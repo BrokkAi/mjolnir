@@ -47,7 +47,7 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
         .await?
         .context("Antigravity requires agy installed on this target")?;
     let source = harness_authentication_marker(HarnessKind::Antigravity, home);
-    let staged = tokio::task::spawn_blocking(move || -> Result<tempfile::TempDir> {
+    let staged = mj_core::runtime::spawn_blocking(move || -> Result<tempfile::TempDir> {
         let staged = tempfile::tempdir().context("stage Antigravity quota login")?;
         let (_, bytes) =
             mj_core::credentials::read_credential_file(HarnessKind::Antigravity, &source)?;

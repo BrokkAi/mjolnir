@@ -1,15 +1,7 @@
-//! Notifications: what the host should tell the person about sessions they
-//! are not looking at.
-//!
-//! The dashboard decides; the host (`mj-cli`) emits. `DashboardState` keeps
-//! one episode per session that needs a person and reports it once, after the
-//! configured delay, unless that session's conversation is the one on screen.
-//! The delay is what stops a question the agent answers itself a moment later
-//! from ringing. The host turns each [`Notification`] into a terminal bell, a
-//! system notification, or nothing, by the `[notify]` configuration, and sets
-//! the terminal title from [`DashboardState::terminal_title`].
+//! Desktop and bell alerts consume the daemon notify-once event stream.
 
 use mj_core::config::NotifyMode;
+use std::time::{Duration, Instant};
 
 use crate::{AttentionLevel, DashboardState};
 
@@ -25,16 +17,9 @@ pub struct Notification {
     pub body: String,
 }
 
-/// One stretch of a session needing a person at one level, and whether it
-/// has been reported yet. A form that opens during the stretch starts a new
-/// one, so a second request does not hide behind a first one already seen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AttentionEpisode {
-    level: AttentionLevel,
-    /// The open forms this episode covers.
-    forms: std::collections::BTreeSet<String>,
-    since_ms: u64,
-    reported: bool,
+pub(crate) struct PendingAlert {
+    event: mj_client::runtime_feed::AlertEvent,
+    received: Instant,
 }
 
 impl DashboardState {
@@ -63,141 +48,76 @@ impl DashboardState {
             .collect()
     }
 
-    /// The notifications due at `now_ms`, each reported exactly once per
-    /// episode. Sessions the person is already looking at are marked as
-    /// reported without a notification, so switching away later does not
-    /// ring for a question they have seen.
-    ///
-    /// Each session's episode follows its own state. A sub-agent child has no
-    /// row of its own, so a child holding an open form has its own episode,
-    /// seen only in the child's conversation, and its notification names the
-    /// parent's row and the child. Two children, or a child and its parent,
-    /// therefore each ring once.
-    pub fn notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
-        let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
-        let enabled = self.config.notify.mode != NotifyMode::Off;
+    /// Advance the durable stream, suppressing history on initial attachment.
+    pub fn set_alert_events(
+        &mut self,
+        high: u64,
+        events: Vec<mj_client::runtime_feed::AlertEvent>,
+    ) {
+        let Some(after) = self.alert_sequence else {
+            self.alert_sequence = Some(high);
+            return;
+        };
         let visible = self.current_session_id().map(str::to_owned);
-        let mut episodes = std::mem::take(&mut self.attention_episodes);
-        let mut due = Vec::new();
-        episodes.retain(|id, _| self.state.sessions.contains_key(id));
-        for id in self.state.sessions.keys() {
-            // An ignored session's attention still renders in its row; it
-            // simply never starts or keeps an episode that interrupts.
-            if self
-                .state
-                .sessions
-                .get(id)
-                .is_some_and(|session| session.notifications_ignored)
+        for event in events {
+            if event.sequence <= after
+                || visible.as_deref() == Some(&event.destination)
+                || self.config.notify.mode == NotifyMode::Off
             {
-                episodes.remove(id);
                 continue;
             }
-            let parent = self
-                .state
-                .subagents
-                .get(id)
-                .map(|child| child.parent_session_id.as_str());
-            let level = match parent {
-                Some(_)
-                    if self.form_holders.get(id) == Some(id)
-                        && self.attention_level(id) == AttentionLevel::Waiting =>
-                {
-                    AttentionLevel::Waiting
-                }
-                Some(_) => AttentionLevel::Inactive,
-                // A descendant form owns its episode and names this row.
-                // The daemon also promotes the row, which must not ring twice.
-                None if self.waiting_child_of(id).is_some() => AttentionLevel::Inactive,
-                None => self.attention_level(id),
-            };
-            if !level.needs_person() {
-                episodes.remove(id);
-                continue;
-            }
-            let forms: std::collections::BTreeSet<String> = self
-                .session_details
-                .get(id)
-                .map(|detail| {
-                    detail
-                        .pending_elicitations
-                        .iter()
-                        .map(|request| request.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
-                level,
-                forms: Default::default(),
-                since_ms: now_ms,
-                reported: false,
-            });
-            if episode.level != level || !forms.is_subset(&episode.forms) {
-                *episode = AttentionEpisode {
-                    level,
-                    forms,
-                    since_ms: now_ms,
-                    reported: false,
-                };
-            } else {
-                // Forget answered forms, so a harness that reuses an id
-                // later still starts a new episode.
-                episode.forms = forms;
-            }
-            if episode.reported {
-                continue;
-            }
-            // An open conversation shows only its first form, so being on
-            // screen sees an episode only when it covers one form.
-            if visible.as_deref() == Some(id.as_str()) && episode.forms.len() <= 1 {
-                episode.reported = true;
-                continue;
-            }
-            if now_ms.saturating_sub(episode.since_ms) < delay_ms {
-                continue;
-            }
-            episode.reported = true;
-            if !enabled {
-                continue;
-            }
-            // A child's reviewer has no row either; name the top-level one.
-            let mut row = id.as_str();
-            let mut steps = 0;
-            while let Some(relation) = self.state.subagents.get(row)
-                && steps < self.state.sessions.len()
-            {
-                row = relation.parent_session_id.as_str();
-                steps += 1;
-            }
-            let Some(session) = self.state.sessions.get(row) else {
-                continue;
-            };
-            let body = match (parent, self.session_details.get(id)) {
-                (Some(_), Some(detail)) => format!(
-                    "{} \"{}\": {}",
-                    match self.state.subagents.get(id).map(|relation| relation.kind) {
-                        Some(mj_core::subagent::SubagentKind::Reviewer) => "Reviewer",
-                        _ => "Sub-agent",
-                    },
-                    self.state
-                        .sessions
-                        .get(id)
-                        .map_or(id.as_str(), |child| child.listed_title()),
-                    detail
-                        .pending_elicitations
-                        .last()
-                        .map_or("", |request| request.message.as_str())
-                ),
-                _ => self.notification_body(id, level),
-            };
-            due.push(Notification {
-                session_id: row.to_owned(),
-                session_title: session.listed_title().to_owned(),
-                level,
-                body,
+            self.pending_alerts.push(PendingAlert {
+                event,
+                received: Instant::now(),
             });
         }
-        self.attention_episodes = episodes;
-        due
+        self.alert_sequence = Some(after.max(high));
+    }
+
+    pub fn notification_events(&mut self) -> Vec<Notification> {
+        self.notification_events_at(Instant::now())
+    }
+
+    fn notification_events_at(&mut self, now: Instant) -> Vec<Notification> {
+        let pending = std::mem::take(&mut self.pending_alerts);
+        if self.config.notify.mode == NotifyMode::Off {
+            return Vec::new();
+        }
+        let delay = Duration::from_secs(self.config.notify.delay_seconds);
+        let mut notices = Vec::new();
+        for alert in pending {
+            if now.saturating_duration_since(alert.received) < delay {
+                self.pending_alerts.push(alert);
+                continue;
+            }
+            let event = alert.event;
+            // The daemon made the event from a published item, so with no delay it
+            // rings as is. A delayed event rings only if its item survived the
+            // delay; the card map may lag the event batch, which a delay absorbs.
+            let published = delay.is_zero()
+                || self.notification_cards.as_ref().is_some_and(|cards| {
+                    cards.iter().any(|(session, card)| {
+                        (0..card.entries.len() + usize::from(card.form.is_some())).any(|item| {
+                            card.item_destination(session, item) == event.destination
+                                && card.item_identity(session, item).as_deref()
+                                    == Some(&event.identity)
+                        })
+                    })
+                });
+            if !published || self.current_session_id() == Some(event.destination.as_str()) {
+                continue;
+            }
+            notices.push(Notification {
+                session_id: event.destination,
+                session_title: event.session_title,
+                body: event.text,
+                level: match event.kind {
+                    mj_core::attention::NotificationKind::NeedsInput => AttentionLevel::Waiting,
+                    mj_core::attention::NotificationKind::Important => AttentionLevel::Important,
+                },
+            });
+        }
+        notices
     }
 
     pub(crate) fn notification_content_session(
@@ -234,6 +154,18 @@ impl DashboardState {
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
     pub(crate) fn notification_message(&self, session_id: &str, level: AttentionLevel) -> String {
+        if matches!(level, AttentionLevel::Waiting | AttentionLevel::Important)
+            && let Some(card) = self
+                .notification_cards
+                .as_ref()
+                .and_then(|cards| cards.get(session_id))
+        {
+            return self.notification_item_text(
+                session_id,
+                card,
+                (card.entries.len() + usize::from(card.form.is_some())).saturating_sub(1),
+            );
+        }
         let holder = self.notification_content_session(session_id, level);
         let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
@@ -312,16 +244,6 @@ impl DashboardState {
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Finished".to_owned()),
         }
-    }
-
-    fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
-        let text = self.notification_message(session_id, level);
-        let line = text.lines().next().unwrap_or_default().trim();
-        let mut body = line.chars().take(120).collect::<String>();
-        if line.chars().count() > 120 {
-            body.push('…');
-        }
-        body
     }
 
     /// Reports that a session's worker cannot be reached, in one plain
@@ -498,11 +420,10 @@ impl DashboardState {
 mod tests {
     use std::collections::BTreeMap;
 
-    use mj_core::config::NotifyMode;
     use mj_core::state::{STATE_VERSION, State};
 
+    use crate::DashboardState;
     use crate::test_support::{config, running_session};
-    use crate::{AttentionLevel, DashboardState};
 
     fn question(session_id: &str) -> mj_core::elicitation::ElicitationRequest {
         mj_core::elicitation::ElicitationRequest::from_acp_params(
@@ -557,152 +478,6 @@ mod tests {
         dashboard
     }
 
-    #[test]
-    fn retained_question_notification_uses_original_message_after_later_reply() {
-        let mut dashboard = dashboard();
-        let detail = dashboard.session_details.get_mut("asks").unwrap();
-        detail.pending_elicitations.clear();
-        detail.supports_open_request = true;
-        detail.question_message = Some("agent:original".into());
-        detail.last_agent_message = Some("The background build finished".into());
-        detail.projection.transcript.push(std::sync::Arc::new(mj_core::state::TranscriptItem {
-            stable_id: "agent:original".into(), position: 1, latest_content_event_ordinal: None,
-            created_at_ms: 1, last_changed_at_ms: 1,
-            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":"Keep the old format?"}})], streaming: false },
-        }));
-        detail.question_message = None;
-        assert_eq!(
-            dashboard.notification_body("asks", AttentionLevel::Waiting),
-            "Waiting for your input"
-        );
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .supports_open_request = false;
-        assert_eq!(
-            dashboard.notification_body("asks", AttentionLevel::Waiting),
-            "The background build finished"
-        );
-        let detail = dashboard.session_details.get_mut("asks").unwrap();
-        detail.supports_open_request = true;
-        detail.question_message = Some("agent:original".into());
-        assert!(dashboard.notification_events(0).is_empty());
-        let notices = dashboard.notification_events(2000);
-        assert_eq!(
-            notices
-                .iter()
-                .find(|notice| notice.session_id == "asks")
-                .unwrap()
-                .body,
-            "Keep the old format?"
-        );
-    }
-
-    // Hard-won: 92684ad3b: interruption after read output stopped producing an unread notification.
-    #[test]
-    fn a_new_question_notifies_once_after_the_delay() {
-        let mut dashboard = dashboard();
-        // Nothing before the two-second default delay has elapsed.
-        assert!(dashboard.notification_events(0).is_empty());
-        assert!(dashboard.notification_events(1_999).is_empty());
-        let due = dashboard.notification_events(2_000);
-        assert_eq!(due.len(), 2, "{due:?}");
-        let asks = due.iter().find(|n| n.session_id == "asks").unwrap();
-        assert_eq!(asks.level, AttentionLevel::Waiting);
-        assert_eq!(asks.body, "Which branch should I use?");
-        let done = due.iter().find(|n| n.session_id == "done").unwrap();
-        assert_eq!(done.level, AttentionLevel::Unread);
-        assert_eq!(done.body, "All tests pass now.");
-        // Reported once; the same episode never repeats.
-        assert!(dashboard.notification_events(60_000).is_empty());
-
-        // Answering and asking again starts a new episode.
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .pending_elicitations
-            .clear();
-        assert!(dashboard.notification_events(61_000).is_empty());
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .pending_elicitations = vec![question("asks")];
-        assert!(dashboard.notification_events(61_000).is_empty());
-        let again = dashboard.notification_events(63_000);
-        assert_eq!(again.len(), 1);
-        assert_eq!(again[0].session_id, "asks");
-        dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
-        assert!(dashboard.notification_events(64_000).is_empty());
-        dashboard
-            .state
-            .sessions
-            .get_mut("done")
-            .unwrap()
-            .viewed_through_event_ordinal = 2;
-        let mut interrupted = crate::test_support::materialized_session_for(
-            "done",
-            vec![crate::test_support::agent_message(2, "Read output")],
-        );
-        interrupted.applied_event_ordinal = 3;
-        interrupted.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
-            command_id: "interrupted".into(),
-            accepted_ordinal: Some(1),
-            turn_start_position: Some(1),
-            completed_ordinal: 3,
-            completed_at_ms: 3,
-            outcome: mj_core::state::TurnOutcomeKind::Interrupted {
-                message: "Stopped".into(),
-                reason: None,
-            },
-            answered_through: None,
-            diagnostic: None,
-            usage: None,
-            work_facts: None,
-        });
-        dashboard.apply_materialized_session(&interrupted);
-        dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Unread);
-        assert!(dashboard.notification_events(65_000).is_empty());
-        let interrupted = dashboard.notification_events(67_000);
-        assert_eq!(interrupted.len(), 1);
-        assert_eq!(interrupted[0].level, AttentionLevel::Unread);
-        assert_eq!(interrupted[0].body, "Work was interrupted");
-    }
-
-    #[test]
-    fn the_open_conversation_never_notifies_even_after_switching_away() {
-        let mut dashboard = dashboard();
-        dashboard.set_current_session(Some("asks"));
-        // The first call starts both episodes; the delay runs from there.
-        assert!(dashboard.notification_events(0).is_empty());
-        let due = dashboard.notification_events(5_000);
-        assert_eq!(
-            due.iter()
-                .map(|n| n.session_id.as_str())
-                .collect::<Vec<_>>(),
-            ["done"]
-        );
-        dashboard.set_current_session(Some("done"));
-        assert!(dashboard.notification_events(10_000).is_empty());
-    }
-
-    #[test]
-    fn notifications_off_reports_nothing_but_still_tracks_episodes() {
-        let mut dashboard = dashboard();
-        let mut config = dashboard.config.clone();
-        config.notify.mode = NotifyMode::Off;
-        dashboard.set_config(config);
-        assert!(dashboard.notification_events(5_000).is_empty());
-        // Turning notifications on later does not replay what was already due.
-        let mut config = dashboard.config.clone();
-        config.notify.mode = NotifyMode::Terminal;
-        dashboard.set_config(config);
-        assert!(dashboard.notification_events(6_000).is_empty());
-    }
-
-    // Hard-won: 3e31dbd32a77: a killed worker was counted as waiting in the terminal title.
     #[test]
     fn the_title_names_an_unreachable_worker_apart_from_questions() {
         let mut dashboard = dashboard();
@@ -787,35 +562,127 @@ mod tests {
         );
     }
 
+    // Hard-won: 751b46ebb: alert consumption ignored the configured delay and item disappearance.
     #[test]
-    fn an_ignored_session_never_notifies_or_counts_in_the_title() {
+    fn alert_cursor_suppresses_history_duplicates_and_visible_destinations() {
+        use mj_client::runtime_feed::AlertEvent;
+        use std::time::Duration;
         let mut dashboard = dashboard();
-        // Prime the episodes before the delay, as an ordinary quiet pass does.
-        assert!(dashboard.notification_events(0).is_empty());
-        dashboard
-            .state
-            .sessions
-            .get_mut("asks")
-            .unwrap()
-            .notifications_ignored = true;
-        let due = dashboard.notification_events(2_000);
-        assert_eq!(due.len(), 1, "{due:?}");
-        assert_eq!(due[0].session_id, "done");
-        let title = dashboard.terminal_title().unwrap();
-        assert!(!title.contains("waiting"), "{title}");
-        assert!(title.contains("1 unread"), "{title}");
-        // Unignoring starts its episode fresh, so it still notifies once.
-        dashboard
-            .state
-            .sessions
-            .get_mut("asks")
-            .unwrap()
-            .notifications_ignored = false;
-        assert!(dashboard.notification_events(2_500).is_empty());
-        let due = dashboard.notification_events(4_500);
+        dashboard.config.notify.delay_seconds = 0;
+        dashboard.notification_cards = Some(
+            ["asks", "done"]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.into(),
+                        mj_client::runtime_feed::NotificationCard {
+                            since_ms: 0,
+                            badge: mj_core::attention::NotificationKind::NeedsInput,
+                            entries: Vec::new(),
+                            dismissal: None,
+                            holder: None,
+                            form: Some(mj_client::runtime_feed::CardForm {
+                                source: mj_client::runtime_feed::CardFormSource::Elicitation,
+                                raised_at_ms: 1,
+                                request_id: "elicitation-1".into(),
+                                message: "Question?".into(),
+                            }),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let event = |sequence, destination: &str| AlertEvent {
+            sequence,
+            identity: serde_json::json!(["form", destination, "elicitation-1", 1]).to_string(),
+            destination: destination.into(),
+            session_title: "Title".into(),
+            text: "Question?".into(),
+            kind: mj_core::attention::NotificationKind::NeedsInput,
+        };
+        dashboard.set_alert_events(7, vec![event(7, "asks")]);
+        assert!(dashboard.notification_events().is_empty());
+        dashboard.set_alert_events(8, vec![event(8, "asks")]);
+        let notices = dashboard.notification_events();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            (notices[0].session_title.as_str(), notices[0].body.as_str()),
+            ("Title", "Question?")
+        );
+        dashboard.set_alert_events(8, vec![event(8, "asks")]);
+        assert!(dashboard.notification_events().is_empty());
+        dashboard.set_current_session(Some("asks"));
+        dashboard.set_alert_events(9, vec![event(9, "asks")]);
+        assert!(dashboard.notification_events().is_empty());
+        dashboard.set_current_session(None);
+        dashboard.set_alert_events(9, vec![event(9, "asks")]);
+        assert!(dashboard.notification_events().is_empty());
+        dashboard.set_alert_events(11, vec![event(10, "asks"), event(11, "done")]);
+        assert_eq!(dashboard.notification_events().len(), 2);
+        dashboard.set_alert_events(12, vec![event(12, "asks")]);
+        dashboard.set_current_session(Some("asks"));
         assert!(
-            due.iter().any(|notice| notice.session_id == "asks"),
-            "{due:?}"
+            dashboard.notification_events().is_empty(),
+            "opening the destination before emission suppresses the ring"
+        );
+        dashboard.set_current_session(None);
+        dashboard.set_alert_events(13, vec![event(13, "done")]);
+        dashboard.config.notify.mode = mj_core::config::NotifyMode::Off;
+        assert!(
+            dashboard.notification_events().is_empty(),
+            "turning notifications off before emission suppresses the ring"
+        );
+        dashboard.config.notify.mode = mj_core::config::NotifyMode::Terminal;
+        dashboard.config.notify.delay_seconds = 5;
+        dashboard.set_alert_events(14, vec![event(14, "asks")]);
+        let received = dashboard.pending_alerts[0].received;
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(4))
+                .is_empty()
+        );
+        assert_eq!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(5))
+                .len(),
+            1
+        );
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(6))
+                .is_empty()
+        );
+
+        dashboard.set_alert_events(15, vec![event(15, "asks")]);
+        let received = dashboard.pending_alerts[0].received;
+        // A new form reuses the request ID, but is a different published item.
+        dashboard
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("asks")
+            .unwrap()
+            .form
+            .as_mut()
+            .unwrap()
+            .raised_at_ms = 2;
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(5))
+                .is_empty()
+        );
+
+        dashboard.set_alert_events(16, vec![event(16, "done")]);
+        let received = dashboard.pending_alerts[0].received;
+        dashboard
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .remove("done");
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(5))
+                .is_empty()
         );
     }
 }

@@ -163,6 +163,26 @@ it or introduce a dependency between sibling branches.
   and restart a staged worker. It fills in the plans of the session types
   crate and builds on the targets, store and accounts crates.
   The methods on `Controller` that orchestrate it stay in the controller.
+- `brokk-mj-session-runtime` (`mj-session-runtime/`, library
+  `mj_session_runtime`) is the daemon's side of a running session: the
+  session manager's relay actors, the relay client and credential sync,
+  worker recovery, checkpoint transfer, and GitHub credentials. It builds on
+  worker staging and worker launch. `mj_controller` re-exports its modules
+  under their old names.
+- `brokk-mj-review-host` (`mj-review-host/`, library `mj_review_host`) is
+  where turn review runs: the host that feeds the review driver, its state,
+  and the environment trait it reviews through. It builds on the session
+  runtime and the store and does not depend on the controller. The daemon
+  supplies the production environment in `mj-daemon/src/review_host/`.
+- `brokk-mj-worker-launch` (`mj-worker-launch/`, library `mj_worker_launch`)
+  plans what a session's worker is launched with, as functions over the
+  configuration and the session records: launch configuration, staged files,
+  the recovery plan and the reconnect command. `Controller`'s methods of the
+  same names call it, and so does the session runtime's worker recovery.
+- `brokk-mj-profile-catalog` (`mj-profile-catalog/`, library
+  `mj_profile_catalog`) discovers what each profile's harness offers (models
+  and options), caches the answers and keeps them current. It builds on
+  worker staging and is a sibling of the session runtime.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.

@@ -73,7 +73,7 @@ pub(super) struct Staging(Option<tempfile::TempDir>, tokio::runtime::Handle);
 impl Staging {
     pub async fn new(root: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(&root).await?;
-        let directory = tokio::task::spawn_blocking(move || {
+        let directory = mj_core::runtime::spawn_blocking(move || {
             tempfile::Builder::new()
                 .prefix(".student-")
                 .tempdir_in(root)
@@ -169,7 +169,7 @@ pub(super) async fn prepare(
     let destination = root.join(&manifest.revision);
     let check = destination.clone();
     let expected = manifest.files.clone();
-    if tokio::task::spawn_blocking(move || verified(&check, &expected))
+    if mj_core::runtime::spawn_blocking(move || verified(&check, &expected))
         .await?
         .is_ok()
     {
@@ -188,7 +188,7 @@ pub(super) async fn prepare(
         async move {
             let reuse = artifact.clone();
             let to = path.clone();
-            let copied = tokio::task::spawn_blocking(move || -> Result<()> {
+            let copied = mj_core::runtime::spawn_blocking(move || -> Result<()> {
                 verify_file(&existing, reuse.bytes, &reuse.sha256)?;
                 std::fs::copy(existing, to)?;
                 Ok(())
@@ -202,7 +202,7 @@ pub(super) async fn prepare(
         }
     }))
     .await?;
-    tokio::task::spawn_blocking(move || staging.publish(destination, &manifest.files)).await?
+    mj_core::runtime::spawn_blocking(move || staging.publish(destination, &manifest.files)).await?
 }
 
 #[cfg(test)]
@@ -251,7 +251,7 @@ mod tests {
             let url = format!("http://{}", listener.local_addr().unwrap());
             let stop = CancellationToken::new();
             let shutdown = stop.clone();
-            let task = tokio::spawn(async move {
+            let task = mj_core::runtime::spawn(async move {
                 let result = axum::serve(
                     listener,
                     Router::new()
@@ -384,10 +384,10 @@ mod tests {
             .unwrap();
         let a = destination.clone();
         let f = files.clone();
-        let left = tokio::task::spawn_blocking(move || first.publish(a, &f));
+        let left = mj_core::runtime::spawn_blocking(move || first.publish(a, &f));
         let b = destination.clone();
         let f = files.clone();
-        let right = tokio::task::spawn_blocking(move || second.publish(b, &f));
+        let right = mj_core::runtime::spawn_blocking(move || second.publish(b, &f));
         left.await.unwrap().unwrap();
         right.await.unwrap().unwrap();
         verified(&destination, &files).unwrap();

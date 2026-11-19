@@ -28,6 +28,16 @@ pub(crate) fn minimized_targets_line(
         .capacity_details
         .values()
         .map(|detail| {
+            // Same rule as the expanded table: a host whose listed targets
+            // are all unavailable shows no reading.
+            if super::capacity::all_listed_targets_unavailable(&detail.target.target_ids, dashboard)
+            {
+                return SummaryReading {
+                    name: detail.target.host.clone(),
+                    value: "unavailable".to_string(),
+                    color: None,
+                };
+            }
             if detail.refreshing {
                 return SummaryReading {
                     name: detail.target.host.clone(),
@@ -67,101 +77,60 @@ pub(crate) fn minimized_targets_line(
     summary_row("Targets", &readings, width, focused)
 }
 
-/// One row summarising every profile's quota, for the minimized Profiles pane.
-///
-/// The figures are percentages *remaining*, which is the number the full
-/// pane's bar prints beside itself: an exhausted profile reads 0% in both. A
-/// profile with weekly headroom to spare reads its weekly figure alone
-/// (`claude 100%`); once the weekly window has been dipped into and a
-/// five-hour window is reported too, both appear as `weekly%/5h%` (`claude
-/// 96%/40%`), because a full week is no comfort while the next five hours are
-/// spent. The colour follows the tighter of the two figures, so the two panes
-/// agree about when a profile is in trouble.
-///
-/// Usage-priced profiles are left out of the row entirely: they bill per token
-/// and have no window to summarise, so a placeholder would only spend width.
+/// A weighted reading for each independently metered provider pool.
 pub(crate) fn minimized_quota_line(
     dashboard: &DashboardState,
     width: u16,
     focused: bool,
+    now: u64,
 ) -> Line<'static> {
-    let readings = dashboard
-        .quota_profile_rows()
-        .into_iter()
-        .filter_map(|row| {
-            let id = row.id;
-            let projected = row.pool.and_then(|pool| {
-                dashboard
-                    .quotas
-                    .get(id)
-                    .map(|quota| quota.for_antigravity_pool(pool))
+    let mut readings = Vec::new();
+    let mut statuses = Vec::new();
+    for provider in super::quota_pools::provider_pools(
+        &dashboard.config,
+        &dashboard.quotas,
+        &dashboard.quota_providers,
+        now,
+    ) {
+        for pool in provider.pools {
+            readings.push(SummaryReading {
+                name: if pool.label.is_empty() {
+                    provider.provider.display_name().into()
+                } else {
+                    format!("{} {}", provider.provider.display_name(), pool.label)
+                },
+                value: format!(
+                    "{}{}",
+                    pool.percentage(),
+                    if pool
+                        .members
+                        .iter()
+                        .any(|member| dashboard.quota_refreshing.contains(&member.id))
+                    {
+                        " (refreshing)"
+                    } else {
+                        ""
+                    }
+                ),
+                color: Some(provider_accent(&provider.provider)),
             });
-            let quota = projected.as_ref().or_else(|| dashboard.quotas.get(id));
-            // The report says for itself that it is usage-priced.
-            let usage_priced = quota.is_some_and(|quota| quota.is_usage_priced());
-            if usage_priced {
-                return None;
-            }
-            if quota.is_some_and(ProfileQuota::is_not_reported) {
-                return Some(SummaryReading {
-                    name: row.label(),
-                    value: NOT_REPORTED_LABEL.into(),
-                    color: None,
-                });
-            }
-            if dashboard.quota_refreshing.contains(id) {
-                return Some(SummaryReading {
-                    name: row.label(),
-                    value: format!("refreshing{}", theme::glyphs().ellipsis),
-                    color: None,
-                });
-            }
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            if quota.is_some_and(|quota| quota.refused_check_without_reading(now).is_some()) {
-                return Some(SummaryReading {
-                    name: row.label(),
-                    value: "check refused".into(),
-                    color: None,
-                });
-            }
-            let quota = quota.filter(|quota| quota.error.is_none());
-            let Some(primary) = quota
-                .and_then(ProfileQuota::summary_window)
-                .and_then(quota_remaining_percent)
-            else {
-                return Some(SummaryReading {
-                    name: row.label(),
-                    value: "unavailable".into(),
-                    color: None,
-                });
+        }
+        for (id, status) in provider.text {
+            let status = if dashboard.quota_refreshing.contains(&id) {
+                format!("refreshing{}", theme::glyphs().ellipsis)
+            } else if status.starts_with("quota check refused") {
+                "check refused".into()
+            } else {
+                status
             };
-            // An untouched weekly window says everything there is to say; the
-            // five-hour figure only matters once the week is being spent.
-            let five_hour = quota
-                .filter(|quota| {
-                    quota
-                        .weekly_window()
-                        .and_then(quota_remaining_percent)
-                        .is_some_and(|weekly| weekly < 100)
-                })
-                .and_then(ProfileQuota::five_hour_window)
-                .and_then(quota_remaining_percent);
-            let value = match five_hour {
-                Some(five_hour) => format!("{primary}%/{five_hour}%"),
-                None => format!("{primary}%"),
-            };
-            Some(SummaryReading {
-                name: row.label(),
-                value,
-                color: Some(headroom_color(
-                    five_hour.map_or(primary, |five_hour| primary.min(five_hour)),
-                )),
-            })
-        })
-        .collect::<Vec<_>>();
+            statuses.push(SummaryReading {
+                name: id,
+                value: status,
+                color: None,
+            });
+        }
+    }
+    readings.extend(statuses);
     summary_row("Profiles", &readings, width, focused)
 }
 
@@ -232,82 +201,6 @@ pub(crate) fn quota_remaining_percent(window: &QuotaWindow) -> Option<u8> {
         })
 }
 
-pub(crate) const EMPTY_QUOTA_CELL: &str = " ";
-
-/// The chart's rails, in the symbol set in force.
-fn quota_chart_left_border() -> &'static str {
-    theme::glyphs().bar_left
-}
-fn quota_chart_right_border() -> &'static str {
-    theme::glyphs().bar_right
-}
-// Both bar kinds occupy the same column, so they must agree on the cell count.
-pub(crate) const QUOTA_BAR_CELLS: usize = 10;
-
-pub(crate) fn quota_chart_border_style() -> Style {
-    Style::default()
-        .fg(theme::palette().muted)
-        .bg(theme::palette().background)
-}
-
-pub(crate) fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
-    pub(crate) const CELLS: usize = QUOTA_BAR_CELLS;
-    pub(crate) const EIGHTHS_PER_CELL: usize = 8;
-    let Some(remaining) = window.and_then(quota_remaining_percent) else {
-        return Line::default();
-    };
-    let eighths = (usize::from(remaining) * CELLS * EIGHTHS_PER_CELL + 50) / 100;
-    let full_cells = eighths / EIGHTHS_PER_CELL;
-    let partial_eighths = eighths % EIGHTHS_PER_CELL;
-    // ASCII has no partial cell, so the fraction rounds to a whole cell.
-    let partial = if theme::ascii() {
-        if partial_eighths >= 4 { "#" } else { "" }
-    } else {
-        ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][partial_eighths]
-    };
-    let empty_cells = CELLS
-        .saturating_sub(full_cells)
-        .saturating_sub(usize::from(partial_eighths > 0));
-    let color = match remaining {
-        0..=20 => theme::palette().error,
-        21..=50 => theme::palette().warning,
-        _ => theme::palette().success,
-    };
-    let bar_style = Style::default()
-        .fg(color)
-        .bg(theme::palette().background)
-        .add_modifier(Modifier::BOLD);
-    Line::from(vec![
-        Span::styled(theme::glyphs().bar_full.repeat(full_cells), bar_style),
-        Span::styled(partial.to_string(), bar_style),
-        Span::styled(
-            EMPTY_QUOTA_CELL.repeat(empty_cells),
-            Style::default().bg(theme::palette().background),
-        ),
-        // The percentage follows the chart rail without an extra separator.
-        Span::styled(quota_chart_right_border(), quota_chart_border_style()),
-        Span::styled(
-            format!("{remaining}%"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
-/// Renders the API label in the same black, bordered field as capacity charts.
-/// The bar a windowless report draws: its label, centred in an empty field.
-pub(crate) fn windowless_quota_bar(label: &'static str) -> Line<'static> {
-    let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
-    let left = (QUOTA_BAR_CELLS - label_cells) / 2;
-    let right = QUOTA_BAR_CELLS - label_cells - left;
-    let field = Style::default().bg(theme::palette().background);
-    Line::from(vec![
-        Span::styled(EMPTY_QUOTA_CELL.repeat(left), field),
-        Span::styled(label, field.add_modifier(Modifier::BOLD)),
-        Span::styled(EMPTY_QUOTA_CELL.repeat(right), field),
-        Span::styled(quota_chart_right_border(), quota_chart_border_style()),
-    ])
-}
-
 pub(crate) fn weekly_quota_exhausted(quota: &ProfileQuota) -> bool {
     quota
         .weekly_window()
@@ -315,251 +208,37 @@ pub(crate) fn weekly_quota_exhausted(quota: &ProfileQuota) -> bool {
         .is_some_and(|remaining| remaining < 1)
 }
 
-pub(crate) fn five_hour_quota_bar(quota: &ProfileQuota) -> Line<'static> {
-    let five_hour = if quota.weekly_window().is_none() || weekly_quota_exhausted(quota) {
-        None
-    } else {
-        quota.five_hour_window()
-    };
-    quota_bar(five_hour)
-}
-
-pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
-    let long_window = quota.weekly_window();
-    let mut primary = match long_window {
-        Some(window) => window.reset_display(now, quota.banked_resets_for_window(window)),
-        None => quota
-            .five_hour_window()
-            .map(|window| window.reset_display(now, None))
-            .unwrap_or_default(),
-    };
-    if let Some(extra) = quota.extra.as_deref() {
-        if !primary.is_empty() {
-            primary.push_str(" · ");
-        }
-        primary.push_str(extra);
-    }
-    let five_hour = if long_window.is_none() || weekly_quota_exhausted(quota) {
-        String::new()
-    } else {
-        quota
-            .five_hour_window()
-            .map(|window| window.reset_display(now, None))
-            .unwrap_or_default()
-    };
-    (primary, five_hour)
-}
-
-pub(crate) struct QuotaTableRow {
-    /// The profile's id, for the row's right-click menu.
-    pub(crate) id: String,
-    profile: String,
-    harness: String,
-    weekly: Line<'static>,
-    weekly_reset: String,
-    five_hour: Line<'static>,
-    five_hour_reset: String,
-}
-
-impl QuotaTableRow {
-    pub(crate) fn into_row(self) -> Row<'static> {
-        Row::new([
-            Cell::from(self.profile).style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from(self.harness).style(theme::muted()),
-            Cell::from(self.weekly),
-            Cell::from(self.weekly_reset).style(theme::muted()),
-            Cell::from(self.five_hour),
-            Cell::from(self.five_hour_reset).style(theme::muted()),
-        ])
-    }
-}
-
-pub(crate) fn quota_chart(mut chart: Line<'static>, chart_present: bool) -> Line<'static> {
-    let mut spans = Vec::new();
-    if chart_present {
-        spans.push(Span::styled(
-            quota_chart_left_border(),
-            quota_chart_border_style(),
-        ));
-    }
-    spans.append(&mut chart.spans);
-    Line::from(spans)
-}
-
-/// Trailing room after each content column. Quota-window resets sit one cell
-/// after their percentage; the larger table groups retain two-cell gaps.
-pub(crate) const QUOTA_COLUMN_GAPS: [u16; 6] = [2, 2, 1, 2, 1, 0];
-
 pub(crate) fn quota_column_width(
     header: &str,
     content_widths: impl Iterator<Item = usize>,
     maximum: u16,
 ) -> u16 {
-    let width = content_widths.fold(Line::raw(header).width(), usize::max);
-    u16::try_from(width).unwrap_or(u16::MAX).min(maximum)
+    u16::try_from(content_widths.fold(Line::raw(header).width(), usize::max))
+        .unwrap_or(u16::MAX)
+        .min(maximum)
 }
 
-pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> {
-    dashboard
-        .quota_profile_rows()
-        .into_iter()
-        .map(|row| {
-            let id = row.id;
-            let projected = row.pool.and_then(|pool| {
-                dashboard
-                    .quotas
-                    .get(id)
-                    .map(|quota| quota.for_antigravity_pool(pool))
-            });
-            let quota = projected.as_ref().or_else(|| dashboard.quotas.get(id));
-            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
-                if let Some(label) = quota.and_then(ProfileQuota::windowless_label) {
-                    (
-                        windowless_quota_bar(label),
-                        String::new(),
-                        Line::default(),
-                        String::new(),
-                        true,
-                        false,
-                    )
-                } else if dashboard.quota_refreshing.contains(id) {
-                    (
-                        Line::raw(format!("refreshing{}", theme::glyphs().ellipsis)),
-                        String::new(),
-                        Line::default(),
-                        String::new(),
-                        false,
-                        false,
-                    )
-                } else {
-                    match quota {
-                        // The provider refused the check and there is no good
-                        // reading to show: the row says when the next check runs.
-                        Some(quota)
-                            if let Some(label) = quota.refused_check_without_reading(now) =>
-                        {
-                            (
-                                Line::raw(label),
-                                String::new(),
-                                Line::default(),
-                                String::new(),
-                                false,
-                                false,
-                            )
-                        }
-                        Some(quota) if quota.error.is_none() => {
-                            let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                            let mut weekly = quota_bar(quota.summary_window());
-                            if quota
-                                .weekly_window()
-                                .and_then(quota_remaining_percent)
-                                .is_some()
-                                && let Some(fable) = quota
-                                    .fable_weekly_window()
-                                    .and_then(quota_remaining_percent)
-                            {
-                                weekly.spans.push(Span::raw(format!(" ({fable}%)")));
-                            }
-                            let five_hour = five_hour_quota_bar(quota);
-                            // A refused check keeps the last good reading on
-                            // screen; the note says when the next check runs.
-                            let five_hour_reset = match quota.rate_limit_label(now) {
-                                Some(label) if five_hour_reset.is_empty() => label,
-                                Some(label) => format!("{five_hour_reset} · {label}"),
-                                None => five_hour_reset,
-                            };
-                            let weekly_chart = !weekly.spans.is_empty();
-                            let five_hour_chart = !five_hour.spans.is_empty();
-                            (
-                                weekly,
-                                weekly_reset,
-                                five_hour,
-                                five_hour_reset,
-                                weekly_chart,
-                                five_hour_chart,
-                            )
-                        }
-                        Some(quota) => (
-                            Line::raw(quota.error_label().unwrap_or_else(|| "unavailable".into())),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
-                        None => (
-                            Line::raw(format!("refreshing{}", theme::glyphs().ellipsis)),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
-                    }
-                };
-            QuotaTableRow {
-                id: row.id.to_owned(),
-                profile: row.label(),
-                harness: row.harness.display_name().into(),
-                weekly: quota_chart(weekly, weekly_chart),
-                weekly_reset,
-                five_hour: quota_chart(five_hour, five_hour_chart),
-                five_hour_reset,
-            }
-        })
-        .collect()
+/// Enough space for seven readable profile segments, without forcing short
+/// dashboards to reserve the width of expanded notes.
+pub(crate) fn quota_pane_width(_dashboard: &DashboardState) -> u16 {
+    76
 }
 
-pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
-    [
-        // The heading is no longer drawn (see `render_quotas`), but the
-        // column keeps the width it gave, so the table does not shift.
-        quota_column_width(
-            "Profile",
-            rows.iter()
-                .map(|row| Line::raw(row.profile.as_str()).width()),
-            u16::MAX,
-        ),
-        quota_column_width(
-            "Harness",
-            rows.iter()
-                .map(|row| Line::raw(row.harness.as_str()).width()),
-            u16::MAX,
-        ),
-        quota_column_width(
-            "Weekly",
-            rows.iter().map(|row| row.weekly.width()),
-            u16::MAX,
-        ),
-        quota_column_width(
-            "Resets",
-            rows.iter()
-                .map(|row| Line::raw(row.weekly_reset.as_str()).width()),
-            u16::MAX,
-        ),
-        quota_column_width("5H", rows.iter().map(|row| row.five_hour.width()), u16::MAX),
-        quota_column_width(
-            "Resets",
-            rows.iter()
-                .map(|row| Line::raw(row.five_hour_reset.as_str()).width()),
-            u16::MAX,
-        ),
-    ]
-}
-
-/// Width needed to draw the complete Profiles table, including its
-/// inter-column spacing, border, and always-present selection marker.
-pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
+pub(crate) fn quota_content_height(dashboard: &DashboardState) -> usize {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let content_widths = quota_table_column_widths(&quota_table_rows(dashboard, now));
-    content_widths
-        .into_iter()
-        .fold(0_u16, u16::saturating_add)
-        .saturating_add(QUOTA_COLUMN_GAPS.into_iter().sum())
-        .saturating_add(4) // two borders and two highlight cells
+    quota_lines(
+        dashboard,
+        usize::from(quota_pane_width(dashboard).saturating_sub(2)),
+        now,
+        false,
+        clock_label,
+    )
+    .0
+    .len()
+    .max(1)
 }
 
 pub(crate) fn render_quotas(
@@ -572,7 +251,19 @@ pub(crate) fn render_quotas(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let rows = quota_table_rows(dashboard, now);
+    render_quotas_at(frame, area, dashboard, size, now, clock_label);
+}
+
+pub(crate) fn render_quotas_at(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &mut DashboardState,
+    size: Option<PaneSize>,
+    now: u64,
+    clock: fn(i64, &str) -> String,
+) {
+    // Provider discovery is polled once per frame by the combined renderer,
+    // before pane sizing, so sizing and drawing use the same snapshot.
     let refresh_status = if !dashboard.quota_refreshing.is_empty() {
         format!("refreshing{}", theme::glyphs().ellipsis)
     } else {
@@ -624,93 +315,1584 @@ pub(crate) fn render_quotas(
         },
         Span::styled(status, Style::default().fg(theme::palette().muted)),
     ]);
-    let quotas_focused = dashboard.focus == Focus::Quota;
-    let content_widths = quota_table_column_widths(&rows);
-    let widths: [Constraint; 6] = std::array::from_fn(|index| {
-        Constraint::Length(content_widths[index].saturating_add(QUOTA_COLUMN_GAPS[index]))
-    });
-    let block = theme::panel(quotas_focused).title(title);
+
+    let focused = dashboard.focus == Focus::Quota;
+    let block = theme::panel(focused).title(title);
     let block = size.map_or(block.clone(), |size| {
         block.title(pane_size_controls(
             size,
             dashboard.pane_maximize_enabled(SupportPane::Quota),
         ))
     });
-    let row_count = rows.len();
-    let row_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
-    let table_inner = block.inner(area);
-    let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
-        .column_spacing(0)
-        // The pane's own title already says these rows are profiles, so the
-        // first column has no heading; it keeps the width the heading gave it.
-        .header(
-            Row::new(["", "Harness", "Weekly", "Resets", "5H", "Resets"])
-                .style(theme::muted().patch(theme::raised())),
-        )
-        .row_highlight_style(if quotas_focused {
-            theme::selection(true)
-        } else {
-            Style::default()
-        })
-        .highlight_symbol(if quotas_focused {
-            theme::glyphs().selected
-        } else {
-            "  "
-        })
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(block);
-    let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
-    let row_heights = vec![1; row_count];
-    let mut offset = mj_chat::components::clamp_offset_to_last_page(
-        dashboard.quota_scroll.get(),
-        &row_heights,
-        viewport,
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (lines, pool_rows, profile_rows) =
+        quota_lines(dashboard, usize::from(inner.width), now, focused, clock);
+    let viewport = usize::from(inner.height);
+    dashboard.quota_viewport.set(viewport);
+    let mut offset = dashboard
+        .quota_scroll
+        .get()
+        .min(lines.len().saturating_sub(viewport));
+    let selected = dashboard.selected_quota_row();
+    let mut selected_lines = pool_rows
+        .iter()
+        .filter(|(row, _)| Some(row) == selected.as_ref())
+        .map(|(_, line)| *line);
+    let rendered_selection = selected_lines.next().and_then(|first| {
+        selected
+            .clone()
+            .map(|row| (row, first, selected_lines.next_back().unwrap_or(first)))
+    });
+    let moved = *dashboard.quota_rendered_selection.borrow() != rendered_selection;
+    *dashboard.quota_rendered_selection.borrow_mut() = rendered_selection.clone();
+    if (take_selection_recenter(dashboard, Focus::Quota) || (focused && moved))
+        && let Some((_, first, last)) = rendered_selection
+    {
+        if first < offset {
+            offset = first;
+        }
+        if last >= offset + viewport {
+            offset = (last + 1).saturating_sub(viewport).min(first);
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines.clone()).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        inner,
     );
-    if take_selection_recenter(dashboard, Focus::Quota) {
-        offset =
-            mj_chat::components::centered_offset(dashboard.quota_index, &row_heights, viewport);
-    }
-    let mut state = TableState::default()
-        .with_offset(offset)
-        .with_selected((row_count > 0).then_some(dashboard.quota_index));
-    frame.render_stateful_widget(table, area, &mut state);
-    if row_count == 0 {
-        frame.render_widget(
-            Paragraph::new("Add an agent profile in Settings.")
-                .style(theme::muted())
-                .wrap(Wrap { trim: true }),
-            Rect::new(
-                area.x.saturating_add(3),
-                area.y.saturating_add(2),
-                area.width.saturating_sub(4),
-                area.height.saturating_sub(3),
-            ),
-        );
-    }
-    dashboard.quota_scroll.set(state.offset());
-    // Right-clicking a profile row opens its load-balancing menu.
-    let offset = state.offset();
-    *dashboard.quota_row_areas.borrow_mut() = (offset..row_count.min(offset + viewport))
-        .map(|index| {
+    dashboard.quota_scroll.set(offset);
+    *dashboard.quota_pool_areas.borrow_mut() = pool_rows
+        .iter()
+        .filter(|(_, row)| *row >= offset && *row < offset + viewport)
+        .map(|(identity, row)| {
             (
-                row_ids[index].clone(),
-                Rect::new(
-                    table_inner.x,
-                    table_inner
-                        .y
-                        .saturating_add(1)
-                        .saturating_add(u16::try_from(index - offset).unwrap_or(0)),
-                    table_inner.width,
-                    1,
-                ),
+                identity.clone(),
+                Rect::new(inner.x, inner.y + (row - offset) as u16, inner.width, 1),
             )
         })
         .collect();
-    render_session_scrollbar(
-        frame,
-        area,
-        row_count,
-        state.offset(),
-        usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
+    *dashboard.quota_row_areas.borrow_mut() = profile_rows
+        .into_iter()
+        .filter(|(_, row)| *row >= offset && *row < offset + viewport)
+        .map(|(id, row)| {
+            (
+                id,
+                Rect::new(inner.x, inner.y + (row - offset) as u16, inner.width, 1),
+            )
+        })
+        .collect();
+    render_session_scrollbar(frame, area, lines.len(), offset, viewport);
+}
+
+use super::quota_pools::{PoolMember, PoolPeriod, QuotaPool, QuotaRow, segment_widths};
+use mj_core::config::QuotaProvider;
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Provider colours paint both foreground and background against the active theme; monochrome uses the theme palette."
+)]
+fn provider_accent(provider: &QuotaProvider) -> Color {
+    if theme::current() == theme::UiTheme::Mono {
+        return theme::palette().text;
+    }
+    match provider {
+        QuotaProvider::Anthropic => Color::Rgb(217, 119, 87),
+        QuotaProvider::OpenAI => Color::Rgb(16, 163, 127),
+        QuotaProvider::Google => Color::Rgb(66, 133, 244),
+        QuotaProvider::XAI => Color::Rgb(200, 200, 210),
+        QuotaProvider::Moonshot => Color::Rgb(150, 110, 230),
+        QuotaProvider::DeepSeek => Color::Rgb(77, 107, 254),
+        QuotaProvider::Zai => Color::Rgb(60, 170, 200),
+        QuotaProvider::Meta => Color::Rgb(0, 129, 251),
+        QuotaProvider::Other(_) => theme::palette().muted,
+    }
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Blend provider backgrounds against the active theme background, never an unknown terminal background."
+)]
+fn tint(accent: Color, strength: f64) -> Color {
+    let Color::Rgb(r, g, b) = accent else {
+        return accent;
+    };
+    let (br, bg, bb) = match theme::palette().background {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (30, 30, 30),
+    };
+    let mix =
+        |a: u8, b: u8| (f64::from(b) + (f64::from(a) - f64::from(b)) * strength).round() as u8;
+    Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb))
+}
+
+/// Label colour with legible contrast on a provider fill: dark text on light
+/// backgrounds, light text on dark ones. Non-RGB fills and monochrome keep the theme text.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Contrast is computed from the fill's own RGB value, not from a theme colour."
+)]
+fn readable_on(background: Color) -> Color {
+    let Color::Rgb(r, g, b) = background else {
+        return theme::palette().text;
+    };
+    // ASCII still paints RGB provider fills, so it needs the same contrast.
+    if theme::current() == theme::UiTheme::Mono {
+        return theme::palette().text;
+    }
+    let linear = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    // Black text beats white above this luminance (equal contrast ratios).
+    if luminance > 0.179 {
+        Color::Rgb(16, 16, 16)
+    } else {
+        Color::Rgb(245, 245, 245)
+    }
+}
+
+/// Countdown to a reset, falling back to the provider's reset text when the
+/// report carries no timestamp.
+pub(crate) fn reset_label(reset: Option<i64>, text: Option<&str>, now: u64) -> String {
+    match (reset, text) {
+        (None, Some(text)) => text.to_owned(),
+        (reset, _) => reset_duration(reset, now),
+    }
+}
+
+pub(crate) fn reset_duration(reset: Option<i64>, now: u64) -> String {
+    let Some(reset) = reset else {
+        return "?".into();
+    };
+    let seconds = (reset.max(0) as u64).saturating_sub(now);
+    let days = seconds / 86400;
+    let hours = seconds % 86400 / 3600;
+    let minutes = seconds % 3600 / 60;
+    if days > 0 {
+        format!("{days}d{hours}h")
+    } else if hours > 0 && minutes > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if hours > 0 {
+        format!("{hours}h")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+fn clock_label(epoch: i64, format: &str) -> String {
+    chrono::DateTime::from_timestamp(epoch, 0)
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format(format)
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn pool_bar(
+    pool: &QuotaPool,
+    width: usize,
+    now: u64,
+    accent: Color,
+    refreshing: &std::collections::BTreeSet<String>,
+) -> (Vec<Span<'static>>, Vec<String>) {
+    let gaps = pool
+        .members
+        .len()
+        .saturating_sub(1)
+        .min(width.saturating_sub(pool.members.len().min(width)));
+    let widths = segment_widths(&pool.members, width.saturating_sub(gaps));
+    let mut spans = Vec::new();
+    let mut omitted = Vec::new();
+    for (index, (member, cells)) in pool.members.iter().zip(widths).enumerate() {
+        if index > 0 && index <= gaps {
+            spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
+        }
+        // A reading older than its own reset says nothing about what is left.
+        let filled = if member.awaiting_reading {
+            0
+        } else {
+            (cells * usize::from(member.remaining) + 50) / 100
+        };
+        let mut label = vec![' '; cells];
+        let mut text = if member.awaiting_reading {
+            "reset due".to_string()
+        } else if refreshing.contains(&member.id) {
+            format!("refreshing{}", theme::glyphs().ellipsis)
+        } else {
+            format!(
+                "{}{}",
+                if theme::ascii() { "r" } else { "↻" },
+                reset_label(member.reset, member.reset_text.as_deref(), now)
+            )
+        };
+        if refreshing.contains(&member.id) && text.chars().count() >= cells {
+            text = if cells >= 8 { "refresh" } else { "check" }.into();
+        }
+        let banked = member
+            .banked
+            .filter(|banked| *banked > 0)
+            .map(|banked| format!("{}{banked}", if theme::ascii() { "B" } else { "⟲" }));
+        let mut omitted_banked = None;
+        if let Some(banked) = banked {
+            if text.chars().count() + 1 + banked.chars().count() <= cells {
+                text.push_str(&format!(" {banked}"));
+            } else {
+                omitted_banked = Some(banked);
+            }
+        }
+        let text: Vec<_> = text.chars().collect();
+        let legible_fill = cells > 1
+            && (member.awaiting_reading || member.remaining == 0 || filled > 0)
+            && (member.remaining == 100 || filled < cells);
+        if cells >= 6 && text.len() <= cells && legible_fill {
+            label[cells - text.len()..].copy_from_slice(&text);
+            if let Some(banked) = omitted_banked {
+                omitted.push(format!("{} {banked} banked", member.id));
+            }
+        } else {
+            omitted.push(format!(
+                "{} {} {}{}",
+                member.id,
+                if member.awaiting_reading {
+                    "?".to_string()
+                } else {
+                    format!("{}%", member.remaining)
+                },
+                text.into_iter().collect::<String>(),
+                omitted_banked
+                    .map(|banked| format!(" {banked} banked"))
+                    .unwrap_or_default()
+            ));
+        }
+        for (cell, ch) in label.into_iter().enumerate() {
+            let background = if cell < filled {
+                accent
+            } else {
+                tint(accent, 0.22)
+            };
+            spans.push(Span::styled(
+                if ch != ' ' {
+                    ch.to_string()
+                } else if theme::ascii() {
+                    if cell < filled {
+                        "#".into()
+                    } else {
+                        ".".into()
+                    }
+                } else if theme::current() == theme::UiTheme::Mono {
+                    if cell < filled {
+                        "█".into()
+                    } else {
+                        "░".into()
+                    }
+                } else {
+                    " ".into()
+                },
+                Style::default()
+                    .add_modifier(
+                        // An accent that cannot be tinted (indexed colours) gives
+                        // filled and spent cells one colour; mark fill by video.
+                        if cell < filled
+                            && (theme::ascii()
+                                || theme::current() == theme::UiTheme::Mono
+                                || !matches!(accent, Color::Rgb(..)))
+                        {
+                            Modifier::REVERSED
+                        } else {
+                            Modifier::empty()
+                        },
+                    )
+                    .fg(readable_on(background))
+                    .bg(background),
+            ));
+        }
+    }
+    (spans, omitted)
+}
+
+fn lane(
+    member: &PoolMember,
+    period: &PoolPeriod,
+    cells: usize,
+    now: u64,
+    accent: Color,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    // A reading older than its own reset (weekly or five-hour) cannot say
+    // whether the profile is usable now, so draw no availability; reset
+    // markers from readings that are still current stay.
+    let unknown = member.awaiting_reading || member.five_hour_awaiting_reading;
+    for cell in 0..cells {
+        let t0 = now.saturating_add(cell as u64 * 86400 / cells as u64);
+        let t1 = now.saturating_add((cell + 1) as u64 * 86400 / cells as u64);
+        let contains = |reset: Option<i64>| {
+            reset.is_some_and(|reset| reset >= 0 && t0 <= reset as u64 && (reset as u64) < t1)
+        };
+        let weekly_reset = member.reset.filter(|_| !member.awaiting_reading);
+        let five_reset = member
+            .five_hour
+            .as_ref()
+            .filter(|_| !member.five_hour_awaiting_reading)
+            .and_then(|window| window.resets_at_epoch_seconds);
+        let blocked = member
+            .other_long_blocked_until
+            .is_some_and(|until| until > t0 as i64)
+            || (member.remaining == 0 && member.reset.is_none_or(|reset| reset > t0 as i64))
+            || member.five_hour.as_ref().is_some_and(|window| {
+                quota_remaining_percent(window) == Some(0)
+                    && window
+                        .resets_at_epoch_seconds
+                        .is_none_or(|reset| reset > t0 as i64)
+            });
+        // A five-hour reading without a reset time is still the active
+        // balance; only its end is unknown.
+        let five = member.five_hour.as_ref().filter(|window| {
+            window
+                .resets_at_epoch_seconds
+                .is_none_or(|reset| reset > t0 as i64)
+        });
+        let marker = if contains(weekly_reset) && contains(five_reset) {
+            Some('*')
+        } else if contains(weekly_reset) {
+            Some(period.marker())
+        } else if contains(five_reset) {
+            Some('5')
+        } else {
+            None
+        };
+        if unknown {
+            spans.push(Span::styled(
+                marker
+                    .unwrap_or(if theme::ascii() { '?' } else { '·' })
+                    .to_string(),
+                Style::default()
+                    .fg(if marker.is_some() {
+                        theme::palette().text
+                    } else {
+                        theme::palette().muted
+                    })
+                    .bg(theme::palette().background),
+            ));
+            continue;
+        }
+        let symbol = marker.unwrap_or(if blocked {
+            if theme::ascii() { '.' } else { '·' }
+        } else if theme::ascii() || theme::current() == theme::UiTheme::Mono {
+            if five.is_some() { '=' } else { '-' }
+        } else {
+            ' '
+        });
+        let background = if blocked {
+            theme::palette().background
+        } else if let Some(window) = five {
+            tint(
+                accent,
+                0.25 + 0.75 * f64::from(quota_remaining_percent(window).unwrap_or(0)) / 100.0,
+            )
+        } else {
+            tint(accent, 0.18)
+        };
+        spans.push(Span::styled(
+            symbol.to_string(),
+            Style::default()
+                .fg(if marker.is_some() {
+                    theme::palette().text
+                } else {
+                    theme::palette().muted
+                })
+                .bg(background),
+        ));
+    }
+    spans
+}
+
+fn lane_note(
+    member: &PoolMember,
+    period: &PoolPeriod,
+    now: u64,
+    clock: fn(i64, &str) -> String,
+) -> String {
+    let mut note = if member.awaiting_reading {
+        format!("{} reset due, awaiting reading", period.label())
+    } else if member.remaining == 0 {
+        format!(
+            "{} back {} ({})",
+            period.label(),
+            member
+                .reset
+                .map(|reset| clock(reset, "%a %H:%M"))
+                .unwrap_or_else(|| "unknown".into()),
+            reset_label(member.reset, member.reset_text.as_deref(), now)
+        )
+    } else {
+        format!(
+            "{} {}%, resets in {}",
+            period.label(),
+            member.remaining,
+            reset_label(member.reset, member.reset_text.as_deref(), now)
+        )
+    };
+    if member.five_hour_awaiting_reading {
+        note.push_str(" · 5H reset due, awaiting reading");
+    } else if let Some(five) = &member.five_hour {
+        note.push_str(&format!(
+            " · 5H {}%, resets in {}",
+            quota_remaining_percent(five)
+                .map(|remaining| remaining.to_string())
+                .unwrap_or_else(|| "?".into()),
+            reset_label(five.resets_at_epoch_seconds, five.resets.as_deref(), now)
+        ));
+    } else if member.remaining > 0
+        && !member.awaiting_reading
+        && member.five_hour_idle
+        && *period == PoolPeriod::Week
+    {
+        note.push_str(" · 5H idle: a fresh window starts on first use");
+    }
+    if member.remaining > 0
+        && !member.awaiting_reading
+        && let Some(fable) = member.fable
+    {
+        note.push_str(&format!(" · Fable {fable}%"));
+    }
+    if let Some(extra) = &member.note {
+        note.push_str(&format!(" · {extra}"));
+    }
+    if let Some(banked) = member.banked.filter(|banked| *banked > 0) {
+        note.push_str(&format!(
+            " · {}{banked} banked",
+            if theme::ascii() { "B" } else { "⟲" }
+        ));
+    }
+    note
+}
+
+fn wrap_note(text: &str, width: usize) -> Vec<String> {
+    mj_chat::components::wrap_lines(
+        [Line::raw(text)],
+        u16::try_from(width.max(1)).unwrap_or(u16::MAX),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+type QuotaLines = (
+    Vec<Line<'static>>,
+    Vec<(QuotaRow, usize)>,
+    Vec<(String, usize)>,
+);
+fn quota_lines(
+    dashboard: &DashboardState,
+    width: usize,
+    now: u64,
+    focused: bool,
+    clock: fn(i64, &str) -> String,
+) -> QuotaLines {
+    let mut lines = Vec::new();
+    let mut pool_rows = Vec::new();
+    let mut profile_rows = Vec::new();
+    let providers = super::quota_pools::provider_pools(
+        &dashboard.config,
+        &dashboard.quotas,
+        &dashboard.quota_providers,
+        now,
     );
+    let selection = dashboard.selected_quota_row();
+    for provider in providers {
+        let accent = provider_accent(&provider.provider);
+        lines.push(Line::styled(
+            provider.provider.display_name().to_uppercase(),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+        for pool in provider.pools {
+            let row = QuotaRow::Pool(pool.key.clone());
+            let selected = focused && selection.as_ref() == Some(&row);
+            pool_rows.push((row, lines.len()));
+            let expanded = dashboard.quota_expanded.contains(&pool.key);
+            let prefix = format!(
+                "{}{}{}",
+                if selected { ">" } else { " " },
+                if expanded { "- " } else { "+ " },
+                if pool.label.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", pool.label)
+                }
+            );
+            let percentage = format!(
+                " {:>padding$}",
+                pool.percentage(),
+                padding = 4 + usize::from(pool.missing > 0)
+            );
+            let bar_width =
+                width.saturating_sub(prefix.chars().count() + percentage.chars().count());
+            let mut spans = vec![Span::styled(
+                prefix,
+                if selected {
+                    theme::selection(true)
+                } else {
+                    Style::default()
+                },
+            )];
+            let (bar, omitted) =
+                pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
+            spans.extend(bar);
+            spans.push(Span::styled(
+                percentage,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ));
+            if pool.members.len() == 1 {
+                profile_rows.push((pool.members[0].id.clone(), lines.len()));
+            }
+            lines.push(Line::from(spans));
+            for text in wrap_note(&omitted.join(" · "), width.saturating_sub(2))
+                .into_iter()
+                .filter(|_| !omitted.is_empty())
+            {
+                lines.push(Line::styled(format!("  {text}"), theme::muted()));
+            }
+            if pool.missing > 0 {
+                lines.push(Line::styled(
+                    format!(
+                        "  {} profile{} not reporting",
+                        pool.missing,
+                        if pool.missing == 1 { "" } else { "s" }
+                    ),
+                    theme::muted(),
+                ));
+            }
+            for member in &pool.members {
+                if let Some(note) = &member.note {
+                    for text in wrap_note(
+                        &format!(
+                            "{} {} · {note}",
+                            member.id,
+                            if member.awaiting_reading {
+                                "?".to_string()
+                            } else {
+                                format!("{}%", member.remaining)
+                            }
+                        ),
+                        width.saturating_sub(2),
+                    ) {
+                        lines.push(Line::styled(format!("  {text}"), theme::muted()));
+                    }
+                }
+            }
+            if expanded {
+                let name_width = pool
+                    .members
+                    .iter()
+                    .map(|member| member.id.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    + 3;
+                let name_width = name_width.min(width.saturating_sub(12).max(3));
+                let notes: Vec<_> = pool
+                    .members
+                    .iter()
+                    .map(|member| lane_note(member, &pool.key.period, now, clock))
+                    .collect();
+                let longest_note = notes
+                    .iter()
+                    .map(|note| Span::raw(note).width())
+                    .max()
+                    .unwrap_or(0);
+                let lane_width = width
+                    .saturating_sub(name_width + longest_note + 2)
+                    .clamp(12, 48)
+                    .min(width.saturating_sub(name_width));
+                let mut axis = vec![' '; lane_width];
+                for cell in (0..lane_width).step_by((lane_width / 6).max(6)) {
+                    let label = clock(now as i64 + (cell * 86400 / lane_width) as i64, "%H:%M");
+                    if cell + label.len() <= lane_width {
+                        for (i, ch) in label.chars().enumerate() {
+                            axis[cell + i] = ch;
+                        }
+                    }
+                }
+                lines.push(Line::styled(
+                    format!("{:name_width$}{}", "", axis.into_iter().collect::<String>()),
+                    theme::muted(),
+                ));
+                for (member, mut note) in pool.members.iter().zip(notes) {
+                    profile_rows.push((member.id.clone(), lines.len()));
+                    let row = QuotaRow::Lane(pool.key.clone(), member.id.clone());
+                    let selected = focused && selection.as_ref() == Some(&row);
+                    pool_rows.push((row.clone(), lines.len()));
+                    let mut spans = vec![Span::styled(
+                        format!(
+                            "{} {:name$} ",
+                            if selected { ">" } else { " " },
+                            truncate_to_cells(&member.id, name_width - 3, Truncate::PLAIN),
+                            name = name_width - 3
+                        ),
+                        if selected {
+                            theme::selection(true)
+                        } else {
+                            Style::default()
+                        },
+                    )];
+                    let timeline = lane(member, &pool.key.period, lane_width, now, accent);
+                    if timeline.iter().any(|span| span.content == "*") {
+                        note.push_str(&format!(
+                            " · *={}+5 (both resets)",
+                            pool.key.period.marker()
+                        ));
+                    }
+                    spans.extend(timeline);
+                    if name_width + lane_width + 2 + Span::raw(&note).width() <= width {
+                        spans.push(Span::styled(format!("  {note}"), theme::muted()));
+                        lines.push(Line::from(spans));
+                    } else {
+                        lines.push(Line::from(spans));
+                        for text in wrap_note(&note, width.saturating_sub(4)) {
+                            pool_rows.push((row.clone(), lines.len()));
+                            profile_rows.push((member.id.clone(), lines.len()));
+                            lines.push(Line::styled(format!("    {text}"), theme::muted()));
+                        }
+                    }
+                }
+            }
+        }
+        for (id, label) in provider.text {
+            let label = if dashboard.quota_refreshing.contains(&id) {
+                format!("refreshing{}", theme::glyphs().ellipsis)
+            } else {
+                label
+            };
+            profile_rows.push((id.clone(), lines.len()));
+            let row = QuotaRow::Profile(id.clone());
+            let selected = focused && selection.as_ref() == Some(&row);
+            for (index, text) in wrap_note(&format!("{id}: {label}"), width.saturating_sub(2))
+                .into_iter()
+                .enumerate()
+            {
+                pool_rows.push((row.clone(), lines.len()));
+                profile_rows.push((id.clone(), lines.len()));
+                lines.push(Line::styled(
+                    format!("{} {text}", if selected && index == 0 { ">" } else { " " }),
+                    if selected {
+                        theme::selection(true)
+                    } else {
+                        theme::muted()
+                    },
+                ));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "Add an agent profile in Settings.",
+            theme::muted(),
+        ));
+    }
+    (lines, pool_rows, profile_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use mj_core::config::{HarnessProfile, SymbolSet};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn fixture() -> (DashboardState, u64) {
+        let quotas: BTreeMap<String, ProfileQuota> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/quota-provider-readings.json"
+        ))
+        .unwrap();
+        let now = quotas
+            .values()
+            .map(|quota| quota.refreshed_at_epoch_seconds)
+            .max()
+            .unwrap();
+        let mut config = crate::test_support::config();
+        config.profiles = quotas
+            .iter()
+            .map(|(id, quota)| {
+                (
+                    id.clone(),
+                    HarnessProfile::new(quota.harness, format!("/quota-fixture/{id}")),
+                )
+            })
+            .collect();
+        let mut dashboard = DashboardState::new(config, Default::default(), quotas);
+        dashboard.quota_providers.settle();
+        dashboard.focus = Focus::Quota;
+        (dashboard, now)
+    }
+
+    fn fixture_clock(epoch: i64, format: &str) -> String {
+        // The readings were recorded in Chicago in November; keep the render
+        // portable across CI hosts without changing the process timezone.
+        chrono::DateTime::from_timestamp(epoch, 0)
+            .unwrap()
+            .with_timezone(&chrono::FixedOffset::west_opt(6 * 3600).unwrap())
+            .format(format)
+            .to_string()
+    }
+
+    fn capture(
+        output: &mut String,
+        label: &str,
+        dashboard: &mut DashboardState,
+        now: u64,
+        width: u16,
+        height: u16,
+    ) {
+        use std::fmt::Write as _;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_quotas_at(frame, frame.area(), dashboard, None, now, fixture_clock);
+                if theme::ascii() {
+                    theme::fold_buffer_to_ascii(frame.buffer_mut());
+                }
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        writeln!(output, "=== {label} ({width}x{height}) ===").unwrap();
+        for y in 0..height {
+            let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            writeln!(output, "{}", row.trim_end()).unwrap();
+        }
+        // Labels can cover fill glyphs. Record backgrounds and modifiers so
+        // monochrome fill boundaries remain part of the surface contract.
+        writeln!(output, "background runs (x..end, colour):").unwrap();
+        for y in 0..height {
+            let mut runs = Vec::new();
+            let mut start = 0;
+            for x in 1..=width {
+                if x == width
+                    || (buffer[(x, y)].bg, buffer[(x, y)].modifier)
+                        != (buffer[(start, y)].bg, buffer[(start, y)].modifier)
+                {
+                    runs.push(format!(
+                        "{start}..{x} {:?} {:?}",
+                        buffer[(start, y)].bg,
+                        buffer[(start, y)].modifier
+                    ));
+                    start = x;
+                }
+            }
+            writeln!(output, "{y}: {}", runs.join(", ")).unwrap();
+        }
+    }
+
+    // Hard-won: quota review: an indexed accent cannot be tinted, so filled and spent cells matched.
+    #[test]
+    fn indexed_accent_marks_filled_cells_apart_from_spent_ones() {
+        theme::with_symbols(SymbolSet::Unicode, || {
+            theme::with_theme(theme::UiTheme::TerminalLight, || {
+                let (dashboard, now) = fixture();
+                let mut pool = dashboard.quota_pools().remove(0).pools.remove(0);
+                pool.members.truncate(1);
+                pool.members[0].remaining = 50;
+                pool.members[0].awaiting_reading = false;
+                let accent = theme::palette().muted;
+                assert!(!matches!(accent, Color::Rgb(..)));
+                let (spans, _) = pool_bar(&pool, 10, now, accent, &Default::default());
+                let style_at = |cell: usize| spans[cell].style;
+                assert_ne!(
+                    (style_at(0).bg, style_at(0).add_modifier),
+                    (style_at(9).bg, style_at(9).add_modifier)
+                );
+            })
+        });
+    }
+
+    // Hard-won: db4dc77c9: refresh reordered pool lanes and stranded selection on another profile.
+    #[test]
+    fn quota_lane_selection_survives_refresh_by_identity() {
+        let (mut dashboard, now) = fixture();
+        let key = dashboard.quota_rows()[0].pool().unwrap().clone();
+        dashboard.toggle_quota_pool();
+        dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let selected = QuotaRow::Lane(key.clone(), "claude2".into());
+        assert_eq!(dashboard.selected_quota_row(), Some(selected.clone()));
+        let before = dashboard.selection_for(Focus::Quota);
+        let mut ignored = String::new();
+        capture(&mut ignored, "before refresh", &mut dashboard, now, 60, 6);
+        let previous_offset = dashboard.quota_scroll.get();
+        dashboard.recenter_on_selection.set(None);
+        dashboard.set_quotas(dashboard.quotas.clone());
+        capture(
+            &mut ignored,
+            "unchanged refresh",
+            &mut dashboard,
+            now,
+            60,
+            6,
+        );
+        assert_eq!(dashboard.quota_scroll.get(), previous_offset);
+        // A wheel offset away from the selection survives a stationary refresh.
+        dashboard.quota_scroll.set(0);
+        dashboard.recenter_on_selection.set(None);
+        dashboard.set_quotas(dashboard.quotas.clone());
+        capture(
+            &mut ignored,
+            "wheel then refresh",
+            &mut dashboard,
+            now,
+            60,
+            6,
+        );
+        assert_eq!(dashboard.quota_scroll.get(), 0);
+        let mut reports = dashboard.quotas.clone();
+        reports.get_mut("claude2").unwrap().windows[0].resets_at_epoch_seconds =
+            Some(now as i64 + 10 * 86400);
+        dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+            reports,
+            ..Default::default()
+        });
+        assert_eq!(dashboard.selected_quota_row(), Some(selected));
+        assert_ne!(dashboard.selection_for(Focus::Quota), before);
+        capture(
+            &mut ignored,
+            "reordered refresh",
+            &mut dashboard,
+            now,
+            60,
+            6,
+        );
+        assert!(
+            dashboard
+                .quota_pool_areas
+                .borrow()
+                .iter()
+                .any(|(row, _)| { dashboard.selected_quota_row().as_ref() == Some(row) })
+        );
+        assert!(dashboard.quota_scroll.get() > previous_offset);
+        let mut reports = dashboard.quotas.clone();
+        reports.remove("claude2");
+        dashboard.set_quotas(reports);
+        // Hard-won: quota review: a profile whose row changed type lost its
+        // selection to the first row, so `e` renamed another profile.
+        assert_eq!(
+            dashboard.selected_quota_row(),
+            Some(QuotaRow::Profile("claude2".into()))
+        );
+        dashboard.quota_selection = Some(QuotaRow::Pool(key.clone()));
+        dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            dashboard.selected_quota_row(),
+            Some(QuotaRow::Lane(..))
+        ));
+        dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            dashboard.selected_quota_row(),
+            Some(QuotaRow::Pool(key.clone()))
+        );
+        assert!(!dashboard.quota_expanded.contains(&key));
+    }
+
+    // Hard-won: quota review: clicks used stale positions after a quota refresh reordered rows.
+    #[test]
+    fn quota_click_uses_rendered_identity_after_snapshot_changes() {
+        let (mut dashboard, now) = fixture();
+        dashboard.toggle_quota_pool();
+        let mut ignored = String::new();
+        capture(&mut ignored, "click", &mut dashboard, now, 132, 40);
+        let (identity, area) = dashboard
+            .quota_pool_areas
+            .borrow()
+            .iter()
+            .find(|(row, _)| matches!(row, QuotaRow::Lane(_, id) if id == "claude5"))
+            .unwrap()
+            .clone();
+        let click = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut reports = dashboard.quotas.clone();
+        reports
+            .get_mut("claude5")
+            .unwrap()
+            .windows
+            .iter_mut()
+            .for_each(|window| window.resets_at_epoch_seconds = Some(now as i64));
+        dashboard.set_quotas(reports);
+        dashboard.handle_mouse(click);
+        assert_eq!(dashboard.selected_quota_row(), Some(identity));
+        let mut reports = dashboard.quotas.clone();
+        reports.remove("claude5");
+        dashboard.set_quotas(reports);
+        let selection = dashboard.selected_quota_row();
+        dashboard.handle_mouse(click);
+        assert_eq!(dashboard.selected_quota_row(), selection);
+    }
+
+    #[test]
+    fn golden_quota_provider_pools() {
+        let mut output = String::new();
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                theme::with_theme(theme::UiTheme::Darcula, || {
+                    let (mut dashboard, now) = fixture();
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} collapsed"),
+                        &mut dashboard,
+                        now,
+                        132,
+                        23,
+                    );
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} narrow collapsed"),
+                        &mut dashboard,
+                        now,
+                        60,
+                        30,
+                    );
+                    // Show missing and cached readings through the daemon's probing snapshot.
+                    let reports = dashboard.quotas.clone();
+                    let mut refreshing = reports.clone();
+                    refreshing.remove("claude2");
+                    dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+                        reports: refreshing,
+                        probing: ["claude2".into(), "claude5".into()].into(),
+                        ..Default::default()
+                    });
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} missing and cached readings while probing"),
+                        &mut dashboard,
+                        now,
+                        132,
+                        24,
+                    );
+                    dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+                        reports,
+                        ..Default::default()
+                    });
+                    // Exercise the actual key dispatch and selection transition.
+                    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                    dashboard.handle_dashboard_key(enter);
+                    assert_eq!(dashboard.quota_expanded.len(), 1);
+                    let google = dashboard
+                        .quota_rows()
+                        .iter()
+                        .position(|row| matches!(row, QuotaRow::Pool(key) if key.scope.as_deref() == Some("gemini")))
+                        .unwrap();
+                    dashboard.set_selection_for(Focus::Quota, google);
+                    dashboard.handle_dashboard_key(enter);
+                    assert_eq!(dashboard.quota_expanded.len(), 2);
+                    dashboard.set_selection_for(Focus::Quota, 0);
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} expanded Anthropic and Gemini"),
+                        &mut dashboard,
+                        now,
+                        132,
+                        36,
+                    );
+                    dashboard.handle_dashboard_key(enter);
+                    assert_eq!(dashboard.quota_expanded.len(), 1);
+                    dashboard.handle_dashboard_key(enter);
+                    assert_eq!(dashboard.quota_expanded.len(), 2);
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} narrow expanded"),
+                        &mut dashboard,
+                        now,
+                        60,
+                        15,
+                    );
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} narrow expanded full Anthropic"),
+                        &mut dashboard,
+                        now,
+                        60,
+                        40,
+                    );
+                    dashboard.quota_expanded = dashboard
+                        .quota_pools()
+                        .into_iter()
+                        .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                        .collect();
+                    dashboard.set_selection_for(Focus::Quota, 0);
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} all periods and status labels"),
+                        &mut dashboard,
+                        now,
+                        132,
+                        68,
+                    );
+                    dashboard.quota_expanded.clear();
+                    let last_pool = dashboard
+                        .quota_rows()
+                        .iter()
+                        .rposition(|row| matches!(row, QuotaRow::Pool(_)))
+                        .unwrap();
+                    dashboard.set_selection_for(Focus::Quota, last_pool);
+                    dashboard.handle_dashboard_key(enter);
+                    dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+                    assert!(matches!(
+                        dashboard.selected_quota_row(),
+                        Some(QuotaRow::Profile(_))
+                    ));
+                    dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+                    assert!(
+                        matches!(dashboard.selected_quota_row(), Some(QuotaRow::Lane(_, id)) if id == "muse6")
+                    );
+                    let last_pool = dashboard
+                        .selected_quota_row()
+                        .unwrap()
+                        .pool()
+                        .unwrap()
+                        .clone();
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} last pool final lane in short pane"),
+                        &mut dashboard,
+                        now,
+                        132,
+                        5,
+                    );
+                    let lane_index = dashboard
+                        .quota_rows()
+                        .iter()
+                        .position(|row| matches!(row, QuotaRow::Lane(_, id) if id == "muse5"))
+                        .unwrap();
+                    let area = dashboard
+                        .quota_pool_areas
+                        .borrow()
+                        .iter()
+                        .find(|(row, _)| *row == dashboard.quota_rows()[lane_index])
+                        .unwrap()
+                        .1;
+                    dashboard.handle_mouse(crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left,
+                        ),
+                        column: area.x,
+                        row: area.y,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    assert!(
+                        matches!(dashboard.selected_quota_row(), Some(QuotaRow::Lane(_, id)) if id == "muse5")
+                    );
+                    dashboard.handle_dashboard_key(enter);
+                    assert_eq!(
+                        dashboard.selected_quota_row(),
+                        Some(QuotaRow::Pool(last_pool))
+                    );
+                    dashboard.quota_expanded.clear();
+                    let short = dashboard.quota_rows().iter().position(|row| matches!(row, QuotaRow::Pool(key) if key.period == PoolPeriod::FiveHour)).unwrap();
+                    dashboard.set_selection_for(Focus::Quota, short);
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} six-cell full and spent segments"),
+                        &mut dashboard,
+                        now,
+                        30,
+                        6,
+                    );
+                })
+            });
+        }
+        theme::with_symbols(SymbolSet::Unicode, || {
+            theme::with_theme(theme::UiTheme::Mono, || {
+                let (mut dashboard, now) = fixture();
+                dashboard.toggle_quota_pool();
+                capture(
+                    &mut output,
+                    "monochrome expanded Anthropic",
+                    &mut dashboard,
+                    now,
+                    132,
+                    30,
+                );
+                dashboard.quota_expanded.clear();
+                let short = dashboard.quota_rows().iter().position(|row| matches!(row, QuotaRow::Pool(key) if key.period == PoolPeriod::FiveHour)).unwrap();
+                dashboard.set_selection_for(Focus::Quota, short);
+                capture(
+                    &mut output,
+                    "monochrome six-cell full and spent segments",
+                    &mut dashboard,
+                    now,
+                    30,
+                    6,
+                );
+            })
+        });
+        theme::with_symbols(SymbolSet::Unicode, || {
+            let (mut dashboard, now) = fixture();
+            let mut reports = dashboard.quotas.clone();
+            reports.get_mut("claude7").unwrap().windows[0].remaining_percent = Some(3);
+            let mut long = reports.remove("claude4").unwrap();
+            let long_id = "claude-with-an-extremely-long-profile-name-that-must-not-hide-readings";
+            long.profile_id = long_id.into();
+            reports.insert(long_id.into(), long);
+            let profile = dashboard.config.profiles.remove("claude4").unwrap();
+            dashboard.config.profiles.insert(long_id.into(), profile);
+            dashboard.quota_providers =
+                super::super::quota_pools::ProviderDiscovery::start(&dashboard.config);
+            dashboard.quota_providers.settle();
+            dashboard.set_quotas(reports);
+            dashboard.toggle_quota_pool();
+            capture(
+                &mut output,
+                "small balance and long profile at narrow width",
+                &mut dashboard,
+                now,
+                60,
+                40,
+            );
+            let lane = dashboard
+                .quota_rows()
+                .iter()
+                .position(|row| matches!(row, QuotaRow::Lane(_, id) if id == "claude5"))
+                .unwrap();
+            dashboard.set_selection_for(Focus::Quota, lane);
+            capture(
+                &mut output,
+                "selected wrapped lane in short viewport",
+                &mut dashboard,
+                now,
+                60,
+                6,
+            );
+            dashboard.recenter_on_selection.set(Some(Focus::Quota));
+            capture(
+                &mut output,
+                "wrapped lane first line in one-line viewport",
+                &mut dashboard,
+                now,
+                60,
+                3,
+            );
+            let selection = dashboard.selected_quota_row();
+            let first = dashboard.quota_scroll.get();
+            dashboard.pane_areas = Some([Rect::default(), Rect::default(), Rect::new(0, 0, 60, 3)]);
+            for step in 1..=2 {
+                dashboard.handle_mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::ScrollDown,
+                    column: 10,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                });
+                capture(
+                    &mut output,
+                    &format!("wrapped lane wheel continuation {step}"),
+                    &mut dashboard,
+                    now,
+                    60,
+                    3,
+                );
+                assert_eq!(dashboard.quota_scroll.get(), first + step);
+                assert_eq!(dashboard.selected_quota_row(), selection);
+            }
+            // Hard-won: quota review: keyboard-only users could not reach the rest of a wrapped note.
+            for (key, step) in [(KeyCode::Up, 1), (KeyCode::Up, 2), (KeyCode::PageDown, 1)] {
+                dashboard.handle_dashboard_key(KeyEvent::new(key, KeyModifiers::NONE));
+                capture(
+                    &mut output,
+                    &format!("wrapped lane key continuation {key:?} {step}"),
+                    &mut dashboard,
+                    now,
+                    60,
+                    3,
+                );
+                assert_eq!(dashboard.selected_quota_row(), selection);
+            }
+            assert_eq!(dashboard.quota_scroll.get(), first + 1);
+            dashboard.quota_expanded = dashboard
+                .quota_pools()
+                .into_iter()
+                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .collect();
+            let moonshot = dashboard
+                .quota_rows()
+                .iter()
+                .position(|row| matches!(row, QuotaRow::Lane(_, id) if id == "kimi"))
+                .unwrap();
+            dashboard.set_selection_for(Focus::Quota, moonshot);
+            capture(
+                &mut output,
+                "Month and 5H with booster notice",
+                &mut dashboard,
+                now,
+                100,
+                12,
+            );
+            let mut reports = dashboard.quotas.clone();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| matches!(id.as_str(), "codex-short-full" | "codex-short-spent"));
+            reports.retain(|id, _| id == "codex-short-full");
+            dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+                reports,
+                probing: ["codex-short-spent".into()].into(),
+                ..Default::default()
+            });
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "full balance with one missing subscription",
+                &mut dashboard,
+                now,
+                70,
+                9,
+            );
+            let minimized = minimized_quota_line(&dashboard, 110, true, now);
+            // Hard-won: quota review: Kimi's Week balance vanished behind its Month window.
+            let (mut dashboard, now) = fixture();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| matches!(id.as_str(), "kimi" | "claude2" | "grok"));
+            let kimi = dashboard.quotas.get_mut("kimi").unwrap();
+            let mut week = kimi.windows[0].clone();
+            week.label = "Week".into();
+            week.remaining_percent = Some(25);
+            week.resets_at_epoch_seconds = Some(now as i64 + 3 * 3600);
+            kimi.windows.push(week);
+            // The cached reset has passed with no newer reading.
+            let stale = dashboard.quotas.get_mut("claude2").unwrap();
+            stale.windows[0].remaining_percent = Some(80);
+            stale.windows[0].resets_at_epoch_seconds = Some(now as i64 - 600);
+            stale.refreshed_at_epoch_seconds = now - 3600;
+            dashboard.set_quotas(dashboard.quotas.clone());
+            dashboard.quota_expanded = dashboard
+                .quota_pools()
+                .into_iter()
+                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .collect();
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "Week and Month pools, and a reset due without a reading",
+                &mut dashboard,
+                now,
+                100,
+                20,
+            );
+            // Judge staleness on the fixture's clock, not the wall clock.
+            let pools = crate::render::quota_pools::provider_pools(
+                &dashboard.config,
+                &dashboard.quotas,
+                &dashboard.quota_providers,
+                now,
+            );
+            let moonshot = pools
+                .iter()
+                .find(|provider| provider.provider == QuotaProvider::Moonshot)
+                .unwrap();
+            assert_eq!(
+                moonshot
+                    .pools
+                    .iter()
+                    .map(|pool| (pool.key.period.clone(), pool.remaining))
+                    .collect::<Vec<_>>(),
+                [(PoolPeriod::Week, 25), (PoolPeriod::Month, 40)]
+            );
+            // Hard-won: quota review: label text over a light fill used the theme's near-white colour.
+            theme::with_theme(theme::UiTheme::Midnight, || {
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_quotas_at(
+                            frame,
+                            frame.area(),
+                            &mut dashboard,
+                            None,
+                            now,
+                            fixture_clock,
+                        )
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let light = provider_accent(&QuotaProvider::XAI);
+                let labelled: Vec<_> = buffer
+                    .content()
+                    .iter()
+                    .filter(|cell| cell.bg == light && cell.symbol() != " ")
+                    .collect();
+                assert!(!labelled.is_empty());
+                assert!(labelled.iter().all(|cell| cell.fg == readable_on(light)));
+                assert_ne!(readable_on(light), theme::palette().text);
+            });
+            use std::fmt::Write;
+            writeln!(
+                &mut output,
+                "minimized partial totals: {}",
+                minimized.to_string().trim_end()
+            )
+            .unwrap();
+        });
+        // Hard-won: quota review: unreadable long windows hid usable profiles and short limits did not block lanes.
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard
+                    .config
+                    .profiles
+                    .retain(|id, _| id == "kimi" || id.starts_with("codex"));
+                let kimi = dashboard.quotas.get_mut("kimi").unwrap();
+                let mut unknown = kimi.windows[0].clone();
+                unknown.label = "Week".into();
+                unknown.duration_seconds = Some(604800);
+                unknown.remaining_percent = None;
+                unknown.used = None;
+                unknown.limit = Some(100);
+                kimi.windows = vec![
+                    unknown,
+                    mj_client::quota::QuotaWindow {
+                        label: "5H".into(),
+                        remaining_percent: Some(70),
+                        duration_seconds: Some(18000),
+                        resets_at_epoch_seconds: Some(now as i64 + 7200),
+                        model_scope: None,
+                        used: None,
+                        limit: None,
+                        resets: None,
+                    },
+                ];
+                let short_fallback = kimi.windows[1].clone();
+                for (id, week, short, reset) in [
+                    ("codex", 80, 0, 7200),
+                    ("codex2", 0, 0, 21600),
+                    ("codex3", 0, 0, 3600),
+                ] {
+                    let report = dashboard.quotas.get_mut(id).unwrap();
+                    report.windows = vec![
+                        mj_client::quota::QuotaWindow {
+                            label: "Week".into(),
+                            duration_seconds: Some(604800),
+                            remaining_percent: Some(week),
+                            resets_at_epoch_seconds: Some(now as i64 + 10800),
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: None,
+                        },
+                        mj_client::quota::QuotaWindow {
+                            label: "5H".into(),
+                            duration_seconds: Some(18000),
+                            remaining_percent: Some(short),
+                            resets_at_epoch_seconds: Some(now as i64 + reset),
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: None,
+                        },
+                    ];
+                }
+                let report = dashboard.quotas.get_mut("codex4").unwrap();
+                let mut unknown = report.windows[0].clone();
+                unknown.remaining_percent = None;
+                unknown.used = None;
+                report.windows = vec![unknown, short_fallback];
+                dashboard.quota_expanded = dashboard
+                    .quota_pools()
+                    .into_iter()
+                    .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                    .collect();
+                dashboard.set_selection_for(Focus::Quota, 0);
+                capture(
+                    &mut output,
+                    &format!("{symbols:?} unreadable week and exhausted overlapping windows"),
+                    &mut dashboard,
+                    now,
+                    132,
+                    34,
+                );
+            });
+        }
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                theme::with_theme(theme::UiTheme::Mono, || {
+                    let (mut dashboard, now) = fixture();
+                    dashboard
+                        .config
+                        .profiles
+                        .retain(|id, _| id.starts_with("codex-short-"));
+                    let report = dashboard.quotas.get_mut("codex-short-spent").unwrap();
+                    report.windows[0].remaining_percent = Some(30);
+                    dashboard.set_selection_for(Focus::Quota, 0);
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} monochrome 30 vs 100 percent under labels"),
+                        &mut dashboard,
+                        now,
+                        30,
+                        7,
+                    );
+                })
+            });
+        }
+        theme::with_symbols(SymbolSet::Unicode, || {
+            let (mut dashboard, now) = fixture();
+            let report = dashboard.quotas.get_mut("claude5").unwrap();
+            let reset = report.weekly_window().unwrap().resets_at_epoch_seconds;
+            report
+                .windows
+                .iter_mut()
+                .find(|window| window.label == "5H")
+                .unwrap()
+                .resets_at_epoch_seconds = reset;
+            dashboard.toggle_quota_pool();
+            capture(
+                &mut output,
+                "coincident weekly and five-hour resets",
+                &mut dashboard,
+                now,
+                60,
+                32,
+            );
+        });
+        // Hard-won: quota review: a Month limit did not block the weekly lane, a stale
+        // five-hour reading hid the weekly reset marker, and indexed accents drew
+        // filled and spent cells alike.
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard
+                    .config
+                    .profiles
+                    .retain(|id, _| matches!(id.as_str(), "kimi" | "claude5"));
+                let kimi = dashboard.quotas.get_mut("kimi").unwrap();
+                kimi.windows[0].remaining_percent = Some(0);
+                kimi.windows[0].resets_at_epoch_seconds = Some(now as i64 + 12 * 3600);
+                let mut week = kimi.windows[0].clone();
+                week.label = "Week".into();
+                week.remaining_percent = Some(100);
+                week.resets_at_epoch_seconds = Some(now as i64 + 2 * 86400);
+                kimi.windows.push(week);
+                let claude = dashboard.quotas.get_mut("claude5").unwrap();
+                claude.refreshed_at_epoch_seconds = now - 3600;
+                for window in &mut claude.windows {
+                    window.resets_at_epoch_seconds = Some(now as i64 + 4 * 3600);
+                    if window.label == "5H" {
+                        window.resets_at_epoch_seconds = Some(now as i64 - 600);
+                    }
+                }
+                dashboard.quota_expanded = dashboard
+                    .quota_pools()
+                    .into_iter()
+                    .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                    .collect();
+                dashboard.set_selection_for(Focus::Quota, 0);
+                capture(
+                    &mut output,
+                    &format!(
+                        "{symbols:?} month limit blocks week lane; stale five-hour keeps week marker"
+                    ),
+                    &mut dashboard,
+                    now,
+                    100,
+                    20,
+                );
+            });
+        }
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard.config.profiles.retain(|id, _| {
+                    id.starts_with("claude") && id != "claude-aws" && id != "claude-login"
+                });
+                // Twelve timeline cells at this width: reset on cell starts,
+                // including the first cell, must belong to exactly one cell.
+                let template = dashboard.quotas["claude5"]
+                    .five_hour_window()
+                    .unwrap()
+                    .clone();
+                dashboard.quotas.get_mut("claude2").unwrap().windows[0].resets_at_epoch_seconds =
+                    Some(now as i64 + 4 * 3600);
+                for (id, hours) in [("claude5", 2), ("claude7", 0)] {
+                    let report = dashboard.quotas.get_mut(id).unwrap();
+                    let mut five = template.clone();
+                    five.resets_at_epoch_seconds = Some(now as i64 + hours * 3600);
+                    report.windows.retain(|window| window.label != "5H");
+                    report.windows.push(five);
+                }
+                dashboard.toggle_quota_pool();
+                capture(
+                    &mut output,
+                    &format!("{symbols:?} reset at cell start and banked fallback"),
+                    &mut dashboard,
+                    now,
+                    60,
+                    36,
+                );
+            });
+        }
+        // Hard-won: quota review: one-cell and omitted segments looked spent at 40%.
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard.config.profiles.retain(|id, _| {
+                    id.starts_with("claude") && id != "claude-aws" && id != "claude-login"
+                });
+                let report = dashboard.quotas.get_mut("claude5").unwrap();
+                report
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.label == "Week")
+                    .unwrap()
+                    .remaining_percent = Some(40);
+                report.monthly_price_usd = Some(1);
+                report.banked_resets = Some(1);
+                for (width, height) in [(60, 8), (16, 26), (11, 44)] {
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} tiny segment remaining and banked resets"),
+                        &mut dashboard,
+                        now,
+                        width,
+                        height,
+                    );
+                }
+            });
+        }
+        // Hard-won: quota review: failed probes vanished from partial totals for other periods.
+        theme::with_symbols(SymbolSet::Unicode, || {
+            let (mut dashboard, now) = fixture();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| id.starts_with("codex") || id.starts_with("gemini"));
+            for id in ["codex2", "gemini2"] {
+                let report = dashboard.quotas.get_mut(id).unwrap();
+                report.error = Some("login refused; sign in again".into());
+                report.windows.clear();
+            }
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "failed probes missing from every eligible period and scope",
+                &mut dashboard,
+                now,
+                132,
+                22,
+            );
+            for id in ["codex2", "gemini2"] {
+                dashboard.quotas.get_mut(id).unwrap().error = None;
+            }
+            capture(
+                &mut output,
+                "empty reports missing from every eligible period and scope",
+                &mut dashboard,
+                now,
+                132,
+                22,
+            );
+        });
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "quota-provider-pools", &output);
+    }
 }

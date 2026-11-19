@@ -8,7 +8,6 @@ use std::time::Duration;
 // An open AWS failure outlives the task that reported it: the replacement
 // task's first clean cycle is reported too, so the notices end the failure and
 // report a later recurrence.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_replaced_renewal_task_still_ends_the_failure_its_predecessor_reported() {
     use crate::pollers::CredentialSyncNotices;

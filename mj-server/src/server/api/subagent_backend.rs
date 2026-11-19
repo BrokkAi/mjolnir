@@ -61,7 +61,7 @@ pub trait SubagentBackend: Send + Sync {
         before: Option<mj_core::storage::TranscriptCursor>,
     ) -> BoxFuture<'_, AnyResult<mj_core::storage::TranscriptHistoryPage>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::load_transcript_history(&session_id, before.as_ref(), 128)?
                     .context("session history is unavailable")
             })
@@ -76,7 +76,7 @@ pub trait SubagentBackend: Send + Sync {
         before: Option<(u64, String)>,
     ) -> BoxFuture<'_, AnyResult<mj_core::native_agent::NativeAgentHistoryPage>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::native_agent_history(&owner, &child, before)
             })
             .await?
@@ -177,7 +177,7 @@ pub trait SubagentBackend: Send + Sync {
         parent_session_id: String,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::subagent::SubagentRecord>>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::list_subagents(&parent_session_id)
             })
             .await?
@@ -188,7 +188,7 @@ pub trait SubagentBackend: Send + Sync {
     fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
         Box::pin(async move {
             let liveness = self.subagent_work_liveness(child_session_id.clone()).await;
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::controller::subagent_has_handed_back(&child_session_id, &liveness)
             })
             .await?
@@ -214,7 +214,7 @@ pub trait SubagentBackend: Send + Sync {
                 .await?;
             match fetched.kind {
                 mj_checkpoint::archive::FetchedKind::File => {
-                    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                    mj_core::runtime::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
                         let mut bytes = Vec::new();
                         std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes)?;
                         Ok(bytes)
@@ -236,7 +236,7 @@ pub trait SubagentBackend: Send + Sync {
         &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async {
-            tokio::task::spawn_blocking(mj_controller::database::list_workspaces).await?
+            mj_core::runtime::spawn_blocking(mj_controller::database::list_workspaces).await?
         })
     }
     /// One listed workspace, read from the store. `None` means the list
@@ -247,7 +247,7 @@ pub trait SubagentBackend: Send + Sync {
         id: String,
     ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || mj_controller::database::workspace_record(&id))
+            mj_core::runtime::spawn_blocking(move || mj_controller::database::workspace_record(&id))
                 .await?
         })
     }
@@ -262,7 +262,7 @@ pub trait SubagentBackend: Send + Sync {
         name: String,
     ) -> BoxFuture<'_, AnyResult<mj_core::workspace::WorkspaceRecord>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::create_or_get_workspace(&name)
             })
             .await?
@@ -399,7 +399,7 @@ pub trait SubagentBackend: Send + Sync {
         limit: usize,
     ) -> BoxFuture<'_, AnyResult<Option<mj_controller::database::UsagePage>>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::load_session_usage(&session_id, after_seq, limit)
             })
             .await?
@@ -414,7 +414,7 @@ pub trait SubagentBackend: Send + Sync {
         review_id: Option<String>,
     ) -> BoxFuture<'_, AnyResult<Option<mj_controller::database::FinishedReview>>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::finished_review(&session_id, review_id.as_deref())
             })
             .await?
@@ -426,8 +426,10 @@ pub trait SubagentBackend: Send + Sync {
         parent: String,
     ) -> BoxFuture<'_, AnyResult<Option<mj_controller::database::UsageTree>>> {
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || mj_controller::database::load_usage_tree(&parent))
-                .await?
+            mj_core::runtime::spawn_blocking(move || {
+                mj_controller::database::load_usage_tree(&parent)
+            })
+            .await?
         })
     }
 
@@ -437,7 +439,7 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
         Box::pin(async move {
             let models = mj_controller::controller::profile_config::advertised_models();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::load_session_usage_report(&query, models)
             })
             .await?

@@ -1,6 +1,7 @@
 //! Dashboard rendering: pane layout, session tables, capacity, quotas, footer.
 mod capacity;
 mod footer;
+pub(crate) mod quota_pools;
 mod quotas;
 pub(crate) mod sessions;
 pub(crate) use capacity::*;
@@ -25,7 +26,7 @@ use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind, State};
 use mj_chat::chat::render_agent_message_head;
 use mj_chat::components::{render_scrollbar, scrollbar_geometry};
 use mj_chat::theme;
-use mj_client::quota::{NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::quota::{ProfileQuota, QuotaWindow};
 use mj_client::review::RuntimeReviewView;
 use mj_core::targets::DeploymentCapacityKind;
 
@@ -49,9 +50,9 @@ const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
 /// One fixed row at the top of Sessions for Create and Resume.
 pub(crate) const SESSION_ACTIONS_HEIGHT: u16 = 1;
 
-/// Whether the selection of `focus` moved by keyboard since the last frame.
-/// Only then does a table re-centre on it; a click or a refresh leaves the
-/// rows where they are.
+/// Whether this pane requested that its selected row be visible again.
+/// Sessions and Targets request this on keyboard movement; Quota also uses it
+/// when its selected identity moves during a refresh.
 fn take_selection_recenter(dashboard: &DashboardState, focus: Focus) -> bool {
     if dashboard.recenter_on_selection.get() == Some(focus) {
         dashboard.recenter_on_selection.set(None);

@@ -203,7 +203,7 @@ pub(super) async fn revoke_viewer(
     // has not reached the browser yet, even if it used a newer cookie expiry.
     let renewal_ttl = renewal_policy(state, &cookie.viewer).map_or(Duration::ZERO, |(ttl, _)| ttl);
     let revocations = state.viewer_revocations.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let result = revocations.revoke(cookie.viewer, cookie.expiry, renewal_ttl);
         if let Err(error) = &result {
             // Report even if the HTTP caller disconnected while disk I/O ran.

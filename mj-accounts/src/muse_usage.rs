@@ -18,17 +18,12 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
+use mj_core::config::MuseQuotaEndpoints as Endpoints;
 use mj_core::credentials::MAX_CREDENTIAL_BYTES;
 
-const MINT_BASE_URL_ENV: &str = "TBH_MINT_BASE_URL";
-const DEFAULT_MINT_BASE_URL: &str = "https://api.meta.ai";
 const MINT_PATH: &str = "/muse-code/key";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Muse's own override for its OAuth host, honoured the same way as the mint
-/// override so a profile's environment points both at one deployment.
-const AUTH_BASE_URL_ENV: &str = "TBH_AUTH_BASE_URL";
-const DEFAULT_AUTH_BASE_URL: &str = "https://auth.meta.com";
 /// The token endpoint and public client id `muse login` uses (observed on the
 /// wire from Muse 1.4.12). A refresh is the standard `refresh_token` grant
 /// against the same endpoint.
@@ -108,29 +103,6 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
         SystemTime::now(),
     )
     .await
-}
-
-/// Where one profile's Muse reaches Meta: the mint endpoint that reports
-/// usage, and the OAuth host that refreshes the login.
-struct Endpoints {
-    mint: String,
-    auth: String,
-}
-
-impl Endpoints {
-    fn of(environment: &HashMap<String, String>) -> Self {
-        let configured = |name: &str, default: &str| {
-            environment
-                .get(name)
-                .cloned()
-                .or_else(|| std::env::var(name).ok())
-                .unwrap_or_else(|| default.to_owned())
-        };
-        Self {
-            mint: configured(MINT_BASE_URL_ENV, DEFAULT_MINT_BASE_URL),
-            auth: configured(AUTH_BASE_URL_ENV, DEFAULT_AUTH_BASE_URL),
-        }
-    }
 }
 
 /// The rate-limit and minimum-interval gate above the network step. `now` is
@@ -692,7 +664,7 @@ mod tests {
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), server)
@@ -787,8 +759,8 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         write_credentials(first.path(), "first-token");
         write_credentials(second.path(), "second-token");
-        let first_environment = HashMap::from([(MINT_BASE_URL_ENV.to_owned(), base_url.clone())]);
-        let second_environment = HashMap::from([(MINT_BASE_URL_ENV.to_owned(), base_url)]);
+        let first_environment = HashMap::from([("TBH_MINT_BASE_URL".to_owned(), base_url.clone())]);
+        let second_environment = HashMap::from([("TBH_MINT_BASE_URL".to_owned(), base_url)]);
 
         query(first.path(), &first_environment).await.unwrap();
         query(second.path(), &second_environment).await.unwrap();
@@ -970,7 +942,8 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base_url = format!("http://{address}");
         let gate = Gate::default();
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -1097,7 +1070,8 @@ mod tests {
             .route("/oidc/device/token/", post(token));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{address}"), server)
     }
 
@@ -1173,7 +1147,7 @@ mod tests {
             .open(raced.path().join(".auth.json.lock"))
             .unwrap();
         muse.lock().unwrap();
-        let query = tokio::spawn({
+        let query = mj_core::runtime::spawn({
             let home = raced.path().to_owned();
             let auth_base_url = base_url;
             async move { fresh_access_token(&reqwest::Client::new(), &home, &auth_base_url, None).await }

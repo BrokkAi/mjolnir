@@ -294,6 +294,10 @@ pub struct StartSessionRequest {
     /// Withhold GitHub credentials; inherited by children.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_credentials: bool,
+    /// Start the session with notifications ignored, as if `Ignore Session`
+    /// had been chosen at creation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_ignored: bool,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default, or anchors model-based profile

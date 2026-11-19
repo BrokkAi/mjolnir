@@ -127,8 +127,8 @@ fn dispatch_diffstat_requests(
         let tool_call_id = request.tool_call_id.clone();
         let revision = request.revision;
         let updates = updates.clone();
-        tokio::spawn(async move {
-            let result = match tokio::task::spawn_blocking(move || request.compute()).await {
+        mj_core::runtime::spawn(async move {
+            let result = match mj_core::runtime::spawn_blocking(move || request.compute()).await {
                 Ok(result) => result,
                 Err(error) => Err(format!("diff summary task failed: {error}")),
             };
@@ -168,8 +168,8 @@ fn spawn_transcript_prefix(
     attempt: u32,
     updates: tokio::sync::mpsc::UnboundedSender<ChatIoUpdate>,
 ) {
-    tokio::spawn(async move {
-        let result = match tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn(async move {
+        let result = match mj_core::runtime::spawn_blocking(move || {
             let entries = materialized_prefix_entries(&pending.items, pending.frontier);
             let diffstats = pending
                 .items
@@ -931,7 +931,7 @@ fn spawn_dictation(
     updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
 ) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = dictation_handoff(preferred_profile, updates.clone(), cancel).await;
         if let Err(error) = updates.send(VoiceUpdate::Finished(result)) {
             tracing::debug!(%error, "voice result dropped because the chat closed");
@@ -944,7 +944,7 @@ async fn dictation_handoff(
     updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
 ) -> anyhow::Result<String> {
-    let (recording, cancel) = tokio::task::spawn_blocking(move || {
+    let (recording, cancel) = mj_core::runtime::spawn_blocking(move || {
         let recording = tempfile::NamedTempFile::new()?;
         let path = recording.path().to_owned();
         crate::speech::run_dictation(

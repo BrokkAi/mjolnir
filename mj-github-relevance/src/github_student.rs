@@ -235,7 +235,7 @@ impl Student {
             notice,
         });
         let cancellation = CancellationToken::new();
-        let task = tokio::spawn(supervise(
+        let task = mj_core::runtime::spawn(supervise(
             inner.clone(),
             data_directory,
             cancellation.clone(),
@@ -345,7 +345,7 @@ impl Student {
             let session = session.to_owned();
             let inner = self.inner.clone();
             let epoch = Arc::downgrade(&engine);
-            let task = tokio::task::spawn_blocking(move || {
+            let task = mj_core::runtime::spawn_blocking(move || {
                 // Fields drop in declaration order, releasing model memory
                 // before returning the admission permit, including on unwind.
                 struct Active {
@@ -673,9 +673,10 @@ async fn supervise(
                     )
                     .await?;
                     let loaded = engine.clone();
-                    let gpu =
-                        tokio::task::spawn_blocking(move || loaded.load_gpu(&directory, device))
-                            .await??;
+                    let gpu = mj_core::runtime::spawn_blocking(move || {
+                        loaded.load_gpu(&directory, device)
+                    })
+                    .await??;
                     Ok::<_, anyhow::Error>(Some(Arc::new(gpu)))
                 };
                 let result = tokio::select! {_=cancellation.cancelled()=>return,_=request.cancelled()=>continue,result=preparation=>result};
@@ -708,7 +709,7 @@ async fn supervise(
                     }
                 } else {
                     drop(machine);
-                    drop(tokio::task::spawn_blocking(move || drop(result)));
+                    drop(mj_core::runtime::spawn_blocking(move || drop(result)));
                 }
             }
             Action::Prepare(use_gpu) => {
@@ -743,7 +744,7 @@ async fn supervise(
                     })?;
                     #[cfg(any(test, feature = "test-support"))]
                     let load_failures = options.load_failures.clone();
-                    tokio::task::spawn_blocking(move || -> Result<Ready> {
+                    mj_core::runtime::spawn_blocking(move || -> Result<Ready> {
                         #[cfg(any(test, feature = "test-support"))]
                         if let Some(failures) = load_failures
                             && failures
@@ -773,7 +774,7 @@ async fn supervise(
                 let mut machine = inner.machine.lock().expect("student state poisoned");
                 if cancellation.is_cancelled() {
                     drop(machine);
-                    drop(tokio::task::spawn_blocking(move || drop(outcome)));
+                    drop(mj_core::runtime::spawn_blocking(move || drop(outcome)));
                     return;
                 }
                 let mut notice = None;

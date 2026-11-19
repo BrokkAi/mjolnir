@@ -378,10 +378,10 @@ impl SessionAttachment {
         self.cancel();
         self.select(session);
         let generation = self.generation;
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(mj_core::runtime::spawn(async move {
             let result = tokio::time::timeout(
                 timeout,
-                tokio_util::task::AbortOnDropHandle::new(tokio::spawn(work)),
+                tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work)),
             )
             .await;
             let result = match result {

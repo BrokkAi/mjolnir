@@ -370,7 +370,7 @@ async fn retry_with_github_credential(
     url: &str,
     anonymous_status: reqwest::StatusCode,
 ) -> Result<reqwest::Response> {
-    let Some(credential) = super::backend::controller_github_credential().await else {
+    let Some(credential) = crate::github_credential::controller_github_credential().await else {
         bail!(
             "GitHub's anonymous rate limit is used up; run `gh auth login` or set GH_TOKEN \
              so mj checks with your account (HTTP {anonymous_status})"

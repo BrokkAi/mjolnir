@@ -10,8 +10,7 @@
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           25                                                         │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -20,6 +19,7 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -42,8 +42,7 @@ Enter open · / searc                                                           
 │  │ No messages yet  │ Cache directory                   Default                                                    │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           107                                                        │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -52,6 +51,7 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -75,9 +75,8 @@ editor value: 107
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           10GiB                                                      │                     │
-│                     │ Enter a whole number of gigabytes.                                                           │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │ Enter a whole number of gigabytes.                                                           │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
@@ -85,6 +84,7 @@ editor value: 107
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -108,9 +108,8 @@ stored size after rejection: "100GiB"
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           0                                                          │                     │
-│                     │ Enter at least 1 GB, or clear the field to use the default.                                  │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │ Enter at least 1 GB, or clear the field to use the default.                                  │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
@@ -118,6 +117,7 @@ stored size after rejection: "100GiB"
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -142,8 +142,7 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           12                                                         │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -152,6 +151,7 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -174,8 +174,7 @@ Settings saved. New
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           12                                                         │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -184,6 +183,7 @@ Settings saved. New
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -207,7 +207,6 @@ budget after Use default: null
 │  │ No messages yet  │ Compile admission budget          Default                                                    │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -217,6 +216,7 @@ budget after Use default: null
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -239,7 +239,6 @@ Enter open · / searc                                                           
 │  │ No messages yet  │ Compile admission budget          6GiB                                                       │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -249,6 +248,7 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -272,8 +272,7 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           Resolving…                                                 │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -282,6 +281,7 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -304,8 +304,7 @@ Enter open · / searc                                                           
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           Resolving…                                                 │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -314,6 +313,7 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -337,8 +337,7 @@ Tab-reached Save action: true
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           Resolving…                                                 │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -347,6 +346,7 @@ Tab-reached Save action: true
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -369,7 +369,6 @@ Enter open · / searc                                                           
 │  │ No messages yet  │                                                                                              │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -379,6 +378,7 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -401,8 +401,7 @@ Enter open · / searc                                                           
 │  │ No messages yet  │ Cache directory                   Resolving…                                                 │                     │
 │  │                  │ Native tool cache directory       Default                                                    │                     │
 │                     │ Total cache budget (GB)           250                                                        │                     │
-│                     │   Compile scheduling              2 settings  ›                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Compile scheduling              2 settings  ›                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -411,6 +410,7 @@ Enter open · / searc                                                           
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -443,7 +443,6 @@ Enter open · / searc                                                           
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -453,6 +452,7 @@ Enter open · / searc                                                           
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
@@ -485,7 +485,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -495,6 +494,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -527,7 +527,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -537,6 +536,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
@@ -570,7 +570,6 @@ summary contains changed state: true
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -580,6 +579,7 @@ summary contains changed state: true
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │
@@ -612,7 +612,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -622,6 +621,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -654,7 +654,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ─────────────────────────────╮
 │                               │                                                                                              │                               │
@@ -664,6 +663,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
 │                               │                                                                                              │  ────────────────────── ▁   ▄ ╮
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │ Resolving the build cache defaults on the machine…                                           │                               │

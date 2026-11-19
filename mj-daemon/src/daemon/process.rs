@@ -59,7 +59,7 @@ pub async fn run_daemon_process() -> Result<()> {
     // the one wait after the epilogue that durability requires. Timed, so a
     // slow exit says whether the writer or the runtime held it.
     let writer_started = Instant::now();
-    let writer_shutdown = tokio::task::spawn_blocking(move || database_writer.shutdown())
+    let writer_shutdown = mj_core::runtime::spawn_blocking(move || database_writer.shutdown())
         .await
         .context("database writer shutdown task panicked")
         .and_then(std::convert::identity);
@@ -91,13 +91,15 @@ pub(super) async fn run_daemon_runtime(
     let startup_work = mj_controller::upgrade::startup_recovery()?;
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
-    tokio::task::spawn_blocking(mj_controller::controller::pin_worker_binary_sources)
+    mj_core::runtime::spawn_blocking(mj_controller::controller::pin_worker_binary_sources)
         .await
         .context("worker source snapshot task failed")??;
     // Lock files outlive the SSH masters they guarded (launch finding R3-11).
-    tokio::task::spawn_blocking(mj_controller::targets::SshSessions::remove_stale_master_locks)
-        .await
-        .context("SSH master lock cleanup task failed")?;
+    mj_core::runtime::spawn_blocking(
+        mj_controller::targets::SshSessions::remove_stale_master_locks,
+    )
+    .await
+    .context("SSH master lock cleanup task failed")?;
     Controller::recover_config_id_rename()?;
     let config = Config::load()?;
     mj_controller::database::recover_interrupted_checkpointing_sessions(
@@ -106,7 +108,7 @@ pub(super) async fn run_daemon_runtime(
     mj_controller::controller::reconcile_managed_checkpoint_archives()?;
 
     let loading = Instant::now();
-    let controller = tokio::task::spawn_blocking(|| {
+    let controller = mj_core::runtime::spawn_blocking(|| {
         let mut controller = Controller::load()?;
         controller.prepare_persisted_sessions()?;
         Ok::<_, anyhow::Error>(controller)
@@ -119,7 +121,7 @@ pub(super) async fn run_daemon_runtime(
     // before any launch configuration is refreshed or any credential sync runs.
     {
         let state = controller.state.clone();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::local_profile_homes::link_profile_homes_of_earlier_sessions(
                 &state,
             )
@@ -160,7 +162,7 @@ pub(super) async fn run_daemon_runtime(
         // `/proc`.
         placement: placement(),
     };
-    let workspaces = tokio::task::spawn_blocking(mj_controller::database::list_workspaces)
+    let workspaces = mj_core::runtime::spawn_blocking(mj_controller::database::list_workspaces)
         .await
         .context("daemon workspace load task panicked")??;
     let mut remote = if config.phone.enabled {
@@ -174,7 +176,9 @@ pub(super) async fn run_daemon_runtime(
     let (delegation_tx, delegation_updates) = mj_controller::session_manager::delegation_channel();
     let manager =
         mj_controller::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
-    manager.control.update_model_policies(&controller);
+    manager
+        .control
+        .update_model_policies(&controller.config, &controller.state);
     let manager_targets = manager.targets;
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
@@ -360,7 +364,7 @@ pub(super) async fn run_daemon_runtime(
     // shutdown, and the next start finishes it.
     let checkpoint_sweep = {
         let cancellation = cancellation.clone();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::sweep_local_checkpoint_leftovers(
                 &mj_controller::targets::BoundedProcessExecutor::new(Duration::from_secs(15)),
                 started,
@@ -370,7 +374,7 @@ pub(super) async fn run_daemon_runtime(
     };
     let activity_cleanup = {
         let cancellation = cancellation.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if let Err(error) = super::activity_cleanup::run(cancellation).await {
                 tracing::warn!(error = %format!("{error:#}"), "API activity cleanup stopped; the next daemon will retry");
             }
@@ -395,7 +399,7 @@ pub(super) async fn run_daemon_runtime(
         let mut receiver = manager.session_cpu;
         let state = state.clone();
         let cancellation = cancellation.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let mut next_publication = tokio::time::Instant::now();
             loop {
                 tokio::select! {
@@ -419,12 +423,11 @@ pub(super) async fn run_daemon_runtime(
             }
         })
     };
-    let project_catalog = tokio::spawn(state.projects().run(cancellation.child_token()));
+    let project_catalog = mj_core::runtime::spawn(state.projects().run(cancellation.child_token()));
     // Before the web viewer starts: it shows this service's readings.
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
-    let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
-    let notification_pruning = tokio::spawn(super::attention::prune_read_notifications(
+    let notification_pruning = mj_core::runtime::spawn(super::attention::prune_read_notifications(
         state.clone(),
         cancellation.clone(),
     ));
@@ -495,7 +498,7 @@ pub(super) async fn run_daemon_runtime(
         // admission after the daemon begins serving.
         let upgrade_work =
             (!controller.state.subagents.contains_key(&session_id)).then(|| startup_work.clone());
-        let interrupted_close_task = tokio::spawn(async move {
+        let interrupted_close_task = mj_core::runtime::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
                 result = recovery_state.recover_suspension(session_id.clone()) => result,
@@ -526,7 +529,7 @@ pub(super) async fn run_daemon_runtime(
         let recovery_shutdown = cancellation.clone();
         let updates = interrupted_close_tx.clone();
         let upgrade_work = startup_work.clone();
-        interrupted_close_tasks.push(tokio::spawn(async move {
+        interrupted_close_tasks.push(mj_core::runtime::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
                 result = recovery_state.recover_destruction(session_id.clone()) => result,
@@ -564,9 +567,9 @@ pub(super) async fn run_daemon_runtime(
         (!unowned.is_empty()).then(|| {
             let state = state.clone();
             let upgrade_work = startup_work.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let _upgrade_work = upgrade_work;
-                let reconciled = tokio::task::spawn_blocking(move || {
+                let reconciled = mj_core::runtime::spawn_blocking(move || {
                     let mut controller = Controller::load()?;
                     let mut reconciled = 0usize;
                     for (session_id, cause) in unowned {
@@ -613,7 +616,7 @@ pub(super) async fn run_daemon_runtime(
         (!tombstones.is_empty()).then(|| {
             let state = state.clone();
             let upgrade_work = startup_work.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let _upgrade_work = upgrade_work;
                 for session_id in tombstones {
                     state.discard_lost_session(session_id).await;
@@ -656,20 +659,25 @@ pub(super) async fn run_daemon_runtime(
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
-    let mut cache_task = tokio::spawn(crate::daemon::mbx_service::run(
+    let mut cache_task = mj_core::runtime::spawn(crate::daemon::mbx_service::run(
         state.clone(),
         cancellation.clone(),
     ));
-    let mut mailbox_task = tokio::spawn(crate::daemon::mailbox_delivery::run(
+    let mut mailbox_task = mj_core::runtime::spawn(crate::daemon::mailbox_delivery::run(
         state.clone(),
         manager_control.clone(),
         cancellation.clone(),
     ));
-    let mut github_watch_task = tokio::spawn(crate::github_watch::service::run(
+    let mut github_watch_task = mj_core::runtime::spawn(crate::github_watch::service::run(
         state.clone(),
         cancellation.clone(),
     ));
 
+    let mut alert_task = mj_core::runtime::spawn(crate::daemon::push_delivery::run_alerts(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut alert_outcome = None;
     let mut cache_outcome = None;
     let mut mailbox_outcome = None;
     let mut github_watch_outcome = None;
@@ -702,6 +710,10 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut alert_task, &mut alert_outcome, &cancellation, "notification service") => {
                     result?;
                     break;
                 }
@@ -916,6 +928,17 @@ pub(super) async fn run_daemon_runtime(
                 .and_then(|result| result),
         },
     );
+    epilogue.record(
+        &mut outcome,
+        "join notification service",
+        match alert_outcome {
+            Some(result) => result,
+            None => alert_task
+                .await
+                .context("notification service failed")
+                .and_then(|result| result),
+        },
+    );
     // Recovery copies and worker upgrades do not hold up a handoff, so some
     // may still be running. Stop them first: the next daemon starts them again.
     // The coordinators share one gate, and dropping either cancels both.
@@ -1001,14 +1024,6 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join capacity service",
         capacity_service.await.map_err(anyhow::Error::new),
-    );
-    epilogue.record(
-        &mut outcome,
-        "join Brokk Observe delivery",
-        observe_delivery
-            .await
-            .context("Brokk Observe delivery task panicked")
-            .and_then(std::convert::identity),
     );
     epilogue.record(
         &mut outcome,
@@ -1239,7 +1254,7 @@ pub(super) fn record_daemon_cleanup(
 /// with the runtime. It exists so no unwinding step can hold the process open
 /// past the deadline its clients wait on, whatever the cause of the shutdown.
 pub(super) fn spawn_shutdown_watchdog() {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         tokio::time::sleep(SHUTDOWN_FORCE_EXIT_TIMEOUT).await;
         tracing::error!(
             seconds = SHUTDOWN_FORCE_EXIT_TIMEOUT.as_secs(),
@@ -1262,7 +1277,7 @@ pub(super) fn spawn_manager_target_refresher(
     cancellation: CancellationToken,
     state: Arc<RuntimeState>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut committed = state
             .committed
             .as_ref()
@@ -1290,12 +1305,12 @@ pub(super) fn spawn_manager_target_refresher(
                 owner.pollable_worker_inputs()
             };
             let controller = inputs.controller();
-            state.session_manager.update_model_policies(&controller);
+            state.session_manager.update_model_policies(&controller.config, &controller.state);
             let config = controller.config;
             if auth_profiles.as_ref() != Some(&config.profiles) {
                 let mut cache = auth.clone();
                 let profiles = config.profiles.clone();
-                match tokio::task::spawn_blocking(move || {
+                match mj_core::runtime::spawn_blocking(move || {
                     cache.refresh(&config);
                     cache
                 })
@@ -1318,7 +1333,7 @@ pub(super) fn spawn_manager_target_refresher(
             {
                 let preparation = inputs.clone();
                 let refreshed =
-                    match tokio::task::spawn_blocking(move || preparation.prepare()).await {
+                    match mj_core::runtime::spawn_blocking(move || preparation.prepare()).await {
                         Ok(targets) => targets,
                         Err(error) => {
                             tracing::error!(%error, "worker target preparation failed");
@@ -1366,7 +1381,7 @@ pub(super) fn spawn_manager_target_refresher(
                 .is_some_and(|(current, _)| Arc::ptr_eq(current, &inputs))
             {
                 let staging = inputs.clone();
-                match tokio::task::spawn_blocking(move || staging.staged_credentials()).await {
+                match mj_core::runtime::spawn_blocking(move || staging.staged_credentials()).await {
                     Ok(staged) => staged_sources = Some((inputs.clone(), staged)),
                     Err(error) => {
                         tracing::error!(%error, "credential staging observation stopped");
@@ -1396,7 +1411,7 @@ pub(super) fn spawn_manager_target_refresher(
                 let preparation = inputs.clone();
                 let schemes = auth.schemes.clone();
                 let staged = staged.clone();
-                let prepared = match tokio::task::spawn_blocking(move || {
+                let prepared = match mj_core::runtime::spawn_blocking(move || {
                     preparation.prepare_credentials(&schemes, &staged)
                 })
                 .await
@@ -1437,7 +1452,7 @@ pub(super) fn spawn_manager_target_refresher(
                     let mut cache = auth.clone();
                     let staging = inputs.clone();
                     let preference_owner = state.clone();
-                    let refreshed = tokio::task::spawn_blocking(move || {
+                    let refreshed = mj_core::runtime::spawn_blocking(move || {
                         let config = Config::load()?;
                         let recent_changed = {
                             // Serialize the cache refresh with create's persisted write so
@@ -1490,7 +1505,7 @@ pub(super) fn spawn_manager_target_refresher(
 /// Store compatibility is a mandatory guard, independent of optional profile,
 /// target and credential preparation. A mismatch owns daemon cancellation.
 fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -1499,7 +1514,7 @@ fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::ta
                 _ = interval.tick() => {}
             }
             let check =
-                tokio::task::spawn_blocking(mj_controller::database::check_read_compatibility);
+                mj_core::runtime::spawn_blocking(mj_controller::database::check_read_compatibility);
             let result = tokio::select! {
                 _ = cancellation.cancelled() => return,
                 result = check => result,
@@ -1542,13 +1557,13 @@ fn spawn_apple_container_startup(
         settled.cancel();
         return None;
     }
-    Some(tokio::spawn(async move {
+    Some(mj_core::runtime::spawn(async move {
         // Every way out of this task, a panic included, settles the start.
         let _settled = settled.drop_guard();
         let command_cancelled = Arc::new(AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(command_cancelled.clone())
             .with_deadline(Duration::from_secs(90));
-        let mut startup = tokio::task::spawn_blocking(move || {
+        let mut startup = mj_core::runtime::spawn_blocking(move || {
             if !mj_controller::targets::program_on_path(
                 "container",
                 std::env::var_os("PATH").as_deref(),
@@ -1620,7 +1635,7 @@ mod tests {
     async fn service_completion_selected_before_shutdown_is_not_unexpected() {
         let cancellation = CancellationToken::new();
         let stop = cancellation.clone();
-        let mut task = tokio::spawn(async move {
+        let mut task = mj_core::runtime::spawn(async move {
             stop.cancelled().await;
             Ok(())
         });
@@ -1642,7 +1657,7 @@ mod tests {
     #[tokio::test]
     async fn service_completion_while_serving_is_unexpected() {
         let cancellation = CancellationToken::new();
-        let mut task = tokio::spawn(async { Ok(()) });
+        let mut task = mj_core::runtime::spawn(async { Ok(()) });
         let mut outcome = None;
         let error = supervise_service(
             &mut task,
@@ -1663,7 +1678,7 @@ mod tests {
     async fn service_failure_during_shutdown_is_preserved_for_cleanup() {
         let cancellation = CancellationToken::new();
         let stop = cancellation.clone();
-        let mut task = tokio::spawn(async move {
+        let mut task = mj_core::runtime::spawn(async move {
             stop.cancelled().await;
             anyhow::bail!("service cleanup failed")
         });

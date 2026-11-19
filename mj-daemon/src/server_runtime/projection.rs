@@ -207,13 +207,13 @@ impl ConversationProjectionDispatcher {
         let permits = Arc::clone(&self.permits);
         let results = self.results.clone();
         let shutdown = self.shutdown.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let result = match tokio::select! {
                 _ = shutdown.cancelled() => return,
                 result = permits.acquire_owned() => result,
             } {
                 Ok(permit) => {
-                    let projection = tokio::task::spawn_blocking(move || {
+                    let projection = mj_core::runtime::spawn_blocking(move || {
                         let started = Instant::now();
                         let mut projector = projector.lock().map_err(|error| format!("browser projector poisoned: {error}"))?;
                         let transcript = projector.project(&request.materialized);

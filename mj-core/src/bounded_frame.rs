@@ -67,7 +67,7 @@ mod tests {
     async fn frames_larger_than_a_pipe_buffer_are_read_whole_and_bounded() {
         const FRAME: usize = 200 * 1024;
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
-        let producer = tokio::spawn(async move {
+        let producer = crate::runtime::spawn(async move {
             for byte in *b"ab" {
                 writer.write_all(&vec![byte; FRAME]).await.unwrap();
                 writer.write_all(b"\n").await.unwrap();

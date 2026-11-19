@@ -76,7 +76,7 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         .arg(host)
         .arg(mj_core::targets::daemon_login_command(&argv));
     let status =
-        tokio::task::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+        mj_core::runtime::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
             .await
             .context("SSH command task panicked")??;
     if status.code() == Some(127) {
@@ -194,7 +194,7 @@ async fn acquire_start_lock(path: PathBuf, shared: bool) -> Result<StartLock> {
     let mut notice_at = asked + START_NOTICE_DELAY;
     loop {
         let path = path.clone();
-        let guard = tokio::task::spawn_blocking(move || -> Result<Option<StartLock>> {
+        let guard = mj_core::runtime::spawn_blocking(move || -> Result<Option<StartLock>> {
             if let Some(parent) = path.parent() {
                 mj_core::config::create_owner_only_directory(parent)?;
             }
@@ -267,7 +267,7 @@ pub(crate) async fn daemon_was_replaced(instance_id: &str) -> bool {
 
 /// What the running daemon, if any, reports as holding a handoff open.
 async fn running_daemon_blockers() -> Option<Vec<String>> {
-    let metadata = tokio::task::spawn_blocking(read_metadata_any)
+    let metadata = mj_core::runtime::spawn_blocking(read_metadata_any)
         .await
         .ok()?
         .ok()?;
@@ -323,7 +323,7 @@ async fn connect_or_start_local() -> Result<DaemonClient> {
 /// [`connect_or_start`] again. The guard is taken by reference only so the
 /// requirement is visible at every call site.
 async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonClient> {
-    if let Ok(metadata) = tokio::task::spawn_blocking(read_metadata_any)
+    if let Ok(metadata) = mj_core::runtime::spawn_blocking(read_metadata_any)
         .await
         .context("read daemon metadata task failed")?
     {
@@ -347,7 +347,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
         let released = Instant::now();
         let handoff_deadline = released + STOP_TIMEOUT;
         loop {
-            if let Some(guard) = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
+            if let Some(guard) = mj_core::runtime::spawn_blocking(ControllerStoreGuard::try_acquire)
                 .await
                 .context("probe controller ownership task failed")??
             {
@@ -548,7 +548,7 @@ async fn resolve_placement(daemon: &mj_core::config::DaemonConfig) -> Result<Con
 }
 
 async fn load_daemon_config() -> Result<mj_core::config::DaemonConfig> {
-    tokio::task::spawn_blocking(|| {
+    mj_core::runtime::spawn_blocking(|| {
         mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
     })
     .await
@@ -648,7 +648,7 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             });
         }
     }
-    tokio::task::spawn_blocking({
+    mj_core::runtime::spawn_blocking({
         let log_path = log_path.to_path_buf();
         move || -> Result<LaunchedDaemon> {
             // Everything the daemon writes from here on belongs to this launch.
@@ -785,7 +785,7 @@ fn random_token() -> Result<String> {
 }
 
 async fn check_store_readiness() -> Result<()> {
-    tokio::task::spawn_blocking(mj_controller::database::check_read_compatibility)
+    mj_core::runtime::spawn_blocking(mj_controller::database::check_read_compatibility)
         .await
         .context("check database readiness task failed")?
 }
@@ -798,7 +798,7 @@ async fn check_store_readiness() -> Result<()> {
 async fn wait_for_store_release(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        let acquired = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
+        let acquired = mj_core::runtime::spawn_blocking(ControllerStoreGuard::try_acquire)
             .await
             .context("probe controller ownership task failed")??;
         if let Some(guard) = acquired {
@@ -974,14 +974,14 @@ async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
     if pid == 0 {
         return Ok(false);
     }
-    let unowned = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
+    let unowned = mj_core::runtime::spawn_blocking(ControllerStoreGuard::try_acquire)
         .await
         .context("probe controller ownership task failed")??;
     let Some(guard) = unowned else {
         return Ok(false);
     };
     drop(guard);
-    if tokio::task::spawn_blocking(move || daemon_still_runs(pid))
+    if mj_core::runtime::spawn_blocking(move || daemon_still_runs(pid))
         .await
         .context("probe daemon process task failed")?
         // Another program owns the PID now; that is not this daemon.
@@ -1032,7 +1032,7 @@ async fn unanswered(metadata: DaemonMetadata) -> Result<ExistingDaemon> {
 }
 
 async fn decide_existing_daemon() -> Result<ExistingDaemon> {
-    let metadata = tokio::task::spawn_blocking(read_metadata_any)
+    let metadata = mj_core::runtime::spawn_blocking(read_metadata_any)
         .await
         .context("read daemon metadata task failed")?;
     let Ok(metadata) = metadata else {
@@ -1430,7 +1430,7 @@ impl LaunchedDaemon {
         let fallback_path = log_path.clone();
         let offset = self.log_offset;
         let pid = self.pid;
-        let output = tokio::task::spawn_blocking(move || -> Result<(PathBuf, String)> {
+        let output = mj_core::runtime::spawn_blocking(move || -> Result<(PathBuf, String)> {
             let directory = log_path
                 .parent()
                 .context("daemon stderr path has no parent")?;
@@ -1557,7 +1557,7 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
             let started: SystemTime = chrono::DateTime::parse_from_rfc3339(&metadata.started_at)
                 .context("parse development daemon start time")?
                 .into();
-            let stale = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let stale = mj_core::runtime::spawn_blocking(move || -> Result<bool> {
                 Ok(daemon_runs_this_build(&identity)? == Some(false)
                     || development_workers_changed_since(
                         started,
@@ -1594,7 +1594,7 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
     // serve; for a new build that is seconds of copying and hashing. Do it
     // while the old daemon drains, and wait for it before the launch so the
     // two never hash the same files at once.
-    let warming = tokio::task::spawn_blocking(|| {
+    let warming = mj_core::runtime::spawn_blocking(|| {
         let started = Instant::now();
         (
             mj_controller::controller::warm_worker_binary_sources(),
@@ -1639,7 +1639,7 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
     );
     loop {
         let previous = metadata.clone();
-        let still_current = tokio::task::spawn_blocking(move || {
+        let still_current = mj_core::runtime::spawn_blocking(move || {
             read_metadata_any().is_ok_and(|current| {
                 current.address == previous.address && current.token == previous.token
             })
@@ -1984,7 +1984,7 @@ pub struct Attachment {
 /// surface says so and offers its explicit restart instead.
 pub fn maintain_attachment(client_id: String, cancellation: CancellationToken) -> Attachment {
     let (presence_tx, presence) = tokio::sync::watch::channel(DaemonPresence::Attached);
-    let task = tokio::spawn(async move {
+    let task = mj_core::runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -2109,7 +2109,7 @@ pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>
         return Ok(None);
     }
     let pid = metadata.pid;
-    let executable = tokio::task::spawn_blocking(move || process_executable_path(pid))
+    let executable = mj_core::runtime::spawn_blocking(move || process_executable_path(pid))
         .await
         .context("inspect upgraded daemon executable task failed")?;
     Ok(executable
@@ -2147,7 +2147,7 @@ mod tests {
                 placement: DaemonPlacement::Host,
             };
             fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
-            let server = tokio::spawn(async move {
+            let server = mj_core::runtime::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                 assert!(matches!(ping.action, DaemonAction::Ping));
@@ -2209,7 +2209,7 @@ mod tests {
         };
         fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
         let (received, mut waiting) = tokio::sync::mpsc::unbounded_channel();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             for is_identity in [false, true] {
                 let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
@@ -2297,7 +2297,7 @@ mod tests {
             placement: DaemonPlacement::Host,
         };
         fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let mut age = 0;
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -2333,7 +2333,7 @@ mod tests {
         for queued in [false, true] {
             let metadata = metadata.clone();
             let path = path.clone();
-            let waiting = tokio::spawn(async move {
+            let waiting = mj_core::runtime::spawn(async move {
                 if queued {
                     let _guard = acquire_shared_start_guard(path).await?;
                     Ok(())
@@ -2377,7 +2377,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut statuses = statuses.into_iter();
             while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
@@ -2599,7 +2599,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("daemon-start.lock");
         let owner = acquire_start_guard(path.clone()).await.unwrap();
-        let mut waiter = tokio::spawn(acquire_start_guard(path.clone()));
+        let mut waiter = mj_core::runtime::spawn(acquire_start_guard(path.clone()));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut waiter)
                 .await
@@ -2631,7 +2631,7 @@ mod tests {
         .await
         .expect("a second shared hold waited for the first")
         .unwrap();
-        let mut replacing = tokio::spawn(acquire_start_guard(path.clone()));
+        let mut replacing = mj_core::runtime::spawn(acquire_start_guard(path.clone()));
         assert!(
             tokio::time::timeout(Duration::from_millis(150), &mut replacing)
                 .await
@@ -3018,7 +3018,7 @@ mod tests {
 /// Machine endpoint discovery is always local to this launcher. In particular,
 /// an SSH placement here must not recursively launch another SSH client.
 pub async fn print_endpoint(existing: bool) -> Result<()> {
-    tokio::task::spawn_blocking(|| {
+    mj_core::runtime::spawn_blocking(|| {
         let path = mj_core::config::config_path();
         let placement = mj_core::config::DaemonConfig::load_placement(&path)?;
         anyhow::ensure!(

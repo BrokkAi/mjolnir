@@ -591,7 +591,7 @@ impl LoginSource {
             Self::File { home } => read_credentials(home).await,
             Self::Keychain { security, .. } => {
                 let security = Arc::clone(security);
-                let login = tokio::task::spawn_blocking(move || {
+                let login = mj_core::runtime::spawn_blocking(move || {
                     crate::harness_auth::read_claude_keychain_login(&*security)
                 })
                 .await
@@ -710,7 +710,7 @@ async fn run_claude_usage(
     .purpose(purpose);
     command.env.extend(environment);
     command.env.extend(program.environment.clone());
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let _program = program;
         executor.execute(&command)
     })
@@ -762,7 +762,7 @@ async fn run_claude_refresh(
     // (`fn(1e4, ...)`) each time out. The executor therefore has no deadline
     // and no cancellation, and the lock wait is counted apart
     // (`CLAUDE_REFRESH_LOCK_WAIT`).
-    let output = tokio::task::spawn_blocking(move || {
+    let output = mj_core::runtime::spawn_blocking(move || {
         // Keep the locks, the installation and the handoff admission until
         // the executor has reaped its child, even if the async caller is
         // cancelled while this thread is still running.
@@ -1454,7 +1454,7 @@ Last 7d · 5966 requests · 78 sessions
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}/usage"), state, server)
@@ -1506,7 +1506,8 @@ Last 7d · 5966 requests · 78 sessions
                 }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let task =
+                mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let report = query_api(
                 &reqwest::Client::new(),
                 &format!("http://{address}/usage"),
@@ -1541,7 +1542,7 @@ Last 7d · 5966 requests · 78 sessions
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}/usage"), server)
@@ -1751,7 +1752,7 @@ Last 7d · 5966 requests · 78 sessions
         let first_home = home.path().to_path_buf();
         let first_url = usage_url.clone();
         let first_executor = executor.clone();
-        let first = tokio::spawn(async move {
+        let first = mj_core::runtime::spawn(async move {
             query_with(first_home, HashMap::new(), &first_url, first_executor).await
         });
         started_rx.await.unwrap();
@@ -1800,7 +1801,7 @@ Last 7d · 5966 requests · 78 sessions
             finish: Mutex::new(finish_rx),
         });
         let path = home.path().to_path_buf();
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             query_with(path, HashMap::new(), "http://127.0.0.1:1/unused", executor).await
         });
         started_rx.await.unwrap();
@@ -2238,7 +2239,7 @@ Last 7d · 5966 requests · 78 sessions
         )
         .await
         .unwrap();
-        let follower = tokio::spawn({
+        let follower = mj_core::runtime::spawn({
             let (source, mac) = (keychain_source(directory.path(), &mac), mac.clone());
             async move { renew_keychain_login(source, &mac, None).await }
         });
@@ -2278,7 +2279,7 @@ Last 7d · 5966 requests · 78 sessions
         .await
         .unwrap();
         let source = keychain_source(directory.path(), &mac);
-        let follower = tokio::spawn({
+        let follower = mj_core::runtime::spawn({
             let (mac, refused) = (mac.clone(), refused.clone());
             async move { renew_keychain_login(source, &mac, Some(&refused)).await }
         });

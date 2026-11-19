@@ -43,7 +43,7 @@ mod tests {
         let (release_saves_tx, release_saves_rx) = oneshot::channel();
         let (release_manager_tx, release_manager_rx) = oneshot::channel();
 
-        let cleanup = tokio::spawn(overlap_final_cleanup(
+        let cleanup = mj_core::runtime::spawn(overlap_final_cleanup(
             async move {
                 saves_started_tx.send(()).unwrap();
                 release_saves_rx.await.unwrap();

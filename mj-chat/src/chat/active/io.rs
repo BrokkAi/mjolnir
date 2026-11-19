@@ -216,10 +216,10 @@ impl ActiveChat {
         self.voice_probe_pending = true;
         self.voice_probe_at = Some(std::time::Instant::now());
         let updates = self.voice_updates_tx.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let result = async {
                 if let Some(reason) =
-                    tokio::task::spawn_blocking(crate::speech::voice_input_unavailable_reason)
+                    mj_core::runtime::spawn_blocking(crate::speech::voice_input_unavailable_reason)
                         .await?
                 {
                     return Ok(Err(reason));
@@ -342,7 +342,7 @@ impl ActiveChat {
         let session_id = self.session.session_id().to_owned();
         let session_manager = self.session_manager.clone();
         let updates = self.chat_io_tx.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let result = session_manager
                 .wait_for_session(&session_id, SESSION_ACTOR_RECONNECT_WAIT)
                 .await

@@ -93,7 +93,7 @@ pub(super) fn spawn_quota_refresher_with(
         },
         Some(updates_tx.clone()),
     );
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut quotas = QuotaManager::default();
         let mut batch = QuotaRefreshBatch::default();
         // The cache identity each profile was last adopted under. A changed
@@ -244,7 +244,7 @@ pub(super) fn spawn_claude_grant_refresher(
     renewal: GrantRenewal,
     updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         let mut running: std::collections::BTreeMap<tokio::task::Id, QuotaRefreshRequest> =
             Default::default();
@@ -422,7 +422,7 @@ async fn adopt_profiles(
         quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
-        let stored = match tokio::task::spawn_blocking(move || load(&for_request)).await {
+        let stored = match mj_core::runtime::spawn_blocking(move || load(&for_request)).await {
             Ok(stored) => stored,
             Err(error) => {
                 tracing::warn!(%error, "stored quota read task failed");
@@ -540,7 +540,7 @@ pub fn spawn_image_refresher(
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
             IMAGE_REFRESH_INTERVAL,
@@ -767,7 +767,7 @@ pub(super) async fn refresh_host_after_startup(
     }
     // ProcessExecutor is synchronous, and a pull is long: it belongs on a
     // blocking thread, never on the runtime.
-    match tokio::task::spawn_blocking(move || run(refresh)).await {
+    match mj_core::runtime::spawn_blocking(move || run(refresh)).await {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, "container image refresh task failed");

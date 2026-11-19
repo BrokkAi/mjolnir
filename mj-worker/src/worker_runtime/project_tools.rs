@@ -496,7 +496,7 @@ pub(super) struct BackgroundInstall(tokio::task::JoinHandle<()>);
 
 impl BackgroundInstall {
     pub(super) fn spawn(install: Install, worker_root: PathBuf, relay: Arc<RelayCell>) -> Self {
-        Self(tokio::spawn(async move {
+        Self(mj_core::runtime::spawn(async move {
             install.run(&worker_root, &relay).await;
         }))
     }

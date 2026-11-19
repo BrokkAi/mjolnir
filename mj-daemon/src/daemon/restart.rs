@@ -158,7 +158,7 @@ impl RuntimeState {
                 .await?;
             owned.insert(session_id.clone());
             let state = self.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let channel = result.clone();
                 match Self::wait_lifecycle_result(result).await {
                     Ok(DaemonLifecycleResult::Done) => {}
@@ -274,7 +274,7 @@ impl RuntimeState {
         }
         // Admission and settings edits serialize in the database writer. Read
         // only after admission, so no accepted edit can be missed or race this plan.
-        let mut controller = tokio::task::spawn_blocking(Controller::load)
+        let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("reload controller after Restart admission")??;
         tracing::info!(
@@ -465,7 +465,7 @@ impl RuntimeState {
                 let error = error.context("checkpoint and seal session for Restart");
                 return Err(error);
             }
-            controller = tokio::task::spawn_blocking(Controller::load)
+            controller = mj_core::runtime::spawn_blocking(Controller::load)
                 .await
                 .context("reload controller after Restart checkpoint")??;
             record = controller

@@ -263,20 +263,17 @@ impl DashboardContext {
         if let Some(title) = self.dashboard.terminal_title() {
             self.terminal.set_title(&title)?;
         }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_millis() as u64);
-        let due = self.dashboard.notification_events(now_ms);
+        let due = self.dashboard.notification_events();
         if due.is_empty() {
             return Ok(());
         }
         let notify = self.dashboard.notify_config().clone();
-        if notify.bell {
-            self.terminal.ring_bell()?;
-        }
-        if notify.mode == mj_core::config::NotifyMode::System {
-            for notification in due {
-                tokio::task::spawn_blocking(move || {
+        for notification in due {
+            if notify.bell {
+                self.terminal.ring_bell()?;
+            }
+            if notify.mode == mj_core::config::NotifyMode::System {
+                mj_core::runtime::spawn_blocking(move || {
                     if let Err(error) = post_system_notification(&notification) {
                         tracing::warn!(%error, session = %notification.session_id, "desktop notification failed");
                     }
@@ -354,8 +351,12 @@ impl DashboardContext {
         let Self {
             selection,
             dashboard,
+            chats,
             ..
         } = self;
+        if let Some(event) = dashboard.route_question_press(selection, chat_owns_pointer, &event) {
+            return SelectionRouting::Forward(event);
+        }
         if let Event::Mouse(mouse) = &event
             && !(selection.owns_pointer()
                 && matches!(
@@ -367,7 +368,9 @@ impl DashboardContext {
             selection.clear();
             return SelectionRouting::Forward(event);
         }
-        route_prompt_selection(selection, dashboard, event)
+        let routing = route_prompt_selection(selection, dashboard, event);
+        dashboard.settle_question_press(selection, chats);
+        routing
     }
 
     /// Copies the finished selection, using only the terminal clipboard over SSH.

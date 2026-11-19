@@ -39,7 +39,7 @@ pub(super) async fn enqueue_event(
         .enter("API mailbox event")
         .map_err(|_| ApiFailure::shutdown(&state))?;
     let blocking_admission = admission.clone();
-    let enqueued = tokio::task::spawn_blocking(move || {
+    let enqueued = mj_core::runtime::spawn_blocking(move || {
         let _admission = blocking_admission;
         mj_controller::database::enqueue_mailbox_event(
             &event_key,
