@@ -500,15 +500,18 @@ fn commit_published(
     commit: &str,
     witnesses: &[String],
 ) -> Result<bool> {
+    // Advertised equality is sufficient; do not walk every preceding tag.
+    if witnesses.iter().any(|witness| witness == commit) {
+        return Ok(true);
+    }
     for witness in witnesses {
-        if commit == witness
-            || runner
-                .run(
-                    repository,
-                    &git_command(&["merge-base", "--is-ancestor", commit, witness]),
-                )?
-                .status
-                == 0
+        if runner
+            .run(
+                repository,
+                &git_command(&["merge-base", "--is-ancestor", commit, witness]),
+            )?
+            .status
+            == 0
         {
             return Ok(true);
         }

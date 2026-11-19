@@ -994,6 +994,9 @@ fn hash_file_metadata(identity: &mut blake3::Hasher, metadata: &fs::Metadata) ->
         // gives each occurrence a new creation timestamp with 100 ns precision.
         identity.update(format!("{:?}", metadata.created()?).as_bytes());
     }
+    // Shown discard consent includes the displayed length, even when a writer
+    // preserves the inode and restores its previous modification timestamp.
+    identity.update(&metadata.len().to_be_bytes());
     let modified = metadata.modified()?;
     match modified.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => {
@@ -2753,6 +2756,13 @@ fn estimate_delta_with_source(
         Some(&remote),
     )?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
+    // Preflight above verifies that anchoring preserves literal URL rewrites.
+    // An absolute override cannot be mistaken for an existing remote name.
+    let remote = if configured.status == 0 {
+        remote
+    } else {
+        absolute_config_url(checkout, &remote)?
+    };
     let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
     let owners = branch_owners(&cut);
     let refs = selected_refs(runner, checkout, &cut, ownership, &owners)?.refs;
@@ -3222,10 +3232,17 @@ fn capture_prepared_workspace(
             if origin_urls.is_empty() {
                 return capture_in_place_metadata(runner, repository).map(Some);
             }
+            // Anchoring was checked before operations were aborted. Do not let
+            // a literal local source override resolve as a named Git remote.
+            let literal_override;
             let remote = if has_origin {
                 "origin"
             } else {
-                originals.first().context("missing snapshot origin")?
+                literal_override = absolute_config_url(
+                    checkout,
+                    originals.first().context("missing snapshot origin")?,
+                )?;
+                &literal_override
             };
             let push_urls = if has_origin {
                 config_values(runner, checkout, "remote.origin.pushurl")?
@@ -4069,10 +4086,11 @@ fn inventory_origin_dependencies(
             let Some(override_url) = override_url else {
                 continue;
             };
+            let literal_override = absolute_config_url(&repository, override_url)?;
             output = run_git(
                 runner,
                 &repository,
-                ["ls-remote", "--get-url", override_url],
+                ["ls-remote", "--get-url", &literal_override],
                 &[],
             )?;
         }
@@ -5050,14 +5068,14 @@ fn restore_submodules(
             needed.push(submodule.commit.clone());
             needed.sort();
             needed.dedup();
-            for oid in needed {
-                if run_git(runner, &directory, ["cat-file", "-e", &oid], &[])?.status != 0 {
+            for oid in &needed {
+                if run_git(runner, &directory, ["cat-file", "-e", oid], &[])?.status != 0 {
                     ensure!(
                         allow_origin_fetch,
                         "submodule {} is missing {oid}; origin fetching is disabled",
                         submodule.path.display()
                     );
-                    let output = restore_object_fetch(runner, &directory, "origin", &oid)?;
+                    let output = restore_object_fetch(runner, &directory, "origin", oid)?;
                     ensure!(
                         output.status == 0,
                         "{}",
@@ -5068,9 +5086,16 @@ fn restore_submodules(
                     runner,
                     &directory,
                     &format!("submodule {}", submodule.path.display()),
-                    &oid,
+                    oid,
                 )?;
             }
+            verify_submodule_objects(
+                runner,
+                &directory,
+                &submodule.path,
+                &needed,
+                allow_origin_fetch,
+            )?;
             // Give Git a real HEAD before registering/absorbing the module. Its
             // index gitlink can intentionally differ from this checked-out commit.
             let mut command = GitCommand {
@@ -5273,6 +5298,72 @@ fn restore_fetch(
         },
     )
 }
+fn verify_submodule_objects(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    path: &Path,
+    tips: &[String],
+    allow_origin_fetch: bool,
+) -> Result<()> {
+    let mut attempted = std::collections::BTreeSet::new();
+    loop {
+        let output = runner.run(
+            checkout,
+            &GitCommand {
+                arguments: [
+                    "rev-list",
+                    "--objects",
+                    "--quiet",
+                    "--missing=print",
+                    "--stdin",
+                ]
+                .map(Into::into)
+                .to_vec(),
+                stdin: format!("{}\n", tips.join("\n")).into_bytes(),
+                // Verification must not implicitly hydrate through a provisioner's
+                // promisor. Recovery below uses only the restored origin.
+                env: vec![("GIT_NO_LAZY_FETCH".into(), "1".into())],
+            },
+        )?;
+        let missing = std::str::from_utf8(&output.stdout)?
+            .lines()
+            .filter_map(|line| line.strip_prefix('?'))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        ensure!(
+            output.status == 0,
+            "submodule {} has incomplete saved history for {}; {}",
+            path.display(),
+            tips.join(", "),
+            git_failure("verify submodule objects", &output)
+        );
+        if missing.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            allow_origin_fetch,
+            "submodule {} is missing objects {} behind saved pins {}; origin fetching is disabled",
+            path.display(),
+            missing.join(", "),
+            tips.join(", ")
+        );
+        for oid in missing {
+            ensure!(
+                attempted.insert(oid.clone()),
+                "submodule {} is still missing {oid}; origin may have rewritten history",
+                path.display()
+            );
+            let fetched = restore_object_fetch(runner, checkout, "origin", &oid)?;
+            ensure!(
+                fetched.status == 0,
+                "submodule {} is missing {oid}; origin may have rewritten history; {}",
+                path.display(),
+                git_failure("fetch submodule dependency", &fetched)
+            );
+        }
+    }
+}
+
 fn restore_object_fetch(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -5398,6 +5489,26 @@ fn restore_worktree_rules(
     rules: &[SnapshotConfigEntry],
 ) -> Result<()> {
     validate_url_rules(rules)?;
+    // Push URLs are restored in shared config. Clear direct worktree values
+    // which would otherwise add stale destinations, including on retry.
+    if worktree_config_enabled(runner, checkout)? {
+        let output = run_git(
+            runner,
+            checkout,
+            [
+                "config",
+                "--worktree",
+                "--unset-all",
+                "remote.origin.pushurl",
+            ],
+            &[],
+        )?;
+        ensure!(
+            matches!(output.status, 0 | 5),
+            "{}",
+            git_failure("clear provisioned worktree push URLs", &output)
+        );
+    }
     // `worktree add` copies config.worktree from the primary checkout. Replace
     // those inherited URL rules so each restored checkout keeps its own scope.
     if worktree_config_enabled(runner, checkout)? {
@@ -16749,5 +16860,355 @@ mod tests {
             git(&directory, &["rev-parse", "HEAD"])
         );
         assert!(!restored.join(".gitmodules").exists());
+    }
+    // Hard-won: e0cc04156: worktree push URLs survived shared remote replacement on provisioned retry.
+    #[test]
+    fn review_twelfth_provisioned_push_urls_clear_all_direct_worktree_scopes() {
+        for explicit in [false, true] {
+            let root = Repo::new();
+            let module = Repo::new();
+            add_submodule(&root, &module);
+            let nested = root.checkout.join("lane");
+            git(
+                &root.checkout,
+                &["worktree", "add", "--detach", nested.to_str().unwrap()],
+            );
+            if explicit {
+                git(
+                    &root.checkout,
+                    &["config", "remote.origin.pushurl", "saved:publish"],
+                );
+            }
+            let snapshot = root.capture(&CheckoutOwnership::Managed);
+            let destination = root.restore(&snapshot, None);
+            let module_dir = destination.join("sub");
+            for checkout in [&destination, &destination.join("lane"), &module_dir] {
+                git(checkout, &["config", "extensions.worktreeConfig", "true"]);
+                git(
+                    checkout,
+                    &[
+                        "config",
+                        "--worktree",
+                        "remote.origin.pushurl",
+                        "obsolete:publish",
+                    ],
+                );
+            }
+            restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap();
+            for checkout in [&destination, &destination.join("lane")] {
+                let expected = if explicit {
+                    "saved:publish"
+                } else {
+                    root.origin.to_str().unwrap()
+                };
+                assert_eq!(
+                    git(
+                        checkout,
+                        &["remote", "get-url", "--push", "--all", "origin"]
+                    ),
+                    expected
+                );
+            }
+            assert_eq!(
+                git(
+                    &module_dir,
+                    &["remote", "get-url", "--push", "--all", "origin"]
+                ),
+                module.origin.to_str().unwrap()
+            );
+        }
+    }
+
+    // Hard-won: e0cc04156: preserving inode and mtime let changed file sizes reuse discard consent.
+    #[test]
+    fn review_twelfth_shown_file_size_changes_refuse_even_with_preserved_mtime() {
+        for nested in [false, true] {
+            let root = Repo::new();
+            let path = if nested {
+                let embedded = root.checkout.join("embedded");
+                git(
+                    root.temp.path(),
+                    &[
+                        "clone",
+                        root.origin.to_str().unwrap(),
+                        embedded.to_str().unwrap(),
+                    ],
+                );
+                embedded.join("file")
+            } else {
+                root.checkout.join("untracked")
+            };
+            if !nested {
+                fs::write(&path, b"before").unwrap();
+            }
+            let inventory =
+                workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+            let shown = inventory
+                .untracked
+                .iter()
+                .map(|entry| UntrackedItem::Path {
+                    checkout: entry.checkout.clone(),
+                    path: entry.path.clone(),
+                    identity: entry.identity.clone(),
+                })
+                .collect();
+            let before = fs::metadata(&path).unwrap();
+            let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(before.len() + 123).unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+                .unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().modified().unwrap(),
+                before.modified().unwrap()
+            );
+            let error = capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Managed,
+                &root.temp.path().join("refused.pack"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::Shown(shown),
+                    operations: OperationConsent::None,
+                },
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<SnapshotRefused>(),
+                    Some(SnapshotRefused::Untracked(_))
+                ),
+                "{error:#}"
+            );
+        }
+    }
+
+    // Hard-won: e0cc04156: a literal source override was queried as a different configured remote.
+    #[test]
+    fn review_twelfth_literal_override_cannot_select_a_same_named_remote() {
+        let root = Repo::new();
+        let literal = root.checkout.join("mirror");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                root.origin.to_str().unwrap(),
+                literal.to_str().unwrap(),
+            ],
+        );
+        let fork = root.temp.path().join("fork.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                root.origin.to_str().unwrap(),
+                fork.to_str().unwrap(),
+            ],
+        );
+        root.commit("published only to the other remote\n");
+        git(&root.checkout, &["push", fork.to_str().unwrap(), "main"]);
+        git(&root.checkout, &["remote", "remove", "origin"]);
+        git(
+            &root.checkout,
+            &["remote", "add", "mirror", fork.to_str().unwrap()],
+        );
+        let ownership = CheckoutOwnership::Raw { launch: None };
+        let estimate = estimate_delta_with_source(
+            &FileGit,
+            &root.checkout,
+            &ownership,
+            Some("mirror".into()),
+            &ExclusionSource::Origin,
+        )
+        .unwrap();
+        assert!(estimate.committed_bytes > 0);
+        let snapshot = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &ownership,
+            &root.temp.path().join("literal.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::None,
+            },
+            Some("mirror".into()),
+        )
+        .unwrap();
+        assert!(snapshot.pack.is_some());
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD"]),
+            git(&root.checkout, &["rev-parse", "HEAD"])
+        );
+    }
+
+    // Hard-won: e0cc04156: an available staged module commit hid missing promised trees and blobs.
+    #[test]
+    fn review_twelfth_partial_module_requires_every_saved_pin_object() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let source_module = add_submodule(&root, &module);
+        let base = git(&source_module, &["rev-parse", "HEAD"]);
+        fs::write(
+            module.checkout.join("promised"),
+            "missing saved-pin content\n".repeat(4000),
+        )
+        .unwrap();
+        git(&module.checkout, &["add", "promised"]);
+        git(&module.checkout, &["commit", "-m", "published staged pin"]);
+        git(&module.checkout, &["push", "origin", "main"]);
+        let pin = git(&module.checkout, &["rev-parse", "HEAD"]);
+        let blob = git(&module.checkout, &["rev-parse", "HEAD:promised"]);
+        git(&source_module, &["fetch", "origin"]);
+        git(
+            &root.checkout,
+            &["update-index", "--cacheinfo", &format!("160000,{pin},sub")],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        git(
+            &module.origin,
+            &["config", "uploadpack.allowFilter", "true"],
+        );
+        git(
+            &module.origin,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        for filter in ["blob:none", "tree:0"] {
+            let destination = root.temp.path().join(filter.replace(':', "-"));
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    root.origin.to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            );
+            let partial = destination.join("sub");
+            let uri = url::Url::from_directory_path(&module.origin)
+                .unwrap()
+                .to_string();
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    &format!("--filter={filter}"),
+                    "--no-checkout",
+                    &uri,
+                    partial.to_str().unwrap(),
+                ],
+            );
+            // Checking out a historical commit in a treeless clone can
+            // hydrate additional advertised trees. Leave that fixture unbuilt.
+            if filter == "blob:none" {
+                git_text(
+                    &CaptureGit::new(&FileGit),
+                    &partial,
+                    ["checkout", "--detach", &base],
+                )
+                .unwrap();
+            }
+            let missing = if filter == "tree:0" {
+                git(&module.checkout, &["rev-parse", "HEAD^{tree}"])
+            } else {
+                blob.clone()
+            };
+            assert_ne!(
+                run_git(&FileGit, &partial, ["cat-file", "-e", &missing], &[])
+                    .unwrap()
+                    .status,
+                0
+            );
+            let error = restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(&missing)
+                    && format!("{error:#}").contains("origin fetching is disabled"),
+                "{error:#}"
+            );
+            assert_ne!(
+                run_git(&FileGit, &partial, ["cat-file", "-e", &blob], &[])
+                    .unwrap()
+                    .status,
+                0
+            );
+            restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: true,
+                },
+            )
+            .unwrap();
+            git(&partial, &["cat-file", "-e", &blob]);
+            git(
+                &destination,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--no-fetch",
+                    "sub",
+                ],
+            );
+            assert_eq!(git(&partial, &["rev-parse", "HEAD"]), pin);
+        }
+    }
+
+    // Hard-won: e0cc04156: a published exact tip was checked only after ancestry walks through earlier tags.
+    #[test]
+    fn review_twelfth_exact_module_tips_need_no_ancestry_walk() {
+        struct Count(std::sync::atomic::AtomicUsize);
+        impl GitCommandRunner for Count {
+            fn run(
+                &self,
+                repository: &Path,
+                command: &GitCommand,
+            ) -> Result<crate::archive::GitOutput> {
+                if git_arguments(command)
+                    .first()
+                    .is_some_and(|arg| arg == "merge-base")
+                {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                FileGit.run(repository, command)
+            }
+        }
+        let root = Repo::new();
+        let module = Repo::new();
+        // Guarantee a smaller advertised OID distinct from the current branch tip.
+        let tip = git(&module.checkout, &["rev-parse", "HEAD"]);
+        for n in 0u64.. {
+            let tag = format!("release-{n}");
+            git(&module.checkout, &["tag", "-a", &tag, "-m", &tag]);
+            let oid = git(&module.checkout, &["rev-parse", &tag]);
+            if oid < tip {
+                break;
+            }
+            git(&module.checkout, &["tag", "-d", &tag]);
+        }
+        git(&module.checkout, &["push", "--tags", "origin"]);
+        add_submodule(&root, &module);
+        let runner = Count(0.into());
+        workspace_inventory(&runner, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        assert_eq!(runner.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
