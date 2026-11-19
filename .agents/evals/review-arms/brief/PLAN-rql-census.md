@@ -120,7 +120,7 @@ These set the test-phase sample. Pilot effects are development data and are neve
   - a cluster bootstrap;
   - a mixed logistic model with a repo intercept, a repo arm slope and a diff intercept;
   - the after-cutoff subset.
-- **Also reported:** per-repo effects, the between-repo SD and a prediction interval for a new repo selected the same way. The repos were chosen for bug yield per indexing hour, with indexing hazards excluded, so neither the interval nor the prediction interval covers Rust projects the screen excludes.
+- **Also reported:** per-repo effects, the between-repo SD and a prediction interval for a new repo selected the same way. The repos were chosen for expected relation-bug yield among those whose index measured under the cap, with indexing hazards excluded, so neither the interval nor the prediction interval covers Rust projects the screen excludes.
 
 Decision bands on R − G, which decide whether complete RQL is worth building for review (minimum effect set by Jonathan, 2026-11-18):
 - **Don't build for review:** upper bound below +10. This takes precedence.

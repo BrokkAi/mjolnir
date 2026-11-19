@@ -14,32 +14,33 @@ after tracing admits at least 8 relation diffs, so tracing walks this list and a
 that misses the floor gives its place to the next.
 """
 import json
+import pathlib
 import sys
+
+from measure_index import latest_records  # the producer's definition of a repo's current record
 
 COHORT = 12
 
 
 def main():
-    measured = {}
-    for line in open(sys.argv[1]):
-        r = json.loads(line)
-        if r.get("cold") is not None:  # later records supersede earlier ones
-            measured[r["repo"]] = r
+    measured = latest_records(pathlib.Path(sys.argv[1]))
     y = json.load(open(sys.argv[2]))
     estimate = y["windows"]["wide_2025"]["per_repo_relation_estimate_capped"]
     group_of = y["group_of"]
 
     rows = []
     for repo, r in measured.items():
-        cold, warm = r["cold"], r.get("warm_restart") or {}
+        cold, warm = r.get("cold") or {}, r.get("warm_restart") or {}
         b = estimate.get(repo, 0.0)
         failure = None
-        if not cold.get("ready"):
+        if r.get("error"):  # the latest attempt failed before or around its phases
+            failure = "setup: " + r["error"]
+        elif not cold.get("ready"):
             failure = cold.get("error") or "cold index not ready"
         elif not warm.get("ready"):
             failure = warm.get("error") or warm.get("skipped") or "warm restart not ready"
-        c_h = cold.get("cpu_to_ready_usec", 0) / 3.6e9
-        w_h = warm.get("cpu_to_ready_usec", 0) / 3.6e9
+        c_h = (cold.get("cpu_to_ready_usec") or 0) / 3.6e9  # null when the phase failed
+        w_h = (warm.get("cpu_to_ready_usec") or 0) / 3.6e9
         hours = c_h + max(b - 1, 0) * w_h
         rows.append({"repo": repo, "b": b, "cold_h": c_h, "warm_h": w_h, "hours": hours,
                      "peak_gib": max(cold.get("peak_tree_kib") or 0,
