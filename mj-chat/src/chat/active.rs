@@ -674,6 +674,9 @@ impl ActiveChat {
     /// Reconcile transferred local state with this attachment's authoritative view.
     pub fn adopt_live_composer(&mut self, composer: super::LiveComposer) {
         self.state.adopt_live_composer(composer);
+        // The adopted composer replaces the one `open` loaded history into.
+        self.state.request_session_history();
+        self.dispatch_composer_requests();
         // The view may have advanced while the composer was parked. Applying
         // it restores the authoritative queue and uses the same submission
         // reconciliation as every feed update, without retaining another copy.
