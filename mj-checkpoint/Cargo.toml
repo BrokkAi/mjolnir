@@ -23,6 +23,7 @@ blake3 = { version = "1", default-features = false, features = ["std"] }
 chrono.workspace = true
 flate2.workspace = true
 libc.workspace = true
+percent-encoding = "2"
 rayon.workspace = true
 rusqlite.workspace = true
 serde = { workspace = true, features = ["rc"] }
