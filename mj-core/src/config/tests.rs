@@ -775,16 +775,25 @@ fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
 fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let legacy =
-        "version = 6\nshow_stopped_sessions = true\n\n[advanced]\nshow_stopped_sessions = true\n";
-    fs::write(&path, legacy).unwrap();
-    let config = Config::load_from(&path).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
-
-    config.save_to(&path).unwrap();
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(!body.contains("show_stopped_sessions"), "{body}");
-    assert_eq!(Config::load_from(&path).unwrap(), config);
+    for runtime in ["auto", "host", "podman", "docker"] {
+        let legacy = format!(
+            "version = 6\nshow_stopped_sessions = true\n\n[advanced]\nshow_stopped_sessions = true\n\n[quota]\nruntime = \"{runtime}\"\n"
+        );
+        fs::write(&path, &legacy).unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        config.save_to(&path).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("show_stopped_sessions"), "{body}");
+        let saved: toml::Value = toml::from_str(&body).unwrap();
+        assert!(
+            saved
+                .get("quota")
+                .is_none_or(|quota| quota.get("runtime").is_none()),
+            "{body}"
+        );
+        assert_eq!(Config::load_from(&path).unwrap(), config);
+    }
 }
 
 #[test]

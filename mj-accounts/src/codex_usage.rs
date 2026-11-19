@@ -4,18 +4,16 @@
 //! protocol rather than a one-shot CLI command. Keep the JSONL client isolated
 //! from the UI so protocol parsing and unavailable states remain testable.
 
-use mj_core::file_lock::FileLock;
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mj_core::config::HarnessKind;
-#[cfg(unix)]
-use mj_core::harness_runtime::{
-    CODEX_CLI_ENTRYPOINT, LEASE_FILE, managed_harness_manifest_matches, pin,
-};
-use mj_core::harness_runtime::{managed_harness_cache_root, managed_harness_install_dir};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+use mj_core::harness_runtime::{CODEX_CLI_ENTRYPOINT, LEASE_FILE, managed_harness_install_dir};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -55,15 +53,29 @@ pub struct CodexUsageWindow {
 /// Where a Codex quota check starts its app-server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexLauncher {
-    /// The Mjolnir-managed installation under this cache root, or the
-    /// process's default cache root.
-    Managed(Option<PathBuf>),
-    /// The agent-dev image's `codex`, started in a new container.
-    Container(crate::quota_runtime::ContainerCheck),
-    /// The `codex` of the image this daemon runs in
-    /// ([`mj_core::worker_launch::HarnessRuntimePolicy::Image`]). No managed
-    /// installation is consulted.
-    Image,
+    /// This host's installed CLI, otherwise the pinned managed installation.
+    Host,
+    #[cfg(any(test, feature = "test-support"))]
+    Program(PathBuf),
+}
+
+impl CodexLauncher {
+    pub(crate) async fn prepare(
+        &self,
+        env: &HashMap<String, String>,
+    ) -> anyhow::Result<Arc<crate::quota_harness::QuotaProgram>> {
+        match self {
+            Self::Host => crate::quota_harness::locate(HarnessKind::Codex, env)
+                .await
+                .map(Arc::new),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Program(command) => Ok(Arc::new(crate::quota_harness::QuotaProgram {
+                command: crate::quota_harness::command_text(command)?,
+                environment: HashMap::new(),
+                _installation: None,
+            })),
+        }
+    }
 }
 
 pub struct CodexUsageClient {
@@ -71,10 +83,7 @@ pub struct CodexUsageClient {
     /// Which launcher started this client; a poll that asks for another one
     /// replaces it.
     launcher: CodexLauncher,
-    /// The managed installation's lease, held while its launcher runs.
-    lease: Option<FileLock>,
-    /// The container the app-server runs in, removed when the client stops.
-    container: Option<crate::quota_runtime::QuotaContainer>,
+    program: Arc<crate::quota_harness::QuotaProgram>,
     stdin: crate::streamed_child::ProxyWriter,
     stdout: BufReader<crate::streamed_child::ProxyReader>,
     stderr: StderrTail,
@@ -84,30 +93,29 @@ pub struct CodexUsageClient {
 }
 
 impl CodexUsageClient {
+    fn matches_launcher(&self, launcher: &CodexLauncher) -> bool {
+        &self.launcher == launcher
+    }
+
+    /// Reuse the selected program and leases while its app-server is alive;
+    /// a changed or damaged installation cannot invalidate a running client.
+    pub(crate) fn prepared_program(
+        &self,
+        launcher: &CodexLauncher,
+    ) -> Option<Arc<crate::quota_harness::QuotaProgram>> {
+        self.matches_launcher(launcher)
+            .then(|| Arc::clone(&self.program))
+    }
+
     async fn spawn(
         cwd: PathBuf,
         env: HashMap<String, String>,
         launcher: &CodexLauncher,
+        program: Arc<crate::quota_harness::QuotaProgram>,
     ) -> Result<Self, QueryError> {
-        let (stdio, lease, container) = match launcher {
-            CodexLauncher::Managed(cache_root) => {
-                let cache_root = match cache_root {
-                    Some(root) => root.clone(),
-                    None => process_managed_cache_root()?,
-                };
-                let (stdio, lease) = spawn_codex(cwd, env, cache_root).await?;
-                (stdio, Some(lease), None)
-            }
-            CodexLauncher::Container(check) => {
-                let (stdio, container) = spawn_codex_in_container(check, env).await?;
-                (stdio, None, Some(container))
-            }
-            CodexLauncher::Image => (
-                spawn_app_server(Path::new("codex"), cwd, env).await?,
-                None,
-                None,
-            ),
-        };
+        let mut env = env;
+        env.extend(program.environment.clone());
+        let stdio = spawn_app_server(&program.command, cwd, env).await?;
         let crate::streamed_child::ProxyStdio {
             child,
             stdin,
@@ -118,8 +126,7 @@ impl CodexUsageClient {
         Ok(Self {
             child,
             launcher: launcher.clone(),
-            lease,
-            container,
+            program,
             stdin,
             stdout: BufReader::new(stdout),
             stderr,
@@ -245,8 +252,7 @@ impl CodexUsageClient {
         drop(self.stdin);
         // Closing stdin asks app-server to stop. The quota process is always
         // launched directly (never through npx), so killing the recorded child
-        // is sufficient if it does not notice EOF promptly. In a container
-        // the child is the engine client, and the container is removed below.
+        // is sufficient if it does not notice EOF promptly.
         if let Err(error) = self.child.start_kill()
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -255,14 +261,7 @@ impl CodexUsageClient {
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Codex quota process");
         }
-        if let Some(lease) = self.lease
-            && let Err(error) = lease.release()
-        {
-            tracing::warn!(%error, "could not release the managed Codex installation lease");
-        }
-        if let Some(container) = self.container {
-            container.remove().await;
-        }
+
         self.stderr_reader
     }
 }
@@ -360,28 +359,36 @@ fn parse_response(message: &Value, expected_id: u64) -> Result<Option<Value>, Qu
         .ok_or(QueryError::Protocol(ProtocolError::InvalidResponse))
 }
 
-/// Spawn the cached client if it is missing, then make sure it is initialized.
-async fn prepare<'a>(
-    client: &'a mut Option<CodexUsageClient>,
+/// Installation is preparation, outside the app-server request deadline.
+async fn start(
+    client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
-) -> Result<&'a mut CodexUsageClient, QueryError> {
-    if let Some(stale) = client.take_if(|ready| &ready.launcher != launcher) {
+    prepared: &mut Option<Arc<crate::quota_harness::QuotaProgram>>,
+) -> Result<(), QueryError> {
+    if let Some(stale) = client.take_if(|ready| !ready.matches_launcher(launcher)) {
         stale.shutdown().await;
     }
     if client.is_none() {
-        if let CodexLauncher::Container(check) = launcher {
-            check.runtime.ensure_image_async().await.map_err(|error| {
-                QueryError::ImageUnavailable {
-                    detail: format!("{error:#}"),
-                    downloading: check.runtime.image_refresh().is_some(),
-                }
-            })?;
-        }
-        *client = Some(CodexUsageClient::spawn(cwd, env, launcher).await?);
+        let program = match prepared.take() {
+            Some(program) => program,
+            None => launcher
+                .prepare(&env)
+                .await
+                .map_err(|error| QueryError::Launch(format!("{error:#}")))?,
+        };
+        *client = Some(CodexUsageClient::spawn(cwd, env, launcher, program).await?);
     }
-    let ready = client.as_mut().expect("client initialized above");
+    Ok(())
+}
+
+async fn prepare(
+    client: &mut Option<CodexUsageClient>,
+) -> Result<&mut CodexUsageClient, QueryError> {
+    let ready = client
+        .as_mut()
+        .expect("client started before the request deadline");
     ready.initialize().await?;
     Ok(ready)
 }
@@ -402,23 +409,29 @@ async fn discard_failed_client(client: &mut Option<CodexUsageClient>, replaceabl
 
 /// Refresh a persistent app-server client, recreating it after transport or
 /// protocol failures. Calls are awaited serially by the session worker.
-pub async fn refresh_with_cache_root(
+pub(crate) async fn refresh_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
+    prepared: &mut Option<Arc<crate::quota_harness::QuotaProgram>>,
 ) -> CodexUsageStatus {
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        prepare(client, cwd, env, launcher).await?.query().await
-    })
-    .await;
+    let result = match start(client, cwd, env, launcher, prepared).await {
+        Ok(()) => {
+            tokio::time::timeout(REQUEST_TIMEOUT, async {
+                prepare(client).await?.query().await
+            })
+            .await
+        }
+        Err(error) => Ok(Err(error)),
+    };
 
     match result {
         Ok(Ok(report)) => CodexUsageStatus::Available(report),
         Ok(Err(error)) => {
             discard_failed_client(client, error.needs_fresh_client()).await;
             tracing::warn!("codex quota query failed: {error}");
-            CodexUsageStatus::Unavailable(error.user_reason().to_string())
+            CodexUsageStatus::Unavailable(error.unavailable_reason())
         }
         Err(_) => {
             discard_failed_client(client, true).await;
@@ -434,7 +447,7 @@ pub struct LoginRefreshFailure {
     /// The failure in full, for the log.
     pub detail: String,
     /// The failure as [`refresh_with_cache_root`] would report it to the user.
-    pub reason: &'static str,
+    pub reason: String,
 }
 
 /// Rotate the profile's Codex login ahead of its expiry, reusing the cached
@@ -444,19 +457,22 @@ pub struct LoginRefreshFailure {
 /// expiry at the same instant both try to spend the same token, one wins, and
 /// the loser's turn dies. Rotating early on the host, so the sync can push the
 /// new file, keeps container copies away from that instant.
-pub async fn refresh_login_with_cache_root(
+pub(crate) async fn refresh_login_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
+    prepared: &mut Option<Arc<crate::quota_harness::QuotaProgram>>,
 ) -> Result<(), LoginRefreshFailure> {
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        prepare(client, cwd, env, launcher)
-            .await?
-            .refresh_token()
+    let result = match start(client, cwd, env, launcher, prepared).await {
+        Ok(()) => {
+            tokio::time::timeout(REQUEST_TIMEOUT, async {
+                prepare(client).await?.refresh_token().await
+            })
             .await
-    })
-    .await;
+        }
+        Err(error) => Ok(Err(error)),
+    };
 
     match result {
         Ok(Ok(())) => Ok(()),
@@ -464,30 +480,17 @@ pub async fn refresh_login_with_cache_root(
             discard_failed_client(client, error.needs_fresh_client()).await;
             Err(LoginRefreshFailure {
                 detail: error.to_string(),
-                reason: error.user_reason(),
+                reason: error.unavailable_reason(),
             })
         }
         Err(_) => {
             discard_failed_client(client, true).await;
             Err(LoginRefreshFailure {
                 detail: "request timed out".to_string(),
-                reason: "request timed out",
+                reason: "request timed out".to_owned(),
             })
         }
     }
-}
-
-fn process_managed_cache_root() -> Result<PathBuf, QueryError> {
-    let xdg_cache_home = std::env::var_os("XDG_CACHE_HOME");
-    let home = mj_core::path_input::user_home();
-    managed_harness_cache_root(
-        xdg_cache_home.as_deref(),
-        home.as_deref().map(std::path::Path::as_os_str),
-    )
-    .map_err(|error| QueryError::NotInstalled {
-        expected: None,
-        detail: Some(error.to_string()),
-    })
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -509,149 +512,14 @@ pub fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
     install
 }
 
-/// Start the agent-dev image's `codex app-server` with the profile home
-/// mounted. The same environment rules as [`spawn_codex`] apply: no API key
-/// (#1160), and error-level logs only.
-async fn spawn_codex_in_container(
-    check: &crate::quota_runtime::ContainerCheck,
-    env: HashMap<String, String>,
-) -> Result<
-    (
-        crate::streamed_child::ProxyStdio,
-        crate::quota_runtime::QuotaContainer,
-    ),
-    QueryError,
-> {
-    let mut env = env
-        .into_iter()
-        .filter(|(name, _)| !mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.contains(&name.as_str()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    env.insert("RUST_LOG".to_owned(), "error".to_owned());
-    let launch = check.launch("codex", &["app-server", "--stdio"], &env);
-    let mut spec = mj_core::targets::CommandSpec::new(
-        mj_core::target_path::text(&launch.program),
-        launch.args.clone(),
-    );
-    spec.env = env;
-    let stdio = crate::streamed_child::spawn_proxy(&spec)
-        .await
-        .map_err(|error| {
-            QueryError::Launch(format!(
-                "could not start {} for the Codex quota check: {error:#}",
-                launch.program.display()
-            ))
-        })?;
-    Ok((stdio, launch.container))
-}
-
-async fn spawn_codex(
-    cwd: PathBuf,
-    env: HashMap<String, String>,
-    cache_root: PathBuf,
-) -> Result<(crate::streamed_child::ProxyStdio, FileLock), QueryError> {
-    let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-
-    #[cfg(not(unix))]
-    {
-        let _ = (cwd, env);
-        Err(QueryError::NotInstalled {
-            expected: Some(install),
-            detail: Some("managed harnesses require a Unix target".to_owned()),
-        })
-    }
-
-    #[cfg(unix)]
-    {
-        let lease = open_managed_codex_lease(&install)?;
-        let launcher = managed_codex_launcher(&install)?;
-
-        let stdio = spawn_app_server(&launcher, cwd, env)
-            .await
-            .map_err(|error| match error {
-                QueryError::NotInstalled { detail, .. } => QueryError::NotInstalled {
-                    expected: Some(install),
-                    detail,
-                },
-                other => other,
-            })?;
-        Ok((stdio, lease))
-    }
-}
-
-/// The launcher of the installation at `install`, once its receipt matches
-/// the current pin and the launcher is executable.
-#[cfg(unix)]
-fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
-    let manifest_matches = managed_harness_manifest_matches(
-        install,
-        HarnessKind::Codex,
-        pin(HarnessKind::Codex).install_id,
-    )
-    .map_err(|error| QueryError::NotInstalled {
-        expected: Some(install.to_path_buf()),
-        detail: Some(error.to_string()),
-    })?;
-    if !manifest_matches {
-        return Err(QueryError::NotInstalled {
-            expected: Some(install.to_path_buf()),
-            detail: Some("missing or mismatched mj-harness.json".to_owned()),
-        });
-    }
-    let launcher = install.join(CODEX_CLI_ENTRYPOINT);
-    if !mj_core::program_path::is_executable_file(&launcher) {
-        return Err(QueryError::NotInstalled {
-            expected: Some(install.to_path_buf()),
-            detail: Some(format!(
-                "missing or non-executable launcher {}",
-                launcher.display()
-            )),
-        });
-    }
-    Ok(launcher)
-}
-
-/// Whether this host holds the managed Codex installation a host check would
-/// start: the same lease, receipt and launcher checks `spawn_codex` makes,
-/// without taking the lease. `cache_root` is as in [`CodexLauncher::Managed`].
-///
-/// The launcher is a Node script, and a host check passes it only the
-/// profile's environment, so `node` must also be on `path`, the PATH that
-/// environment gives it. A host whose only Node is Mjolnir's managed copy
-/// therefore uses a container under `auto`.
-pub fn host_has_codex(cache_root: Option<&Path>, path: Option<&std::ffi::OsStr>) -> bool {
-    #[cfg(unix)]
-    {
-        if mj_core::program_path::find_executable_on_path("node", path).is_none() {
-            return false;
-        }
-        let cache_root = match cache_root {
-            Some(root) => root.to_path_buf(),
-            None => match process_managed_cache_root() {
-                Ok(root) => root,
-                Err(_) => return false,
-            },
-        };
-        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-        install.join(LEASE_FILE).is_file() && managed_codex_launcher(&install).is_ok()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (cache_root, path);
-        false
-    }
-}
-
 /// Start `codex app-server` from `launcher`, with the environment a quota
 /// check gives it.
 async fn spawn_app_server(
-    launcher: &Path,
+    launcher: &str,
     cwd: PathBuf,
     env: HashMap<String, String>,
 ) -> Result<crate::streamed_child::ProxyStdio, QueryError> {
-    let mut spec = mj_core::targets::CommandSpec::new(
-        mj_core::target_path::text(launcher),
-        ["app-server", "--stdio"],
-    );
+    let mut spec = mj_core::targets::CommandSpec::new(launcher, ["app-server", "--stdio"]);
     spec.cwd = Some(cwd);
     spec.env = env.into_iter().collect();
     // This probe reads a ChatGPT login's rate limits and refreshes that
@@ -670,47 +538,12 @@ async fn spawn_app_server(
         Err(error) if crate::streamed_child::is_missing_program(&error) => {
             Err(QueryError::NotInstalled {
                 expected: None,
-                detail: Some(format!(
-                    "launcher {} could not be found",
-                    launcher.display()
-                )),
+                detail: Some(format!("launcher {launcher} could not be found")),
             })
         }
         Err(error) => Err(QueryError::Launch(format!(
-            "could not start Codex launcher {}: {error:#}",
-            launcher.display()
+            "could not start Codex launcher {launcher}: {error:#}"
         ))),
-    }
-}
-
-#[cfg(unix)]
-fn open_managed_codex_lease(install: &Path) -> Result<FileLock, QueryError> {
-    let lease_path = install.join(LEASE_FILE);
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lease_path)
-        .map_err(|error| {
-            let detail = if error.kind() == std::io::ErrorKind::NotFound {
-                "lease file missing".to_owned()
-            } else {
-                format!("could not open lease file: {error}")
-            };
-            QueryError::NotInstalled {
-                expected: Some(install.to_path_buf()),
-                detail: Some(detail),
-            }
-        })?;
-    match file.try_lock_shared() {
-        Ok(()) => Ok(FileLock::new(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Err(QueryError::NotInstalled {
-            expected: Some(install.to_path_buf()),
-            detail: Some("managed Codex installation is being repaired".to_owned()),
-        }),
-        Err(std::fs::TryLockError::Error(error)) => Err(QueryError::NotInstalled {
-            expected: Some(install.to_path_buf()),
-            detail: Some(format!("could not lock {}: {error}", lease_path.display())),
-        }),
     }
 }
 
@@ -720,18 +553,7 @@ enum QueryError {
         expected: Option<PathBuf>,
         detail: Option<String>,
     },
-    // `spawn_codex` only reaches the launcher spawn on Unix; other platforms
-    // return `NotInstalled` first, so this stays compiled with the code that
-    // constructs it.
-    #[cfg_attr(not(unix), allow(dead_code))]
     Launch(String),
-    /// The container engine does not hold the agent-dev image yet;
-    /// `downloading` says whether the runtime's pull policy lets the daemon
-    /// download it.
-    ImageUnavailable {
-        detail: String,
-        downloading: bool,
-    },
     NotSignedIn,
     UnsupportedAccount,
     Unsupported,
@@ -764,25 +586,17 @@ impl QueryError {
         )
     }
 
+    fn unavailable_reason(&self) -> String {
+        match self {
+            Self::Launch(_) | Self::NotInstalled { .. } => self.to_string(),
+            _ => self.user_reason().to_owned(),
+        }
+    }
+
     fn user_reason(&self) -> &'static str {
         match self {
-            Self::NotInstalled { .. } if cfg!(unix) => {
-                "Mjolnir's Codex installation is unavailable; start a Codex session on a local target to install it"
-            }
-            Self::NotInstalled { .. } => {
-                "Codex quota probing is unavailable because managed Codex installations require Unix"
-            }
+            Self::NotInstalled { .. } => "Codex CLI is unavailable",
             Self::Launch(_) => "could not start Codex CLI",
-            Self::ImageUnavailable {
-                downloading: true, ..
-            } => {
-                "the agent-dev image is not downloaded yet; Mjolnir downloads it in the background"
-            }
-            Self::ImageUnavailable {
-                downloading: false, ..
-            } => {
-                "the agent-dev image is not downloaded, and its runtime's pull policy is never, so Mjolnir does not download it"
-            }
             Self::NotSignedIn => "not signed in with ChatGPT",
             Self::UnsupportedAccount => {
                 "ChatGPT subscription quota is not available for this account"
@@ -798,7 +612,6 @@ impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Launch(detail) => write!(f, "could not start Codex CLI: {detail}"),
-            Self::ImageUnavailable { detail, .. } => f.write_str(detail),
             Self::Protocol(kind) => write!(f, "Codex app-server protocol error ({kind:?})"),
             Self::NotInstalled { expected, detail } => {
                 f.write_str(self.user_reason())?;
@@ -905,7 +718,7 @@ fn window_label(minutes: Option<i64>) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -921,6 +734,7 @@ mod tests {
     ) -> (HashMap<String, String>, PathBuf) {
         let cache_root = test_cache_root(temp);
         install_fake_managed_codex(&cache_root, script);
+        mj_core::test_hooks::install_fake_command(temp.path(), "codex", script);
 
         let log = temp.path().join("requests.jsonl");
         let env = HashMap::from([
@@ -941,15 +755,9 @@ mod tests {
         client: &mut Option<CodexUsageClient>,
         cwd: PathBuf,
         env: HashMap<String, String>,
-        temp: &tempfile::TempDir,
+        _temp: &tempfile::TempDir,
     ) -> CodexUsageStatus {
-        refresh_with_cache_root(
-            client,
-            cwd,
-            env,
-            &CodexLauncher::Managed(Some(test_cache_root(temp))),
-        )
-        .await
+        refresh_with_cache_root(client, cwd, env, &CodexLauncher::Host, &mut None).await
     }
 
     #[cfg(unix)]
@@ -957,346 +765,11 @@ mod tests {
         client: &mut Option<CodexUsageClient>,
         cwd: PathBuf,
         env: HashMap<String, String>,
-        temp: &tempfile::TempDir,
+        _temp: &tempfile::TempDir,
     ) -> Result<(), LoginRefreshFailure> {
-        refresh_login_with_cache_root(
-            client,
-            cwd,
-            env,
-            &CodexLauncher::Managed(Some(test_cache_root(temp))),
-        )
-        .await
+        refresh_login_with_cache_root(client, cwd, env, &CodexLauncher::Host, &mut None).await
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn missing_managed_install_reports_its_expected_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let cache_root = test_cache_root(&temp);
-        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-        let Err(error) = spawn_codex(temp.path().to_path_buf(), HashMap::new(), cache_root).await
-        else {
-            panic!("missing managed Codex install unexpectedly spawned");
-        };
-
-        assert!(matches!(error, QueryError::NotInstalled { .. }));
-        assert_eq!(
-            error.user_reason(),
-            "Mjolnir's Codex installation is unavailable; start a Codex session on a local target to install it"
-        );
-        assert!(error.to_string().contains(&install.display().to_string()));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn missing_managed_install_lease_is_not_created_by_the_probe() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let cache_root = test_cache_root(&temp);
-        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-        std::fs::create_dir_all(&install).expect("create incomplete managed install");
-
-        let Err(error) = spawn_codex(temp.path().to_path_buf(), HashMap::new(), cache_root).await
-        else {
-            panic!("managed install without a lease unexpectedly spawned");
-        };
-
-        assert!(matches!(error, QueryError::NotInstalled { .. }));
-        assert!(error.to_string().contains("lease file missing"));
-        assert!(!install.join(LEASE_FILE).exists());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn mismatched_managed_manifest_is_not_installed() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (env, _log) = fake_codex_env(&temp, "#!/bin/sh\nexit 0\n");
-        let cache_root = test_cache_root(&temp);
-        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-        let manifest = json!({
-            "schema": 1,
-            "harness": "codex",
-            "install_id": "different-codex-pin"
-        });
-        std::fs::write(
-            install.join(mj_core::harness_runtime::MANIFEST_FILE),
-            serde_json::to_vec(&manifest).expect("serialize manifest"),
-        )
-        .expect("write mismatched manifest");
-
-        let Err(error) = spawn_codex(temp.path().to_path_buf(), env, cache_root).await else {
-            panic!("mismatched managed Codex install unexpectedly spawned");
-        };
-
-        assert!(matches!(error, QueryError::NotInstalled { .. }));
-        assert!(error.to_string().contains("mismatched mj-harness.json"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn path_codex_is_not_used_when_managed_install_is_missing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("path");
-        std::fs::create_dir_all(&path).expect("create PATH directory");
-        let marker = temp.path().join("path-codex-ran");
-        mj_core::test_hooks::install_fake_command(
-            &path,
-            "codex",
-            &format!(
-                "#!/bin/sh\nprintf ran > {}\n",
-                mj_core::targets::posix_quote(&marker.to_string_lossy())
-            ),
-        );
-        let env = HashMap::from([("PATH".to_owned(), path.to_string_lossy().into_owned())]);
-        let cache_root = test_cache_root(&temp);
-        let Err(error) = spawn_codex(temp.path().to_path_buf(), env, cache_root).await else {
-            panic!("PATH codex unexpectedly replaced the missing managed install");
-        };
-
-        assert!(matches!(error, QueryError::NotInstalled { .. }));
-        assert!(!marker.exists(), "the PATH codex must not run");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn host_has_codex_only_for_a_complete_managed_install() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().expect("tempdir");
-        let cache_root = test_cache_root(&temp);
-        let bin = temp.path().join("bin");
-        std::fs::create_dir(&bin).expect("bin");
-        std::fs::write(bin.join("node"), "#!/bin/sh\nexit 0\n").expect("node");
-        std::fs::set_permissions(bin.join("node"), std::fs::Permissions::from_mode(0o755))
-            .expect("chmod node");
-        let with_node = Some(bin.as_os_str());
-        assert!(!host_has_codex(Some(&cache_root), with_node));
-
-        let install = install_fake_managed_codex(&cache_root, "#!/bin/sh\nexit 0\n");
-        assert!(host_has_codex(Some(&cache_root), with_node));
-
-        // The launcher is a Node script: without `node` on its PATH it cannot
-        // start.
-        let empty = tempfile::tempdir().expect("tempdir");
-        assert!(!host_has_codex(
-            Some(&cache_root),
-            Some(empty.path().as_os_str())
-        ));
-        assert!(!host_has_codex(Some(&cache_root), None));
-
-        // A `codex` on PATH is not the managed install.
-        let other = tempfile::tempdir().expect("tempdir");
-        assert!(!host_has_codex(
-            Some(&other.path().join("cache")),
-            with_node
-        ));
-
-        std::fs::remove_file(install.join(mj_core::harness_runtime::MANIFEST_FILE))
-            .expect("remove manifest");
-        assert!(!host_has_codex(Some(&cache_root), with_node));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn client_holds_a_shared_install_lease_for_its_lifetime() {
-        use std::fs::OpenOptions;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (env, _log) = fake_codex_env(&temp, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n");
-        let cache_root = test_cache_root(&temp);
-        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-        let lease_path = install.join(LEASE_FILE);
-        let lease_reader = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lease_path)
-            .expect("open lease to check repair exclusion");
-        let client = CodexUsageClient::spawn(
-            temp.path().to_path_buf(),
-            env,
-            &CodexLauncher::Managed(Some(cache_root)),
-        )
-        .await
-        .expect("spawn managed app-server");
-
-        assert!(matches!(
-            lease_reader.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
-        drop(lease_reader);
-        client.shutdown().await;
-        let exclusive = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lease_path)
-            .expect("reopen lease for repair");
-        exclusive.try_lock().expect("lease released after shutdown");
-    }
-
-    #[test]
-    fn parses_codex_bucket_and_formats_remaining_windows() {
-        let report = parse_report(&json!({
-            "rateLimits": { "primary": { "usedPercent": 99, "windowDurationMins": 60 },
-                "credits": {"hasCredits": true, "unlimited": true} },
-            "rateLimitsByLimitId": {
-                "codex": {
-                    "primary": { "usedPercent": 25, "windowDurationMins": 300 },
-                    "secondary": { "usedPercent": 18, "windowDurationMins": 10080 },
-                    "credits": {"hasCredits": true, "unlimited": false, "balance": "0.125"}
-                }
-            }
-        }))
-        .expect("report");
-
-        assert_eq!(report.primary.as_ref().unwrap().remaining_percent, 75);
-        assert_eq!(report.primary.as_ref().unwrap().label, "5H");
-        assert_eq!(report.secondary.as_ref().unwrap().remaining_percent, 82);
-        assert_eq!(report.secondary.as_ref().unwrap().label, "Week");
-        assert_eq!(
-            report.paid_credits,
-            mj_client::quota::PaidCredits::limited(0.125)
-        );
-    }
-
-    #[test]
-    fn falls_back_when_codex_bucket_has_no_usable_windows() {
-        let report = parse_report(&json!({
-            "rateLimits": {
-                "primary": { "usedPercent": 20, "windowDurationMins": 300, "resetsAt": 1234 }
-            },
-            "rateLimitsByLimitId": { "codex": {} }
-        }))
-        .expect("fallback report");
-        let primary = report.primary.expect("primary");
-        assert_eq!(primary.remaining_percent, 80);
-        assert_eq!(primary.resets_at, Some(1234));
-    }
-
-    #[test]
-    fn clamps_negative_percentages_and_ignores_invalid_window_fields() {
-        let report = parse_report(&json!({
-            "rateLimits": {
-                "primary": {
-                    "usedPercent": -5,
-                    "windowDurationMins": 1440,
-                    "resetsAt": "later"
-                },
-                "secondary": { "usedPercent": "unknown" }
-            }
-        }))
-        .expect("report");
-        let primary = report.primary.expect("primary");
-        assert_eq!(primary.remaining_percent, 100);
-        assert_eq!(primary.label, "1d");
-        assert_eq!(primary.resets_at, None);
-        assert!(report.secondary.is_none());
-    }
-
-    #[test]
-    fn empty_limits_are_unavailable() {
-        assert!(matches!(
-            parse_report(&json!({ "rateLimits": {} })),
-            Err(QueryError::NoData)
-        ));
-    }
-
-    #[test]
-    fn response_parser_ignores_notifications_and_matches_request_id() {
-        assert_eq!(
-            parse_response(
-                &json!({ "method": "account/rateLimits/updated", "params": {} }),
-                4,
-            )
-            .expect("notification"),
-            None
-        );
-        assert_eq!(
-            parse_response(&json!({ "id": 3, "result": { "old": true } }), 4)
-                .expect("different response"),
-            None
-        );
-        assert_eq!(
-            parse_response(&json!({ "id": 4, "result": { "ok": true } }), 4)
-                .expect("matching response"),
-            Some(json!({ "ok": true }))
-        );
-    }
-
-    #[test]
-    fn response_parser_classifies_unsupported_and_protocol_errors() {
-        assert!(matches!(
-            parse_response(
-                &json!({ "id": 4, "error": { "code": -32601, "message": "missing" } }),
-                4,
-            ),
-            Err(QueryError::Unsupported)
-        ));
-        assert!(matches!(
-            parse_response(
-                &json!({ "id": 4, "error": { "code": -32000, "message": "denied" } }),
-                4,
-            ),
-            Err(QueryError::Protocol(ProtocolError::RemoteError))
-        ));
-        assert!(matches!(
-            parse_response(&json!({ "id": 4, "error": {} }), 4),
-            Err(QueryError::Protocol(ProtocolError::RemoteError))
-        ));
-        assert!(matches!(
-            parse_response(&json!({ "id": 4 }), 4),
-            Err(QueryError::Protocol(ProtocolError::InvalidResponse))
-        ));
-        assert_eq!(
-            parse_response(&json!({ "id": "4", "result": {} }), 4).expect("string id"),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_frame_reads_complete_frames_and_clean_eof() {
-        let mut reader = BufReader::new(&b"first\nsecond\n"[..]);
-        assert_eq!(
-            read_bounded_frame(&mut reader).await.expect("first frame"),
-            Some(b"first".to_vec())
-        );
-        assert_eq!(
-            read_bounded_frame(&mut reader).await.expect("second frame"),
-            Some(b"second".to_vec())
-        );
-        assert_eq!(
-            read_bounded_frame(&mut reader).await.expect("clean eof"),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_frame_rejects_oversized_or_incomplete_responses() {
-        let (mut writer, reader) = tokio::io::duplex(1024);
-        let writer_task = tokio::spawn(async move {
-            writer
-                .write_all(&vec![b'x'; MAX_RESPONSE_BYTES + 1])
-                .await
-                .expect("write oversized frame");
-        });
-        let mut reader = BufReader::new(reader);
-        assert!(matches!(
-            read_bounded_frame(&mut reader).await,
-            Err(QueryError::Protocol(ProtocolError::TooLarge))
-        ));
-        writer_task.abort();
-
-        let (mut writer, reader) = tokio::io::duplex(64);
-        writer.write_all(b"{\"id\":1").await.expect("write partial");
-        drop(writer);
-        let mut reader = BufReader::new(reader);
-        assert!(matches!(
-            read_bounded_frame(&mut reader).await,
-            Err(QueryError::Protocol(ProtocolError::Closed))
-        ));
-    }
-
-    /// The quota probe reads a ChatGPT login's rate limits (#1160). An API key
-    /// in the profile's environment, or in the daemon's own, must not reach
-    /// the Codex it starts.
-    // Hard-won: c4e2838d7cca: ChatGPT Codex quota probe inherited an API key and sent it to the OAuth endpoint
     #[cfg(unix)]
     #[tokio::test]
     async fn the_quota_probe_starts_codex_without_an_api_key() {
@@ -1652,14 +1125,19 @@ IFS= read -r line
 "#,
         );
         let mut client = None;
-        prepare(
+        start(
             &mut client,
             temp.path().to_path_buf(),
             env,
-            &CodexLauncher::Managed(Some(test_cache_root(&temp))),
+            &CodexLauncher::Program(
+                managed_harness_install_dir(&test_cache_root(&temp), HarnessKind::Codex)
+                    .join(CODEX_CLI_ENTRYPOINT),
+            ),
+            &mut None,
         )
         .await
-        .expect("initialized client");
+        .expect("started client");
+        prepare(&mut client).await.expect("initialized client");
 
         let lines = client
             .take()
@@ -1672,147 +1150,6 @@ IFS= read -r line
         assert_eq!(
             lines.last().unwrap(),
             "ERROR failed to refresh token: refresh_token=[redacted] reused"
-        );
-    }
-
-    /// A stand-in container engine: `image inspect` succeeds unless
-    /// `image_missing`, `run` logs its arguments and becomes `app_server`,
-    /// and `rm` logs its arguments.
-    #[cfg(unix)]
-    fn fake_container_check(
-        temp: &tempfile::TempDir,
-        app_server: &str,
-        image_missing: bool,
-    ) -> (crate::quota_runtime::ContainerCheck, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        let log = temp.path().join("engine.log");
-        let server = temp.path().join("app-server");
-        std::fs::write(&server, app_server).unwrap();
-        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let inspect = if image_missing {
-            "echo 'Error: example.invalid/agent-dev:test: image not known' >&2; exit 125"
-        } else {
-            "echo sha256:test"
-        };
-        let engine = temp.path().join("podman");
-        std::fs::write(
-            &engine,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\n  image) {inspect} ;;\n  run) echo \"run $*\" >> '{log}'; exec '{server}' ;;\n  rm) echo \"rm $*\" >> '{log}' ;;\nesac\n",
-                log = log.display(),
-                server = server.display(),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let check = crate::quota_runtime::ContainerCheck {
-            runtime: crate::quota_runtime::ContainerRuntime {
-                engine: crate::quota_runtime::Engine::Podman,
-                program: engine,
-                image: "example.invalid/agent-dev:test".to_owned(),
-                pull_policy: mj_core::config::ImagePullPolicy::Auto,
-            },
-            home: temp.path().join("codex-home"),
-        };
-        (check, log)
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_container_check_passes_secrets_by_name_and_removes_its_container_on_shutdown() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let seen = temp.path().join("seen");
-        let (check, log) = fake_container_check(
-            &temp,
-            &format!(
-                r#"#!/bin/sh
-printf '%s|%s\n' "$PROFILE_SECRET" "${{OPENAI_API_KEY:-unset}}" > '{seen}'
-IFS= read -r line || exit 1
-printf '%s\n' '{{"id":1,"result":{{}}}}'
-IFS= read -r line || exit 1
-IFS= read -r line || exit 1
-printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"chatgpt"}}}}}}'
-IFS= read -r line || exit 1
-printf '%s\n' '{{"id":3,"result":{{"rateLimits":{{"primary":{{"usedPercent":25,"windowDurationMins":300}}}}}}}}'
-read -r line
-"#,
-                seen = seen.display()
-            ),
-            false,
-        );
-        let env = HashMap::from([
-            ("PROFILE_SECRET".to_owned(), "secret-value-1".to_owned()),
-            ("OPENAI_API_KEY".to_owned(), "secret-value-2".to_owned()),
-        ]);
-        let mut client = None;
-
-        let status = refresh_with_cache_root(
-            &mut client,
-            temp.path().to_path_buf(),
-            env,
-            &CodexLauncher::Container(check),
-        )
-        .await;
-        assert!(
-            matches!(status, CodexUsageStatus::Available(_)),
-            "{status:?}"
-        );
-        client.take().expect("cached client").shutdown().await;
-
-        let log = std::fs::read_to_string(log).expect("engine log");
-        let lines = log.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 2, "{log}");
-        let run = lines[0];
-        // Values travel in the engine's environment, where `ps` cannot read
-        // them, and Codex never sees an API key that would replace the login.
-        assert!(run.contains(" --env PROFILE_SECRET "), "{run}");
-        assert!(!run.contains("secret-value"), "{run}");
-        assert!(!run.contains("OPENAI_API_KEY"), "{run}");
-        assert!(
-            run.ends_with(" example.invalid/agent-dev:test codex app-server --stdio"),
-            "{run}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&seen).unwrap(),
-            "secret-value-1|unset\n"
-        );
-        // Killing the engine client leaves a container running, so the
-        // client removes the container it named.
-        let name = run
-            .split(" --name ")
-            .nth(1)
-            .and_then(|rest| rest.split(' ').next())
-            .expect("named container");
-        assert_eq!(lines[1], format!("rm rm --force --ignore {name}"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_container_check_without_its_image_reports_the_download_and_runs_nothing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (check, log) = fake_container_check(&temp, "#!/bin/sh\nexit 1\n", true);
-        let mut client = None;
-
-        let status = refresh_with_cache_root(
-            &mut client,
-            temp.path().to_path_buf(),
-            HashMap::new(),
-            &CodexLauncher::Container(check),
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            CodexUsageStatus::Unavailable(
-                "the agent-dev image is not downloaded yet; Mjolnir downloads it in the background"
-                    .to_owned()
-            )
-        );
-        assert!(client.is_none());
-        assert!(
-            !log.exists(),
-            "nothing ran: {:?}",
-            std::fs::read_to_string(&log)
         );
     }
 }

@@ -49,12 +49,7 @@ fn an_inline_token_provider_credential_does_not_become_native_openai() {
     );
     std::fs::write(path, config).unwrap();
     profile.environment.clear();
-    let request = QuotaRefreshRequest::for_profile(
-        "custom",
-        &profile,
-        home.path().to_owned(),
-        crate::quota::QuotaRuntimeConfig::host(),
-    );
+    let request = QuotaRefreshRequest::for_profile("custom", &profile, home.path().to_owned());
     assert!(
         matches!(
             &request.codex_source,
@@ -81,12 +76,7 @@ async fn a_provider_without_a_readable_key_never_reads_the_chatgpt_quota() {
         ..keyless.clone()
     };
     for (id, profile) in [("keyless", keyless), ("ollama", ollama)] {
-        let request = QuotaRefreshRequest::for_profile(
-            id,
-            &profile,
-            home.path().to_path_buf(),
-            crate::quota::QuotaRuntimeConfig::host(),
-        );
+        let request = QuotaRefreshRequest::for_profile(id, &profile, home.path().to_path_buf());
         assert!(
             matches!(request.codex_source, CodexQuotaSource::UsagePriced { .. }),
             "{id}: {:?}",
@@ -117,7 +107,6 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
-        crate::quota::QuotaRuntimeConfig::host(),
     );
     let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
     assert_eq!(outcome.report.error, None);
@@ -139,12 +128,8 @@ async fn bedrock_claude_reports_usage_pricing_without_an_oauth_login() {
         },
     }))
     .unwrap();
-    let request = QuotaRefreshRequest::for_profile(
-        "aws-model",
-        &profile,
-        home.path().to_path_buf(),
-        crate::quota::QuotaRuntimeConfig::host(),
-    );
+    let request =
+        QuotaRefreshRequest::for_profile("aws-model", &profile, home.path().to_path_buf());
     let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
 
     assert_eq!(outcome.report.profile_id, "aws-model");
@@ -407,7 +392,6 @@ fn codex_quota_request(
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 
@@ -722,6 +706,139 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
     );
 }
 
+#[cfg(unix)]
+// Hard-won: 7f4649508: re-preparing Codex rejected a healthy cached client after its CLI disappeared.
+#[tokio::test]
+async fn cached_codex_keeps_polling_after_its_launcher_disappears() {
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(36_000),
+        Duration::from_secs(3_600),
+    );
+    let script = r#"#!/bin/sh
+id=0
+while IFS= read -r line; do
+    case "$line" in
+        *'"method":"initialized"'*) continue ;;
+    esac
+    id=$((id + 1))
+    case "$line" in
+        *'"method":"account/read"'*) result='{"account":{"type":"chatgpt"}}' ;;
+        *'"method":"account/rateLimits/read"'*) result='{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}' ;;
+        *) result='{}' ;;
+    esac
+    printf '{"id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
+    mj_core::test_hooks::install_fake_command(directory.path(), "codex", script);
+    let request = codex_quota_request(
+        directory.path(),
+        BTreeMap::from([
+            (
+                "PATH".into(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            // If lookup is retried after the executable disappears, preparation
+            // fails deterministically without touching the host cache or network.
+            ("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into()),
+        ]),
+    );
+    let (first, client) = refresh_profile_with_cache_root(request.clone(), None, None).await;
+    assert_eq!(first.report.error, None);
+    assert!(client.is_some());
+    std::fs::remove_file(directory.path().join("codex")).unwrap();
+    let (second, client) = refresh_profile_with_cache_root(request.clone(), client, None).await;
+    // Stop the child even if the assertion below detects the regression.
+    client.expect("cached app-server survives").shutdown().await;
+    assert_eq!(second.report.error, None);
+    assert_eq!(
+        second.report.five_hour_window().unwrap().remaining_percent,
+        Some(75)
+    );
+    // Hard-won: ce1937477: a fresh installation failure lost its actionable cause in the quota report.
+    let (unavailable, client) = refresh_profile_with_cache_root(request, None, None).await;
+    assert!(client.is_none());
+    let error = unavailable
+        .report
+        .error
+        .expect("the stopped client cannot serve this poll");
+    assert!(
+        error.contains("could not prepare the pinned harness"),
+        "{error}"
+    );
+    assert!(
+        error.contains("managed harness cache root must be absolute"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: 7f4649508: an ambient CLI's non-UTF-8 directory was replaced before process startup.
+#[tokio::test]
+async fn inherited_native_path_reports_a_non_utf8_quota_harness() {
+    use std::os::unix::ffi::OsStringExt as _;
+    const CHILD_HOME: &str = "MJ_NATIVE_QUOTA_PATH_HOME";
+    if let Some(home) = std::env::var_os(CHILD_HOME) {
+        let request = codex_quota_request(
+            Path::new(&home),
+            BTreeMap::from([("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into())]),
+        );
+        let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
+        assert!(client.is_none());
+        let error = outcome
+            .report
+            .error
+            .expect("native path cannot enter CommandSpec");
+        assert!(
+            error.contains("quota harness path is not UTF-8:"),
+            "{error}"
+        );
+        assert!(error.contains("bin-"), "{error}");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(36_000),
+        Duration::from_secs(3_600),
+    );
+    let bin = directory
+        .path()
+        .join(std::ffi::OsString::from_vec(b"bin-\xff".to_vec()));
+    std::fs::create_dir(&bin).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "codex",
+        r#"#!/bin/sh
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+IFS= read -r line
+"#,
+    );
+    let child = crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+        module_path!(),
+        "inherited_native_path_reports_a_non_utf8_quota_harness",
+    ))
+    .env(CHILD_HOME, directory.path())
+    .env("PATH", std::env::join_paths([bin]).unwrap())
+    .isolated_store(&directory.path().join("child-instance"));
+    let output = tokio::task::spawn_blocking(move || child.output())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A profile switched off the ChatGPT login stops the app-server cached for it
 /// instead of handing it back to be kept until the daemon exits.
 #[cfg(unix)]
@@ -816,6 +933,7 @@ IFS= read -r line
 /// until it restarts. The poll replaces it and reads the quota with the new
 /// one, which reads the credential file again.
 #[cfg(unix)]
+// Hard-won: 4de4844fb: cached rotation recovery reused a disappeared CLI instead of preparing its replacement.
 #[tokio::test]
 async fn a_failed_rotation_in_a_cached_app_server_recovers_in_the_same_poll() {
     let directory = tempfile::tempdir().unwrap();
@@ -824,9 +942,7 @@ async fn a_failed_rotation_in_a_cached_app_server_recovers_in_the_same_poll() {
         Duration::from_secs(10 * 3_600),
         Duration::from_secs(3_600),
     );
-    let (environment, log) = fake_codex_app_server(
-        directory.path(),
-        r#"#!/bin/sh
+    let script = r#"#!/bin/sh
 starts="$CODEX_USAGE_TEST_LOG.starts"
 started_before=no
 [ -e "$starts" ] && started_before=yes
@@ -845,18 +961,31 @@ else
     printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":29,"windowDurationMins":10080}}}}'
 fi
 IFS= read -r line
-"#,
+"#;
+    let (mut environment, log) = fake_codex_app_server(directory.path(), script);
+    let replacement_bin = directory.path().join("replacement-bin");
+    std::fs::create_dir(&replacement_bin).unwrap();
+    mj_core::test_hooks::install_fake_command(directory.path(), "codex", script);
+    environment.insert(
+        "PATH".into(),
+        std::env::join_paths([directory.path(), &replacement_bin])
+            .unwrap()
+            .into_string()
+            .unwrap(),
     );
+    environment.insert("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into());
 
     let (first, client) = refresh_profile_with_cache_root(
         codex_quota_request(directory.path(), environment.clone()),
         None,
-        Some(managed_codex_cache_root(directory.path())),
+        None,
     )
     .await;
     assert_eq!(first.report.error, None);
     assert!(client.is_some(), "the first poll caches its app-server");
 
+    std::fs::remove_file(directory.path().join("codex")).unwrap();
+    mj_core::test_hooks::install_fake_command(&replacement_bin, "codex", script);
     write_codex_auth(
         directory.path(),
         Duration::from_secs(600),
@@ -865,7 +994,7 @@ IFS= read -r line
     let (second, client) = refresh_profile_with_cache_root(
         codex_quota_request(directory.path(), environment),
         client,
-        Some(managed_codex_cache_root(directory.path())),
+        None,
     )
     .await;
     if let Some(client) = client {
@@ -908,9 +1037,12 @@ fn a_codex_refresh_margin_is_an_hour_or_a_tenth_of_the_token_life() {
     assert!(!codex_login_needs_refresh(None, Some(now - hour), now));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     let directory = tempfile::tempdir().unwrap();
+
+    mj_core::test_hooks::install_fake_command(directory.path(), "grok", "#!/bin/sh\nexit 1\n");
 
     let (outcome, _) = refresh_profile_with_cache_root(
         QuotaRefreshRequest {
@@ -925,7 +1057,6 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
             opencode_usage_priced: false,
-            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -936,7 +1067,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     assert!(report.windows.is_empty());
     assert_eq!(
         report.error.as_deref(),
-        Some("Grok Build executable not found")
+        Some("grok agent stdio exited before answering the usage request")
     );
 }
 
@@ -988,7 +1119,6 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
     manager
@@ -1095,7 +1225,6 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
     let said = |text: &str| {
@@ -1296,7 +1425,6 @@ async fn expired_claude_credentials_report_login_expired() {
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
             opencode_usage_priced: false,
-            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -1553,7 +1681,6 @@ while IFS= read -r line; do :; done
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
     let mut quotas = QuotaManager {
@@ -1681,7 +1808,6 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
-        crate::quota::QuotaRuntimeConfig::host(),
     );
     let identity = request.cache_identity();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1763,12 +1889,7 @@ async fn opencode_reports_api_for_a_profile_signed_in_only_with_a_stored_api_key
         enabled: true,
         ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
     };
-    let request = QuotaRefreshRequest::for_profile(
-        "ds8bit",
-        &profile,
-        home.path().to_path_buf(),
-        QuotaRuntimeConfig::host(),
-    );
+    let request = QuotaRefreshRequest::for_profile("ds8bit", &profile, home.path().to_path_buf());
     assert!(
         request.opencode_usage_priced,
         "a stored login that is itself a plain API key is still billed by usage"
@@ -1792,12 +1913,7 @@ async fn opencode_stays_unreported_when_a_stored_login_is_oauth() {
             .collect(),
         ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
     };
-    let request = QuotaRefreshRequest::for_profile(
-        "mixed",
-        &profile,
-        home.path().to_path_buf(),
-        QuotaRuntimeConfig::host(),
-    );
+    let request = QuotaRefreshRequest::for_profile("mixed", &profile, home.path().to_path_buf());
     assert!(
         !request.opencode_usage_priced,
         "an OAuth login leaves billing unknown even beside an environment key for another provider"

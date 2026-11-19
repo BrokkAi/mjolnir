@@ -584,30 +584,59 @@ async fn classify_recorded_items(
         return Ok(());
     }
     pending.truncate(MAX_CLASSIFICATIONS_PER_POLL);
-    let mut digests = std::collections::HashMap::new();
-    for (_, session, _, _) in &pending {
-        if !digests.contains_key(&session.id) {
-            // Retain failures per pair, just like classifier failures, without reloading.
-            digests.insert(
-                session.id.clone(),
-                session_evidence_snapshot(session.id.clone())
-                    .await
-                    .map_err(|e| format!("{e:#}")),
-            );
-        }
-    }
     let login = api.credential_login().await?;
     let login = login.as_deref();
     let concurrency = pending.len();
-    let results = stream::iter(pending).map(|(item, session, _, attempts)| {
+    let mut by_session = BTreeMap::<_, Vec<_>>::new();
+    for (index, (item, session, _, attempts)) in pending.into_iter().enumerate() {
+        by_session
+            .entry(session.id.clone())
+            .or_default()
+            .push((index, item, session, attempts));
+    }
+    let mut prepared = Vec::with_capacity(concurrency);
+    for (session_id, pairs) in by_session {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
+        api.control.check_enabled()?;
+        // This scope owns the only history snapshot. Build owned classifier
+        // inputs before releasing it and loading the next session's history.
+        let snapshot = session_evidence_snapshot(session_id)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        for (index, item, session, attempts) in pairs {
+            if stop.is_cancelled() {
+                return Ok(());
+            }
+            let evidence = match &snapshot {
+                Ok(snapshot) => {
+                    prepare_session_evidence(
+                        owner,
+                        repo,
+                        &item,
+                        &session,
+                        snapshot.clone(),
+                        login,
+                        &api.control,
+                    )
+                    .await
+                }
+                Err(error) => Err(anyhow::anyhow!(error.clone())),
+            };
+            prepared.push((index, item, session, attempts, evidence));
+        }
+    }
+    // Grouping must not change the never-attempted / oldest-retry order.
+    prepared.sort_by_key(|pair| pair.0);
+    let results = stream::iter(prepared).map(|(_, item, session, attempts, evidence)| {
         let classifier = classifier.clone(); let control = api.control.clone();
-        let digest = digests[&session.id].clone();
         async move {
             if stop.is_cancelled() { return Ok(()); }
             let number = item.number; let session_id = session.id.clone();
             match async {
-                let digest = digest.map_err(|e| anyhow::anyhow!(e))?;
-                classify_for_session(owner, repo, item, (session, digest), login, classifier, control).await
+                let evidence = evidence?;
+                classify_for_session(owner, repo, item, session, evidence, classifier, control).await
             }.await {
                 Ok(()) => Ok(()),
                 Err(error) if is_github_events_disabled(&error) => Err(error),
@@ -625,16 +654,16 @@ async fn classify_recorded_items(
     Ok(())
 }
 
-async fn classify_for_session(
+async fn prepare_session_evidence(
     owner: &str,
     repo: &str,
-    item: mj_controller::database::GithubSeenItem,
-    session: (SessionRecord, SessionEvidenceSnapshot),
+    item: &mj_controller::database::GithubSeenItem,
+    session: &SessionRecord,
+    snapshot: SessionEvidenceSnapshot,
     credential_login: Option<&str>,
-    classifier: Arc<dyn GithubClassifier>,
-    control: PollControl,
-) -> Result<()> {
-    let (session, (digest, history)) = session;
+    control: &PollControl,
+) -> Result<Option<GithubItemEvidence>> {
+    let (digest, history) = snapshot;
     let repo_label = format!("{owner}/{repo}");
     let kind = item_kind_from_watch(&item.kind);
     // Sessions share one GitHub account, so the author cannot name a session,
@@ -649,44 +678,62 @@ async fn classify_for_session(
             number: item.number as u64,
             title: item.title.clone(),
             body: item.body.clone(),
-            author: item.author,
+            author: item.author.clone(),
             url: item.url.clone(),
         },
         session: digest,
     };
     // A bare `#N` in the session names the item's repository only when the
     // session works in no other one.
-    let bare_is_item_repo = session_github_repositories(&session).len() == 1;
+    let bare_is_item_repo = session_github_repositories(session).len() == 1;
     evidence.session = evidence.session.for_item(&evidence.item, bare_is_item_repo);
     // The creator already knows its item, so it is never told about it and
     // The classifier is not asked; its stored interest is false.
-    let interested = if created {
-        false
-    } else {
-        control.check_enabled()?;
-        let original = evidence.item.clone();
-        let session_id = session.id.clone();
-        let cutoff =
-            timestamp_millis(&item.created_at).context("invalid GitHub item creation time")?;
-        let evidence = tokio::task::spawn_blocking(move || {
-            let mut base = serde_json::to_value(evidence.bounded_for_request()?)?;
-            mj_core::redact::redact_json_strings(&mut base);
-            let base = serde_json::from_value(base)?;
-            let transcript = mj_transcript::github_history::render(
-                &session_id,
-                &history,
-                cutoff,
-                &original.repo,
-                original.number,
-            )?;
-            mj_transcript::github_history::build_evidence(&original, &transcript, &base)
-                .map(|(evidence, _)| evidence)
-        })
-        .await
-        .context("build GitHub history evidence")??;
+    if created {
+        return Ok(None);
+    }
+    control.check_enabled()?;
+    let original = evidence.item.clone();
+    let session_id = session.id.clone();
+    let cutoff = timestamp_millis(&item.created_at).context("invalid GitHub item creation time")?;
+    let evidence = tokio::task::spawn_blocking(move || {
+        let mut base = serde_json::to_value(evidence.bounded_for_request()?)?;
+        mj_core::redact::redact_json_strings(&mut base);
+        let base = serde_json::from_value(base)?;
+        let transcript = mj_transcript::github_history::render(
+            &session_id,
+            &history,
+            cutoff,
+            &original.repo,
+            original.number,
+        )?;
+        mj_transcript::github_history::build_evidence(&original, &transcript, &base)
+            .map(|(evidence, _)| evidence)
+    })
+    .await
+    .context("build GitHub history evidence")??;
+    Ok(Some(evidence))
+}
+
+async fn classify_for_session(
+    owner: &str,
+    repo: &str,
+    item: mj_controller::database::GithubSeenItem,
+    session: SessionRecord,
+    evidence: Option<GithubItemEvidence>,
+    classifier: Arc<dyn GithubClassifier>,
+    control: PollControl,
+) -> Result<()> {
+    let repo_label = format!("{owner}/{repo}");
+    let kind = item_kind_from_watch(&item.kind);
+    control.check_enabled()?;
+    let created = evidence.is_none();
+    let interested = if let Some(evidence) = evidence {
         let verdict = classifier.classify(&evidence).await?;
         control.check_enabled()?;
         verdict.interested
+    } else {
+        false
     };
     let event = if interested {
         let key = format!(
@@ -779,7 +826,10 @@ async fn session_evidence_snapshot(session_id: String) -> Result<SessionEvidence
         )?
         .map(|materialized| mj_transcript::github_item::session_digest(&materialized))
         .unwrap_or_default();
-        Ok((digest, Arc::new(history)))
+        let history = Arc::new(history);
+        #[cfg(test)]
+        tests::observe_history_snapshot(&history);
+        Ok((digest, history))
     })
     .await
     .context("load GitHub session evidence snapshot")?
@@ -1780,6 +1830,14 @@ mod tests {
     impl GithubClassifier for FakeClassifier {
         fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
+                if let Some(snapshots) = HISTORY_SNAPSHOT_PROBE.lock().unwrap().as_ref() {
+                    assert!(
+                        snapshots
+                            .iter()
+                            .all(|snapshot| snapshot.upgrade().is_none()),
+                        "inference must not retain any history snapshot"
+                    );
+                }
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     evidence.session.history.is_some(),
@@ -3449,6 +3507,122 @@ mod tests {
         );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    type HistorySnapshotProbe =
+        Vec<std::sync::Weak<Vec<mj_transcript::github_history::HistoryRow>>>;
+    static HISTORY_SNAPSHOT_PROBE: Mutex<Option<HistorySnapshotProbe>> = Mutex::new(None);
+
+    pub(super) fn observe_history_snapshot(
+        history: &Arc<Vec<mj_transcript::github_history::HistoryRow>>,
+    ) {
+        if let Some(snapshots) = HISTORY_SNAPSHOT_PROBE.lock().unwrap().as_mut() {
+            assert!(
+                snapshots
+                    .iter()
+                    .all(|snapshot| snapshot.upgrade().is_none()),
+                "a prior session snapshot is still alive while loading the next"
+            );
+            snapshots.push(Arc::downgrade(history));
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_classification_releases_history_before_inference() {
+        if !run_isolated_child("prepared_classification_releases_history_before_inference") {
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let created = (DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
+            + chrono::Duration::seconds(1))
+        .to_rfc3339();
+        let items = (1..=2)
+            .map(|n| {
+                parse_github_item(&github_item(n, n, "synthetic", created.clone(), false)).unwrap()
+            })
+            .collect();
+        mj_controller::database::record_github_page(
+            "acme".into(),
+            "repo".into(),
+            items,
+            mj_controller::database::GithubFeedProgress::Main(created),
+        )
+        .unwrap();
+        let sessions = ["first", "second"]
+            .into_iter()
+            .map(|id| {
+                let mut session = mj_controller::database::test_session(id, "project");
+                session.created_at = cursor.watch_started_at.clone();
+                mj_controller::database::save_session(&session).unwrap();
+                session
+            })
+            .collect::<Vec<_>>();
+        *HISTORY_SNAPSHOT_PROBE.lock().unwrap() = Some(Vec::new());
+        let api = GithubApi::new("http://127.0.0.1:1", Some("snapshot-lifetime".into())).unwrap();
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &sessions,
+            fake_classifier(),
+            &cursor.watch_started_at,
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let snapshots = HISTORY_SNAPSHOT_PROBE.lock().unwrap().take().unwrap();
+        assert_eq!(
+            snapshots.len(),
+            2,
+            "both sessions must reach the snapshot loader"
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.upgrade().is_none())
+        );
+        assert!(
+            mj_controller::database::load_github_classification_failures("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // Hard-won: review 7fb8c222b: queued creator watches bypassed the enablement recheck.
+    #[tokio::test]
+    async fn prepared_creator_watch_rechecks_enablement_before_commit() {
+        if !run_isolated_child("prepared_creator_watch_rechecks_enablement_before_commit") {
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let session = mj_controller::database::test_session("creator", "project");
+        mj_controller::database::save_session(&session).unwrap();
+        let item = parse_github_item(&github_item(
+            1,
+            1,
+            "created item",
+            "2026-11-18T00:00:00Z".into(),
+            true,
+        ))
+        .unwrap();
+        let error = classify_for_session(
+            "acme",
+            "repo",
+            item,
+            session,
+            None,
+            fake_classifier(),
+            PollControl::new(|| false),
+        )
+        .await
+        .unwrap_err();
+        assert!(is_github_events_disabled(&error));
+        assert!(
+            mj_controller::database::load_github_watches("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     struct FailingSessionClassifier(Arc<AtomicBool>);

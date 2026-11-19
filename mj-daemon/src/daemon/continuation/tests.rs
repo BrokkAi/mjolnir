@@ -1516,12 +1516,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         rate_limited_until_epoch_seconds: None,
         next_check_at_epoch_seconds: None,
     };
-    let request = QuotaRefreshRequest::for_profile(
-        "claude",
-        &profile,
-        home.path().to_path_buf(),
-        mj_controller::quota::QuotaRuntimeConfig::of(&config),
-    );
+    let request = QuotaRefreshRequest::for_profile("claude", &profile, home.path().to_path_buf());
     mj_controller::database::save_quota_report(&request.cache_identity(), &stored).unwrap();
     let reports = Arc::new(Mutex::new(mj_controller::quota::QuotaReportMap::new()));
     let (publications, quota_feed) =
@@ -1677,7 +1672,6 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 "claude",
                 &config.profiles["claude"],
                 home.path().to_path_buf(),
-                mj_controller::quota::QuotaRuntimeConfig::of(config),
             )
             .cache_identity()
         };
