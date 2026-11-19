@@ -790,6 +790,9 @@ mod tests {
             undecided,
             "a failed item remains eligible for a later observation"
         );
+        // Mark revisions seen before the repair, so the observer's recovery
+        // revision cannot be consumed before the ledger is checked.
+        revisions.borrow_and_update();
         let before_repair =
             mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
                 .await
@@ -809,7 +812,6 @@ mod tests {
         }).await.unwrap();
         // Hard-won: 4bf70672c: an observation with an unreadable item waited for an unrelated revision, so an idle daemon never retried it.
         // No revision is published here: the observer's own failure backoff must retry the repaired item.
-        revisions.borrow_and_update();
         loop {
             tokio::select! {
                 changed = revisions.changed() => { changed.unwrap(); },
