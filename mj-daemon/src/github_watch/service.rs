@@ -758,6 +758,7 @@ async fn build_session_evidence(
         let mut specs = Vec::new();
         let mut scanned = Vec::new();
         for (index, pair) in pairs.iter().enumerate() {
+            anyhow::ensure!(!stop.is_cancelled(), "GitHub history evidence cancelled");
             if let Some(sink) =
                 mj_transcript::github_history::history_scanner(&pair.original, &pair.base)?
             {
