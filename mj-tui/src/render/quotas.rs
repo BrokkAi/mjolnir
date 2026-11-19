@@ -1163,10 +1163,13 @@ mod tests {
         let mut reports = dashboard.quotas.clone();
         reports.remove("claude2");
         dashboard.set_quotas(reports);
+        // Hard-won: quota review: a profile whose row changed type lost its
+        // selection to the first row, so `e` renamed another profile.
         assert_eq!(
             dashboard.selected_quota_row(),
-            Some(QuotaRow::Pool(key.clone()))
+            Some(QuotaRow::Profile("claude2".into()))
         );
+        dashboard.quota_selection = Some(QuotaRow::Pool(key.clone()));
         dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert!(matches!(
             dashboard.selected_quota_row(),

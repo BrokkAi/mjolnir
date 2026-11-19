@@ -1449,15 +1449,44 @@ impl DashboardState {
 
     pub(crate) fn selected_quota_row(&self) -> Option<crate::render::quota_pools::QuotaRow> {
         use crate::render::quota_pools::QuotaRow;
-        let rows = self.quota_rows();
+        let pools = self.quota_pools();
+        let rows = crate::render::quota_pools::selectable_rows(&pools, &self.quota_expanded);
+        // A profile's row can change type between refreshes (a status row
+        // becomes a pool or lane after its first reading, and back on a
+        // failure), so follow the profile before falling back to its pool.
+        let profile_row = |id: &str| {
+            rows.iter()
+                .find(|row| match row {
+                    QuotaRow::Profile(other) | QuotaRow::Lane(_, other) => other == id,
+                    QuotaRow::Pool(_) => false,
+                })
+                .or_else(|| {
+                    rows.iter().find(|row| match row {
+                        QuotaRow::Pool(key) => pools
+                            .iter()
+                            .flat_map(|provider| &provider.pools)
+                            .find(|pool| pool.key == *key)
+                            .is_some_and(|pool| {
+                                pool.members.len() == 1 && pool.members[0].id == id
+                            }),
+                        _ => false,
+                    })
+                })
+        };
         self.quota_selection
             .as_ref()
             .and_then(|selected| {
-                rows.iter().find(|row| *row == selected).or_else(|| {
-                    selected.pool().and_then(|key| {
-                        rows.iter().find(|row| **row == QuotaRow::Pool(key.clone()))
+                rows.iter()
+                    .find(|row| *row == selected)
+                    .or_else(|| match selected {
+                        QuotaRow::Profile(id) | QuotaRow::Lane(_, id) => profile_row(id),
+                        QuotaRow::Pool(_) => None,
                     })
-                })
+                    .or_else(|| {
+                        selected.pool().and_then(|key| {
+                            rows.iter().find(|row| **row == QuotaRow::Pool(key.clone()))
+                        })
+                    })
             })
             .or_else(|| rows.first())
             .cloned()
