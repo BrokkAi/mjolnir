@@ -518,10 +518,9 @@ fn pool_bar(
         } else {
             (cells * usize::from(member.remaining) + 50) / 100
         };
-        // A partly used reading never draws full or empty, so its label stays
-        // in the bar; an expired reading stays empty.
-        if !member.awaiting_reading && cells > 1 && member.remaining > 0 && member.remaining < 100 {
-            filled = filled.clamp(1, cells - 1);
+        // Quota that is left never draws as spent, however narrow the segment.
+        if !member.awaiting_reading && member.remaining > 0 && cells > 0 {
+            filled = filled.max(1);
         }
         let mut label = vec![' '; cells];
         let mut text = if member.awaiting_reading {
@@ -545,9 +544,19 @@ fn pool_bar(
         }
         // A label that does not fit is left out; the expanded pool's lanes
         // show every member's reading, so a collapsed pool never lists some
-        // members by name and not others.
-        let text: Vec<_> = text.chars().collect();
-        if cells >= 6 && text.len() <= cells {
+        // members by name and not others. An unknown or refreshing reading
+        // keeps a one-cell marker so it does not read as spent quota.
+        let mut text: Vec<_> = text.chars().collect();
+        if cells < 6 || text.len() > cells {
+            text = if member.awaiting_reading {
+                vec!['?']
+            } else if refreshing.contains(&member.id) {
+                theme::glyphs().ellipsis.chars().collect()
+            } else {
+                Vec::new()
+            };
+        }
+        if text.len() <= cells {
             label[cells - text.len()..].copy_from_slice(&text);
         }
         for (cell, ch) in label.into_iter().enumerate() {
@@ -697,7 +706,14 @@ fn lane_note(
     period: &PoolPeriod,
     now: u64,
     clock: fn(i64, &str) -> String,
+    refreshing: bool,
 ) -> String {
+    // A collapsed segment can be too narrow to say so; the lane always does.
+    let refresh = if refreshing {
+        format!("refreshing{} · ", theme::glyphs().ellipsis)
+    } else {
+        String::new()
+    };
     let mut note = if member.awaiting_reading {
         format!("{} reset due, awaiting reading", period.label())
     } else if member.remaining == 0 {
@@ -750,7 +766,7 @@ fn lane_note(
             if theme::ascii() { "B" } else { "⟲" }
         ));
     }
-    note
+    refresh + &note
 }
 
 fn wrap_note(text: &str, width: usize) -> Vec<String> {
@@ -841,6 +857,8 @@ fn quota_lines(
                     theme::muted(),
                 ));
             }
+            // Warnings (a refused check, unknown windows) stay visible while
+            // collapsed; each line names one member and opens its menu.
             for member in &pool.members {
                 if let Some(note) = &member.note {
                     for text in wrap_note(
@@ -855,6 +873,7 @@ fn quota_lines(
                         ),
                         width.saturating_sub(2),
                     ) {
+                        profile_rows.push((member.id.clone(), lines.len()));
                         lines.push(Line::styled(format!("  {text}"), theme::muted()));
                     }
                 }
@@ -871,7 +890,15 @@ fn quota_lines(
                 let notes: Vec<_> = pool
                     .members
                     .iter()
-                    .map(|member| lane_note(member, &pool.key.period, now, clock))
+                    .map(|member| {
+                        lane_note(
+                            member,
+                            &pool.key.period,
+                            now,
+                            clock,
+                            dashboard.quota_refreshing.contains(&member.id),
+                        )
+                    })
                     .collect();
                 let longest_note = notes
                     .iter()
