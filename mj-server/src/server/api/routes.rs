@@ -101,6 +101,8 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/export", post(export))
         .route("/ui/requests", post(request_ui))
         .route("/wiki/search", get(wiki_search))
+        .route("/wiki/sync", post(wiki_sync_request))
+        .route("/wiki/sync/watch", get(wiki_sync_watch))
         .route("/wiki/sessions/{wiki_id}", get(wiki_session))
         .route("/wiki/sessions/{wiki_id}/brief", get(wiki_brief))
         .route("/wiki/sessions/{wiki_id}/hits", get(wiki_hits))

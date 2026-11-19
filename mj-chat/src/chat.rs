@@ -77,7 +77,7 @@ use autocomplete::{
 };
 use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
-pub use elicitation::ElicitationDraft;
+pub use elicitation::{ElicitationDraft, ElicitationSurface};
 use history::HistorySearch;
 #[cfg(test)]
 use rendering::voice_button_area;
@@ -197,14 +197,29 @@ pub struct ChatFooter<'a> {
 /// The local form state saved while the dashboard attaches another session.
 /// The reviewer metadata is part of the identity because reviewer answers are
 /// delivered to a different harness than primary-agent answers.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChatElicitationDraft {
     form: ElicitationDraft,
     reviewer: bool,
     reviewer_role: Option<String>,
 }
 
+/// A logical form target, independent of presentation and editable values.
+#[derive(Debug, Clone, PartialEq)]
+struct ElicitationIdentity {
+    request: ElicitationRequest,
+    reviewer: bool,
+    reviewer_role: Option<String>,
+}
+
 impl ChatElicitationDraft {
+    fn identity(&self) -> ElicitationIdentity {
+        ElicitationIdentity {
+            request: self.request().clone(),
+            reviewer: self.reviewer,
+            reviewer_role: self.reviewer_role.clone(),
+        }
+    }
     #[must_use]
     pub fn matches(&self, request: &ElicitationRequest) -> bool {
         self.form.matches(request)
@@ -312,8 +327,7 @@ pub enum ChatAction {
     /// the role that asked, never to the primary: a turn review can have
     /// several harnesses waiting at once.
     RespondReviewerElicitation {
-        role: Option<String>,
-        elicitation_id: String,
+        draft: ChatElicitationDraft,
         response: ElicitationResponse,
     },
     PasteFromClipboard,
@@ -565,6 +579,8 @@ pub struct ChatState {
     pending_elicitations: Vec<ElicitationRequest>,
     /// The daemon-owned review projected into prompt status and actions.
     turn_review: Option<Box<TurnReview>>,
+    // None becomes authoritative only after the host supplies its first projection.
+    review_projection_known: bool,
     /// What `[review]` says, mirrored from the config the TUI already drains,
     /// so `/review status` and the composer title can report it.
     review_config: mj_core::config::ReviewConfig,
@@ -618,6 +634,7 @@ pub struct ChatState {
     feedback: Notices,
     connection_feedback: Option<String>,
     operation_feedback: BTreeMap<String, String>,
+    deferred_form_results: Vec<remote::ChatRemoteResult>,
     conversation_notices: Vec<feedback::ConversationNotice>,
     /// Whether Codex OAuth credentials and the voice helper are available. The runtime
     /// owns discovering this asynchronously; the chat starts disabled until
@@ -760,6 +777,7 @@ impl ChatState {
             elicitation: None,
             pending_elicitations: Vec::new(),
             turn_review: None,
+            review_projection_known: false,
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
             review_unavailable: None,
@@ -798,6 +816,7 @@ impl ChatState {
             feedback: Notices::default(),
             connection_feedback: None,
             operation_feedback: BTreeMap::new(),
+            deferred_form_results: Vec::new(),
             conversation_notices: Vec::new(),
             voice_available: false,
             voice_active: false,
@@ -1260,6 +1279,14 @@ impl ChatState {
         self.elicitation_is_reviewers && self.elicitation.is_some()
     }
 
+    fn elicitation_identity(&self) -> Option<ElicitationIdentity> {
+        Some(ElicitationIdentity {
+            request: self.elicitation.as_ref()?.request().clone(),
+            reviewer: self.elicitation_is_reviewers,
+            reviewer_role: self.elicitation_role.clone(),
+        })
+    }
+
     pub(super) fn elicitation_source(&self) -> (bool, Option<&str>) {
         (
             self.elicitation_is_reviewers,
@@ -1284,6 +1311,13 @@ impl ChatState {
     /// Take a process-local snapshot before this chat is replaced by another
     /// session. The snapshot carries reviewer routing metadata as well as the
     /// form values, because those answers do not all go to the primary agent.
+    /// Form recovery snapshots owned by this composer, including parked results.
+    pub fn elicitation_drafts(&self) -> Vec<ChatElicitationDraft> {
+        let mut drafts = self.elicitation_draft().into_iter().collect::<Vec<_>>();
+        drafts.extend(self.deferred_form_result_drafts());
+        drafts
+    }
+
     pub(super) fn elicitation_draft(&self) -> Option<ChatElicitationDraft> {
         let dialog = self.elicitation.as_ref()?;
         Some(ChatElicitationDraft {
@@ -1315,6 +1349,48 @@ impl ChatState {
         self.elicitation_is_reviewers = draft.reviewer;
         self.elicitation_role = draft.reviewer_role;
         true
+    }
+
+    fn restore_failed_reviewer_elicitation(
+        &mut self,
+        draft: ChatElicitationDraft,
+        error: String,
+    ) -> bool {
+        if !self.pending_reviewer_matches(&draft) {
+            return true;
+        }
+        let matches = self.elicitation_identity() == Some(draft.identity());
+        if self.elicitation.is_some() && !matches {
+            // Another form owns focus. Keep the whole result with its draft,
+            // rather than losing it or replacing the visible question.
+            self.deferred_form_results
+                .push(remote::ChatRemoteResult::ReviewerAnswer {
+                    draft: Some(Box::new(draft)),
+                    result: Err(error),
+                });
+            return false;
+        }
+        if self.elicitation.is_none() {
+            self.show_review_role_elicitation(draft.reviewer_role.clone(), draft.request().clone());
+        }
+        self.restore_elicitation_draft(draft);
+        if let Some(dialog) = self.elicitation.as_mut() {
+            dialog.set_response_error(format!("Answer was not sent: {error}"));
+        }
+        true
+    }
+
+    fn restore_failed_elicitation(&mut self, request: ElicitationRequest, error: String) {
+        if !self.pending_elicitations.contains(&request) {
+            return;
+        }
+        self.restore_elicitation(request.clone());
+        if self.elicitation_source() == (false, None)
+            && let Some(dialog) = self.elicitation.as_mut()
+            && dialog.request() == &request
+        {
+            dialog.set_response_error(error);
+        }
     }
 
     fn restore_elicitation(&mut self, request: ElicitationRequest) {

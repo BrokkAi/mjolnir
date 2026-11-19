@@ -562,7 +562,11 @@ pub(super) fn record_subagent_handback_to(
         )
         .optional()?
         .flatten();
-    if recorded_for.as_deref() == Some(handback.command_id.as_str()) {
+    // The first report for a turn wins, including when a restart continuation
+    // of that turn reports again under its own command ID.
+    if recorded_for.is_some_and(|recorded| {
+        mj_core::subagent::report_answers(&recorded, &handback.command_id)
+    }) {
         return Ok(false);
     }
     tx.execute(
@@ -1659,6 +1663,8 @@ pub fn save_startup_cleanup_outcome(session: &SessionRecord, archive: bool) -> R
                 "UPDATE sessions SET archived=1 WHERE session_id=?1",
                 [&session.id],
             )?;
+            // Only the non-retry cleanup outcome owns final startup failure.
+            super::mailbox::settle_failed_parent_messages_with(&tx, &session)?;
         }
         tx.commit()?;
         Ok(())

@@ -250,12 +250,19 @@ pub(super) fn spawn_remote_actor(
 pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
+    let (launches_tx, mut launches_rx) = mpsc::unbounded_channel();
+    let mut committed = if crate::database::database_writer_installed() {
+        Some(crate::database::subscribe_committed_state()?)
+    } else {
+        None
+    };
     let (updates_tx, updates_rx) = coalesced_update_channel();
     let session_gate = updates_tx.session_gate.clone();
     let (published_tx, mut published_rx) = mpsc::unbounded_channel();
     let (requests_tx, requests_rx) = mpsc::channel(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let mut starting = StartingSessions::default();
         let mut actors = BTreeMap::<String, RemoteActorRegistration>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut desired = BTreeMap::<String, RelaySessionTarget>::new();
@@ -295,10 +302,42 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                         }
                     }
                 }
-                command = commands_rx.recv() => {
-                    let Some(ManagerCommand::Session { session_id, reply }) = command else {
-                        break;
+                event = launches_rx.recv() => {
+                    let Some(event) = event else { break; };
+                    let view = match &event {
+                        StartingEvent::Route { session_id, .. } => actors.get(session_id).map(|actor| actor.view.borrow().clone()),
+                        _ => None,
                     };
+                    let snapshot = committed.as_ref().map(|feed| feed.borrow().clone());
+                    match snapshot.as_ref() {
+                        Some(Ok(snapshot)) => starting.event(event, view, Some(snapshot)),
+                        None => starting.event(event, view, None),
+                        Some(Err(error)) => {
+                            tracing::error!(%error, "launch registration lost its durable state feed");
+                            break;
+                        }
+                    }
+                }
+                changed = async {
+                    match &mut committed {
+                        Some(feed) => feed.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() { break; }
+                    match &*committed.as_mut().expect("feed changed").borrow_and_update() {
+                        Ok(snapshot) => {
+                            starting.reconcile_committed(&snapshot.state);
+                            starting.reconcile_attached(|id| actors.get(id).and_then(|actor| crate::mailbox_outbox::published_worker_relay_protocol(&actor.view.borrow())));
+                        },
+                        Err(error) => {
+                            tracing::error!(%error, "launch registration lost its durable state feed");
+                            break;
+                        }
+                    }
+                }
+                command = commands_rx.recv() => {
+                    let Some(ManagerCommand::Session { session_id, reply }) = command else { break; };
                     let handle = actors.get(&session_id).map(|actor| ManagedSessionHandle {
                         session_id: session_id.clone(),
                         commands: actor.commands.clone(),
@@ -340,6 +379,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
             harness_failure: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,
             commands: commands_tx,
+            launches: launches_tx,
             session_cpu: watch::channel(SessionCpuTable::new()).1,
         },
         updates: updates_rx,

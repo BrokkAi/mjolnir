@@ -188,6 +188,7 @@ pub type BackgroundHold = Box<dyn Send + Sync>;
 /// daemon reloads config.toml every 500 ms for the same reason.
 #[derive(Default)]
 pub struct ControllerEnvironment {
+    pub(super) manager: Option<SessionManagerControl>,
     pub(super) runtime: SharedReviewerRuntime,
     /// The daemon's gate for recovery copies and worker upgrades, which a
     /// review waits behind instead of racing for the session's lease.
@@ -351,21 +352,26 @@ impl ReviewEnvironment for ControllerEnvironment {
         launch.effort = reviewer.main.effort.clone();
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);
         controller
-            .register_subagent(mj_controller::controller::RegisterSubagentRequest {
-                no_github_credentials: false,
-                kind: mj_core::subagent::SubagentKind::Reviewer,
-                reviewer_launch: Some(launch),
-                parent_session_id: session_id.to_owned(),
-                task_name: "review".to_owned(),
-                profile_id: reviewer.profile.clone(),
-                model: reviewer.main.model.clone(),
-                effort: reviewer.main.effort.clone(),
-                fast_mode: reviewer.main.fast_mode,
-                working_directory: working_directory.unwrap_or_default(),
-                initial_prompt: prompt,
-                request_key,
-                report_root: None,
-            })
+            .register_subagent_with_manager(
+                mj_controller::controller::RegisterSubagentRequest {
+                    no_github_credentials: false,
+                    kind: mj_core::subagent::SubagentKind::Reviewer,
+                    reviewer_launch: Some(launch),
+                    parent_session_id: session_id.to_owned(),
+                    task_name: "review".to_owned(),
+                    profile_id: reviewer.profile.clone(),
+                    model: reviewer.main.model.clone(),
+                    effort: reviewer.main.effort.clone(),
+                    fast_mode: reviewer.main.fast_mode,
+                    working_directory: working_directory.unwrap_or_default(),
+                    initial_prompt: prompt,
+                    request_key,
+                    report_root: None,
+                },
+                self.manager
+                    .as_ref()
+                    .ok_or("review session manager is unavailable")?,
+            )
             .map(|child| child.child_session_id)
             .map_err(|e| format!("{e:#}"))
     }

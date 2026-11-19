@@ -98,6 +98,12 @@ where
         .pending_for_bridge_with_source(spec.verdict.clone(), Some(spec.turn_context.clone()));
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
+    // A bridge-local counter alone repeats after reload (and worker restart).
+    // Use the same unique identity source as sessions, keeping the namespace.
+    let permission_id_prefix = format!(
+        "{TOOL_PERMISSION_ID_PREFIX}{}-",
+        mj_core::state::new_session_id()?
+    );
     let permission_review_ids = Arc::new(AtomicU64::new(1));
     let ext_review_ids = Arc::new(AtomicU64::new(1));
     let session_elicitations = pending_elicitations.clone();
@@ -345,6 +351,7 @@ where
                 let permission_implementation_slot = permission_implementation_slot.clone();
                 let permission_elicitations = permission_elicitations.clone();
                 let permission_review_ids = permission_review_ids.clone();
+                let permission_id_prefix = permission_id_prefix.clone();
                 let permission_owned_mcp = permission_owned_mcp.clone();
                 let permission_tool_content = permission_tool_content.clone();
                 let permission_observe = permission_observe.clone();
@@ -686,7 +693,7 @@ where
                             "permission request not classified as a plan review and could not be serialized"
                         ),
                     }
-                    let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                    let id = format!("{permission_id_prefix}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                     // The worker alone decides which answers this form offers, and
                     // accepts only those (see `permission_choices`).
                     let PermissionAnswers { choices, skip } =
@@ -788,8 +795,10 @@ where
                         }
                         if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                             elicitation_id: id,
-                            action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
-                            reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
+                            action: response.as_ref().map_or("closed", PendingAnswer::action_name).into(),
+                            reply: response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel)
+                                .map(|response| form.reply_text(response)),
                         }).await {
                             tracing::debug!(%error, "harness permission result receiver closed");
                         }
@@ -1352,7 +1361,7 @@ pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
 }
 
 /// The id prefix of a permission request shown as a form.
-pub(super) const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+pub(super) use mj_core::elicitation::TOOL_PERMISSION_ID_PREFIX;
 
 /// Describe a failed ACP connection. The hint about stray bridge output only
 /// helps when the connection itself broke or could not parse what the bridge

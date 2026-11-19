@@ -715,8 +715,9 @@ fn project_states(
                 // The frozen registration identifies one review even when
                 // several reviewer roles contributed findings.
                 card.holder = Some(review.session_id.clone());
-                card.form = Some(CardForm {
-                    raised_at_ms: committed.map_or(0, |state| {
+                card.form = Some(CardForm::review_findings(
+                    reviewer,
+                    committed.map_or(0, |state| {
                         review
                             .reviewer_children()
                             .chain(review.child_session_id.as_deref())
@@ -737,9 +738,8 @@ fn project_states(
                             .max()
                             .unwrap_or(0)
                     }),
-                    request_id: format!("review-verdict.{reviewer}.findings"),
-                    message: review.status.clone(),
-                });
+                    review.status.clone(),
+                ));
             }
             if let Some(card) = &mut card {
                 card.since_ms = card
@@ -970,11 +970,7 @@ fn notification_card(
                     .find(|request| {
                         !runtime.subagents.contains_key(holder) || !request.goes_to_parent()
                     })
-                    .map(|request| CardForm {
-                        raised_at_ms: raised_at(&request.id),
-                        request_id: request.id.clone(),
-                        message: request.message.clone(),
-                    })
+                    .map(|request| CardForm::elicitation(request, raised_at(&request.id)))
             })
             .or_else(|| {
                 runtime
@@ -987,11 +983,7 @@ fn notification_card(
                     .map(|question| {
                         let raised_at_ms = raised_at(&question.request.id);
                         let request = question.session_request();
-                        CardForm {
-                            raised_at_ms,
-                            request_id: request.id,
-                            message: request.message,
-                        }
+                        CardForm::elicitation(&request, raised_at_ms)
                     })
             })
     });
@@ -1011,15 +1003,13 @@ fn notification_card(
     } else if let Some((source, native, request)) = native {
         (
             Some(native.agent.owner_session_id.clone()),
-            Some(CardForm {
-                raised_at_ms: native.pending_input_raised_at_ms.unwrap_or(0),
-                request_id: format!(
-                    "native.{}:{source}.{}.{request}",
-                    source.len(),
-                    native.generation_ordinal
-                ),
-                message: native.pending_input_message.clone().unwrap_or_default(),
-            }),
+            Some(CardForm::native(
+                source,
+                native.generation_ordinal,
+                request,
+                native.pending_input_raised_at_ms.unwrap_or(0),
+                native.pending_input_message.clone().unwrap_or_default(),
+            )),
         )
     } else {
         (holder.cloned(), None)
@@ -1295,6 +1285,23 @@ mod tests {
             fields: vec![],
             tool_permission: None,
         };
+        // Hard-won: 56747ef: opaque harness IDs collided with generated native/verdict prefixes.
+        for opaque_id in ["native.real-request", "review-verdict.real-request"] {
+            let mut primary = runtime.clone();
+            let mut materialized = MaterializedSession::empty("parent");
+            materialized.pending_elicitations = vec![request(opaque_id)];
+            primary.transcripts.insert(
+                "parent".into(),
+                mj_client::runtime_feed::SessionTail::of(&materialized, &Default::default(), 12),
+            );
+            let cards = project_states(&primary, BTreeSet::from(["parent".into()])).cards;
+            let card: mj_client::runtime_feed::NotificationCard =
+                serde_json::from_value(serde_json::to_value(&cards["parent"]).unwrap()).unwrap();
+            let form = card.form.unwrap();
+            assert_eq!(form.request_id, opaque_id);
+            assert!(form.requires_elicitation());
+            assert!(!form.is_native());
+        }
         let mut view = NativeAgentView {
             generation_ordinal: 1,
             agent,
@@ -1315,6 +1322,7 @@ mod tests {
         let form = card.form.as_ref().unwrap();
         let first_request = format!("native.{}:{id}.1.first-request", id.len());
         assert_eq!(form.request_id, first_request);
+        assert!(form.is_native());
         assert_eq!(form.message, "Approve the native action?");
         assert_eq!(form.raised_at_ms, 42);
         assert_eq!(card.since_ms, 42);
@@ -1412,6 +1420,7 @@ mod tests {
         assert!(card.entries.is_empty());
         let form = card.form.as_ref().unwrap();
         assert_eq!(form.request_id, "review-verdict.reviewer-a.findings");
+        assert!(!form.requires_elicitation());
         assert_eq!(form.message, "Review found issues");
         runtime.metadata.reviews[0].roles.reverse();
         let reordered = project_states(&runtime, BTreeSet::from(["parent".into()]));

@@ -529,6 +529,7 @@ fn only_harness_observations_request_credential_sync() {
     assert!(!events_report_auth_failure(
         HarnessKind::Claude,
         &[event(RelayObservation::CommandInterrupted {
+            continuation_id: None,
             reason: None,
             command_id: "command-1".into(),
             command: crate::relay::RelayCommandKind::Prompt,

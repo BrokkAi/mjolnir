@@ -433,6 +433,20 @@ impl HarnessKind {
         }
     }
 
+    /// Pin global instructions to a session-owned staged copy.
+    pub fn configure_staged_home_environment(
+        self,
+        home: &Path,
+        environment: &mut BTreeMap<String, String>,
+    ) {
+        self.configure_home_environment(home, environment);
+        if self == Self::OpenCode {
+            // OpenCode replaces its XDG global config root with this override.
+            // Both variables must name the session-owned staged profile.
+            environment.insert("OPENCODE_CONFIG_DIR".into(), crate::target_path::text(home));
+        }
+    }
+
     /// Point this harness's own CLI at a profile's configured home, for the
     /// commands that act on the person's own login rather than on a session:
     /// `mj login`, `claude setup-token`, and quota probes.

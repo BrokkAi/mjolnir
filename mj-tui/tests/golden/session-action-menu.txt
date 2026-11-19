@@ -703,7 +703,7 @@ unread dismissed: Some("Notification dismissed.")
 │                                      ││? ACP pretty name · hel · <age>                                               │
 │                                      ││                                                                              │
 │                                      ││ Waiting for your input                                                       │
-│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │

@@ -7,6 +7,53 @@ pub struct SessionManagerControl {
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
+    pub(super) launches: mpsc::UnboundedSender<StartingEvent>,
+}
+
+/// Owns a pre-commit launch registration. Publication hands it to the durable
+/// state feed; every earlier exit releases it through the manager's channel.
+pub struct StartingSessionRegistration {
+    pub(super) session_id: Option<String>,
+    pub(super) launches: mpsc::UnboundedSender<StartingEvent>,
+}
+
+impl StartingSessionRegistration {
+    pub fn publish(mut self) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.launches
+            .send(StartingEvent::Published {
+                session_id: self
+                    .session_id
+                    .as_ref()
+                    .expect("registration is held")
+                    .clone(),
+                reply,
+            })
+            .context("session manager stopped")?;
+        response
+            .blocking_recv()
+            .context("session manager stopped")??;
+        self.session_id = None;
+        Ok(())
+    }
+}
+
+impl Drop for StartingSessionRegistration {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id.take()
+            && self
+                .launches
+                .send(StartingEvent::Aborted {
+                    session_id: session_id.clone(),
+                })
+                .is_err()
+        {
+            tracing::debug!(
+                session_id,
+                "session manager already stopped before launch registration release"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

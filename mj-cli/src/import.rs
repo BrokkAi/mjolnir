@@ -1126,7 +1126,6 @@ mod tests {
                 rows: Vec::new(),
                 status: WikiStatus {
                     state: WikiIndexState::Ready,
-                    topping_up: false,
                 },
             },
         );

@@ -53,13 +53,13 @@ mj-server = { path = "mj-server", package = "brokk-mj-server", version = "2.71.0
 mj-daemon = { path = "mj-daemon", package = "brokk-mj-daemon", version = "2.71.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.71.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.71.0" }
-sessionwiki = { package = "brokk-sessionwiki", version = "0.34.25" }
+sessionwiki = { package = "brokk-sessionwiki", version = "0.34.27" }
 
 # Every external dependency that two or more crates share is declared once
 # here, so a version can only be raised in one place. Each entry carries the
 # features every user of it needs; a crate that needs more adds them beside
 # `workspace = true`, which unions them with these.
-agent-client-protocol = { version = "5", features = ["unstable_session_fork", "unstable_end_turn_token_usage"] }
+agent-client-protocol = { version = "5", features = ["unstable_session_fork", "unstable_session_system_prompt", "unstable_end_turn_token_usage"] }
 anyhow = "1"
 axum = "0.8"
 # Use the ring provider already pulled by reqwest instead of aws-lc-rs, which

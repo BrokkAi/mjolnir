@@ -326,7 +326,7 @@ pub fn worker_launch_config_with_checkout(
     }
     profile
         .kind
-        .configure_home_environment(Path::new(&target_profile_home), &mut environment);
+        .configure_staged_home_environment(Path::new(&target_profile_home), &mut environment);
     let observe_policy = mj_core::observe::ObserveEnforcementConfig::from_environment()?
         .map(|config| config.supports_harness(profile.kind))
         .transpose()?;

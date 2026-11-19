@@ -19,7 +19,18 @@ pub(super) struct EarlierMessages {
 }
 
 impl ChatState {
+    /// The earlier-message reader belongs to the conversation presentation.
+    /// A notification form still edits the same dialog while that reader is open.
+    pub(super) fn earlier_reader_has_focus(&self) -> bool {
+        self.earlier.is_some()
+            && !self
+                .elicitation
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_notification_surface())
+    }
+
     pub(super) fn open_earlier_messages(&mut self) {
+        self.cancel_conversation_pointer();
         self.earlier_generation += 1;
         self.earlier = Some(EarlierMessages {
             generation: self.earlier_generation,

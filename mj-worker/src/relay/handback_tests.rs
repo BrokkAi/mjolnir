@@ -1,6 +1,7 @@
 use super::{test_support::*, *};
 use mj_core::config::HarnessKind;
 
+// Hard-won: 1d399ac64: restarting a mailbox wake overwrote a newer hook assignment.
 #[test]
 fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_check() {
     let root = tempfile::tempdir().unwrap();
@@ -165,7 +166,7 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
     // Hard-won: 9130f139e: parent follow-ups delivered through the mailbox bypassed the handback check
     for hook in [true, false] {
         use mj_core::mailbox::{MailboxDeliveryPath, MailboxEvent, MailboxEventBody};
-        let event = MailboxEvent {
+        let mut event = MailboxEvent {
             key: format!("parent-followup-{hook}"),
             source: "parent".into(),
             wake: true,
@@ -212,7 +213,54 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
                 })
                 .unwrap();
             relay.claim_pending_commands(true).unwrap();
-            finish_prompt(&mut relay, "mailbox-wake-followup");
+            let newer = MailboxEvent {
+                key: "newer-hook-assignment".into(),
+                body: MailboxEventBody::ParentMessage {
+                    text: "Newer assignment supersedes the wake".into(),
+                },
+                ..event.clone()
+            };
+            relay
+                .record_observation(RelayObservation::CommandQueued {
+                    command_id: "deliver-newer-hook".into(),
+                    command: RelayCommand::DeliverMailboxEvent {
+                        event: newer.clone(),
+                    },
+                    created_at_ms: 2,
+                })
+                .unwrap();
+            relay
+                .record_observation(RelayObservation::MailboxEventsDelivered {
+                    event_keys: vec![newer.key.clone()],
+                    path: MailboxDeliveryPath::ToolHook,
+                    prompt_command_id: None,
+                    hook_event: Some("PostToolUse".into()),
+                    events: vec![newer.clone()],
+                    lease_id: None,
+                    steering: None,
+                })
+                .unwrap();
+            let newer_id = newer.handback_assignment().unwrap().0;
+            drop(relay);
+            relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+            relay.set_turn_verdict_harness(HarnessKind::Codex);
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: vec![],
+                })
+                .unwrap();
+            let resumed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(resumed.len(), 1);
+            assert!(mj_core::continuation::is_restart_continuation(
+                &resumed[0].command_id
+            ));
+            assert_eq!(
+                relay.snapshot.handback_checks.assignment_id.as_ref(),
+                Some(&newer_id)
+            );
+            finish_prompt(&mut relay, &resumed[0].command_id);
+            // Continue the existing checks against the latest assignment.
+            event = newer;
         }
         let expected_id = event.handback_assignment().unwrap().0;
         assert_eq!(
@@ -223,11 +271,11 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
             .prepare_handback_check("Mailbox report")
             .unwrap()
             .unwrap();
-        assert!(
-            serde_json::to_string(&evidence)
-                .unwrap()
-                .contains(&format!("Validate mailbox delivery {hook}"))
-        );
+        assert!(serde_json::to_string(&evidence).unwrap().contains(if hook {
+            "Validate mailbox delivery true"
+        } else {
+            "Newer assignment supersedes the wake"
+        }));
         assert!(relay.prepare_handback_check("Duplicate").unwrap().is_none());
         drop(relay);
         std::fs::write(root.path().join(RELAY_STATE_FILE), stale_snapshot).unwrap();

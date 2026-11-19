@@ -941,14 +941,14 @@ impl JevConfig {
     }
 }
 
-/// Where the daemon runs the quota checks that start a harness program: the
-/// Codex app-server, Grok's agent, and Claude Code's login refresh.
-/// `[quota] runtime = "auto"`.
+/// Quota display and profile preferences.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QuotaConfig {
-    #[serde(skip_serializing_if = "QuotaRuntimeChoice::is_default")]
-    pub runtime: QuotaRuntimeChoice,
+    /// Retired runtime selector, accepted from older clients and files but ignored.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "discard_legacy_setting")]
+    pub runtime: (),
     /// Profiles chosen in the dashboard to win load balancing when their
     /// quota allows, most preferred first. `[quota] prefer = [...]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -958,29 +958,6 @@ pub struct QuotaConfig {
 impl QuotaConfig {
     fn is_default(&self) -> bool {
         self == &Self::default()
-    }
-}
-
-/// `Auto` runs a check on the host when the host already has the harness it
-/// starts (Codex's managed installation, `grok`, or `claude`). Otherwise it
-/// runs the check in the image of an enabled local Podman runtime, else an
-/// enabled local Docker runtime, when its engine is installed, and on the host
-/// when there is no such runtime. `Podman` and `Docker` insist on that engine
-/// (with its runtime's image, or the release's agent-dev image without one),
-/// whether or not the host has the harness; `Host` never uses a container.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum QuotaRuntimeChoice {
-    #[default]
-    Auto,
-    Podman,
-    Docker,
-    Host,
-}
-
-impl QuotaRuntimeChoice {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
     }
 }
 
@@ -1120,7 +1097,7 @@ pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/conf
 pub const PRODUCT_DIR: &str = "mjolnir";
 /// The registry repository for the release image.
 pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
-/// The image for daemon-container mode and quota containers.
+/// The image for daemon-container mode.
 ///
 /// A release build names the immutable image published for its own version; a
 /// development build names the floating image published from master.
@@ -1264,11 +1241,9 @@ fn unread_build_cache_keys(document: &toml::Value) -> Vec<String> {
     unread
 }
 
-// Old config files may still contain [startup]. Accept it without retaining
-// settings that could recreate automatic first-session behavior on save. The
-// section is read whole rather than as `IgnoredAny`, which the file loader
-// counts as a key no setting reads.
-fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
+// Read retired settings whole without retaining or writing them. Unlike
+// `IgnoredAny`, this does not make the file loader flag a key as unread.
+fn discard_legacy_setting<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<(), D::Error> {
     serde_json::Value::deserialize(deserializer).map(|_| ())
@@ -1458,7 +1433,7 @@ struct StoredConfig {
         default,
         rename = "startup",
         skip_serializing,
-        deserialize_with = "discard_legacy_startup"
+        deserialize_with = "discard_legacy_setting"
     )]
     legacy_startup: (),
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

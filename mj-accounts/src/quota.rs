@@ -14,9 +14,7 @@ use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
 use mj_core::codex_provider::BuiltInCodexProvider;
-use mj_core::config::{
-    AuthScheme, HarnessKind, HarnessProfile, QuotaRuntimeChoice, harness_authentication_marker,
-};
+use mj_core::config::{AuthScheme, HarnessKind, HarnessProfile, harness_authentication_marker};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
@@ -58,69 +56,6 @@ pub struct QuotaRefreshRequest {
     /// billed by usage the way Dsh and a Codex custom provider are. Other
     /// harnesses ignore it.
     pub opencode_usage_priced: bool,
-    /// Where a check that starts the harness runs it (`[quota] runtime`).
-    pub runtime: QuotaRuntimeConfig,
-}
-
-/// What `[quota] runtime` and the configured runtimes allow a check that
-/// starts a harness to use.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuotaRuntimeConfig {
-    pub choice: QuotaRuntimeChoice,
-    /// The release image with the enabled local Podman runtime's pull policy,
-    /// preferring a configured runtime over a standard candidate.
-    pub podman_image: Option<RuntimeImage>,
-    /// The same for Docker.
-    pub docker_image: Option<RuntimeImage>,
-    /// Whether the daemon runs in its own container, whose image already
-    /// carries every harness: checks then run beside it, whatever `choice` says.
-    pub in_daemon_container: bool,
-}
-
-/// The quota release image, with a local runtime's pull policy: the policy, not
-/// the quota check, decides whether the daemon downloads the image.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeImage {
-    pub image: String,
-    pub pull_policy: mj_core::config::ImagePullPolicy,
-}
-
-impl QuotaRuntimeConfig {
-    pub fn of(config: &mj_core::config::Config) -> Self {
-        let image = |wanted: mj_core::targets::ImageHost| {
-            let mut enabled = config
-                .targets
-                .iter()
-                .filter(|(id, _)| !config.disabled_targets.contains(*id))
-                .filter_map(|(id, target)| {
-                    let (host, container) = target.image_host()?;
-                    (host == wanted).then(|| (config.default_targets.contains(id), container))
-                })
-                .collect::<Vec<_>>();
-            // Configured runtimes first: `false` sorts before `true`.
-            enabled.sort_by_key(|(standard, _)| *standard);
-            enabled.first().map(|(_, container)| RuntimeImage {
-                image: mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned(),
-                pull_policy: container.pull_policy,
-            })
-        };
-        Self {
-            choice: config.quota.runtime,
-            podman_image: image(mj_core::targets::ImageHost::LocalPodman),
-            docker_image: image(mj_core::targets::ImageHost::LocalDocker),
-            in_daemon_container: mj_core::placement::daemon_container().is_some(),
-        }
-    }
-
-    /// Never a container.
-    pub fn host() -> Self {
-        Self {
-            choice: QuotaRuntimeChoice::Host,
-            podman_image: None,
-            docker_image: None,
-            in_daemon_container: mj_core::placement::daemon_container().is_some(),
-        }
-    }
 }
 
 /// Where a Codex profile's quota comes from, decided once from its provider
@@ -218,7 +153,6 @@ impl QuotaRefreshRequest {
         profile_id: &str,
         profile: &HarnessProfile,
         cwd: std::path::PathBuf,
-        runtime: QuotaRuntimeConfig,
     ) -> Self {
         let mut environment = profile.environment.resolved().clone();
         profile.kind.configure_profile_home_environment(
@@ -261,7 +195,6 @@ impl QuotaRefreshRequest {
             cwd,
             codex_source: CodexQuotaSource::of_profile(profile),
             opencode_usage_priced,
-            runtime,
         }
     }
 }
@@ -569,26 +502,6 @@ fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
     }
 }
 
-/// Where a check that starts a harness runs it: on this host, or in the
-/// configured container runtime when the host lacks the harness.
-fn quota_container(
-    runtime: &QuotaRuntimeConfig,
-    source_home: &Path,
-    host_has_harness: bool,
-) -> Result<Option<crate::quota_runtime::ContainerCheck>> {
-    Ok(
-        match crate::quota_runtime::QuotaRuntime::current(runtime, host_has_harness)? {
-            crate::quota_runtime::QuotaRuntime::Host => None,
-            crate::quota_runtime::QuotaRuntime::Container(runtime) => {
-                Some(crate::quota_runtime::ContainerCheck {
-                    runtime,
-                    home: source_home.to_owned(),
-                })
-            }
-        },
-    )
-}
-
 /// What the daemon's early Claude grant refresh decided for one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeGrantCheck {
@@ -626,7 +539,7 @@ pub async fn refresh_claude_grant(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
-    let (source, container) = match request.harness.login_store(
+    let source = match request.harness.login_store(
         mj_core::config::HarnessHost::current(),
         &request.source_home,
     ) {
@@ -645,44 +558,19 @@ pub async fn refresh_claude_grant(
                     return ClaudeGrantCheck::Failed;
                 }
             };
-            (
-                claude_usage::LoginSource::Keychain {
-                    lock_marker,
-                    // `security` can wait on a Keychain prompt; the same bound
-                    // as the other host lookups. The login exchange itself
-                    // runs under no deadline.
-                    security: std::sync::Arc::new(crate::targets::BoundedProcessExecutor::new(
-                        crate::harness_auth::KEYCHAIN_READ_TIMEOUT,
-                    )),
-                },
-                None,
-            )
+            claude_usage::LoginSource::Keychain {
+                lock_marker,
+                // `security` can wait on a Keychain prompt; the same bound
+                // as the other host lookups. The login exchange itself
+                // runs under no deadline.
+                security: std::sync::Arc::new(crate::targets::BoundedProcessExecutor::new(
+                    crate::harness_auth::KEYCHAIN_READ_TIMEOUT,
+                )),
+            }
         }
-        mj_core::config::HarnessLoginStore::File { .. } => {
-            // The launcher says whether this host can run Claude Code, so
-            // `auto` picks a container exactly when it cannot.
-            let container = match quota_container(
-                &request.runtime,
-                &request.source_home,
-                launcher.host_can_run(&environment),
-            ) {
-                Ok(container) => container,
-                Err(error) => {
-                    tracing::warn!(
-                        profile_id = %request.profile_id,
-                        error = %format!("{error:#}"),
-                        "could not choose where to refresh the Claude login"
-                    );
-                    return ClaudeGrantCheck::Failed;
-                }
-            };
-            (
-                claude_usage::LoginSource::File {
-                    home: request.source_home.clone(),
-                },
-                container,
-            )
-        }
+        mj_core::config::HarnessLoginStore::File { .. } => claude_usage::LoginSource::File {
+            home: request.source_home.clone(),
+        },
     };
     // No deadline and no cancellation: a started login exchange runs to its
     // own end (see `claude_usage::run_claude_refresh`).
@@ -691,7 +579,6 @@ pub async fn refresh_claude_grant(
         source,
         environment,
         executor,
-        container,
         launcher,
         gate,
         claude_usage::GrantRefreshTrigger {
@@ -773,19 +660,8 @@ async fn refresh_profile_with_cache_root(
         cwd,
         codex_source,
         opencode_usage_priced,
-        runtime,
     } = request;
-    // Only the checks that start a harness program consult the runtime, each
-    // saying whether this host already has the harness it would start.
-    let container =
-        |host_has_harness: bool| quota_container(&runtime, &source_home, host_has_harness);
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
-    // The PATH a host check's program is found on: the profile's own when it
-    // sets one, as the subprocess then receives it, else the daemon's.
-    let host_path = environment
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("PATH"));
     let refreshed_at_epoch_seconds = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -819,237 +695,266 @@ async fn refresh_profile_with_cache_root(
         // provider has no ChatGPT login to refresh and no ChatGPT rate-limit
         // windows to read. Its quota, when the provider publishes one, comes
         // from the provider's own endpoint.
-        HarnessKind::Codex => match codex_source {
-            CodexQuotaSource::Provider(provider)
-                if crate::zai_usage::serves_quota(&provider.host) =>
-            {
-                crate::zai_usage::query(&provider.host, &provider.api_key)
-                    .await
-                    .map(|windows| ProfileQuota {
-                        paid_credits: None,
-                        monthly_price_usd: None,
-                        banked_resets: None,
-                        profile_id: profile_id.clone(),
-                        harness,
-                        windows: windows
-                            .into_iter()
-                            .map(|window| QuotaWindow {
-                                label: window.label,
-                                remaining_percent: Some(window.remaining_percent),
-                                duration_seconds: None,
-                                model_scope: None,
-                                used: window.used,
-                                limit: window.limit,
-                                resets: window.resets_at.and_then(format_reset_local_seconds),
-                                resets_at_epoch_seconds: window.resets_at,
-                            })
-                            .collect(),
-                        extra: None,
-                        error: None,
-                        refreshed_at_epoch_seconds,
-                        rate_limited_until_epoch_seconds: None,
-                        next_check_at_epoch_seconds: None,
-                    })
-            }
-            CodexQuotaSource::Provider(_) | CodexQuotaSource::UsagePriced { .. } => {
-                Ok(usage_priced())
-            }
-            CodexQuotaSource::Unreadable(error) => Err(anyhow::anyhow!(
-                "could not read the Codex configuration: {error}"
-            )),
-            CodexQuotaSource::ChatGptLogin => 'codex: {
-                // Serialize the expiry decision and every app-server request with
-                // other daemons and credential syncs using this login slot.
-                // Waiting for ownership is outside the RPC request timeout.
-                let _credential_guard = match mj_core::credentials::CredentialWriteGuard::acquire(
-                    HarnessKind::Codex,
-                    &credential_path,
-                )
-                .await
+        HarnessKind::Codex => {
+            match codex_source {
+                CodexQuotaSource::Provider(provider)
+                    if crate::zai_usage::serves_quota(&provider.host) =>
                 {
-                    Ok(guard) => guard,
-                    Err(error) => break 'codex Err(error),
-                };
-                let launcher = match container(codex_usage::host_has_codex(
-                    cache_root.as_deref(),
-                    host_path.as_deref(),
-                )) {
-                    Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
-                    Ok(None) => match mj_core::placement::local_harness_runtime() {
-                        mj_core::worker_launch::HarnessRuntimePolicy::Image => {
-                            codex_usage::CodexLauncher::Image
-                        }
-                        _ => codex_usage::CodexLauncher::Managed(cache_root.clone()),
-                    },
-                    Err(error) => break 'codex Err(error),
-                };
-                // A poll starts at most one app-server. A failed rotation drops its
-                // client. When that client was cached from an earlier poll, a new
-                // one may still read the quota, which is how a login that the old
-                // process gave up on recovers (#1224). When this poll started it,
-                // another start would only repeat the failure, so the next poll
-                // tries again instead.
-                let mut failed_rotation = None;
-                if codex_login_is_near_expiry(&credential_path).await {
-                    let started_here = codex_client.is_none();
-                    let login_refresh = codex_usage::refresh_login_with_cache_root(
-                        &mut codex_client,
-                        cwd.clone(),
-                        environment.clone(),
-                        &launcher,
-                    )
-                    .await;
-                    match login_refresh {
-                        Ok(()) => tracing::info!(
-                            profile_id = %profile_id,
-                            "refreshed Codex login ahead of expiry"
-                        ),
-                        Err(failure) => {
-                            tracing::warn!(
+                    crate::zai_usage::query(&provider.host, &provider.api_key)
+                        .await
+                        .map(|windows| ProfileQuota {
+                            paid_credits: None,
+                            monthly_price_usd: None,
+                            banked_resets: None,
+                            profile_id: profile_id.clone(),
+                            harness,
+                            windows: windows
+                                .into_iter()
+                                .map(|window| QuotaWindow {
+                                    label: window.label,
+                                    remaining_percent: Some(window.remaining_percent),
+                                    duration_seconds: None,
+                                    model_scope: None,
+                                    used: window.used,
+                                    limit: window.limit,
+                                    resets: window.resets_at.and_then(format_reset_local_seconds),
+                                    resets_at_epoch_seconds: window.resets_at,
+                                })
+                                .collect(),
+                            extra: None,
+                            error: None,
+                            refreshed_at_epoch_seconds,
+                            rate_limited_until_epoch_seconds: None,
+                            next_check_at_epoch_seconds: None,
+                        })
+                }
+                CodexQuotaSource::Provider(_) | CodexQuotaSource::UsagePriced { .. } => {
+                    Ok(usage_priced())
+                }
+                CodexQuotaSource::Unreadable(error) => Err(anyhow::anyhow!(
+                    "could not read the Codex configuration: {error}"
+                )),
+                CodexQuotaSource::ChatGptLogin => 'codex: {
+                    use mj_core::credentials::CredentialWriteGuard;
+                    let launcher = codex_usage::CodexLauncher::Host;
+                    #[cfg(test)]
+                    let launcher = cache_root.as_ref().map_or(launcher, |root| {
+                        codex_usage::CodexLauncher::Program(
+                            mj_core::harness_runtime::managed_harness_install_dir(
+                                root,
+                                HarnessKind::Codex,
+                            )
+                            .join(mj_core::harness_runtime::CODEX_CLI_ENTRYPOINT),
+                        )
+                    });
+                    #[cfg(not(test))]
+                    let _ = cache_root;
+                    // Installation touches no credentials; finish it before
+                    // reserving the login slot used by credential synchronization.
+                    let mut prepared = codex_client
+                        .as_ref()
+                        .and_then(|client| client.prepared_program(&launcher));
+                    if prepared.is_none() {
+                        prepared = match launcher.prepare(&environment).await {
+                            Ok(program) => Some(program),
+                            Err(error) => break 'codex Err(error),
+                        };
+                    }
+                    // Serialize the expiry decision and every app-server request with
+                    // other daemons and credential syncs using this login slot.
+                    // Waiting for ownership is outside the RPC request timeout.
+                    let mut credential_guard =
+                        match CredentialWriteGuard::acquire(HarnessKind::Codex, &credential_path)
+                            .await
+                        {
+                            Ok(guard) => guard,
+                            Err(error) => break 'codex Err(error),
+                        };
+                    // A poll starts at most one app-server. A failed rotation drops its
+                    // client. When that client was cached from an earlier poll, a new
+                    // one may still read the quota, which is how a login that the old
+                    // process gave up on recovers (#1224). When this poll started it,
+                    // another start would only repeat the failure, so the next poll
+                    // tries again instead.
+                    let mut failed_rotation = None;
+                    if codex_login_is_near_expiry(&credential_path).await {
+                        let started_here = codex_client.is_none();
+                        let login_refresh = codex_usage::refresh_login_with_cache_root(
+                            &mut codex_client,
+                            cwd.clone(),
+                            environment.clone(),
+                            &launcher,
+                            &mut prepared,
+                        )
+                        .await;
+                        match login_refresh {
+                            Ok(()) => tracing::info!(
                                 profile_id = %profile_id,
-                                error = %failure.detail,
-                                "could not refresh the Codex login ahead of expiry"
-                            );
-                            if started_here && codex_client.is_none() {
-                                failed_rotation = Some(failure.reason);
+                                "refreshed Codex login ahead of expiry"
+                            ),
+                            Err(failure) => {
+                                tracing::warn!(
+                                    profile_id = %profile_id,
+                                    error = %failure.detail,
+                                    "could not refresh the Codex login ahead of expiry"
+                                );
+                                if codex_client.is_none() {
+                                    if started_here {
+                                        failed_rotation = Some(failure.reason);
+                                    } else {
+                                        // The failed cached process has stopped. Drop its
+                                        // lease and login admission before preparing a
+                                        // replacement, which may need a fresh install.
+                                        drop(prepared.take());
+                                        drop(credential_guard);
+                                        prepared = match launcher.prepare(&environment).await {
+                                            Ok(program) => Some(program),
+                                            Err(error) => break 'codex Err(error),
+                                        };
+                                        let replacement_guard = CredentialWriteGuard::acquire(
+                                            HarnessKind::Codex,
+                                            &credential_path,
+                                        )
+                                        .await;
+                                        credential_guard = match replacement_guard {
+                                            Ok(guard) => guard,
+                                            Err(error) => break 'codex Err(error),
+                                        };
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                let status = match failed_rotation {
-                    Some(reason) => CodexUsageStatus::Unavailable(reason.to_owned()),
-                    None => {
-                        codex_usage::refresh_with_cache_root(
-                            &mut codex_client,
-                            cwd,
-                            environment,
-                            &launcher,
-                        )
-                        .await
+                    let status = match failed_rotation {
+                        Some(reason) => CodexUsageStatus::Unavailable(reason.to_owned()),
+                        None => {
+                            codex_usage::refresh_with_cache_root(
+                                &mut codex_client,
+                                cwd,
+                                environment,
+                                &launcher,
+                                &mut prepared,
+                            )
+                            .await
+                        }
+                    };
+                    drop(credential_guard);
+                    match status {
+                        CodexUsageStatus::Available(report) => Ok(ProfileQuota {
+                            paid_credits: report.paid_credits,
+                            monthly_price_usd: None,
+                            banked_resets: report.banked_resets,
+                            profile_id: profile_id.clone(),
+                            harness,
+                            windows: [report.primary, report.secondary]
+                                .into_iter()
+                                .flatten()
+                                .map(|window| QuotaWindow {
+                                    label: window.label,
+                                    remaining_percent: Some(window.remaining_percent),
+                                    duration_seconds: window.duration_seconds,
+                                    model_scope: None,
+                                    used: None,
+                                    limit: None,
+                                    resets: window.resets_at.and_then(format_reset_local_seconds),
+                                    resets_at_epoch_seconds: window.resets_at,
+                                })
+                                .collect(),
+                            extra: None,
+                            error: None,
+                            refreshed_at_epoch_seconds,
+                            rate_limited_until_epoch_seconds: None,
+                            next_check_at_epoch_seconds: None,
+                        }),
+                        CodexUsageStatus::Unavailable(error) => Err(anyhow::anyhow!(error)),
                     }
-                };
-                match status {
-                    CodexUsageStatus::Available(report) => Ok(ProfileQuota {
-                        paid_credits: report.paid_credits,
-                        monthly_price_usd: None,
-                        banked_resets: report.banked_resets,
-                        profile_id: profile_id.clone(),
-                        harness,
-                        windows: [report.primary, report.secondary]
-                            .into_iter()
-                            .flatten()
-                            .map(|window| QuotaWindow {
-                                label: window.label,
-                                remaining_percent: Some(window.remaining_percent),
-                                duration_seconds: window.duration_seconds,
-                                model_scope: None,
-                                used: None,
-                                limit: None,
-                                resets: window.resets_at.and_then(format_reset_local_seconds),
-                                resets_at_epoch_seconds: window.resets_at,
-                            })
-                            .collect(),
-                        extra: None,
-                        error: None,
-                        refreshed_at_epoch_seconds,
-                        rate_limited_until_epoch_seconds: None,
-                        next_check_at_epoch_seconds: None,
-                    }),
-                    CodexUsageStatus::Unavailable(error) => Err(anyhow::anyhow!(error)),
                 }
             }
-        },
+        }
         // Bedrock bills through AWS and has no Claude subscription allowance.
         HarnessKind::Claude if auth_scheme == AuthScheme::AwsCredentialChain => Ok(usage_priced()),
-        HarnessKind::Claude => match if cfg!(target_os = "macos") {
-            Ok(None)
-        } else {
-            container(claude_usage::ClaudeLauncher::Managed.host_can_run(&environment))
-        } {
-            Err(error) => Err(error),
-            Ok(container) => claude_usage::query(source_home, environment, container)
-                .await
-                .map(|report| ProfileQuota {
-                    paid_credits: report.paid_credits,
-                    monthly_price_usd: report.monthly_price_usd,
-                    banked_resets: report.banked_resets,
-                    profile_id: profile_id.clone(),
-                    harness,
-                    windows: {
-                        let mut windows = Vec::new();
-                        if let Some(window) = report.five_hour {
-                            windows.push(QuotaWindow {
-                                label: "5H".to_owned(),
-                                remaining_percent: Some(window.remaining_percent),
-                                duration_seconds: window.duration_seconds,
-                                model_scope: None,
-                                used: None,
-                                limit: None,
-                                resets: window
-                                    .reset_context
-                                    .as_deref()
-                                    .and_then(normalize_reset_text),
-                                resets_at_epoch_seconds: window
-                                    .reset_context
-                                    .as_deref()
-                                    .and_then(normalize_reset_epoch_seconds),
-                            });
-                        }
-                        if let Some(window) = report.week {
-                            windows.push(QuotaWindow {
-                                label: "Week".to_owned(),
-                                remaining_percent: Some(window.remaining_percent),
-                                duration_seconds: window.duration_seconds,
-                                model_scope: None,
-                                used: None,
-                                limit: None,
-                                resets: window
-                                    .reset_context
-                                    .as_deref()
-                                    .and_then(normalize_reset_text),
-                                resets_at_epoch_seconds: window
-                                    .reset_context
-                                    .as_deref()
-                                    .and_then(normalize_reset_epoch_seconds),
-                            });
-                        }
-                        for (scope, window) in report.scoped_weeks {
-                            let mut chars = scope.chars();
-                            let label_scope = chars.next().map_or_else(String::new, |first| {
-                                first.to_ascii_uppercase().to_string() + chars.as_str()
-                            });
-                            windows.push(QuotaWindow {
-                                label: format!("Week ({label_scope})"),
-                                remaining_percent: Some(window.remaining_percent),
-                                duration_seconds: window.duration_seconds,
-                                model_scope: Some(scope),
-                                used: None,
-                                limit: None,
-                                resets: window
-                                    .reset_context
-                                    .as_deref()
-                                    .and_then(normalize_reset_text),
-                                resets_at_epoch_seconds: window
-                                    .reset_context
-                                    .as_deref()
-                                    .and_then(normalize_reset_epoch_seconds),
-                            });
-                        }
-                        windows
-                    },
-                    extra: None,
-                    error: None,
-                    refreshed_at_epoch_seconds,
-                    rate_limited_until_epoch_seconds: None,
-                    next_check_at_epoch_seconds: None,
-                })
-                .map_err(|error| match error {
-                    claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
-                        anyhow::Error::new(RateLimited { retry_after })
+        HarnessKind::Claude => claude_usage::query(source_home, environment)
+            .await
+            .map(|report| ProfileQuota {
+                paid_credits: report.paid_credits,
+                monthly_price_usd: report.monthly_price_usd,
+                banked_resets: report.banked_resets,
+                profile_id: profile_id.clone(),
+                harness,
+                windows: {
+                    let mut windows = Vec::new();
+                    if let Some(window) = report.five_hour {
+                        windows.push(QuotaWindow {
+                            label: "5H".to_owned(),
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_text),
+                            resets_at_epoch_seconds: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_epoch_seconds),
+                        });
                     }
-                    error => anyhow::anyhow!(error.to_string()),
-                }),
-        },
+                    if let Some(window) = report.week {
+                        windows.push(QuotaWindow {
+                            label: "Week".to_owned(),
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_text),
+                            resets_at_epoch_seconds: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_epoch_seconds),
+                        });
+                    }
+                    for (scope, window) in report.scoped_weeks {
+                        let mut chars = scope.chars();
+                        let label_scope = chars.next().map_or_else(String::new, |first| {
+                            first.to_ascii_uppercase().to_string() + chars.as_str()
+                        });
+                        windows.push(QuotaWindow {
+                            label: format!("Week ({label_scope})"),
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: Some(scope),
+                            used: None,
+                            limit: None,
+                            resets: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_text),
+                            resets_at_epoch_seconds: window
+                                .reset_context
+                                .as_deref()
+                                .and_then(normalize_reset_epoch_seconds),
+                        });
+                    }
+                    windows
+                },
+                extra: None,
+                error: None,
+                refreshed_at_epoch_seconds,
+                rate_limited_until_epoch_seconds: None,
+                next_check_at_epoch_seconds: None,
+            })
+            .map_err(|error| match error {
+                claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
+                    anyhow::Error::new(RateLimited { retry_after })
+                }
+                error => anyhow::anyhow!(error.to_string()),
+            }),
         HarnessKind::Kimi => {
             query_kimi(&source_home, &environment)
                 .await
@@ -1069,13 +974,8 @@ async fn refresh_profile_with_cache_root(
         }
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
-        HarnessKind::Grok => 'grok: {
-            let host_has_grok = grok_usage::host_has_grok(&source_home, host_path.as_deref());
-            let container = match container(host_has_grok) {
-                Ok(container) => container,
-                Err(error) => break 'grok Err(error),
-            };
-            grok_usage::query(source_home.clone(), cwd, environment, container)
+        HarnessKind::Grok => {
+            grok_usage::query(cwd, environment)
                 .await
                 .map(|report| ProfileQuota {
                     paid_credits: None,
@@ -1171,7 +1071,7 @@ async fn refresh_profile_with_cache_root(
             harness,
             windows: Vec::new(),
             extra: None,
-            error: Some(error.to_string()),
+            error: Some(format!("{error:#}")),
             refreshed_at_epoch_seconds,
             rate_limited_until_epoch_seconds: schedule.map(|(until, _)| until),
             next_check_at_epoch_seconds: schedule.map(|(_, next_check)| next_check),
