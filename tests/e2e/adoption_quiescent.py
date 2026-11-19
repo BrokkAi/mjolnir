@@ -249,6 +249,8 @@ with socket.socket(socket.AF_UNIX) as peer:
         self.wait(lambda: (self.hooks / "adoption_install_write_accepted.reached").exists(), "install write accepted")
         submitted.send_signal(signal.SIGINT)
         assert submitted.wait(timeout=WAIT) != 0
+        cancellation = (self.root / "accepted-before-disconnect.stderr").read_text()
+        assert "outcome unknown" in cancellation and "session state before retrying" in cancellation
         destroy = self.start_recovery("destroy", session, "destroy-after-write", "--confirm", session)
         self.wait(lambda: "client request" in json.dumps(self.daemon_request({"action":"upgrade_blockers"})), "destroy waiting for install ownership")
         assert destroy.poll() is None

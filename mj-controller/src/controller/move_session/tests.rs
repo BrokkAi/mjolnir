@@ -341,6 +341,18 @@ fn move_queue_relay_child() {
                 _ => {}
             }
         }
+        if let Ok(kind) = fs::read_to_string(root.join("unusable-worker"))
+            && let RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Status(state),
+            } = &mut response.body
+        {
+            match kind.as_str() {
+                "checkpoint-only" => state.checkpoint_only = true,
+                "closed" => state.execution = mj_core::relay::RelayExecutionState::Closed,
+                "closing" => state.execution = mj_core::relay::RelayExecutionState::Closing,
+                _ => panic!("unknown unavailable worker state"),
+            }
+        }
         response.protocol_version = wire_protocol;
         write_relay_frame(&mut output, &response).expect("write relay response");
         if should_crash {
@@ -7252,6 +7264,7 @@ enum AdoptionProbe {
     Drain,
     Disconnect,
     Install,
+    Unusable(&'static str),
 }
 
 #[cfg(unix)]
@@ -7299,8 +7312,14 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
         fs::write(root.join("block-after-cut"), b"1").unwrap();
     }
     drop(relay);
-    if !matches!(disposition, AdoptionProbe::Install) {
+    if matches!(
+        disposition,
+        AdoptionProbe::Drain | AdoptionProbe::Disconnect
+    ) {
         fs::write(root.join("block-install-status"), b"1").unwrap();
+    }
+    if let AdoptionProbe::Unusable(kind) = disposition {
+        fs::write(root.join("unusable-worker"), kind).unwrap();
     }
     let mut record = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
     record.state = SessionState::Disconnected;
@@ -7348,6 +7367,24 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 )
                 .await
         });
+        if let AdoptionProbe::Unusable(_) = disposition {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(format!("{:#}", outcome.result.unwrap_err()).contains("no runnable harness"));
+            let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.state, SessionState::Disconnected);
+            assert_eq!(current.target, record.target);
+            assert!(
+                crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .is_none_or(|(ordinal, _)| ordinal == 0)
+            );
+            return;
+        }
         if matches!(disposition, AdoptionProbe::Install) {
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
                 .await
@@ -7514,4 +7551,21 @@ fn proxy_fixture_reaps_its_pipeline_when_an_assertion_unwinds() {
     );
     // Failed spawn/handshake may never write a launch marker.
     drop(TestProxyGroupGuard::new(&root.join("never-spawned")));
+}
+
+#[cfg(unix)]
+// Hard-won: d5c0c25: a Status reply from a checkpoint-only or closed worker was published as Running.
+#[test]
+fn adoption_rejects_checkpoint_only_and_closed_workers() {
+    let name = test_name("adoption_rejects_checkpoint_only_and_closed_workers");
+    if !isolated_test_child(&name, "MJ_ADOPT_DRAINING_PROBE_CHILD") {
+        return;
+    }
+    for kind in ["checkpoint-only", "closed", "closing"] {
+        adoption_interrupted_probe(
+            true,
+            AdoptionProbe::Unusable(kind),
+            "adoption_rejects_checkpoint_only_and_closed_workers",
+        );
+    }
 }

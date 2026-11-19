@@ -402,26 +402,50 @@ pub(super) async fn serve_client(
                     &adoption.target_id,
                     adoption.all_instances,
                 );
-                let mut work = Box::pin(async {
+                let work_state = state.clone();
+                let work_adoption = adoption.clone();
+                let work_cancelled = cancelled.clone();
+                let work_wait_cancel = wait_cancel.clone();
+                let _cancel_processes =
+                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
+                let operation = async move {
                     let mut controller = blocking(Controller::load).await?;
-                    let executor = CancellableProcessExecutor::new(cancelled.clone());
+                    let executor = CancellableProcessExecutor::new(work_cancelled);
                     let outcome = controller
                         .adopt_orphan_worker_controlled(
-                            &adoption,
+                            &work_adoption,
                             &executor,
                             mj_controller::controller::AdoptionControl {
-                                cancelled: wait_cancel.clone(),
+                                cancelled: work_wait_cancel,
                                 progress: Some(progress),
-                                lifecycle_gate: state.session_gate.clone(),
+                                lifecycle_gate: work_state.session_gate.clone(),
                             },
                         )
                         .await;
                     if outcome.result.is_ok() {
-                        refresh_runtime_controller(&state).await;
+                        refresh_runtime_controller(&work_state).await;
                     }
                     Ok::<_, anyhow::Error>(outcome)
+                };
+                let mut work = mj_core::runtime::spawn_off_async_workers(async move {
+                    use futures::FutureExt;
+                    let result = match std::panic::AssertUnwindSafe(operation).catch_unwind().await
+                    {
+                        Ok(result) => result,
+                        Err(panic) => {
+                            tracing::error!(?panic, "adoption controller task panicked");
+                            Err(anyhow::anyhow!(
+                                "adoption controller task panicked; check session state before retrying"
+                            ))
+                        }
+                    };
+                    if let Err(error) = &result {
+                        tracing::error!(%error, "adoption controller task failed");
+                    }
+                    result
                 });
                 let mut disconnected = false;
+                let mut draining = false;
                 let mut progress_open = true;
                 let mut previous_blockers = None;
                 let mut byte = [0u8; 1];
@@ -436,7 +460,18 @@ pub(super) async fn serve_client(
                             wait_cancel.cancel();
                         }
 
-                        result = &mut work => break result,
+                        result = &mut work => break match result {
+                            Ok(result) => result.and_then(|result| result),
+                            Err(error) => {
+                                tracing::error!(%error, "adoption supervisor task failed");
+                                Err(anyhow::anyhow!("adoption task failed: {error}"))
+                            },
+                        },
+                        () = mj_controller::upgrade::gate().wait_until_draining(), if !draining => {
+                            draining = true;
+                            cancelled.store(true, Ordering::Release);
+                            wait_cancel.cancel();
+                        }
                         changed = waiting.changed(), if progress_open => {
                             if changed.is_ok() {
                                 let blockers = waiting.borrow_and_update().clone();
@@ -488,7 +523,10 @@ pub(super) async fn serve_client(
                 // The install guard spans final response delivery, as other
                 // admitted requests do; no worker wait or catch-up owns it.
                 drop(admission);
-                return Ok(());
+                if disconnected {
+                    return Ok(());
+                }
+                continue;
             }
             if request.action.is_cancellable_machine_action() {
                 let cancelled = Arc::new(AtomicBool::new(false));

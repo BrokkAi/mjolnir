@@ -2638,7 +2638,7 @@ async fn recover(args: RecoverArgs) -> Result<()> {
                 }) => result?,
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
-                    anyhow::bail!("adoption cancelled; the worker continues running; rerun recover adopt when ready");
+                    anyhow::bail!("adoption outcome unknown: no final reply was received; the install may still complete. Check this instance's session state before retrying recover adopt");
                 }
             }
             println!("adopted worker {session}");

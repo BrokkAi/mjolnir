@@ -7,9 +7,16 @@ fn resume_admission(
     resume: bool,
 ) -> Result<Option<crate::relay::NativeGoalResume>> {
     if resume {
+        let goal = spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .snapshot
+            .clone();
         spec.terminal_owner
             .as_ref()
-            .map(crate::relay::NativeGoalResume::begin)
+            .map(|owner| crate::relay::NativeGoalResume::begin(owner, goal))
             .transpose()
     } else {
         Ok(None)
@@ -38,6 +45,13 @@ impl PendingControls {
         expected: Option<GoalSnapshot>,
     ) {
         let owner = spec.terminal_owner.clone();
+        let resume_goal = spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .snapshot
+            .clone();
         let connection = connection.clone();
         let session = session.clone();
         self.0.push(Box::pin(async move {
@@ -46,7 +60,7 @@ impl PendingControls {
             let admission = if action == mj_core::goal::GoalControlAction::Resume {
                 owner
                     .as_ref()
-                    .map(crate::relay::NativeGoalResume::begin)
+                    .map(|owner| crate::relay::NativeGoalResume::begin(owner, resume_goal))
                     .transpose()
             } else {
                 Ok(None)

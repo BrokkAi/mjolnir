@@ -127,6 +127,11 @@ pub(crate) struct PendingLiveBaseline {
     >,
 }
 
+struct PendingNativeResume {
+    token: std::sync::Arc<()>,
+    goal: Option<mj_core::goal::GoalSnapshot>,
+}
+
 /// A native resume is admitted before its ACP request is sent. Success keeps
 /// the token until the relay observes the turn; failure or cancellation removes it.
 pub(crate) struct NativeGoalResume {
@@ -135,7 +140,10 @@ pub(crate) struct NativeGoalResume {
 }
 
 impl NativeGoalResume {
-    pub(crate) fn begin(owner: &std::sync::Weak<RelayCell>) -> Result<Self> {
+    pub(crate) fn begin(
+        owner: &std::sync::Weak<RelayCell>,
+        goal: Option<mj_core::goal::GoalSnapshot>,
+    ) -> Result<Self> {
         let relay = owner
             .upgrade()
             .context("native resume relay owner disappeared")?;
@@ -144,7 +152,10 @@ impl NativeGoalResume {
             .lock()
             .expect("relay lock poisoned")
             .pending_native_resumes
-            .push(token.clone());
+            .push(PendingNativeResume {
+                token: token.clone(),
+                goal,
+            });
         Ok(Self {
             owner: owner.clone(),
             token: Some(token),
@@ -152,13 +163,9 @@ impl NativeGoalResume {
     }
 
     pub(crate) fn accepted(mut self) {
-        if let Some(owner) = self.owner.upgrade() {
-            let relay = owner.observe().expect("relay lock poisoned");
-            if !relay.turn_in_progress() {
-                self.token = None;
-            }
-        }
-        // If a turn has already opened, Drop removes any remaining token.
+        // The ACK may precede execution. Only that goal's running update
+        // releases the reservation; unrelated work cannot stand in for it.
+        self.token = None;
     }
 }
 
@@ -168,7 +175,7 @@ impl Drop for NativeGoalResume {
             let mut relay = owner.lock().expect("relay lock poisoned");
             relay
                 .pending_native_resumes
-                .retain(|pending| !std::sync::Arc::ptr_eq(pending, &token));
+                .retain(|pending| !std::sync::Arc::ptr_eq(&pending.token, &token));
             relay.service_live_baselines();
         }
     }
@@ -322,7 +329,7 @@ pub struct DurableRelay {
     /// Retry physical prefix cleanup once after reopen, or after a failed GC.
     journal_cleanup_pending: bool,
     pending_live_baselines: Vec<PendingLiveBaseline>,
-    pending_native_resumes: Vec<std::sync::Arc<()>>,
+    pending_native_resumes: Vec<PendingNativeResume>,
     acp_activity: AcpActivityClock,
     step_clock: crate::acp::StepClock,
     /// Whether harness announcements or output with no prompt open a turn.
@@ -1954,14 +1961,38 @@ impl DurableRelay {
         let native_before = self.snapshot.goal.running();
         let mut native_after = self.snapshot.goal.clone();
         native_after.apply(&update)?;
+        let resume_running = if let SessionUpdate::SessionInfoUpdate(info) = &update
+            && let Some(execution) = info.meta.as_ref().and_then(|meta| meta.get("execution"))
+        {
+            let execution: mj_core::goal::GoalExecution =
+                serde_json::from_value(execution.clone())?;
+            execution.status == "running" && native_after.execution.as_ref() == Some(&execution)
+        } else {
+            false
+        };
+        let resumes_goal = |pending: &PendingNativeResume| {
+            pending.goal.as_ref().is_none_or(|expected| {
+                native_after
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|goal| goal.same_goal(expected))
+            })
+        };
+        let resumed_native = resume_running && self.pending_native_resumes.iter().any(resumes_goal);
         let codex = self.harness_turns == HarnessTurnPolicy::CodexAdapter;
-        if codex && !native_before && native_after.running() {
+        if (codex && !native_before && native_after.running())
+            || (resumed_native && self.snapshot.harness_turn.is_none())
+        {
             self.append_relay_event(
                 None,
                 RelayObservation::HarnessTurnStarted {
                     started_at_ms: epoch_millis(),
                 },
             )?;
+        }
+        if resumed_native && self.snapshot.harness_turn.is_some() {
+            self.pending_native_resumes
+                .retain(|pending| !resumes_goal(pending));
         }
         let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
         // A stop we requested is acknowledged with a plain chunk and nothing

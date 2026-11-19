@@ -16072,3 +16072,182 @@ async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
     );
     assert!(state.owner().lifecycle.is_empty());
 }
+
+#[cfg(unix)]
+// Hard-won: d5c0c25: adoption closed the server socket although the client retained it for reuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_refusal_keeps_the_daemon_connection_reusable() {
+    let Some(_writer) =
+        startup_prompt_test_store("adoption_refusal_keeps_the_daemon_connection_reusable")
+    else {
+        return;
+    };
+    let session = runtime_test_session(
+        "already-adopted",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    mj_controller::database::save_session(&session).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            server_metadata,
+            test_runtime_state(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+        .await
+        .unwrap();
+    let error = client
+        .adopt_recovery(
+            mj_client::daemon::RecoveryAdoptionRequest {
+                session_id: session.id,
+                target_id: "unused".into(),
+                profile: None,
+                bundle: None,
+                all_instances: false,
+            },
+            |_, _| panic!("tracked session must refuse without a cut wait"),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("already tracked"));
+    client
+        .request(DaemonAction::Ping)
+        .await
+        .expect("same connection remains usable after adoption's final reply");
+    drop(client);
+    server.await.unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: d5c0c25: a blocked discovery command prevented the adoption connection from observing EOF or drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
+    use mj_controller::controller::move_session::test_fixtures::TestProxyGroupGuard;
+    const NAME: &str = "adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff";
+    const ROOT: &str = "MJ_ADOPTION_SCAN_TEST_ROOT";
+    if std::env::var_os(ROOT).is_none() {
+        for mode in ["disconnect", "handoff"] {
+            let root = tempfile::tempdir().unwrap();
+            let bin = root.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            let groups = TestProxyGroupGuard::new(root.path());
+            let script = format!(
+                "#!/bin/sh\n{}head -c 131072 /dev/zero >&2\nprintf ready > {}\n/bin/sleep 600 &\nwait\n",
+                groups.registration_script(),
+                mj_core::targets::posix_quote(&root.path().join("scan-started").to_string_lossy())
+            );
+            mj_core::test_hooks::install_fake_command(&bin, "podman", &script);
+            let path = std::env::join_paths(
+                std::iter::once(bin)
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(ROOT, root.path())
+            .env("MJ_ADOPTION_SCAN_MODE", mode)
+            .env("PATH", path)
+            .isolated_store(root.path())
+            .run();
+            drop(groups);
+        }
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+    let mut config = Config::default();
+    config.targets.clear();
+    config.targets.insert(
+        "blocked".into(),
+        mj_core::config::TargetTemplate::LocalPodman {
+            container: serde_json::from_value(serde_json::json!({"image":"unused-test-image"}))
+                .unwrap(),
+        },
+    );
+    config.save().unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            server_metadata,
+            test_runtime_state(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut stream,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token,
+            action: DaemonAction::AdoptRecovery(mj_client::daemon::RecoveryAdoptionRequest {
+                session_id: "missing-orphan".into(),
+                target_id: "blocked".into(),
+                profile: None,
+                bundle: None,
+                all_instances: false,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.join("scan-started").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("discovery reaches the real blocking subprocess without blocking EOF supervision");
+    let group: i32 = fs::read_dir(root.join("proxy-groups"))
+        .unwrap()
+        .find_map(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok())
+        })
+        .unwrap();
+    if std::env::var("MJ_ADOPTION_SCAN_MODE").unwrap() == "handoff" {
+        mj_controller::upgrade::gate().begin_draining();
+        let response: ResponseEnvelope =
+            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(response.result.is_err());
+    }
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("cancelled discovery must stop and reap its subprocess")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while TestProxyGroupGuard::group_exists(group).unwrap() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("no process in the discovery group may survive cancellation");
+    assert!(
+        mj_controller::database::read_durable_session_record("missing-orphan")
+            .unwrap()
+            .is_none()
+    );
+}

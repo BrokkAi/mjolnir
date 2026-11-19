@@ -825,12 +825,6 @@ impl DurableRelay {
         ) {
             self.turn_context.invalidate();
         }
-        if matches!(
-            event.observation,
-            RelayObservation::HarnessTurnStarted { .. } | RelayObservation::CommandStarted { .. }
-        ) {
-            self.pending_native_resumes.clear();
-        }
         let idle_changed = self.refresh_idle_clock(event.recorded_at_ms);
         self.record_journal_append(&path, &event);
         self.push_hot_event(event);

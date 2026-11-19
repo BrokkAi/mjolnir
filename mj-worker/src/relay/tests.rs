@@ -9630,13 +9630,25 @@ fn adoption_cut_waits_for_a_goal_resume_before_its_turn_opens() {
 }
 
 // Automatic reopen and answered native resumes have no command dispatch to block a cut.
+// Hard-won: d5c0c25: an unrelated shell cancellation released the native resume reservation.
 #[test]
 fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
     let temp = tempfile::tempdir().unwrap();
     let relay = std::sync::Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION, "test").unwrap(),
     ));
-    let resume = NativeGoalResume::begin(&std::sync::Arc::downgrade(&relay)).unwrap();
+    {
+        let mut relay = relay.lock().unwrap();
+        submit_relay(
+            &mut relay,
+            "unrelated-shell",
+            RelayCommand::RunUserShell {
+                command: "tail -f previous.log".into(),
+            },
+        );
+        relay.claim_pending_user_shell_commands_up_to(1).unwrap();
+    }
+    let resume = NativeGoalResume::begin(&std::sync::Arc::downgrade(&relay), Some(serde_json::from_value(serde_json::json!({"objective":"resume this goal", "createdAt":1, "status":"paused"})).unwrap())).unwrap();
     let mut cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(cut.try_recv().is_err());
     assert!(
@@ -9647,15 +9659,57 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
             .iter()
             .any(|blocker| blocker.contains("goal resume"))
     );
+    {
+        let mut relay = relay.lock().unwrap();
+        submit_relay(
+            &mut relay,
+            "unrelated-shell-cancel",
+            RelayCommand::CancelUserShell {
+                shell_command_id: "unrelated-shell".into(),
+            },
+        );
+        relay.claim_pending_user_shell_commands_up_to(1).unwrap();
+        relay
+            .record_command_completed(
+                "unrelated-shell-cancel",
+                RelayCommandOutcome::UserShellCancelled,
+            )
+            .unwrap();
+        relay
+            .record_command_completed(
+                "unrelated-shell",
+                RelayCommandOutcome::UserShell {
+                    result: successful_shell("tail -f previous.log", ""),
+                },
+            )
+            .unwrap();
+        assert!(!relay.pending_native_resumes.is_empty());
+    }
     resume.accepted();
     assert!(
         cut.try_recv().is_err(),
         "native acknowledgement does not settle the resumed turn"
     );
+    {
+        let mut relay = relay.lock().unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                autonomous: None,
+                origin: None,
+                prompt_in_flight: false,
+            })
+            .unwrap();
+        relay.record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"different goal", "createdAt":2, "status":"active"}, "execution":{"version":1,"status":"running","turnId":"other-goal"}}})).unwrap()).unwrap();
+        assert!(!relay.pending_native_resumes.is_empty());
+        assert!(cut.try_recv().is_err());
+    }
     relay
         .lock()
         .unwrap()
-        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+        .record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"resume this goal", "createdAt":1, "status":"active"}, "execution":{"version":1,"status":"running","turnId":"resumed-goal"}}})).unwrap())
         .unwrap();
     assert!(cut.try_recv().is_err());
     assert!(relay.observe().unwrap().pending_native_resumes.is_empty());
@@ -9669,7 +9723,7 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         })
         .unwrap();
     assert!(cut.try_recv().unwrap().is_ok());
-    let resume = NativeGoalResume::begin(&std::sync::Arc::downgrade(&relay)).unwrap();
+    let resume = NativeGoalResume::begin(&std::sync::Arc::downgrade(&relay), None).unwrap();
     let mut failed_cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(failed_cut.try_recv().is_err());
     drop(resume);

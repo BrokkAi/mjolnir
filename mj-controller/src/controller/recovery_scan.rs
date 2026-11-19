@@ -465,6 +465,15 @@ impl Controller {
             _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began during the worker probe; cut discarded; rerun recover adopt"),
             status = client.status() => status.context("worker disappeared before adoption install; cut discarded")?,
         };
+        anyhow::ensure!(
+            !operational.checkpoint_only
+                && !matches!(
+                    operational.execution,
+                    mj_core::relay::RelayExecutionState::Closing
+                        | mj_core::relay::RelayExecutionState::Closed
+                ),
+            "worker has no runnable harness (checkpoint-only or closed relay); adoption was not installed; recover its saved checkpoint or destroy the leftover worker"
+        );
         let guard = AdoptionInstall {
             _session: install_owner,
             _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
