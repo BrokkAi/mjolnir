@@ -384,11 +384,23 @@ def git(*args, cwd=None):
             break
         except subprocess.TimeoutExpired:
             if cancelled():
-                run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
                 try:
+                    stopped = run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"],
+                                          capture_output=True, text=True)
                     proc.communicate(timeout=STOP_SECONDS)
-                except subprocess.TimeoutExpired as e:
-                    raise TeardownUnconfirmed(f"{unit}.scope: git survived its scope stop") from e
+                    deadline = time.monotonic() + STOP_SECONDS
+                    while True:  # the same proof as a server's teardown
+                        gone, detail = scope_tree_gone(f"{unit}.scope")
+                        if gone:
+                            break
+                        if time.monotonic() > deadline:
+                            raise TeardownUnconfirmed(f"{unit}.scope not confirmed stopped ({detail}; stop "
+                                                      f"exit {stopped.returncode})")
+                        time.sleep(1)
+                except TeardownUnconfirmed:
+                    raise
+                except BaseException as e:
+                    raise TeardownUnconfirmed(f"{unit}.scope: git teardown failed: {e!r}") from e
                 raise Cancelled(f"cancelled during git {args[0]}")
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
@@ -498,11 +510,7 @@ def main():
         "nproc": os.cpu_count(),
         "bifrost_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("BIFROST_")},
     }
-    latest = {}  # the latest record per repo is the one readers use; resume follows it too
-    if results.exists():
-        for l in open(results):
-            r = json.loads(l)
-            latest[r["repo"]] = r
+    latest = latest_records(results)  # the record readers use; resume follows it too
     done = {repo for repo, r in latest.items()
             if repo in pins and not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
             and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
@@ -565,8 +573,7 @@ def main():
             rec["traceback"] = traceback.format_exc()[-2000:]
             rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
             rec["cancelled"] = isinstance(e, Cancelled)
-        with open(results, "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        append_record(results, rec)
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
@@ -577,19 +584,41 @@ def main():
             # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
             sys.exit(f"{repo}: server scope not confirmed stopped; batch halted")
 
-    usable = [r for r in latest_records(results).values() if r["repo"] in pins
-              and not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
+    # Exit 0 only when every pinned repo reached measurement. A measured failure (OOM, readiness
+    # timeout) is a result; a repo that never got there (clone, fetch or setup failed) isn't.
+    final = latest_records(results)
+    unmeasured = [repo for repo in repos if "cold" not in (final.get(repo) or {})]
+    usable = [repo for repo in repos if not (final.get(repo) or {}).get("error")
+              and all((final[repo].get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
+    if unmeasured:
+        sys.exit(f"{len(unmeasured)} pinned repos never reached measurement: {unmeasured[:5]}")
     if not usable:
         sys.exit("no repository produced a usable cold/warm pair; see the per-repo records")
 
 
 def latest_records(results):
+    """Latest record per repo. A line that doesn't parse (a torn append from an interrupted run
+    or a full volume) is skipped with a warning: that repo simply isn't done and is retried."""
     latest = {}
     if results.exists():
-        for l in open(results):
-            r = json.loads(l)
+        for n, l in enumerate(open(results, errors="replace"), 1):
+            try:
+                r = json.loads(l)
+            except ValueError:
+                print(f"skipping unreadable record line {n} in {results}", file=sys.stderr, flush=True)
+                continue
             latest[r["repo"]] = r
     return latest
+
+
+def append_record(results, rec):
+    """One write per record, flushed and fsynced, so a crash leaves at most a torn last line."""
+    fd = os.open(results, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, (json.dumps(rec) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":
