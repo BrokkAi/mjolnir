@@ -215,7 +215,6 @@ impl Policy {
         }));
         let credentials = CredentialSyncCoordinator::spawn_guarded(
             manager.clone(),
-            state.worker_background_gate(),
             state.clone(),
             rejected.clone(),
         );
@@ -466,6 +465,7 @@ impl Policy {
             QuotaUpdate::ClaudeGrant {
                 request,
                 check,
+                login_changed,
                 rejected_logins,
             } => {
                 // A result belongs to the exact configured request and refusal
@@ -509,15 +509,7 @@ impl Policy {
                     self.state
                         .push_notice("", format!("Profile {}: {error}", request.profile_id));
                 }
-                if matches!(
-                    check,
-                    mj_controller::quota::ClaudeGrantCheck::Renewed { .. }
-                ) || (!rejected_logins.is_empty()
-                    && matches!(
-                        check,
-                        mj_controller::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) }
-                    ))
-                {
+                if claude_grant_requires_sync(check, login_changed, !rejected_logins.is_empty()) {
                     self.credentials
                         .handle()
                         .sync_profile_now(&request.profile_id, None);
@@ -642,7 +634,6 @@ impl Policy {
                 .conclude(&result, profile.as_ref());
             let notice = self.notices.leveled_notice(
                 &result,
-                profile.as_ref().map(|p| p.kind),
                 &self.state.owner().controller().state,
                 verdict.as_ref(),
             );
@@ -656,6 +647,22 @@ impl Policy {
             }
         }
     }
+}
+
+fn claude_grant_requires_sync(
+    check: mj_controller::quota::ClaudeGrantCheck,
+    login_changed: bool,
+    has_rejected_logins: bool,
+) -> bool {
+    matches!(
+        check,
+        mj_controller::quota::ClaudeGrantCheck::Renewed { .. }
+    ) || login_changed
+        || (has_rejected_logins
+            && matches!(
+                check,
+                mj_controller::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) }
+            ))
 }
 
 fn schedule_observed_credential_syncs(

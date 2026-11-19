@@ -26,10 +26,7 @@ impl ProjectMemoryTransfer<'_> {
 
     async fn abort(mut self, error: anyhow::Error) -> anyhow::Error {
         let client = self.client.as_ref().unwrap();
-        if client.abandoned.is_some()
-            || client.cancelled()
-            || error.downcast_ref::<RelayTransportDead>().is_some()
-        {
+        if client.abandoned.is_some() || error.downcast_ref::<RelayTransportDead>().is_some() {
             // Drop closes the connection and lets its worker clean up staging.
             // An abort cannot succeed here and would obscure the primary cause.
             return error;

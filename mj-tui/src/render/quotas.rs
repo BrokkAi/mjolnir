@@ -500,7 +500,7 @@ fn pool_bar(
     now: u64,
     accent: Color,
     refreshing: &std::collections::BTreeSet<String>,
-) -> (Vec<Span<'static>>, Vec<String>) {
+) -> Vec<Span<'static>> {
     let gaps = pool
         .members
         .len()
@@ -508,28 +508,27 @@ fn pool_bar(
         .min(width.saturating_sub(pool.members.len().min(width)));
     let widths = segment_widths(&pool.members, width.saturating_sub(gaps));
     let mut spans = Vec::new();
-    let mut omitted = Vec::new();
     for (index, (member, cells)) in pool.members.iter().zip(widths).enumerate() {
         if index > 0 && index <= gaps {
             spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
         }
         // A reading older than its own reset says nothing about what is left.
-        let filled = if member.awaiting_reading {
+        let mut filled = if member.awaiting_reading {
             0
         } else {
             (cells * usize::from(member.remaining) + 50) / 100
         };
+        // Quota that is left never draws as spent, however narrow the segment.
+        if !member.awaiting_reading && member.remaining > 0 && cells > 0 {
+            filled = filled.max(1);
+        }
         let mut label = vec![' '; cells];
         let mut text = if member.awaiting_reading {
             "reset due".to_string()
         } else if refreshing.contains(&member.id) {
             format!("refreshing{}", theme::glyphs().ellipsis)
         } else {
-            format!(
-                "{}{}",
-                if theme::ascii() { "r" } else { "↻" },
-                reset_label(member.reset, member.reset_text.as_deref(), now)
-            )
+            reset_label(member.reset, member.reset_text.as_deref(), now)
         };
         if refreshing.contains(&member.id) && text.chars().count() >= cells {
             text = if cells >= 8 { "refresh" } else { "check" }.into();
@@ -538,37 +537,28 @@ fn pool_bar(
             .banked
             .filter(|banked| *banked > 0)
             .map(|banked| format!("{}{banked}", if theme::ascii() { "B" } else { "⟲" }));
-        let mut omitted_banked = None;
-        if let Some(banked) = banked {
-            if text.chars().count() + 1 + banked.chars().count() <= cells {
-                text.push_str(&format!(" {banked}"));
-            } else {
-                omitted_banked = Some(banked);
-            }
+        if let Some(banked) = banked
+            && text.chars().count() + 1 + banked.chars().count() <= cells
+        {
+            text.push_str(&format!(" {banked}"));
         }
-        let text: Vec<_> = text.chars().collect();
-        let legible_fill = cells > 1
-            && (member.awaiting_reading || member.remaining == 0 || filled > 0)
-            && (member.remaining == 100 || filled < cells);
-        if cells >= 6 && text.len() <= cells && legible_fill {
+        // A label that does not fit is left out; the expanded pool's lanes
+        // show every member's reading, so a collapsed pool never lists some
+        // members by name and not others. An unknown or refreshing reading
+        // keeps a one-cell marker so it does not read as spent quota.
+        let mut text: Vec<_> = text.chars().collect();
+        if text.len() > cells {
+            text = if member.awaiting_reading {
+                vec!['?']
+            } else if refreshing.contains(&member.id) {
+                // One cell, distinct from the spent fill in every theme.
+                vec![if theme::ascii() { '~' } else { '…' }]
+            } else {
+                Vec::new()
+            };
+        }
+        if text.len() <= cells {
             label[cells - text.len()..].copy_from_slice(&text);
-            if let Some(banked) = omitted_banked {
-                omitted.push(format!("{} {banked} banked", member.id));
-            }
-        } else {
-            omitted.push(format!(
-                "{} {} {}{}",
-                member.id,
-                if member.awaiting_reading {
-                    "?".to_string()
-                } else {
-                    format!("{}%", member.remaining)
-                },
-                text.into_iter().collect::<String>(),
-                omitted_banked
-                    .map(|banked| format!(" {banked} banked"))
-                    .unwrap_or_default()
-            ));
         }
         for (cell, ch) in label.into_iter().enumerate() {
             let background = if cell < filled {
@@ -613,7 +603,7 @@ fn pool_bar(
             ));
         }
     }
-    (spans, omitted)
+    spans
 }
 
 fn lane(
@@ -717,7 +707,14 @@ fn lane_note(
     period: &PoolPeriod,
     now: u64,
     clock: fn(i64, &str) -> String,
+    refreshing: bool,
 ) -> String {
+    // A collapsed segment can be too narrow to say so; the lane always does.
+    let refresh = if refreshing {
+        format!("refreshing{} · ", theme::glyphs().ellipsis)
+    } else {
+        String::new()
+    };
     let mut note = if member.awaiting_reading {
         format!("{} reset due, awaiting reading", period.label())
     } else if member.remaining == 0 {
@@ -770,7 +767,7 @@ fn lane_note(
             if theme::ascii() { "B" } else { "⟲" }
         ));
     }
-    note
+    refresh + &note
 }
 
 fn wrap_note(text: &str, width: usize) -> Vec<String> {
@@ -841,8 +838,7 @@ fn quota_lines(
                     Style::default()
                 },
             )];
-            let (bar, omitted) =
-                pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
+            let bar = pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
             spans.extend(bar);
             spans.push(Span::styled(
                 percentage,
@@ -852,12 +848,6 @@ fn quota_lines(
                 profile_rows.push((pool.members[0].id.clone(), lines.len()));
             }
             lines.push(Line::from(spans));
-            for text in wrap_note(&omitted.join(" · "), width.saturating_sub(2))
-                .into_iter()
-                .filter(|_| !omitted.is_empty())
-            {
-                lines.push(Line::styled(format!("  {text}"), theme::muted()));
-            }
             if pool.missing > 0 {
                 lines.push(Line::styled(
                     format!(
@@ -868,6 +858,8 @@ fn quota_lines(
                     theme::muted(),
                 ));
             }
+            // Warnings (a refused check, unknown windows) stay visible while
+            // collapsed; each line names one member and opens its menu.
             for member in &pool.members {
                 if let Some(note) = &member.note {
                     for text in wrap_note(
@@ -882,6 +874,7 @@ fn quota_lines(
                         ),
                         width.saturating_sub(2),
                     ) {
+                        profile_rows.push((member.id.clone(), lines.len()));
                         lines.push(Line::styled(format!("  {text}"), theme::muted()));
                     }
                 }
@@ -898,7 +891,15 @@ fn quota_lines(
                 let notes: Vec<_> = pool
                     .members
                     .iter()
-                    .map(|member| lane_note(member, &pool.key.period, now, clock))
+                    .map(|member| {
+                        lane_note(
+                            member,
+                            &pool.key.period,
+                            now,
+                            clock,
+                            dashboard.quota_refreshing.contains(&member.id),
+                        )
+                    })
                     .collect();
                 let longest_note = notes
                     .iter()
@@ -1099,7 +1100,7 @@ mod tests {
                 pool.members[0].awaiting_reading = false;
                 let accent = theme::palette().muted;
                 assert!(!matches!(accent, Color::Rgb(..)));
-                let (spans, _) = pool_bar(&pool, 10, now, accent, &Default::default());
+                let spans = pool_bar(&pool, 10, now, accent, &Default::default());
                 let style_at = |cell: usize| spans[cell].style;
                 assert_ne!(
                     (style_at(0).bg, style_at(0).add_modifier),

@@ -99,19 +99,11 @@ pub enum BackgroundWork {
     RecoveryCopyAbandoning,
     DelegationDelivery,
     QuotaScheduling,
-    /// Reconciles the session's logins (harness, AWS, GitHub, skills) with a
-    /// few relay requests.
-    CredentialSync,
 }
 
 impl BackgroundWork {
     /// Whether this work may start while `other` holds the session.
     ///
-    /// A credential sync runs beside a recovery copy: the worker serves its
-    /// requests on the live relay connection whatever ACP dispatch or a
-    /// checkpoint barrier is doing, and archives leave login files out. If
-    /// it had to wait, back-to-back copies of a large session would keep a
-    /// renewed login, which revokes the old one, from ever reaching it.
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkerReplacement => "worker upgrade",
@@ -122,35 +114,20 @@ impl BackgroundWork {
             Self::RecoveryCopyAbandoning => "recovery copy cleanup",
             Self::DelegationDelivery => "delegation delivery",
             Self::QuotaScheduling => "quota scheduling",
-            Self::CredentialSync => "credential sync",
         }
     }
 
     /// Needs exclusivity with connection holders. Quota scheduling uses
     /// actor exchanges directly, but must exclude every competing lease.
     pub fn needs_lease(self) -> bool {
-        !matches!(self, Self::CredentialSync | Self::RecoveryCopyTransferring)
+        !matches!(self, Self::RecoveryCopyTransferring)
     }
 
     fn runs_beside(self, other: Self) -> bool {
         use BackgroundWork::*;
         matches!(
             (self, other),
-            (
-                CredentialSync,
-                RecoveryCopyCapturing
-                    | RecoveryCopyTransferring
-                    | RecoveryCopyAbandoning
-                    | DelegationDelivery
-                    | QuotaScheduling
-            ) | (
-                RecoveryCopyCapturing
-                    | RecoveryCopyTransferring
-                    | RecoveryCopyAbandoning
-                    | DelegationDelivery
-                    | QuotaScheduling,
-                CredentialSync
-            ) | (RecoveryCopyTransferring, DelegationDelivery)
+            (RecoveryCopyTransferring, DelegationDelivery)
                 | (DelegationDelivery, RecoveryCopyTransferring)
                 | (QuotaScheduling, RecoveryCopyTransferring)
                 | (RecoveryCopyTransferring, QuotaScheduling)
@@ -186,7 +163,6 @@ pub struct RecoveryGate {
     /// Which sessions are busy, for waiters. Published from inside the gate so
     /// every holder updates it, whatever started the work.
     busy: watch::Sender<BTreeSet<String>>,
-    credential_wakes: watch::Sender<BTreeSet<String>>,
     foreground_releases: watch::Sender<BTreeMap<String, LifecycleOrigin>>,
 }
 
@@ -196,7 +172,6 @@ impl Default for RecoveryGate {
             state: Mutex::default(),
             closed: Notify::new(),
             busy: watch::channel(BTreeSet::new()).0,
-            credential_wakes: watch::channel(BTreeSet::new()).0,
             foreground_releases: watch::channel(BTreeMap::new()).0,
         }
     }
@@ -211,7 +186,6 @@ struct RecoveryGateState {
     busy: BTreeMap<String, Vec<BackgroundHolder>>,
     reservations: BTreeMap<String, Vec<Reservation>>,
     leases: BTreeMap<String, &'static str>,
-    deferred_credentials: BTreeSet<String>,
 }
 
 /// Reviews exclude automatic work except accepted replies, but cannot hold
@@ -394,8 +368,8 @@ impl RecoveryGate {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if reservation.is_none()
                     // A waiting review does not preempt background work, so
-                    // compatible work (notably credential sync beside a copy)
-                    // must remain admissible until the review can start.
+                    // compatible work must remain admissible until the review
+                    // can start.
                     && (kind == ReservationKind::Foreground || !state.busy.contains_key(session_id))
                     && !state
                         .reservations
@@ -981,20 +955,10 @@ impl Drop for ForegroundDelegationDrain {
 }
 
 /// Retained by the actor until it has applied the lease return. Admission
-/// cannot end or wake deferred credential work before the relay is available.
+/// cannot end before the relay is available.
 pub struct RelayLeaseAdmission {
     admission: SessionAdmission,
     pub label: &'static str,
-}
-impl RelayLeaseAdmission {
-    pub fn defer_credentials(&self) {
-        let (gate, session) = self.admission.gate_and_session();
-        gate.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deferred_credentials
-            .insert(session.to_owned());
-    }
 }
 impl Drop for RelayLeaseAdmission {
     fn drop(&mut self) {
@@ -1004,25 +968,10 @@ impl Drop for RelayLeaseAdmission {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.leases.remove(session);
-        if state.deferred_credentials.remove(session) {
-            gate.credential_wakes.send_modify(|sessions| {
-                sessions.insert(session.to_owned());
-            });
-        }
         gate.publish_busy(&state);
     }
 }
 impl RecoveryGate {
-    // Its one caller is a Unix-only test.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deferred_credentials
-            .contains(session_id)
-    }
-
     pub fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
         let mut releases = self.foreground_releases.subscribe();
         releases.mark_changed();
@@ -1032,25 +981,6 @@ impl RecoveryGate {
         let mut ready = BTreeMap::new();
         self.foreground_releases.send_if_modified(|releases| {
             ready = std::mem::take(releases);
-            false
-        });
-        ready
-    }
-
-    pub fn wake_credentials(&self, session_id: &str) {
-        self.credential_wakes
-            .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
-    }
-
-    pub fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
-        let mut wakes = self.credential_wakes.subscribe();
-        wakes.mark_changed();
-        wakes
-    }
-    pub fn take_credential_wakes(&self) -> BTreeSet<String> {
-        let mut ready = BTreeSet::new();
-        self.credential_wakes.send_if_modified(|sessions| {
-            ready = std::mem::take(sessions);
             false
         });
         ready
@@ -1253,7 +1183,7 @@ mod tests {
         let task = mj_core::runtime::spawn({
             let gate = gate.clone();
             async move {
-                gate.run_background("child", BackgroundWork::CredentialSync, async {
+                gate.run_background("child", BackgroundWork::DelegationDelivery, async {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
                 })
@@ -1273,35 +1203,35 @@ mod tests {
         );
         assert!(!gate.is_busy("child"));
         assert!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async {
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async {
                 panic!("reserved worker accessed")
             })
             .await
             .is_none()
         );
         assert_eq!(
-            gate.run_background("other", BackgroundWork::CredentialSync, async { 7 })
+            gate.run_background("other", BackgroundWork::DelegationDelivery, async { 7 })
                 .await,
             Some(7)
         );
         drop(reservation);
         assert_eq!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async { 9 })
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async { 9 })
                 .await,
             Some(9)
         );
     }
 
-    /// With a copy and a sync holding one session, a lifecycle operation must
+    /// With a copy and a delivery holding one session, a lifecycle operation must
     /// stop both and still find the session busy until the last one is gone.
     #[test]
     fn lifecycle_reservation_waits_for_every_holder_it_preempts() {
         let gate = Arc::new(RecoveryGate::default());
         let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::RecoveryCopyTransferring)
             .unwrap();
         let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let reservation = gate.reserve("session");
         gate.cancel_busy("session");
@@ -1309,7 +1239,7 @@ mod tests {
         drop(copy);
         assert!(gate.is_busy("session"), "the running sync was forgotten");
         assert!(
-            gate.try_start("session", BackgroundWork::CredentialSync)
+            gate.try_start("session", BackgroundWork::DelegationDelivery)
                 .is_err()
         );
         drop(sync);
@@ -1324,7 +1254,7 @@ mod tests {
         let task = mj_core::runtime::spawn({
             let gate = gate.clone();
             async move {
-                gate.run_background("child", BackgroundWork::CredentialSync, async {
+                gate.run_background("child", BackgroundWork::DelegationDelivery, async {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
                 })
@@ -1333,14 +1263,14 @@ mod tests {
         });
         started_rx.await.unwrap();
         assert!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async { 1 })
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async { 1 })
                 .await
                 .is_none()
         );
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async { 2 })
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async { 2 })
                 .await,
             Some(2)
         );
@@ -1476,18 +1406,18 @@ mod tests {
     /// A review waits for a recovery copy already running, then holds the
     /// session so no copy or worker upgrade can start until it is done.
     // Hard-won: 352a87453: a review hold blocked foreground work and daemon handoff.
-    // Hard-won: 373784672: a waiting review blocked credential sync beside a recovery copy.
+    // Hard-won: 373784672: a waiting review blocked compatible work beside a recovery copy.
     #[tokio::test]
     async fn reserving_when_idle_waits_for_running_work_then_blocks_new_work() {
         let gate = Arc::new(RecoveryGate::default());
         let copy = gate
-            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session-1", BackgroundWork::RecoveryCopyTransferring)
             .expect("the slot starts free");
         let mut waiter = Box::pin(gate.reserve_when_idle("session-1"));
         assert!(futures::poll!(&mut waiter).is_pending());
         let sync = gate
-            .try_start("session-1", BackgroundWork::CredentialSync)
-            .expect("a waiting review must allow credentials through beside the running copy");
+            .try_start("session-1", BackgroundWork::DelegationDelivery)
+            .expect("a waiting review must allow compatible work beside the running copy");
         assert!(!copy.cancellation().load(Ordering::Acquire));
         drop(copy);
         assert!(futures::poll!(&mut waiter).is_pending());
@@ -1497,7 +1427,7 @@ mod tests {
             .await
             .expect("the reservation follows all background holders");
         assert!(
-            gate.try_start("session-1", BackgroundWork::CredentialSync)
+            gate.try_start("session-1", BackgroundWork::QuotaScheduling)
                 .is_err(),
             "an admitted review excludes new background work"
         );
@@ -1589,10 +1519,10 @@ mod tests {
         let gate = Arc::new(RecoveryGate::default());
         let notices = Notices::default();
         let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::RecoveryCopyTransferring)
             .unwrap();
         let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let cancelled = AtomicBool::new(true);
         assert!(
@@ -1623,11 +1553,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             notices.0.lock().unwrap().as_slice(),
-            &["Waiting for recovery copy and credential sync to stop"]
+            &["Waiting for recovery copy transfer and delegation delivery to stop"]
         );
         assert_eq!(
             refusal.holders,
-            vec!["recovery copy", "credential sync", "Move"]
+            vec!["recovery copy transfer", "delegation delivery", "Move"]
         );
         assert!(copy.load(Ordering::Acquire));
         assert!(sync.load(Ordering::Acquire));
@@ -1685,17 +1615,9 @@ mod copy_transition_tests {
             gate.try_start("session", BackgroundWork::DelegationDelivery)
                 .is_err()
         );
-        let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
-            .unwrap();
-        drop(sync);
         copy.narrow(BackgroundWork::RecoveryCopyTransferring)
             .unwrap();
         assert!(copy.narrow(BackgroundWork::RecoveryCopyCapturing).is_err());
-        let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
-            .unwrap();
-        drop(sync);
         let delivery = gate
             .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
@@ -1725,17 +1647,12 @@ mod copy_transition_tests {
         drop(copy);
         let foreground = foreground.await.unwrap();
         drop(foreground);
-        // Without a pending foreground, cleanup still permits credentials.
         let copy = gate
             .try_start("session", BackgroundWork::RecoveryCopyCapturing)
             .unwrap();
         copy.narrow(BackgroundWork::RecoveryCopyTransferring)
             .unwrap();
         copy.abandon().await.unwrap();
-        assert!(
-            gate.try_start("session", BackgroundWork::CredentialSync)
-                .is_ok()
-        );
         assert!(
             gate.try_start("session", BackgroundWork::DelegationDelivery)
                 .is_err()

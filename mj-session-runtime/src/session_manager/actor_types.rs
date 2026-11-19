@@ -81,8 +81,9 @@ pub enum ActorCommand {
 /// actor's other relay traffic. A periodic exchange such as credential sync
 /// uses this instead of opening a connection of its own to every worker.
 pub trait RelayConnectionJob: Send + Sync + 'static {
-    fn deferred_by_lease(&self, _lease: &crate::recovery_gate::RelayLeaseAdmission) {}
-    fn deferred_by_reconnect(&self) -> bool {
+    /// If the actor refuses this job, it tells the job's owner when its
+    /// connection is usable again.
+    fn wake_when_usable(&self) -> bool {
         false
     }
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()>;

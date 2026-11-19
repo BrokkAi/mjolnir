@@ -185,7 +185,7 @@ impl RuntimeStateOwner {
         closing: &BTreeSet<String>,
         mut targets: Vec<mj_core::credentials::CredentialSyncTarget>,
         publication: &tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>,
-        wake: Option<&mj_controller::recovery_gate::RecoveryGate>,
+        wake: Option<&mj_controller::worker_client::CredentialWakes>,
     ) -> bool {
         let complete =
             Arc::ptr_eq(&self.pollable_worker_inputs(), inputs) && self.close_requested == *closing;
@@ -217,9 +217,9 @@ impl RuntimeStateOwner {
                 true
             }
         });
-        if let Some(gate) = wake {
+        if let Some(wakes) = wake {
             for id in revalidated {
-                gate.wake_credentials(&id);
+                wakes.wake(&id);
             }
         }
         complete
