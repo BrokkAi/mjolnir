@@ -30,6 +30,7 @@ impl InstructionRole {
 
 pub(super) async fn compose(
     spec: &LaunchSpec,
+    mcp_available: bool,
     events: &mpsc::Sender<RuntimeEvent>,
 ) -> Result<String> {
     let mut sections = Vec::new();
@@ -65,7 +66,7 @@ pub(super) async fn compose(
             index.as_deref().map_err(String::as_str),
         ));
     }
-    if let Some(socket) = &spec.subagent_mcp_socket {
+    if mcp_available && let Some(socket) = &spec.subagent_mcp_socket {
         let review_role = match spec.instruction_role {
             Some(InstructionRole::Reviewer) => {
                 Some(mj_core::worker_launch::ReviewChildRole::Reviewer)
@@ -83,19 +84,21 @@ pub(super) async fn compose(
             sections.push(crate::subagent_mcp::review_instructions(socket.role).to_owned());
         }
     }
-    if spec
-        .project_memory
-        .as_ref()
-        .is_some_and(|memory| memory.history_socket.is_some())
+    if mcp_available
+        && spec
+            .project_memory
+            .as_ref()
+            .is_some_and(|memory| memory.history_socket.is_some())
     {
         sections.push(crate::memory_mcp::GUIDANCE.to_owned());
     }
     match spec.instruction_role {
         Some(InstructionRole::Worker) => {
-            let has_handback = spec
-                .subagent_mcp_socket
-                .as_ref()
-                .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child);
+            let has_handback = mcp_available
+                && spec
+                    .subagent_mcp_socket
+                    .as_ref()
+                    .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child);
             sections.push("When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.".into());
             if !has_handback {
                 sections.push(format!(
@@ -105,10 +108,11 @@ pub(super) async fn compose(
             }
         }
         Some(InstructionRole::Oracle) => {
-            let instructions = if spec
-                .subagent_mcp_socket
-                .as_ref()
-                .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child)
+            let instructions = if mcp_available
+                && spec
+                    .subagent_mcp_socket
+                    .as_ref()
+                    .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child)
             {
                 ORACLE_INSTRUCTIONS.to_owned()
             } else {
@@ -553,7 +557,7 @@ mod tests {
                 profile_registration: false,
             });
             let (events, _rx) = mpsc::channel(256);
-            let text = compose(&spec, &events)
+            let text = compose(&spec, true, &events)
                 .await
                 .unwrap()
                 .replace(&*temp.path().to_string_lossy(), "/memory");

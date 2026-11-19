@@ -9542,7 +9542,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
             }
             let (expected_events, _rx) = mpsc::channel(256);
-            let expected = instructions::compose(&spec, &expected_events)
+            let expected = instructions::compose(&spec, true, &expected_events)
                 .await
                 .unwrap();
             if phase == "clear" {

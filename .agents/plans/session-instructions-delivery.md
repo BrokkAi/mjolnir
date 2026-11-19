@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Ninth review: compose MCP guidance from the same negotiated availability used by the post-open warning. Muse without HTTP MCP grant omits agent/history guidance; configured memory data remains, and roles use their existing no-handback wording. Extended the Muse ACP fixture to capture append text with history and agent servers offered. Checkpoint saved before long builds; grant/withheld regression (1), failed-host diagnostic (1), instruction suite (4) and worker all-target clippy pass. No overrides; request re-review.
+
 - [x] (2026-11-19) Eighth review: parent ruled that legacy symlinked native homes visibly degrade without writes or migration (automated reviewer/brief exceptions still fail); OpenCode's config pin is staged-only; system append remains approved and shared memory is escaped as agent-written data. Added legacy-link security regression and hostile closing-tag role golden input; legacy regression (1), instruction tests (4), host/staged-home checks (1 each), project-memory tests (12) and core/worker/staging clippy pass. Source and updated goldens were checkpointed before long builds; amend the WIP into the final commit and request re-review.
 
 - [x] (2026-11-19) Seventh review: recover_creates now restores manager-owned mailbox routing for durable child creates before restarting their lifecycle and before serving sends. Restoration is idempotent. A deterministic replacement regression persists an initial queued message/create intent, replaces the manager, and sends another message before any worker attachment. The first run exposed missing intent setup in the fixture; the seed now uses the cleanup/retry owner transaction. Local checkpoint 5604ba37b was saved before long validation because WSL restarts kill processes. Recovery (1), registration failure (1), reservation (1), no-attachment routing (1), outbox (3) tests and controller/daemon clippy pass; amend the checkpoint into the final commit and request re-review.
@@ -45,6 +47,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Surprises & Discoveries
+
+- Ninth review found that a configured MCP socket did not imply the Muse host had granted its tools. Composition now consumes the same initialized availability decision as the existing warning, including the no-handback role wording. The ACP grant fixture verifies actual appended text as well as offered server names.
 
 - Fifth review corrected the fourth round's interpretation of Error: a retained environment can recover through explicit Resume/Restart, so queued ParentMessages must stay pending. A real isolated legacy Error/pending-row probe against the pre-fix binaries verified explicit Resume and actual native-prompt delivery. New sends to an Error session remain refused; auto-resume of Error is outside this lane. Terminal settlement is narrowed to StartupCleanup/Destroying, with removed targets using the existing TargetGone outcome.
 

@@ -248,7 +248,9 @@ pub(super) async fn serve_session(
     )
     .await?;
 
-    let instructions = instructions::compose(spec, events).await?;
+    let mcp_available = !spec.harness.mcp_servers_need_advertised_http()
+        || initialized.agent_capabilities.mcp_capabilities.http;
+    let instructions = instructions::compose(spec, mcp_available, events).await?;
     let system_prompt = instructions::deliver(
         spec,
         &initialized.agent_capabilities,
@@ -516,10 +518,7 @@ pub(super) async fn serve_session(
     // reviewer does not: it is told to inspect the change with its analyzer
     // tools, and reviewing without them is the degraded review the review
     // design refuses.
-    if offered_mcp_servers > 0
-        && spec.harness.mcp_servers_need_advertised_http()
-        && !initialized.agent_capabilities.mcp_capabilities.http
-    {
+    if offered_mcp_servers > 0 && !mcp_available {
         let remedy = format!(
             "Managed targets install muse-acp {}; on a container target, suspend and resume the session once its agent-dev image has updated",
             mj_core::harness_runtime::MUSE_ACP_VERSION

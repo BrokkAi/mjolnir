@@ -251,3 +251,19 @@ Source and goldens were saved in local WIP checkpoints before long builds, then 
 - `cargo clippy -p brokk-mj-core -p brokk-mj-worker-runtime -p brokk-mj-worker-staging --all-targets -- -D warnings`: passed (`memory-instructions-review8-clippy.log`).
 
 Formatting/diff checks are clean. No still-failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings from this round were overridden; the final candidate is submitted for re-review.
+
+
+## Ninth review: negotiated MCP guidance
+
+The ACP open owner computes MCP availability once from the initialized adapter capabilities and passes it to the instruction composer and existing post-open warning. A Muse host without the HTTP grant now receives memory data and role text without history or agent-tool guidance. Worker/oracle roles use their existing last-message report wording when handback is unavailable. Failed-host diagnostics retain their original precedence.
+
+The existing Muse ACP fixture now offers both history and agent sockets and captures the actual system append. It checks both tool groups are described when granted and omitted when withheld. An initial fixture edit hit the native-probe helper instead of the fake-adapter helper; that compile error was corrected before validation. No production behavior was changed to accommodate the fixture.
+
+Saved a local source checkpoint before compilation. Checks ran outside the sandbox on the dev profile, clearing inherited MJ_CONFIG_DIR/MJ_DATA_DIR; existing test isolation remains in place:
+
+- `cargo test -p brokk-mj-worker-runtime muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them`: 1 passed (`memory-instructions-review9-muse-test.log`).
+- `cargo test -p brokk-mj-worker-runtime a_muse_host_that_could_not_start_reports_its_own_diagnostic`: 1 passed (`memory-instructions-review9-diagnostic-test.log`).
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed (`memory-instructions-review9-worker-tests.log`).
+- `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-review9-clippy.log`).
+
+Formatting/diff checks are clean. No still-failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings from this round were overridden; the final candidate is submitted for re-review.
