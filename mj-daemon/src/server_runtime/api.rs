@@ -224,12 +224,17 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    /// Whether the index is stale enough that a query should ask for a sync.
-    fn wiki_sync_is_stale(&self) -> bool {
-        false
+    fn wiki_sync_request(&self) -> anyhow::Result<mj_client::daemon::WikiSyncStatus> {
+        anyhow::bail!("SessionWiki sync is unavailable")
     }
 
-    fn wiki_request_sync(&self) {}
+    fn wiki_sync_watch(
+        &self,
+        _epoch: String,
+        _after: u64,
+    ) -> BoxFuture<'_, anyhow::Result<mj_client::daemon::WikiSyncStatus>> {
+        Box::pin(async { anyhow::bail!("SessionWiki sync is unavailable") })
+    }
 
     fn wiki_search(&self, _query: String, _limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
@@ -469,12 +474,19 @@ impl ExportRuntime for RuntimeState {
         Box::pin(RuntimeState::refresh_workspaces(self))
     }
 
-    fn wiki_sync_is_stale(&self) -> bool {
-        mj_controller::sessionwiki::sync_is_stale(self.wiki().last_success())
+    fn wiki_sync_request(&self) -> Result<mj_client::daemon::WikiSyncStatus> {
+        let target = self.wiki().request_sync(false);
+        let mut status = self.wiki().state();
+        status.target = Some(target);
+        Ok(status)
     }
 
-    fn wiki_request_sync(&self) {
-        self.wiki().request_sync(false);
+    fn wiki_sync_watch(
+        &self,
+        epoch: String,
+        after: u64,
+    ) -> BoxFuture<'_, Result<mj_client::daemon::WikiSyncStatus>> {
+        Box::pin(self.wiki().watch_after(epoch, after))
     }
 
     fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
@@ -4120,12 +4132,16 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn wiki_sync_is_stale(&self) -> bool {
-        self.exports.wiki_sync_is_stale()
+    fn wiki_sync_request(&self) -> Result<mj_client::daemon::WikiSyncStatus> {
+        self.exports.wiki_sync_request()
     }
 
-    fn wiki_request_sync(&self) {
-        self.exports.wiki_request_sync();
+    fn wiki_sync_watch(
+        &self,
+        epoch: String,
+        after: u64,
+    ) -> BoxFuture<'_, Result<mj_client::daemon::WikiSyncStatus>> {
+        self.exports.wiki_sync_watch(epoch, after)
     }
 
     fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {

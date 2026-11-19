@@ -20,6 +20,79 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+// Hard-won: c6ac3b7aa: new sync requests extended an already draining handoff.
+#[tokio::test]
+async fn wiki_sync_request_is_refused_during_handoff_drain() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+    backend.upgrade_gate.begin_draining();
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/wiki/sync"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .unwrap(),
+        "pending"
+    );
+    assert_eq!(json_body(response).await["code"], DAEMON_HANDOFF_CODE);
+}
+
+// Hard-won: 18753da4d: backend corruption was retried forever as a shutdown503.
+#[tokio::test]
+async fn wiki_backend_failures_are_not_retryable_shutdowns() {
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    for (method, path, expected) in [
+        (
+            "GET",
+            "/api/v1/wiki/search?q=needle",
+            "SessionWiki search failed: SessionWiki search is unavailable",
+        ),
+        (
+            "POST",
+            "/api/v1/wiki/sync",
+            "SessionWiki sync failed: SessionWiki sync is unavailable",
+        ),
+        (
+            "GET",
+            "/api/v1/wiki/sync/watch?epoch=fixture&after=0",
+            "SessionWiki sync watch failed: SessionWiki sync is unavailable",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::builder().method(method).uri(path))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+        assert!(
+            response
+                .headers()
+                .get(crate::server::UPGRADE_HEADER)
+                .is_none()
+        );
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({"error": expected})
+        );
+    }
+}
+
 // Hard-won: 3c523cbdd: CLI callers could not retrieve cleanup warnings after Destroy removed the record.
 #[tokio::test]
 async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() {

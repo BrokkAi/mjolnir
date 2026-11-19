@@ -13,7 +13,7 @@
 │         │                                                                                                  │         │
 │         │ Search: the phrase                                                                               │         │
 │         │                                                                                                  │         │
-│         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -55,7 +55,7 @@ tab hit counts: [0, 1, 2, 1]
 │         │                                                                                                  │         │
 │         │ Search: the phrase                                                                               │         │
 │         │                                                                                                  │         │
-│         │ ╭ 0 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 0 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │No matches here · 1 on Import                                                                 │ │         │
 │         │ │                                                                                              │ │         │
@@ -98,7 +98,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ Search: needle                                                                                   │         │
 │         │                                                                                                  │         │
-│         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
 │         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
@@ -139,7 +139,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ Search: needle                                                                                   │         │
 │         │                                                                                                  │         │
-│         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
 │         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
@@ -180,7 +180,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ Search: needle                                                                                   │         │
 │         │                                                                                                  │         │
-│         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
 │         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
@@ -221,7 +221,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ Search: needle                                                                                   │         │
 │         │                                                                                                  │         │
-│         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
 │         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
@@ -262,7 +262,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Archived sessions · newest first ────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Archived sessions · newest first · ? Syncing session index… ─────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
@@ -304,7 +304,7 @@ briefing request action: None
 │         │                                                                                                  │         │
 │         │ Search: needle                                                                                   │         │
 │         │                                                                                                  │         │
-│         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
@@ -349,7 +349,7 @@ new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other
 │         │                                                                                                  │         │
 │         │ Search: other                                                                                    │         │
 │         │                                                                                                  │         │
-│         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │

@@ -56,6 +56,9 @@ fn take_lifecycle_completion(
 impl DashboardContext {
     pub(crate) fn cancel_background_work(&mut self) {
         self.wiki_search_task = None;
+        self.wiki_sync_task = None;
+        self.sessions_sync_task = None;
+        self.sessions_text_task = None;
         self.usage_report.cancel();
         self.cancel_chat_open();
         self.critical_operations.cancel_all();

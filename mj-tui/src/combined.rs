@@ -673,9 +673,13 @@ fn render_combined_themed(
                     area.height,
                     sessions_layout.minimized_content_height().into(),
                 )
-                .saturating_add(SESSION_ACTIONS_HEIGHT)
+                .saturating_add(
+                    SESSION_ACTIONS_HEIGHT + u16::from(dashboard.sessions_sync_label().is_some()),
+                )
                 .saturating_add(2),
-                full: sessions_layout.content_height().saturating_add(2),
+                full: sessions_layout
+                    .content_height()
+                    .saturating_add(2 + u16::from(dashboard.sessions_sync_label().is_some())),
                 standard_cap: area.height / 3,
             },
         ),
