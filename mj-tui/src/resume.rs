@@ -2234,9 +2234,10 @@ fn native_project_target(project_directory: &str) -> String {
         )
 }
 
-/// The least room the preview pane is worth drawing in: a border plus one
-/// row of text. Below this the preview is hidden rather than drawn empty.
-const PREVIEW_MINIMUM_HEIGHT: u16 = 3;
+/// The least room the preview pane is worth drawing in: a border plus three
+/// rows of text, enough to show text past the briefing's blank second line.
+/// Below this the preview is hidden rather than drawn empty.
+const PREVIEW_MINIMUM_HEIGHT: u16 = 5;
 
 /// Rows left for the preview once the fixed bands and the list's five
 /// session rows have their share.
