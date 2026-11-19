@@ -46,6 +46,8 @@ TASK_CENSUS = None
 TASK_JOBS = None
 TASK_NAME = None
 TASK_SCOPE = None
+# Strict-construction mode (brief/PLAN-bifrost-oracle-strict.md): fidelity check and cause gate.
+STRICT = False
 
 
 def sha(text):
@@ -102,7 +104,8 @@ def task_scope():
     return {"census": str(pathlib.Path(TASK_CENSUS).resolve()),
             "census_sha256": hashlib.sha256(pathlib.Path(TASK_CENSUS).read_bytes()).hexdigest(),
             "jobs": str(pathlib.Path(TASK_JOBS).resolve()),
-            "jobs_sha256": hashlib.sha256(pathlib.Path(TASK_JOBS).read_bytes()).hexdigest(), "name": TASK_NAME}
+            "jobs_sha256": hashlib.sha256(pathlib.Path(TASK_JOBS).read_bytes()).hexdigest(), "name": TASK_NAME,
+            **({"mode": "strict"} if STRICT else {})}
 
 
 def load_task_inputs():
@@ -497,6 +500,11 @@ def annotate(path, run_started):
 NOLEAK_ROUNDS = 3
 
 
+def max_rounds():
+    """Strict mode voided round 1 as a construction defect and runs rounds 2-4 (plan amendment)."""
+    return 4 if STRICT else NOLEAK_ROUNDS
+
+
 def noleak_ids():
     _, jobs = load_task_inputs()
     return [j["bug"] for j in jobs]
@@ -534,9 +542,15 @@ def noleak_state(bug, upto):
         if decision["decision"] != "carries":
             # Keep the leak reasons for the text that is retried: they permit and direct the
             # next edit; the rejection says what the failed edit lost.
-            leak_reasons = previous if previous and previous.get("kind") == "leak judges" else \
-                (previous or {}).get("leak")
-            previous = {"kind": "fact check rejected the last edit", "why": decision["why"],
+            leak_reasons = previous if previous and previous.get("kind") in ("leak judges", "strict leak gate") \
+                else (previous or {}).get("leak")
+            previous = {"kind": ("fidelity check failed the last edit" if STRICT else
+                                 "fact check rejected the last edit"), "why": decision["why"],
+                        **({"elements_not_kept": decision.get("elements_not_kept"),
+                            "fact_inferred": decision.get("fact_inferred"),
+                            **({"note": "the decisive fact needed inference or more than one line: state it "
+                                        "explicitly in one item"} if decision.get("fact_inferred") else {})}
+                           if STRICT else {}),
                         "leak": leak_reasons}
             continue
         text = (W / "texts" / bug / f"round-{n}.md").read_text()
@@ -545,9 +559,27 @@ def noleak_state(bug, upto):
         leak = rounds.get(n)
         if leak is None or leak["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
             raise SystemExit(f"{bug}: round {n} leak check is missing or bound to other text")
+        if STRICT:
+            require_strict_judges(n, bug, leak["verdicts"])
         source = text
-        if leak["label"] == "missed":
+        if leak["label"] == "missed" and not STRICT:
             return n, source, None
+        if STRICT and n == 1:
+            continue  # round 1 is void in strict mode (plan amendment): it can never retain a diff
+        if leak["label"] == "missed":
+            gate_path = W / f"round-{n}" / "gate-results.json"
+            if not gate_path.exists():
+                raise SystemExit(f"round {n} strict leak gate is not collected")
+            gate = json.loads(gate_path.read_text())["results"][bug]
+            if gate.get("verdicts_sha256") != verdicts_fingerprint(leak):
+                raise SystemExit(f"{bug}: round {n} gate result does not cover the current leak verdicts")
+            if gate["pass"]:
+                return n, source, None
+            previous = {"kind": "strict leak gate", "gate": gate.get("gate"), "why": gate["why"],
+                        "answers": gate.get("answers"),
+                        "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale"),
+                                     "confidence": v.get("confidence")} for v in leak["verdicts"]]}
+            continue
         previous = {"kind": "leak judges", "label": leak["label"],
                     "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale")}
                                 for v in leak["verdicts"] if v["label"] != "missed"]}
@@ -568,8 +600,8 @@ def ot_leak_reasons(bug, text):
 
 
 def noleak_edit_build(n):
-    if not 1 <= n <= NOLEAK_ROUNDS:
-        raise SystemExit(f"rounds run 1..{NOLEAK_ROUNDS}")
+    if not 1 <= n <= max_rounds():
+        raise SystemExit(f"rounds run 1..{max_rounds()}")
     census_rows, _ = load_task_inputs()
     corpus = driver.CORPUS
     W = task_work()
@@ -594,10 +626,11 @@ def noleak_edit_build(n):
         unit = base / bug
         unit.mkdir(parents=True)
         save(unit / "item.json", item)
-        (unit / "NOLEAK.md").write_text((SCRIPTS / "brief/NOLEAK.md").read_text())
+        editor = "STRICT.md" if STRICT else "NOLEAK.md"
+        (unit / editor).write_text((SCRIPTS / "brief" / editor).read_text())
         (unit / "WRITER.md").write_text((SCRIPTS / "brief/WRITER.md").read_text())
         (unit / "INSTRUCTIONS.md").write_text(
-            "Read NOLEAK.md and WRITER.md and follow them exactly. Your item is item.json. "
+            f"Read {editor} and WRITER.md and follow them exactly. Your item is item.json. "
             "Read code only through git show or git diff at the item's intro and base commits; "
             "do not read code from the current checkout or other history. Do not read any other "
             "experiment data or history, use the network, build, test, or edit tracked files. "
@@ -636,9 +669,11 @@ def noleak_validate(bug, item, raw):
         if new != declared.get(i, old):
             raise SystemExit(f"{bug}: line {i + 1} differs from the declared edits")
     problems = brief_driver.lint(result_text, driver.CORPUS[bug])
-    if problems:
+    if problems and not STRICT:
         raise SystemExit(f"{bug}: edited brief fails lint: {problems}")
-    return result_text
+    # In strict mode a well-formed edit that breaks the brief rules (for example the length limit) is
+    # the editor's result for the round: it fails construction for that diff, not the whole round.
+    return result_text if not STRICT else (result_text, problems)
 
 
 def noleak_edit_collect(n):
@@ -649,15 +684,34 @@ def noleak_edit_collect(n):
     out_path = base.parent / "edit-results.json"
     if out_path.exists():
         raise SystemExit(f"{out_path} exists")
+    if STRICT:
+        # The registered strict editor is Opus/high on claude7; check each edit's producer.
+        for u in units:
+            producer = json.loads((base / "out" / f"task-{u['id']}.json").read_text()).get("producer") or {}
+            if (producer.get("profile"), (producer.get("config") or {}).get("model")) != ("claude7", "opus"):
+                raise SystemExit(f"{u['id']}: round {n} edit came from {producer.get('profile')}/"
+                                 f"{(producer.get('config') or {}).get('model')}, not claude7/opus")
     # Validate every unit before writing anything, so a failure leaves nothing half collected.
     recs = []
     for u in units:
         bug = u["id"]
         item = json.loads((base / bug / "item.json").read_text())
         raw = json.loads((base / bug / "edit.json").read_text())
-        text = noleak_validate(bug, item, raw)
+        try:
+            validated = noleak_validate(bug, item, raw)
+        except SystemExit as e:
+            # In strict mode a well-formed edit that breaks the wording-only rules (lines, anchors,
+            # undeclared changes) is that diff's failed attempt; malformed output still stops collection.
+            if not STRICT or "schema" in str(e) or "non-empty items list" in str(e):
+                raise
+            recs.append({"id": bug, "source_sha256": u["source_sha256"], "edited_items": len(raw["items"]),
+                         "brief": item["brief"], "brief_sha256": "structural-failure",
+                         "lint_problems": [f"structural: {e}"]})
+            continue
+        text, lint_problems = validated if STRICT else (validated, [])
         recs.append({"id": bug, "source_sha256": u["source_sha256"], "edited_items": len(raw["items"]),
-                     "brief": text, "brief_sha256": hashlib.sha256(text.encode()).hexdigest()})
+                     "brief": text, "brief_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                     **({"lint_problems": lint_problems} if lint_problems else {})})
     save(out_path, {"round": n, "results": recs})
     print(json.dumps([{k: r[k] for k in ("id", "edited_items", "brief_sha256")} for r in recs]))
 
@@ -665,38 +719,58 @@ def noleak_edit_collect(n):
 def noleak_check_build(n):
     W = task_work()
     noleak_require_scope()
-    edits = json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]
+    # Edits that broke the brief rules already failed construction; only the others are checked.
+    edits = [r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]
+             if not r.get("lint_problems")]
     census_rows, _ = load_task_inputs()
     corpus = driver.CORPUS
     unit = W / f"round-{n}" / "check" / "factcheck"
     if unit.exists():
         raise SystemExit(f"{unit} exists")
     unit.mkdir(parents=True)
+    spec, output = ("FIDELITY.md", "fidelity.jsonl") if STRICT else ("FACTCHECK.md", "factcheck.jsonl")
     for r in edits:
         census = census_rows[r["id"]]
-        save(unit / f"item-{r['id']}.json", {
-            "id": r["id"], "intro": corpus[r["id"]]["intro_commit"], "base": corpus[r["id"]]["base_commit"],
-            "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")},
-            "brief": r["brief"], "brief_sha256": r["brief_sha256"]})
-    (unit / "FACTCHECK.md").write_text((SCRIPTS / "brief/FACTCHECK.md").read_text())
+        item = {"id": r["id"], "intro": corpus[r["id"]]["intro_commit"], "base": corpus[r["id"]]["base_commit"],
+                "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")},
+                "brief": r["brief"], "brief_sha256": r["brief_sha256"]}
+        if STRICT:
+            # Fidelity is always judged against the round L OT text, not an intermediate round.
+            original = (ROOT / "briefs" / "oracle" / r["id"] / "brief.md").read_text().splitlines()
+            edited = r["brief"].splitlines()
+            if len(original) != len(edited):
+                raise SystemExit(f"{r['id']}: edited brief does not keep the OT brief's lines")
+            item["pairs"] = [{"original": o, "edited": e} for o, e in zip(original, edited) if o != e]
+        save(unit / f"item-{r['id']}.json", item)
+    (unit / spec).write_text((SCRIPTS / "brief" / spec).read_text())
     (unit / "INSTRUCTIONS.md").write_text(
-        f"Read FACTCHECK.md and follow it exactly. Your item files are the {len(edits)} item-*.json files "
+        f"Read {spec} and follow it exactly. Your item files are the {len(edits)} item-*.json files "
         "in this folder. Read code only through git show or git diff at each item's intro and base commits. "
         "Do not read any other experiment data or history, use the network, build, test, or edit tracked "
-        "files. Write factcheck.jsonl in the repository working directory and edit no other file.")
+        f"files. Write {output} in the repository working directory and edit no other file.")
     print(json.dumps({"dir": str(unit.parent), "items": len(edits)}))
 
 
 def noleak_check_collect(n):
     W = task_work()
     noleak_require_scope()
-    edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
+    all_edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
+    edits = {b: r for b, r in all_edits.items() if not r.get("lint_problems")}
     out_path = W / f"round-{n}" / "check-results.json"
+    output = "fidelity.jsonl" if STRICT else "factcheck.jsonl"
+    if STRICT:
+        # The registered fidelity checker is Opus/high on claude7; check the producer of this output.
+        producer = json.loads((W / f"round-{n}" / "check" / "out" / "task-factcheck.json").read_text()).get("producer") or {}
+        if (producer.get("profile"), (producer.get("config") or {}).get("model")) != ("claude7", "opus"):
+            raise SystemExit(f"round {n} fidelity output came from {producer.get('profile')}/"
+                             f"{(producer.get('config') or {}).get('model')}, not claude7/opus")
     rows = [json.loads(line) for line in
-            (W / f"round-{n}" / "check" / "factcheck" / "factcheck.jsonl").read_text().splitlines() if line.strip()]
+            (W / f"round-{n}" / "check" / "factcheck" / output).read_text().splitlines() if line.strip()]
     if sorted(r.get("id") for r in rows) != sorted(edits):
         raise SystemExit("fact check must cover each edited brief exactly once")
     decisions = {}
+    if STRICT:
+        rows = [strict_fidelity_decision(r, edits.get(r.get("id"))) for r in rows]
     for r in rows:
         e = edits[r["id"]]
         if r.get("brief_sha256") != e["brief_sha256"] or r.get("decision") not in ("carries", "does not carry"):
@@ -706,7 +780,15 @@ def noleak_check_collect(n):
             if not isinstance(r.get("item"), str) or r["item"] not in e["brief"].splitlines() or not r["item"].startswith("- "):
                 raise SystemExit(f"{r['id']}: carrying item is not a complete line of the checked brief")
         decisions[r["id"]] = {"decision": r["decision"], "item": r.get("item"), "why": r.get("why"),
-                              "brief_sha256": e["brief_sha256"]}
+                              "brief_sha256": e["brief_sha256"],
+                              **({"elements_not_kept": r["elements_not_kept"], "fact_inferred": r["fact_inferred"]}
+                                 if STRICT else {})}
+    for bug, r in all_edits.items():
+        if r.get("lint_problems"):
+            decisions[bug] = {"decision": "does not carry", "item": None,
+                              "why": f"edit breaks the brief rules: {r['lint_problems']}",
+                              "brief_sha256": r["brief_sha256"],
+                              "elements_not_kept": [f"lint: {x}" for x in r["lint_problems"]], "fact_inferred": False}
     if out_path.exists():
         if json.loads(out_path.read_text()) != {"round": n, "decisions": decisions}:
             raise SystemExit(f"{out_path} holds different decisions")
@@ -732,28 +814,247 @@ def noleak_check_collect(n):
                       "rejected": sorted(b for b, d in decisions.items() if d["decision"] != "carries")}))
 
 
+def strict_fidelity_decision(r, e):
+    """Maps a fidelity row onto the fact-check decision shape. The checker's own `decision` is
+    not trusted alone: a pass also needs every element kept, no inference and a whole-line quote."""
+    if e is None or r.get("brief_sha256") != e["brief_sha256"]:
+        raise SystemExit(f"{r.get('id')}: fidelity row names another brief")
+    elements = r.get("elements")
+    if not isinstance(elements, list) or any(not isinstance(x, dict) or not isinstance(x.get("kept"), bool)
+                                             or not isinstance(x.get("element"), str) or not x["element"].strip()
+                                             for x in elements):
+        raise SystemExit(f"{r['id']}: fidelity row has no valid element list")
+    if not isinstance(r.get("fact_inferred"), bool) or r.get("decision") not in ("pass", "fail"):
+        raise SystemExit(f"{r['id']}: fidelity row has an invalid decision or fact_inferred")
+    # Every changed line must have its elements listed; a skipped line cannot pass.
+    original = (ROOT / "briefs" / "oracle" / r["id"] / "brief.md").read_text().splitlines()
+    pair_count = sum(o != ed for o, ed in zip(original, e["brief"].splitlines()))
+    covered = {x.get("pair") for x in elements}
+    if any(not isinstance(i, int) or not 0 <= i < pair_count for i in covered):
+        raise SystemExit(f"{r['id']}: fidelity elements name pairs outside 0..{pair_count - 1}")
+    uncovered = sorted(set(range(pair_count)) - covered)
+    added = r.get("added")
+    if not isinstance(added, list):
+        raise SystemExit(f"{r['id']}: fidelity row has no list of added elements")
+    not_kept = ([x.get("element") for x in elements if not x["kept"]] + [f"pair {i}: no elements listed" for i in uncovered]
+                + [f"added: {a}" for a in added])
+    quote = r.get("carrying_item")
+    whole_line = isinstance(quote, str) and quote.startswith("- ") and quote in e["brief"].splitlines()
+    if uncovered or (r["decision"] == "pass" and not whole_line):
+        # The checker claims a pass but left lines unassessed or quoted no valid line: fidelity was not
+        # assessed, so rerun the checker rather than charge the edit with a failure.
+        raise SystemExit(f"{r['id']}: fidelity pass with unassessed pairs {uncovered} or an invalid quote; "
+                         "rerun the fidelity check")
+    ok = r["decision"] == "pass" and not not_kept and not r["fact_inferred"] and whole_line
+    return {"id": r["id"], "brief_sha256": r["brief_sha256"], "decision": "carries" if ok else "does not carry",
+            "item": quote if whole_line else None, "why": r.get("why"), "elements_not_kept": not_kept,
+            "fact_inferred": r["fact_inferred"]}
+
+
+# Judge A on Claude Opus (claude7), judge B on GPT Sol (codex), as brief/PLAN-bifrost-oracle-strict.md registers.
+STRICT_JUDGE_MODELS = {"A": ("claude7", "opus"), "B": ("codex", "gpt-6.1-sol")}  # judge: (profile, model)
+
+
+def require_strict_judges(n, bug=None, verdicts=None):
+    """The registered leak rule pairs one Opus and one Sol judge for every strict leak judgment.
+
+    Reads each judge's output file, which names the session, profile and model that produced its
+    verdicts, and (given a leak record's verdicts) requires them to be exactly those outputs."""
+    leak_dir = ROOT / "briefs" / f"{TASK_NAME}-leak-{n}"
+    key = json.loads((leak_dir / "key.json").read_text())
+    produced = {}
+    for judge, (profile, model) in STRICT_JUDGE_MODELS.items():
+        out = json.loads((leak_dir / "out" / f"verdicts-0-{judge}.json").read_text())
+        p = out.get("producer") or {}
+        if (p.get("profile"), (p.get("config") or {}).get("model")) != (profile, model):
+            raise SystemExit(f"round {n} judge {judge} verdicts came from {p.get('profile')}/"
+                             f"{(p.get('config') or {}).get('model')}, not {profile}/{model}")
+        for v in out["verdicts"]:
+            produced[(key[v["output_id"]]["bug"], judge)] = (v.get("label"), v.get("rationale"), v.get("confidence"))
+    if bug is not None:
+        got = {(bug, v["judge"]): (v.get("label"), v.get("rationale"), v.get("confidence")) for v in verdicts}
+        if set(got) != {(bug, "A"), (bug, "B")} or any(produced.get(k) != got[k] for k in got):
+            raise SystemExit(f"{bug}: round {n} leak record is not the registered judges' output")
+
+
+def quotes_rationale(why, rationale):
+    """The cause answer's reason must quote its own item's rationale: some quoted span of at least
+    eight characters in `why` appears in that rationale (whitespace and case normalized)."""
+    norm = lambda t: " ".join(t.split()).lower()
+    # At least eight characters, or the whole rationale when it is shorter than that.
+    shortest = min(8, len(norm(rationale)))
+    spans = re.findall(r'"([^"]+)"|\u201c([^\u201d]+)\u201d|\'([^\']+)\'', why)
+    return shortest > 0 and any(len(norm(s)) >= shortest and norm(s) in norm(rationale)
+                                for group in spans for s in group if s)
+
+
+def verdicts_fingerprint(leak_round):
+    """Binds a gate result to the exact leak verdicts it judged."""
+    return hashlib.sha256(json.dumps(leak_round["verdicts"], sort_keys=True).encode()).hexdigest()
+
+
+def noleak_gate_build(n):
+    """Strict leak gate: both leak verdicts `missed` at high confidence go to one blind cause check;
+    any other round-n leak result fails the gate without one."""
+    if not STRICT:
+        raise SystemExit("the leak gate exists only in strict mode")
+    W = task_work()
+    noleak_require_scope()
+    unit = W / f"round-{n}" / "gate" / "cause"
+    if unit.exists():
+        raise SystemExit(f"{unit} exists")
+    checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
+    pending = 0
+    keymap = {}
+    accepted = [bug for bug, d in checks.items() if d["decision"] == "carries"]
+    if not accepted:
+        # No edit passed fidelity: there was no leak round and nothing to gate.
+        print(json.dumps({"round": n, "cause_checks": 0, "dir": None, "note": "no brief passed fidelity"}))
+        return
+    # Every accepted diff's round-n leak record must exist and be the registered judges' output
+    # before anything is written.
+    records = {}
+    for bug in accepted:
+        r = next((x for x in noleak_record(bug)["rounds"] if x["round"] == n), None)
+        if r is None:
+            raise SystemExit(f"{bug}: round {n} leak verdicts are not collected")
+        require_strict_judges(n, bug, r["verdicts"])
+        if r["label"] == "missed" and any(not (v.get("rationale") or "").strip()
+                                          or (v.get("confidence") or "").lower() not in ("high", "medium", "low")
+                                          for v in r["verdicts"]):
+            # Malformed, not evidence: the verdict must be rejudged before the gate can run.
+            raise SystemExit(f"{bug}: a round {n} missed verdict lacks a rationale or a valid confidence; rejudge it")
+        records[bug] = r
+    for bug, r in records.items():
+        if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
+            continue
+        for v in r["verdicts"]:
+            unit.mkdir(parents=True, exist_ok=True)
+            # The cause check sees only an opaque token, the rationale and the fixed question in
+            # CAUSE.md: a descriptive diff name could itself hint at the mechanism. The key that maps
+            # tokens back stays outside the uploaded unit.
+            token = hashlib.sha256(f"{n}/{bug}/{v['judge']}/{v.get('rationale')}".encode()).hexdigest()[:16]
+            keymap[token] = {"bug": bug, "judge": v["judge"], "verdicts_sha256": verdicts_fingerprint(r)}
+            save(unit / f"item-{token}.json", {"id": token, "rationale": v.get("rationale")})
+            pending += 1
+    if pending:
+        save(unit.parent / "key.json", keymap)
+        (unit / "CAUSE.md").write_text((SCRIPTS / "brief/CAUSE.md").read_text())
+        (unit / "INSTRUCTIONS.md").write_text(
+            f"Read CAUSE.md and follow it exactly. Your item files are the {pending} item-*.json files in this "
+            "folder. Do not read anything else, use the network, build, test, or edit tracked files. "
+            "Write cause.jsonl in the repository working directory and edit no other file.")
+    print(json.dumps({"round": n, "cause_checks": pending, "dir": str(unit.parent) if pending else None}))
+
+
+def noleak_gate_collect(n):
+    W = task_work()
+    noleak_require_scope()
+    out_path = W / f"round-{n}" / "gate-results.json"
+    checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
+    unit = W / f"round-{n}" / "gate" / "cause"
+    keymap = json.loads((unit.parent / "key.json").read_text()) if (unit.parent / "key.json").exists() else {}
+    causes = {}
+    if keymap:
+        # The registered cause checker is Opus/high on claude7; check the producer of its answers.
+        producer = json.loads((unit.parent / "out" / "task-cause.json").read_text()).get("producer") or {}
+        if (producer.get("profile"), (producer.get("config") or {}).get("model")) != ("claude7", "opus"):
+            raise SystemExit(f"round {n} cause answers came from {producer.get('profile')}/"
+                             f"{(producer.get('config') or {}).get('model')}, not claude7/opus")
+        rows = [json.loads(line) for line in (unit / "cause.jsonl").read_text().splitlines() if line.strip()]
+        got = {r.get("id"): r for r in rows}
+        if set(got) != set(keymap) or len(rows) != len(keymap):
+            raise SystemExit("cause check must answer each verdict exactly once")
+        # Validate every answer before any gate decision is recorded: a malformed row is an error to
+        # fix and rerun, not evidence for or against a brief.
+        rationales = {t: json.loads((unit / f"item-{t}.json").read_text())["rationale"] for t in keymap}
+        bad = [t for t, r in got.items() if r.get("answer") not in ("yes", "no", "unclear")
+               or not isinstance(r.get("why"), str) or not quotes_rationale(r["why"], rationales[t])]
+        if bad:
+            raise SystemExit(f"cause check rows without a valid answer and quoted reason: {bad}")
+        causes = {f"{keymap[t]['bug']}-{keymap[t]['judge']}": {**got[t], "judge": keymap[t]["judge"],
+                                                                "verdicts_sha256": keymap[t]["verdicts_sha256"]}
+                  for t in keymap}
+    results = {}
+    for bug, d in checks.items():
+        if d["decision"] != "carries":
+            continue
+        r = next(x for x in noleak_record(bug)["rounds"] if x["round"] == n)
+        if r["label"] != "missed":
+            results[bug] = {"pass": False, "gate": "leak", "why": f"leak label {r['label']}"}
+        elif any(not (v.get("rationale") or "").strip()
+                 or (v.get("confidence") or "").lower() not in ("high", "medium", "low") for v in r["verdicts"]):
+            raise SystemExit(f"{bug}: a round {n} missed verdict lacks a rationale or a valid confidence; rejudge it")
+        elif any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
+            results[bug] = {"pass": False, "gate": "leak", "why": "a missed verdict below high confidence: " +
+                            ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}
+        else:
+            if any(causes[f"{bug}-{v['judge']}"]["verdicts_sha256"] != verdicts_fingerprint(r) for v in r["verdicts"]):
+                raise SystemExit(f"{bug}: cause answers were given for other leak verdicts")
+            # Only a clear "no" passes; "yes", "unclear" or anything else fails the brief.
+            flagged = [causes[f"{bug}-{v['judge']}"] for v in r["verdicts"]
+                       if causes[f"{bug}-{v['judge']}"].get("answer") != "no"]
+            results[bug] = {"pass": not flagged, "gate": "cause",
+                            "answers": [causes[f"{bug}-{v['judge']}"].get("answer") for v in r["verdicts"]],
+                            "why": "; ".join(f"judge {c['judge']}: {c.get('why')}" for c in flagged) or "clean"}
+        results[bug]["verdicts_sha256"] = verdicts_fingerprint(r)
+    record = {"round": n, "results": results}
+    if out_path.exists():
+        frozen = json.loads(out_path.read_text())
+        # A record frozen before the `answers` field existed is compared without it; it is never
+        # rewritten, so the frozen bytes stay as collected.
+        strip = lambda rec: {"round": rec["round"], "results": {b: {k: v for k, v in x.items() if k != "answers"}
+                                                               for b, x in rec["results"].items()}}
+        legacy = not any("answers" in x for x in frozen["results"].values())
+        if (strip(frozen) != strip(record)) if legacy else (frozen != record):
+            raise SystemExit(f"{out_path} holds different gate results")
+    else:
+        save(out_path, record)
+    print(json.dumps({"round": n, "pass": sorted(b for b, x in results.items() if x["pass"]),
+                      "fail": {b: x["why"][:120] for b, x in results.items() if not x["pass"]}}))
+
+
 def noleak_publish(jobs_out):
     W = task_work()
     noleak_require_scope()
-    done = max((n for n in range(1, NOLEAK_ROUNDS + 1) if (W / f"round-{n}" / "check-results.json").exists()), default=0)
+    done = max((n for n in range(1, max_rounds() + 1) if (W / f"round-{n}" / "check-results.json").exists()), default=0)
     retained, excluded = [], []
     for bug in noleak_ids():
         passed, source, previous = noleak_state(bug, done)
         if passed:
             retained.append({"bug": bug, "round": passed, "brief_sha256": hashlib.sha256(source.encode()).hexdigest()})
-        elif done < NOLEAK_ROUNDS:
+        elif done < max_rounds():
             raise SystemExit(f"{bug}: not passed after round {done}; run the remaining rounds first")
         else:
-            excluded.append({"bug": bug, "after_round": done, "last_check": previous})
+            # Say why: a diff that never reached a clean leak check failed construction, which is
+            # not evidence that its complete fact cannot be stated without leaking.
+            kind = (previous or {}).get("kind", "")
+            if "fidelity" in kind or "fact check" in kind:
+                cause = "fidelity (editor failure)"
+            elif kind == "strict leak gate":
+                # Unresolved judgments fail retention but are not evidence that the complete fact
+                # cannot be stated without leaking; keep them apart from affirmative ones.
+                gate = previous.get("gate", "leak")
+                why = previous.get("why", "")
+                if gate == "leak" and why.startswith("a missed verdict below high confidence"):
+                    cause = "leak (unresolved: missed below high confidence)"
+                elif gate == "cause" and "yes" not in (previous.get("answers") or []):
+                    cause = "cause (unresolved: unclear answer)"
+                else:
+                    cause = gate
+            else:
+                cause = "leak"
+            excluded.append({"bug": bug, "after_round": done, "cause": cause, "last_check": previous})
     for r in retained:
-        d = ROOT / "briefs" / "oracle-noleak" / r["bug"]
+        d = ROOT / "briefs" / ("oracle-strict" if STRICT else "oracle-noleak") / r["bug"]
         text = (W / "texts" / r["bug"] / f"round-{r['round']}.md").read_text()
         if (d / "brief.md").exists() and (d / "brief.md").read_text() != text:
             raise SystemExit(f"{d}: a different brief is already published")
         d.mkdir(parents=True, exist_ok=True)
         (d / "brief.md").write_text(text)
     # ON and its same-image no-brief control AF, interleaved per diff (the plan's AF amendment).
-    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": arm} for r in retained for arm in ("ON", "AF")])
+    arms = ("OX", "AF2") if STRICT else ("ON", "AF")  # OX is the plan's strict arm "OS" (driver.py)
+    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": arm} for r in retained for arm in arms])
     # Registered: fewer than 8 retained diffs reads Inconclusive whatever the scores. With none
     # retained there is nothing to review or score, so the outcome is recorded here.
     outcome = "Inconclusive (fewer than 8 retained diffs)" if len(retained) < 8 else None
@@ -768,7 +1069,9 @@ if __name__ == "__main__":
     p.add_argument("step", choices=["build", "collect", "merge", "blind-collect", "annotate",
                                     "edit-build", "edit-collect", "task-sync",
                                     "noleak-edit-build", "noleak-edit-collect", "noleak-check-build",
-                                    "noleak-check-collect", "noleak-publish"])
+                                    "noleak-check-collect", "noleak-gate-build", "noleak-gate-collect",
+                                    "noleak-publish"])
+    p.add_argument("--strict", action="store_true", help="noleak steps: strict construction (fidelity check, leak gate)")
     p.add_argument("--round", type=int, help="noleak steps: round 1..3")
     p.add_argument("--jobs-out", help="noleak-publish: where to write the ON jobs file")
     p.add_argument("path", nargs="?")
@@ -786,6 +1089,9 @@ if __name__ == "__main__":
             p.error("--name must be a single path component")
         TASK_CENSUS, TASK_JOBS, TASK_NAME = a.census, a.bugs_from, a.name
         load_task_inputs()
+    if a.strict and not a.step.startswith("noleak-"):
+        p.error("--strict applies only to noleak steps")
+    STRICT = a.strict
     if a.step.startswith("noleak-"):
         if not TASK_NAME:
             p.error("noleak steps need --census, --bugs-from and --name")
@@ -797,7 +1103,8 @@ if __name__ == "__main__":
             if a.round is None:
                 p.error("noleak steps need --round")
             {"noleak-edit-build": noleak_edit_build, "noleak-edit-collect": noleak_edit_collect,
-             "noleak-check-build": noleak_check_build, "noleak-check-collect": noleak_check_collect}[a.step](a.round)
+             "noleak-check-build": noleak_check_build, "noleak-check-collect": noleak_check_collect,
+             "noleak-gate-build": noleak_gate_build, "noleak-gate-collect": noleak_gate_collect}[a.step](a.round)
     elif a.step == "merge":
         merge(a.path)
     elif a.step == "blind-collect":

@@ -1,0 +1,28 @@
+{
+  "id": "kotlin-value-class-this-loses-underlying-projection",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "e3c1f2ca1eb86a5ac98123588ff6572586bcaa1c40be9bc92239269a0a085f5b",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It describes this_expression reading self.receiver and bind_carrier on formal slots, but it does not identify the missing carrier binding for the value-class receiver or the lost underlying projection.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It mentions how this_expression and the receiver are lowered and the underlying-projection branch, but never says this.amount in a value-class member misses the projection.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

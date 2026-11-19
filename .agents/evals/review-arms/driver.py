@@ -90,7 +90,11 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              # Non-leaking oracle brief (brief/PLAN-bifrost-oracle-noleak.md), Terra reviewers.
              "ON": ["gpt-6.1-terra:high"] * 3,
              # Fresh no-brief control in the same window and image as ON (its 2026-11-18 amendment).
-             "AF": ["gpt-6.1-terra:high"] * 3})
+             "AF": ["gpt-6.1-terra:high"] * 3,
+             # Strict-construction oracle brief and its same-image no-brief control
+             # (brief/PLAN-bifrost-oracle-strict.md). The plan calls the brief arm "OS"; that ID
+             # already names stage A's Sol oracle arm above, so the strict arm is OX here.
+             "OX": ["gpt-6.1-terra:high"] * 3, "AF2": ["gpt-6.1-terra:high"] * 3})
 
 
 def workspace_id():
@@ -433,7 +437,7 @@ def commit_message(bug):
 BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind", "FT": "bifrost", "FS": "bifrost",
               "DT": "bifrost-plus", "DS": "bifrost-plus", "XT": "blind-minus", "XS": "blind-minus",
               "WT": "bifrost-diluted", "WS": "bifrost-diluted", "TT": "blind-terra", "TS": "blind-sonnet",
-              "ON": "oracle-noleak"}
+              "ON": "oracle-noleak", "OX": "oracle-strict"}
 BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
               "They may be incomplete.")
 

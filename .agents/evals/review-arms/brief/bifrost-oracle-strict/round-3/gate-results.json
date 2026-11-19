@@ -1,0 +1,65 @@
+{
+  "round": 3,
+  "results": {
+    "cpp-template-inherited-base-signature": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "da9153bcd2c7b3bf07e8800d54ef1fd184c01c0142075bbbaa43e2e443e012fe"
+    },
+    "incompatible-semantic-bundle-late-gate": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "e6e3a34041d8e579ed30dadef9303e7c6e3df794d0a1e0ce46da36d1c80172ef"
+    },
+    "java-static-getter-drops-incomplete-route": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "e5e46966e30f99b9d49e1dcb01a486b8dd13d79699a8a7b6e350b192d09616b0"
+    },
+    "jvm-protected-unindexed-hierarchy-denied": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "3e148399e3543367c61cb57fa79635f5e2c3f9d4d16db9afc6fd803bfd141d31"
+    },
+    "kotlin-source-constructor-steals-class-header-comment": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "6a60ff664a90efa1888631feba749bd271d5ee49bf799ddd57dd2ad34704c1f7"
+    },
+    "kotlin-value-class-this-loses-underlying-projection": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "6f470c4bf3b7c0f3d6370bca9d90d8192a0e7540669652ffeacf8cab6d6d93e8"
+    },
+    "mcp-default-advisory-reported-clean": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "7070481ae78b30920fa64874644e61a5af6600c494a9dd640c32975533e0e3a3"
+    },
+    "python-filescope-enclosing-tie": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "d7da7dabfda3f25612280a749397fdb495374db6431eb9a1b8ab483c8b61e619"
+    },
+    "python-module-mutation-repeated-scan-budget": {
+      "pass": false,
+      "gate": "leak",
+      "why": "a missed verdict below high confidence: A=medium, B=high",
+      "verdicts_sha256": "0256b40b559e8d246dee833e27c3750215734db70c2c52876032973d521560ad"
+    },
+    "retained-fill-java-memo-loses-gap": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "e37c1b054a26129f71cc4c2ae66accc6d72725bf115c274437c88ff188d82b0e"
+    }
+  }
+}

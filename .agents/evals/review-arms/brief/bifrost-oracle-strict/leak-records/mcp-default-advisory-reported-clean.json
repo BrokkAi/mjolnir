@@ -1,0 +1,50 @@
+{
+  "id": "mcp-default-advisory-reported-clean",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 3,
+      "label": "caught",
+      "brief_sha256": "4f01b1f05d845489fe20b09ff615d245c08bf6b38b4bc2e811502ceb85b48f3d",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "The MCP options builder sets no inconclusive option ...; the options default for that field is Pass. run_policy picks its public status string by matching outcome.exit_status(), where POLICY_EXIT_CLEAN matches clean",
+          "rationale": "It links the new Pass default to MCP's numeric-status-to-clean projection. It never says that an inconclusive run is therefore reported to MCP clients as clean. Boundary case between caught and partial, so I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "The MCP options builder sets no inconclusive option",
+          "rationale": "The output links the new default Pass option to MCP run_policy's exit-status-only clean projection while retaining the report separately. Together with its observation that inconclusive completion is accepted on the exit-zero path, this identifies the advisory-to-clean conflation.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "4cb7a935f83c53dab7b1b9926fcd85044d1f86fa153fe8f463229a65c80c2d7d",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "`run_policy` builds its result from a `match` on `outcome.exit_status()` for the `status` string, with arm `POLICY_EXIT_CLEAN` => `clean` ... the MCP options builder sets no inconclusive option, and the options default for that field is `Pass`",
+          "rationale": "Connects the new default Pass inconclusive handling to MCP run_policy deriving status solely from the exit gate, where CLEAN maps to clean. It does not say outright that an inconclusive run is labelled clean, but the chain is complete.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "with arm `POLICY_EXIT_CLEAN` => `clean`",
+          "rationale": "It directly connects the MCP numeric-status projection to its unset inconclusive option and the new Pass default. This identifies the false clean label on advisory exit-zero runs, rather than objecting to the advisory exit code itself.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

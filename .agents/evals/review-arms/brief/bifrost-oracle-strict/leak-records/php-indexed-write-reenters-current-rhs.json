@@ -1,0 +1,28 @@
+{
+  "id": "php-indexed-write-reenters-current-rhs",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "caught",
+      "brief_sha256": "23682521e1e04d296b24f1996b1d324623752c67221ef7aac54b6eb0a1811e37",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "filters nodes by start byte and has no assignment end-byte check, and calls `resolve_value(right)` ... including an assignment that encloses the current collection read",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it states that the indexed-write helper accepts the enclosing in-progress assignment and resolves its RHS, but never draws the self-recursion/stack-overflow conclusion.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "calls `resolve_value(right)` for matching indexed writes, including an assignment that encloses the current collection read",
+          "rationale": "The output connects the new subscript branch to collection inference, the start-only assignment filter, and the callback into the same receiver evaluator. Selecting an enclosing assignment and resolving its current RHS identifies the non-progressing self-recursion mechanism rather than a generic recursion concern.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

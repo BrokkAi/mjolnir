@@ -1,0 +1,28 @@
+{
+  "id": "python-filescope-enclosing-tie",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "db80691f8e6e62e0b56ba90e6558b93c27234d969cefd3ddf737523e12c2df22",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It separately notes that byte-based enclosing lookup picks the smallest range from the raw set and that the Python module and FileScope both cover the whole file, but it never says they tie, that the pick is arbitrary, or that lookups fail.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map with no defect claims. It does note that the byte-based enclosing lookup picks by size from the underlying set, and that the Python module (root node) and FileScope (0..source.len()) both cover the file, but it never says the tie is resolved arbitrarily or that module-scope lookups are lost.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

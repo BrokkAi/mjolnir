@@ -1,0 +1,28 @@
+{
+  "id": "php-indexed-write-reenters-current-rhs",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "15a8f8cb80e2d42628be2d47fd8be59a631f3e7f92c03bb963c05c0383791907",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": "skips nodes whose start byte is at or after before_byte, and calls resolve_value(right) ... the visited nodes include the collection node's own ancestors, which start before it",
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It notes that writes in the read's own ancestor assignment are visited, which is the root of the defect. But it never says this re-enters the same RHS or causes unbounded recursion or a stack overflow.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": "the visited nodes include the collection node's own ancestors, which start before it",
+          "rationale": "The output observes that infer_indexed_local_element_type admits nodes by start byte, so the collection's own enclosing assignment is visited and resolve_value(right) is called on it. That is the mechanism, but there is no claim of self-recursion or stack overflow, so it is not a finding. Picked the lower label.",
+          "confidence": "low"
+        }
+      ]
+    }
+  ]
+}

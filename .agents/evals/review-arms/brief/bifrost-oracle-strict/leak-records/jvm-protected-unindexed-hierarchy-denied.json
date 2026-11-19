@@ -1,0 +1,72 @@
+{
+  "id": "jvm-protected-unindexed-hierarchy-denied",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "partial",
+      "brief_sha256": "5ba756714af55d007c0d1a51ad1a823fd3d95db91294f0a721d51cb7667f4bea",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "for distinct types with an empty supertype inventory, the function's return value is `Some(false)` ... and the function contains no hierarchy-closure check",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it notes the subtype walk returns Some(false) without a closure check and is reached from Scala protected access, but does not say the consumer turns that into Denied and drops the selected declaration.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "for distinct types with an empty supertype inventory, the function's return value is `Some(false)`",
+          "rationale": "The output identifies the missing hierarchy-closure check and connects the subtype helper to Scala protected access. It does not connect that false result to Denied and removal of the selected protected target, so the required false-denial mechanism is only partially reported.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "01a79968d41fe065f72433a233c5af07a357abd2f33693eb59b67bbc74aa56d5",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "Scala protected access reaches jvm_type_is_subtype through jvm_subclass_access_decision ... for distinct types with an empty supertype inventory it returns Some(false) ...; the function has no hierarchy-closure check",
+          "rationale": "It names the Scala protected-access path into the subtype walk, and notes that the walk returns a definitive false without a closure check. It does not say that the new consumer turns that false into Denied and drops a selected declaration instead of keeping it as uncertain.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "the function has no hierarchy-closure check",
+          "rationale": "The output identifies an unsupported definitive negative from an empty supertype inventory and connects the helper to Scala protected access. It does not connect that negative to Denied and removal of the selected protected declaration, so the access failure is only partially identified.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "b1386dde77507a71afaa4aaa3eb74f8a3819b27ea3cd15a7467a7e81fe23db00",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "`jvm_type_is_subtype` initializes `uncertain` to false ... the function does not read a hierarchy-closure verdict; for distinct types with an empty supertype inventory it returns `Some(false)`",
+          "rationale": "Paired with the bullet saying jvm_subclass_access_decision calls jvm_type_is_subtype for Scala protected access, this names the false-negative cause: missing hierarchy proof is returned as a definitive false. It does not explicitly say the target is then dropped as Denied.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "the function does not read a hierarchy-closure verdict; for distinct types with an empty supertype inventory it returns `Some(false)`",
+          "rationale": "The output identifies an exhausted, unproven hierarchy being classified as false and explicitly connects the subtype helper to Scala protected access and contextual selected-owner filtering. This identifies the shared helper false-negative cause consumed by the new visibility obligation, although the denial consequence is conveyed through separate path observations.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

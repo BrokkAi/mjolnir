@@ -1,0 +1,72 @@
+{
+  "id": "kotlin-value-class-this-loses-underlying-projection",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "partial",
+      "brief_sha256": "08fdb63bae03c65fe93106e0e9e7147045fec421dc314dee6be0db9d0617d671",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "dispatch receiver creation ... sets `self.receiver` and does not call `bind_carrier`",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it notes the missing receiver carrier binding for this_expression but does not connect it to a value-class member's this.amount missing the underlying projection.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "sets `self.receiver` and does not call `bind_carrier`",
+          "rationale": "The output identifies this_expression receiver flow and the missing receiver carrier binding. It does not connect that omission to the value-class member underlying-property projection falling back to an ordinary field load/gap, so it stops short of the required member-this failure.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "eee8dc70d263b5556ab1c5719638fdf7e19a1bd788227dc25901f59a8c8d77c9",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "The this_expression flow ... reads captured_receiver or self.receiver; formal slots call bind_carrier ...; dispatch receiver creation ... sets self.receiver, with no bind_carrier call",
+          "rationale": "It singles out the missing carrier binding for the dispatch receiver that this_expression reads. It does not link this to a value-class member's this.amount losing the underlying projection and falling back to a generic field load. Boundary case, so I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "with no `bind_carrier` call",
+          "rationale": "The output highlights missing dispatch-receiver carrier binding and this-expression value flow. It does not connect that omission to failed own-underlying-property projection, generic field loading, or lost carrier dependence, so it does not meet the full member-this projection match rule.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "partial",
+      "brief_sha256": "06d8e0c932ab42afc181748ca9ef2b99ff322cdf5ea4659639d06b6144a08711",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "Formal slots call `bind_carrier`; dispatch receiver creation ... sets `self.receiver` and contains no `bind_carrier` call; the `this_expression` flow ... reads `captured_receiver` or `self.receiver`",
+          "rationale": "Points at the missing receiver carrier binding, one half of the fix, but never connects it to `this.amount` missing the underlying projection. It also omits that expression_carrier does not handle this_expression. Between caught and partial I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "dispatch receiver creation at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:279` sets `self.receiver` and contains no `bind_carrier` call",
+          "rationale": "It identifies the missing dispatch-receiver carrier binding and notes that this_expression reads that receiver. However, it never connects this omission to a value-class member reading its underlying property or to the resulting missed projection/generic field load; under the explicit match rule this is partial rather than caught.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "round": 1,
+  "units": [
+    {
+      "id": "python-filescope-enclosing-tie",
+      "source_sha256": "983d46c6a6eee0550cd263e27365847f0d0bdd58bc753b79cc0a5261494578c0"
+    },
+    {
+      "id": "cpp-template-inherited-base-signature",
+      "source_sha256": "cf69c3b9605690c9e56d247bedd30a010fb7b752d15d89d238814be5f67dbece"
+    },
+    {
+      "id": "incompatible-semantic-bundle-late-gate",
+      "source_sha256": "3fa68a1d8ccad7dc5fb165dc0bc799369851b641a5dcba5f4513c5f94ec3e6a6"
+    },
+    {
+      "id": "retained-fill-java-memo-loses-gap",
+      "source_sha256": "8b7b7555c697acb9ad10b22d7308cdad1af015c0b417fe6a8535c6222eefc763"
+    },
+    {
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "source_sha256": "06eaf4eaac3bffb8a7f8488f096359505ff68463ffea72c1b2a381e0af91f576"
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "source_sha256": "251366e31ac638d3df55d7911f93469db9f89f8cb1bdc05dd4c47e8943692d32"
+    },
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "source_sha256": "18993fcf1e19231c99e3063e2677b68431eb7aabdb3f35b75ac191b9c14e4a81"
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "source_sha256": "5599e04c3bebd8c4d305c5200a15f50967dbcdcdad6f7e9fe6203d7fb752f18d"
+    },
+    {
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "source_sha256": "25308a33e036d3918a520a4763fc0a8ba09103c8caac10ab54d7b18ac0bb7e4d"
+    },
+    {
+      "id": "python-module-mutation-repeated-scan-budget",
+      "source_sha256": "f2e666da81e245336362ef8686909d3ecd8a2a0b58aa32ed417f1df78ffe3a4b"
+    },
+    {
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "source_sha256": "d1eff1980fcf51245f1d25fbabb0a7f27bd9937f5416cbf7f997e6411d9e0962"
+    },
+    {
+      "id": "php-indexed-write-reenters-current-rhs",
+      "source_sha256": "ed7a2f88f92cab2688f02ec7c0c1c0794817c91f4c9fce24b2fe1e9d5f1b6745"
+    },
+    {
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "source_sha256": "c1d62c6d3b25b28e1b1aac3e61968b6338d9ce5536d5c03d0867cac79107abcc"
+    },
+    {
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "source_sha256": "8d8cd655626f2e5bf024c58b8d41c58dfe60c6dbecc31fbf3cd79dec1f3a6de1"
+    },
+    {
+      "id": "java-static-getter-drops-incomplete-route",
+      "source_sha256": "75a880f45ab02ecc29654f4887d7bddc43765e284789862f801b0918bc7edbb4"
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "source_sha256": "513c3242a07f7ce632a4b7d3f79caaaa545a780d5a9f081e2e4b457175c1e7c1"
+    },
+    {
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "source_sha256": "bc35e4cfbd944008184cf68b7dad2e3d700f575bedcbdbb1e47eb5b0667c9957"
+    }
+  ]
+}

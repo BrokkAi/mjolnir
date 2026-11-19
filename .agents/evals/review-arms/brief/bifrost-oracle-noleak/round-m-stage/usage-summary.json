@@ -1,0 +1,50 @@
+{
+  "round1 editors": {
+    "sessions": 17,
+    "usd": 4.1453,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "round1 fact check": {
+    "sessions": 1,
+    "usd": 0.7528,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "round1 leak judges": {
+    "sessions": 2,
+    "usd": 1.4843,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "diag1 opus on OT": {
+    "sessions": 2,
+    "usd": 1.8413,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "diag2 sol on ON": {
+    "sessions": 2,
+    "usd": 0.4112,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "round M judges": {
+    "sessions": 6,
+    "usd": 3.2532,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "round M hand check": {
+    "sessions": 1,
+    "usd": 0.7183,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 0
+  },
+  "ON/AF carriers": {
+    "sessions": 34,
+    "usd": 1.5811,
+    "missing_cost_turns": 0,
+    "unfinished_turns": 20
+  }
+}

@@ -699,7 +699,8 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 /// Global policy for Mjolnir-managed child agents.
 ///
 /// Sessions choose Native or Mjolnir; task model and effort choices are global,
-/// except that a target with `permissions = "yolo"` can have its own choices.
+/// except that a target whose harness runs without approvals (a container,
+/// or `permissions = "yolo"`) can have its own choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubagentConfig {

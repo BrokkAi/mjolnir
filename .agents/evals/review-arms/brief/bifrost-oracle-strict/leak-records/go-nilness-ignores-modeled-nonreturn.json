@@ -1,0 +1,28 @@
+{
+  "id": "go-nilness-ignores-modeled-nonreturn",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 4,
+      "label": "partial",
+      "brief_sha256": "79946bf3768de7b785bef94b7655cf2e7714d8ac1a2b3bb44a23e412ffd74f9c",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`complete_modeled_call_facts` requires `complete: true`; `proves_normal_continuation_absent` evaluates exact active-model agreement with no summary-completeness condition ... including for `testing.T.Fatal`'s summary, which has `completeness: \"partial\"` and `normal_continuation_absent: true`",
+          "rationale": "Points at the nilness modeled-call facts and T.Fatal's nonreturn fact being gated out by the completeness requirement, which is related. It never says scalar reachability keeps the normal continuation after a nonreturning call, or that nil flows past the guard. It meets the partial bar because it names the right code and the gated nonreturn fact, though only by juxtaposition.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "`complete_modeled_call_facts` requires `complete: true`",
+          "rationale": "It juxtaposes the complete-summary requirement with the independently exact nonreturn proof on the partial testing.T.Fatal summary. It does not identify scalar reachability retaining the normal continuation or the resulting impossible nil-use path, so it stops short of the required mechanism and symptom.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

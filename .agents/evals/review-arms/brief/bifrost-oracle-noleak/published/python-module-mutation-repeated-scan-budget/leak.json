@@ -1,0 +1,28 @@
+{
+  "id": "python-module-mutation-repeated-scan-budget",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "386daa42d712430eaeee67720a0612d425636579d9493b6ae117a06067c288c3",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. Nothing about repeated full-file mutation collection per base/name exhausting the shared budget.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It traces class_hierarchy's shared HierarchyBudget into the per-base module-binding guard, but never mentions repeated whole-module scans exhausting the budget.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

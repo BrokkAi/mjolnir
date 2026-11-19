@@ -1,0 +1,342 @@
+{
+  "java-static-getter-drops-incomplete-route": {
+    "label": "missed",
+    "brief_sha256": "470b1147ffdfdf9386488c16d6c2caf52c5fc4b3517f2aa4297019891e478b4c",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes static alias kind admission, Kotlin getter production, and found_alias tracking. It does not identify a getter being skipped before evidence tracking or the resulting false absence/unindexed-owner result instead of scoped incompleteness.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output records static alias kind filtering, Kotlin getter publication, and found_alias tracking. It does not identify a getter being skipped before that tracking or the resulting loss of incomplete-route evidence.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "retained-fill-java-memo-loses-gap": {
+    "label": "missed",
+    "brief_sha256": "d5f94074c4bb60256dc2877d1c968fc8488b2e677a1b647d34dc2d209d891ed0",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes the shared retained domain and Java's index-only memo hit/miss behavior. It never connects a StructureUnavailable build to a subsequent hit losing its gap and admitting a falsely complete absence; no related erroneous result is reported.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes the shared retained domain and the Java memo storing and reusing class indexes. It never identifies StructureUnavailable during an index build, failure to replay that gap, or a later fill accepting incomplete absence as complete.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "python-filescope-enclosing-tie": {
+    "label": "missed",
+    "brief_sha256": "db80691f8e6e62e0b56ba90e6558b93c27234d969cefd3ddf737523e12c2df22",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes the two whole-file ranges and size-based enclosing lookup, but never identifies an unordered equal-span tie choosing FileScope or the resulting loss of module receiver facts. These are code-path observations without a reported lookup defect, so they do not meet the partial bar.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output records the whole-file synthetic range, Python module range, and span-based enclosing lookup, but never identifies an equal-span unordered tie or loss of module receiver facts. These are code-flow observations rather than a finding of the specified lookup defect.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "kotlin-source-constructor-steals-class-header-comment": {
+    "label": "missed",
+    "brief_sha256": "ab34944bfa9b4893e29c7be26da616cdaa1c8d3b2a3289cdb62d02138c5da8e0",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output connects nonsynthetic primary constructors, expanded comment ranges, and deepest-owner attribution. It does not state that the constructor takes the class KDoc or that the class header count becomes wrong, leaving the required faulty ownership behavior unidentified.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces primary-constructor visibility, comment-range expansion, and deepest-owner attribution. It does not identify the constructor stealing class KDoc or an incorrect class header-density result.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "kotlin-value-class-this-loses-underlying-projection": {
+    "label": "missed",
+    "brief_sha256": "e3c1f2ca1eb86a5ac98123588ff6572586bcaa1c40be9bc92239269a0a085f5b",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes receiver creation, this_expression value flow, and carrier binding APIs. It does not identify the missing this/receiver carrier classification or the resulting generic field load and lost underlying projection in a value-class member.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces this_expression receiver values and carrier storage but does not identify omitted this carrier classification or receiver binding. It never reports a member underlying-property read falling back to a generic field load and gap.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "js-synthetic-owner-leaks-file-summary": {
+    "label": "missed",
+    "brief_sha256": "5a41fe58a86e59598f3e1f2da4dfbc21beba7af19dfdb95fbb80c0c13bf8a8cc",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces root-range registration into signature_elements and its line-count computation. It does not identify the synthetic signature acquiring whole-file summary coverage that encloses or duplicates real declarations, so no faulty summary behavior is actually reported.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces whole-root range registration into signature_elements and its line-count calculation. It does not identify synthetic summary coverage enclosing or duplicating later real declarations as a defect.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "go-nilness-ignores-modeled-nonreturn": {
+    "label": "missed",
+    "brief_sha256": "ba8b04e4830496c527600dae6f47174251fad872b096e2e2cabb3b0fe24fc711",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output contrasts complete-summary fact collection with the independent nonreturn API and the partial testing.T.Fatal model. It does not state that nilness preserves normal continuation through that terminating call or produces an impossible guarded nil-dereference finding.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output notes the exact nonreturn axis and the partial testing.T.Fatal summary. It does not identify scalar reachability continuing after that modeled terminating call or the resulting impossible nil-dereference finding.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "go-receiver-poisons-package-result-contract-discovery": {
+    "label": "missed",
+    "brief_sha256": "26ea7f2bf977ed0318f2379a647029dd95e9170e91b9991bae622d9cb47c9e6e",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output identifies the language/name/arity inventory and the incomplete-diagnostic path for empty open lookups. It does not connect an unrelated typed receiver to a receiverless package contract or report false query incompleteness from that lost distinction.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes the language/name/arity inventory and incomplete diagnostics for empty open lookups. It never identifies a typed Go receiver being confused with a receiverless package-function contract or the resulting spurious discovery incompleteness.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "incompatible-semantic-bundle-late-gate": {
+    "label": "missed",
+    "brief_sha256": "f258b7f21fcaacda4a9f4701af0b4bb91cf6e6fe829897909aae5220ea777235",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output lists checksum, curated decode, and generated-version verification in their execution order. It does not identify avoidable work on an index-known incompatible bundle or the resulting acquisition/request blocking, so the ordering inventory alone is not a matching finding.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output enumerates checksumming, curated decoding, and subsequent generated-version checking, but does not identify avoidable work on an index-known incompatible bundle or the resulting request blockage. It supplies relevant ordering facts without reporting the compatibility-gate defect.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "python-module-binding-representative-after-event": {
+    "label": "missed",
+    "brief_sha256": "011d6662c16705d2cbb7c8ab2003af20e66df7454c5176e975a276b63924bfde",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output describes final-assignment range replacement, event offset comparisons, and the empty-result diagnostic path. It does not identify an earlier valid repeated-binding read being rejected because its representative declaration is later; reconstructing that failure would require adding the actual finding.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output records last-assignment declaration ranges, event cutoffs, and the no_indexed_definition path. It does not connect them into a finding that a valid read between repeated assignments loses its representative declaration.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "unproven-override-family-certifies-empty": {
+    "label": "missed",
+    "brief_sha256": "8eed200a60ba3d53106b6df55ca68c8323802cdb66eab9ba311b222b02689421",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output places the unproven-to-empty helper behavior beside the concrete caller's empty-result arm and describes downstream gap filtering. It does not state that the empty arm treats uncertainty as proven absence and unsoundly discharges completeness; the missing defect conclusion prevents counting this code-flow inventory as a finding.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output places the unproven-to-empty helper beside the concrete empty-result match and describes downstream gap handling. It does not identify that the empty answer is incorrectly treated as proof of absent overrides and unsoundly certifies completeness.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "python-module-mutation-repeated-scan-budget": {
+    "label": "missed",
+    "brief_sha256": "386daa42d712430eaeee67720a0612d425636579d9493b6ae117a06067c288c3",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces the bounded hierarchy provider and module guards but does not identify repeated full-root scans exhausting their shared scope budget. It reports neither a false incomplete hierarchy result nor the redundant-work mechanism required by the match rule.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output maps hierarchy guards and their callers but never identifies repeated whole-module mutation scans consuming a shared budget or falsely making a small hierarchy incomplete.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "jvm-protected-unindexed-hierarchy-denied": {
+    "label": "missed",
+    "brief_sha256": "f536568e78894fa6f419a191193baa714d36f5cbca4485736c822894355758fc",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output notes that an edgeless subtype read returns Some(false) and traces Scala protected access through the helper. It does not identify absent closed-inventory proof or explain that incomplete hierarchy evidence wrongly denies and removes a selected protected target.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output notes that an empty supertype-edge read produces Some(false) and traces the protected-access helper. It does not identify missing closed-inventory proof or a selected protected declaration being falsely denied as a consequence.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "dependency-failure-drops-independent-model-evidence": {
+    "label": "missed",
+    "brief_sha256": "abef8135eb25900ff904adceb2aba8f71a20055c75fb5bf077ec4a215d4af5a9",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output notes that caller activation evidence is cloned and that a Go fixture activates successfully. It does not identify the Go discovery/preparation failure early returns or their loss of independently valid supplied model evidence.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output notes caller-supplied Go activation evidence and shared activation setup. It does not identify the new Go discovery failure returning runtime=None before independently valid supplied evidence can activate.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "cpp-template-inherited-base-signature": {
+    "label": "missed",
+    "brief_sha256": "44f07cfeceac1a77a1158891f1b63f43f1c4f0fcc252b499657e75cddd002ee6",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces inherited lookup to signature() and explains that templates store only their parameter list there. It does not identify loss of the base clause or failed inherited-member lookup for template classes; the general empty-result diagnostic is not a report of that failure.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output traces inherited lookup to signature-based base discovery and notes that template signatures contain parameter lists. It does not identify the resulting loss of bases or failed inherited-member lookup for class templates.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "php-indexed-write-reenters-current-rhs": {
+    "label": "missed",
+    "brief_sha256": "15a8f8cb80e2d42628be2d47fd8be59a631f3e7f92c03bb963c05c0383791907",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output observes that indexed-write inference uses start offsets and visits ancestors while resolving right operands. It does not identify the unfinished assignment selecting its own RHS again or the resulting non-progressing recursion/stack overflow, so the relevant implementation observations are not a matching defect finding.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output notes start-byte filtering, recursive value resolution, and inclusion of ancestor writes. It does not identify the unfinished indexed assignment selecting its own RHS again or the resulting non-progressing recursion and stack overflow.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "mcp-default-advisory-reported-clean": {
+    "label": "missed",
+    "brief_sha256": "3cf01abb440d63435c27ce9d72b1c3f989318b61bb598da931cee44fb8deb5a0",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output documents MCP's default options and its numeric exit-status-to-clean projection. It never identifies an inconclusive advisory run taking the zero/clean path or the contradiction with its report, so it supplies context rather than a finding of false clean status.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "The output records MCP default options and the numeric-exit-to-status mapping. It does not identify that an advisory inconclusive run now returns zero and is consequently mislabeled clean by MCP.",
+        "confidence": "high"
+      }
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "id": "go-receiver-poisons-package-result-contract-discovery",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "caught",
+      "brief_sha256": "503aa97444b337767c87df877792be3195a8fbb8204eff461f81f000e318fb57",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`may_name_result_contract` keys its inventory by `(language, member, parameter_count)` ... neither key includes `summary.target.has_receiver`",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it shows the empty-Open check uses a name/arity key without receiver applicability and that the branch records Incomplete coverage, but never claims an unrelated receiver call falsely makes discovery incomplete.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "neither key includes `summary.target.has_receiver` or call receiver applicability",
+          "rationale": "The output identifies receiverless summaries and receiver calls colliding in the language/member/arity inventory. Its separate trace of the empty-open branch into Incomplete/AnalysisIncomplete connects that lost receiver distinction to false discovery incompleteness.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "541eabe1a8120ad6769138774954e3629238f00c36ae6be0f7012693d0ca64e8",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "`may_name_result_contract` builds its inventory from `(language, member, parameter_count)` tuples ... a receiverless summary and a receiver call with equal tuples map to one shared inventory entry; the empty-open-lookup check calls it",
+          "rationale": "States that the applicability test ignores receivers, so a receiver call matches a receiverless contract in the new empty-open-lookup branch. Another bullet says that branch pushes an Incomplete coverage diagnostic. Together these give the false-incompleteness mechanism.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "`summary.target.has_receiver` and call receiver applicability are not components of either tuple",
+          "rationale": "The output explicitly identifies receiverless summaries colliding with receiver calls in the language/member/arity inventory. Its separate empty-open-lookup trace connects that collision to an Incomplete result-contract diagnostic, matching the false-incompleteness mechanism.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}
