@@ -185,9 +185,6 @@ pub struct LaunchSpec {
     /// The Claude profile's permission mode under configured approvals, from
     /// the launch config. Read only through `session_enforcement`.
     pub claude_permission_mode: mj_core::config::ClaudePermissionMode,
-    /// Optional central Brokk Observe guardrail client. The permission
-    /// handler consults it before any automatic approval.
-    pub observe_policy: Option<crate::observe::PolicyClient>,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.
