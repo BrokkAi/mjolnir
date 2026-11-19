@@ -479,6 +479,7 @@ mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
 
+    // Hard-won: 78a59a943: one unreadable notification body stopped the observer and daemon.
     // Hard-won: eb348fefb: deferred observations never resumed after a handoff lapsed without a revision.
     // Hard-won: 6b12ea8ea: transcript-only revisions repeatedly submitted notification writes.
     // Hard-won: eb00602a0: notification observations could queue writes after handoff drained.
@@ -501,6 +502,9 @@ mod tests {
             mj_client::daemon::PROTOCOL_VERSION,
             mj_client::daemon::ALERT_EVENTS_PROTOCOL
         );
+        let log = crate::test_log::CapturedLog::default();
+        tracing::subscriber::set_global_default(log.clone())
+            .expect("isolated observer log subscriber");
         let _writer = crate::database::install_isolated_test_writer();
         let state = super::super::tests::test_runtime_state();
         let mut config = super::super::tests::runtime_test_config();
@@ -685,6 +689,30 @@ mod tests {
         config.phone.enabled = false;
         assert!(!config.phone.enabled);
         state.owner().install_config(config);
+        let mut stored_record = served_record.clone();
+        stored_record.workspace_id = mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned();
+        crate::web_push::blocking(move || {
+            crate::database::save_session(&stored_record)?;
+            let connection = rusqlite::Connection::open(crate::database::database_path())?;
+            connection.execute_batch("INSERT OR IGNORE INTO materialized_sessions(session_id) VALUES('hidden');
+                INSERT INTO materialized_transcript_items(session_id,stable_id,position,latest_content_event_ordinal,created_at_ms,last_changed_at_ms,body_json)
+                VALUES('hidden','agent:corrupt',1,12,1,1,'not-json');")?;
+            Ok(())
+        }).await.unwrap();
+        let mut served_view = served_view;
+        let mut worker = (**served_view.operational.as_ref().unwrap()).clone();
+        let mut stack = (*worker.notification_stack).clone();
+        stack.revision = 12;
+        stack
+            .entries
+            .push(mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 1,
+                completed_ordinal: 12,
+                kind: mj_core::attention::NotificationKind::Important,
+                message: mj_core::attention::EntryMessage::Found("agent:corrupt".into()),
+            });
+        worker.notification_stack = stack.into();
+        served_view.operational = Some(worker.into());
         state.owner().edit_sessions(|sessions| {
             sessions.insert("hidden".into(), served_record);
         });
@@ -692,11 +720,14 @@ mod tests {
         let mut revisions = state.revisions();
         revisions.borrow_and_update();
         let cancellation = CancellationToken::new();
-        let observer = tokio::spawn(crate::web_push::run_alerts(
+        let mut observer = tokio::spawn(crate::web_push::run_alerts(
             state.clone(),
             cancellation.clone(),
         ));
-        revisions.changed().await.unwrap();
+        tokio::select! {
+            changed = revisions.changed() => { changed.unwrap(); },
+            result = &mut observer => panic!("one unreadable item must not stop the notification observer: {result:?}"),
+        }
         let (_, events) =
             crate::web_push::blocking(move || crate::database::alert_events_since(Some(high)))
                 .await
@@ -705,6 +736,34 @@ mod tests {
             events.len(),
             1,
             "the standalone daemon service produces alerts with phone disabled"
+        );
+        assert!(
+            !observer.is_finished(),
+            "the observer keeps running after the item read failure"
+        );
+        assert!(
+            log.at(tracing::Level::WARN)
+                .iter()
+                .any(|line| line.contains("notification text")
+                    && line.contains("session=")
+                    && line.contains("hidden")
+                    && line.contains("identity=")
+                    && line.contains("agent:corrupt")),
+            "the warning names the failing item and session"
+        );
+        let undecided = crate::web_push::blocking(|| {
+            let connection = rusqlite::Connection::open(crate::database::database_path())?;
+            Ok(connection.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM alert_events WHERE identity=?1)",
+                [r#"["message","hidden","agent:corrupt"]"#],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+        assert!(
+            undecided,
+            "a failed item remains eligible for a later observation"
         );
         cancellation.cancel();
         observer.await.unwrap().unwrap();

@@ -220,7 +220,13 @@ fn push_observe_in(
         if !eligible {
             continue;
         }
-        let message = push_entry_text(tx, runtime, entry)?;
+        let message = match push_entry_text(tx, runtime, entry) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(session = entry.session, %identity, error = format!("{error:#}"), "could not read notification text; leaving item pending");
+                continue;
+            }
+        };
         let notice = entry.notice(runtime, identity.clone(), message.as_deref());
         tx.execute(
             "INSERT INTO alert_events(identity,destination,session_title,text,kind) VALUES(?1,?2,?3,?4,?5)",
