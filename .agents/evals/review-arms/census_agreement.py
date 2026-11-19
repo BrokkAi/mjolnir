@@ -118,7 +118,7 @@ def category_comparisons(a, b):
         yield category, value == other
 
 
-def comparison(pairs):
+def comparison(pairs, split):
     categories_by_fact = {category: {"agree": 0, "n": 0}
                           for category in ("rql.class", "rql.locator_present", "kind", "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
@@ -135,6 +135,10 @@ def comparison(pairs):
         matched += len(aligned)
         for a, b in aligned:
             for category, agree in category_comparisons(a, b):
+                # The development task has no anchoring step, so a copied anchoring object
+                # mustn't count there.
+                if split == "development" and category == "anchors_on_touched":
+                    continue
                 stats = categories_by_fact[category]
                 stats["n"] += 1
                 stats["agree"] += agree
@@ -168,7 +172,7 @@ def compare_split(directory, split, cohort, documents, heads):
         replication = keys & second.keys()
         both = primary & replication
         pairs = [(first[key], second[key]) for key in sorted(both)]
-        return {**comparison(pairs), "paired": len(both),
+        return {**comparison(pairs, split), "paired": len(both),
                 "missing_both": len(keys - (primary | replication)),
                 "missing_primary_only": len(replication - primary),
                 "missing_replication_only": len(primary - replication),

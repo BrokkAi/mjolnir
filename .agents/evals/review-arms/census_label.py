@@ -876,9 +876,10 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
             except Exception as error:
                 log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
                 raise
-    # Only the completed, suspended batch reaches here. Keep the evidence
-    # beside the checkout, and release the full clone.
-    shutil.rmtree(unit / "repo")
+            # Suspension is confirmed, whether the batch succeeded or failed, so no worker can
+            # still need the checkout. Keep the evidence beside it and release the full clone.
+            # A session left for fetch recovery keeps its checkout.
+            shutil.rmtree(unit / "repo")
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
