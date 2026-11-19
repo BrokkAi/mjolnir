@@ -1,12 +1,12 @@
 {
-  "repo": "uutils__coreutils",
+  "repo": "uutils/coreutils",
   "pin": "2b85f6f12875d97abcbe8e2157000d7dde702823",
   "seed": 20261118,
   "window": "2024-extended",
   "window_extended": true,
   "order_2025_len": 494,
   "pool_size": 625,
-  "stop_index": 531,
+  "stop_index": 416,
   "order": [
     "fa82066ceed07588771a3dbe22202b9e95ecb56b",
     "9cf774bed8919636f437caf0e7ee379fc701cdab",
