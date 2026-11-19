@@ -1757,6 +1757,9 @@ pub struct RelaySnapshot {
     /// Accepted command receipts retained until their durable operation finishes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub command_retention: BTreeMap<String, BTreeSet<String>>,
+    /// Launch initialization still consumes these receipts after context clear.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub initial_command_ids: BTreeSet<String>,
     /// Upgrade protection until the daemon reconciles the outstanding Move.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub legacy_command_retention: bool,
@@ -1920,6 +1923,7 @@ impl RelaySnapshot {
             native_session_used: false,
             native_use_evidence: None,
             command_retention: BTreeMap::new(),
+            initial_command_ids: BTreeSet::new(),
             legacy_command_retention: false,
             native_session_opened_ordinal: None,
             restored_native_session_unused: false,

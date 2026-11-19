@@ -27,6 +27,80 @@ fn initial_fifo_commands() -> Vec<mj_core::worker_launch::InitialWorkerCommand> 
     .collect()
 }
 
+// Hard-won: 92ab7be: clearing context and pruning receipts replayed the original child assignment.
+#[test]
+fn initial_brief_is_not_reseeded_after_clear_and_ack_pruning() {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = vec![mj_core::worker_launch::InitialWorkerCommand {
+        command_id: "original-brief".into(),
+        command: prompt("original assignment"),
+        optional: false,
+    }];
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "original-brief");
+    // The latest-turn owner must not accidentally protect the startup receipt.
+    submit_relay(&mut relay, "followup-prompt", prompt("later user request"));
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "followup-prompt");
+    submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "empty-after-clear".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(!relay.snapshot.native_session_used);
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("later-command-{index}"),
+            RelayCommand::RecordNotice {
+                text: "later".into(),
+            },
+        );
+    }
+    let latest = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "ack-after-clear", latest);
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("later-command-0")
+    );
+    drop(relay);
+    let mut checkpoint_only =
+        DurableRelay::open_for_checkpoint(temp.path(), SESSION, "test").unwrap();
+    acknowledge_relay(&mut checkpoint_only, "checkpoint-only-ack", latest);
+    assert!(
+        checkpoint_only
+            .snapshot
+            .handled_commands
+            .contains_key("original-brief")
+    );
+    drop(checkpoint_only);
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(relay.latest_ordinal(), latest);
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+}
+
 // Hard-won: #1394: a mailbox wake ran between startup selectors without the child's original brief.
 #[test]
 fn initial_fifo_completes_a_crashed_prefix_and_keeps_mail_after_the_brief() {
@@ -146,7 +220,13 @@ fn initial_fifo_does_not_release_the_brief_after_required_configuration_fails() 
             .contains("provider refused the selected model")
     );
     // Checkpoint recovery still owns and can preserve this failed worker's data.
-    DurableRelay::open_for_checkpoint(temp.path(), SESSION, "test").unwrap();
+    DurableRelay::open_for_checkpoint_with_initial_commands(
+        temp.path(),
+        SESSION,
+        "test",
+        &commands,
+    )
+    .unwrap();
 }
 
 #[test]

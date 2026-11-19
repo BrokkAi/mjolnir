@@ -1110,6 +1110,9 @@ impl DurableRelay {
                     .turn_completion
                     .as_ref()
                     .is_none_or(|turn| &turn.command_id != *command_id)
+                    // Startup still consumes these receipts after /clear resets
+                    // native-use evidence; selector failures are consumed too.
+                    && !snapshot.initial_command_ids.contains(*command_id)
             })
             .map(|(_, command_id)| command_id.clone())
             .collect()

@@ -480,6 +480,103 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
     );
 }
 
+#[cfg(unix)]
+// Hard-won: 92ab7be: adoption erased a retained turn's acceptance and original start position.
+#[test]
+fn adoption_preserves_a_turn_started_in_retained_history() {
+    let name = test_name("adoption_preserves_a_turn_started_in_retained_history");
+    if !isolated_test_child(&name, "MJ_ADOPT_RETAINED_TURN_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::Notice {
+            message: "acknowledged prefix".into(),
+        })
+        .unwrap();
+    let ack = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "ack".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Acknowledge {
+            through_ordinal: ack,
+            through_digest: digest,
+        },
+    });
+    let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "prompt".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "retained-turn".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("retained prompt")],
+            },
+        },
+    });
+    let mj_core::relay::RelayResponseBody::Ok {
+        payload: mj_core::relay::RelayResponsePayload::Accepted { ordinal, .. },
+    } = response.body
+    else {
+        panic!("prompt refused")
+    };
+    let started = relay.latest_ordinal();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"before adoption"}
+    })).unwrap()).unwrap();
+    drop(relay);
+    crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
+    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_adopting(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let turn = connection.snapshot().materialized.active_turn.unwrap();
+        assert_eq!(turn.accepted_ordinal, Some(ordinal));
+        assert_eq!(turn.turn_start_position, started);
+    });
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "retained-turn",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
+        .unwrap();
+    drop(relay);
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let outcome = connection
+            .snapshot()
+            .materialized
+            .last_turn_outcome
+            .unwrap();
+        assert_eq!(outcome.accepted_ordinal, Some(ordinal));
+        assert_eq!(outcome.turn_start_position, Some(started));
+    });
+}
+
 #[test]
 fn mutation_guard_rejects_conflicting_commands_but_allows_observation() {
     let session_id = "move-guard-test";

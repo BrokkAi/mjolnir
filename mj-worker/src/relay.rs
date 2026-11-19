@@ -386,12 +386,29 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
     ) -> Result<Self> {
+        Self::open_for_checkpoint_with_initial_commands(root, session_id, relay_version, &[])
+    }
+
+    /// Preserve launch receipt owners during checkpoint-only upgrades without seeding work.
+    pub fn open_for_checkpoint_with_initial_commands(
+        root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        relay_version: impl Into<String>,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
+    ) -> Result<Self> {
         let root = root.into();
         anyhow::ensure!(
             root.join(RELAY_STATE_FILE).is_file(),
             "checkpoint recovery requires existing relay state"
         );
-        Self::open_with_harness(root, session_id, relay_version, true, None, &[])
+        Self::open_with_harness(
+            root,
+            session_id,
+            relay_version,
+            true,
+            None,
+            initial_commands,
+        )
     }
 
     pub(crate) fn discard_queued_prompts_before_start(
@@ -608,6 +625,16 @@ impl DurableRelay {
             snapshot
         };
 
+        // Startup owns these receipts until session destruction: after a context clear,
+        // seed_initial_commands still reads them. Keep that receipt as the single
+        // durable initialization fact, at the cost of a handful of entries per session.
+        let startup_owner_count = snapshot.initial_command_ids.len();
+        snapshot.initial_command_ids.extend(
+            initial_commands
+                .iter()
+                .map(|initial| initial.command_id.clone()),
+        );
+        let registered_startup_owners = snapshot.initial_command_ids.len() != startup_owner_count;
         let compacted_terminal_commands = snapshot.compact_terminal_commands()?;
         let assigned_store_id = snapshot.store_id.is_none();
         if assigned_store_id {
@@ -685,7 +712,11 @@ impl DurableRelay {
             reviewer_admissions: BTreeMap::new(),
             next_reviewer_admission: 0,
             steering_supported: None,
-            initial_commands: initial_commands.to_vec(),
+            initial_commands: if checkpoint_only {
+                Vec::new()
+            } else {
+                initial_commands.to_vec()
+            },
             automatic_steering: false,
             steering_delivery_mode: harness
                 .map(|harness| SteeringDeliveryMode::for_harness(harness, false))
@@ -806,6 +837,7 @@ impl DurableRelay {
             || recovered_questions
             || migrated_assessment
             || compacted_terminal_commands
+            || registered_startup_owners
         {
             relay.persist_snapshot()?;
         }

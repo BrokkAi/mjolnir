@@ -989,7 +989,12 @@ pub async fn run_daemon_owned(
     // failed startup must never leave a fresh endpoint that looks live.
     super::record_startup_step(&root, "durable-relay");
     let mut durable_relay = if checkpoint_only {
-        DurableRelay::open_for_checkpoint(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
+        DurableRelay::open_for_checkpoint_with_initial_commands(
+            &root,
+            &config.session_id,
+            env!("CARGO_PKG_VERSION"),
+            &config.initial_commands,
+        )?
     } else {
         DurableRelay::open_for_harness(
             &root,

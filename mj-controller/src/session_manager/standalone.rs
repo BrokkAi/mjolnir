@@ -203,7 +203,13 @@ impl StandaloneSession {
                             mj_core::state::MaterializedExecutionState::Closed
                         }
                     };
+                    let reconstructed = projection.active_turn.take();
                     projection.active_turn = snapshot.active_prompt.as_ref().map(|active| {
+                        if let Some(turn) =
+                            reconstructed.filter(|turn| turn.belongs_to(&active.command_id))
+                        {
+                            return turn;
+                        }
                         mj_core::state::MaterializedTurn {
                             command_id: active.command_id.clone(),
                             accepted_ordinal: None,
