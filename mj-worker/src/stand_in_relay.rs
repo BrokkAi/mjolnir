@@ -742,6 +742,8 @@ pub fn serve_leased_relay() {
     // cannot glue itself onto the first protocol frame.
     println!();
     let mut relay = None;
+    // Held from the first session request to this process's exit.
+    let mut journal_owner: Option<std::fs::File> = None;
     {
         let marker = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER");
         let mut input = std::io::stdin().lock();
@@ -1014,6 +1016,36 @@ pub fn serve_leased_relay() {
                 )
                 .unwrap();
                 continue;
+            }
+            // Each connection to this fake is its own process with its own
+            // copy of the relay, where the real worker is one process that
+            // holds `worker.lock`. So the session's connection owns the
+            // journal the same way, and its successor waits here until the
+            // connection it replaced has finished its last request and
+            // exited: the client abandons a connection that timed out while
+            // the fake is still holding that request. A project-memory
+            // connection runs beside the session's own, and the relay
+            // refuses its requests without appending, so it reads the
+            // journal without owning it.
+            let beside_the_session = matches!(
+                request.request,
+                RelayRequest::ProjectMemorySnapshot
+                    | RelayRequest::InstallProjectMemorySnapshot { .. }
+                    | RelayRequest::ReplaceProjectMemoryTree { .. }
+                    | RelayRequest::ProjectMemoryTransfer { .. }
+            );
+            if journal_owner.is_none() && !beside_the_session {
+                let lock = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(PathBuf::from(&root).join("journal-owner.lock"))
+                    .expect("open the test relay journal's owner lock");
+                lock.lock().expect("wait to own the test relay journal");
+                journal_owner = Some(lock);
+                // A copy this process read before it owned the journal may
+                // be behind what the previous owner wrote.
+                relay = None;
             }
             let relay = relay.get_or_insert_with(|| {
                 let mut relay = crate::relay::DurableRelay::open(

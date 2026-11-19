@@ -368,6 +368,7 @@ pub fn discover_harness_homes_with_executor(
 /// authentication can be recognized.
 fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) -> HarnessProfile {
     let mut profile = HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind,
         home: home.to_path_buf(),

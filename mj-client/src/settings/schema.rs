@@ -106,6 +106,9 @@ fn profile_defaults(kind: &str) -> Value {
         "claude" => {
             object.insert("claude_permission_mode".to_owned(), Value::Null);
         }
+        "antigravity" => {
+            object.insert("third_party_models".to_owned(), Value::Bool(true));
+        }
         _ => {}
     }
     object.insert("models".to_owned(), json!([]));
@@ -325,6 +328,7 @@ pub fn label(key: &str) -> String {
         "codex_profile" => "Codex profile",
         "claude_permission_mode" => "Claude permission mode",
         "load_balancing_may_consume_credits" => "Load balancing may consume credits",
+        "third_party_models" => "Offer Claude and GPT models",
         "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
@@ -1082,6 +1086,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
+        }
+        "third_party_models" => {
+            "Antigravity only: offer the Claude and GPT models of the account's third-party quota pool. Off: the profile offers only Gemini models, refuses switching to the others, and hides that pool's quota. A session already on one keeps it until you switch."
         }
         "claude_permission_mode" => {
             "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."

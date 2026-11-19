@@ -19,6 +19,63 @@ pub struct PtyOutput {
     answered_background_query: bool,
     answered_device_query: bool,
     pub screen: PtyScreen,
+    pub timeline: TerminalTimeline,
+}
+
+/// When the fixture terminal was polled and what it did, so a failure shows
+/// whether the terminal answered late or the program read the answer late.
+pub struct TerminalTimeline {
+    started: std::time::Instant,
+    last_poll: Option<std::time::Instant>,
+    /// The longest time between two polls, and when it ended.
+    longest_gap: (std::time::Duration, std::time::Duration),
+    notes: Vec<(std::time::Duration, String)>,
+    /// When the background query was answered, until the next query shows
+    /// that the program read the answer.
+    pub awaiting_next_query: Option<std::time::Instant>,
+}
+
+impl TerminalTimeline {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            last_poll: None,
+            longest_gap: Default::default(),
+            notes: Vec::new(),
+            awaiting_next_query: None,
+        }
+    }
+
+    pub fn polled(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_poll {
+            let gap = now - last;
+            if gap > self.longest_gap.0 {
+                self.longest_gap = (gap, now - self.started);
+            }
+        }
+        self.last_poll = Some(now);
+    }
+
+    pub fn note(&mut self, what: impl Into<String>) {
+        self.notes.push((self.started.elapsed(), what.into()));
+    }
+}
+
+impl std::fmt::Display for TerminalTimeline {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "polled for {:.3}s, longest gap between polls {:.3}s ending at {:.3}s",
+            self.started.elapsed().as_secs_f64(),
+            self.longest_gap.0.as_secs_f64(),
+            self.longest_gap.1.as_secs_f64()
+        )?;
+        for (at, what) in &self.notes {
+            write!(formatter, "; {what} at {:.3}s", at.as_secs_f64())?;
+        }
+        Ok(())
+    }
 }
 
 impl PtyOutput {
@@ -29,6 +86,7 @@ impl PtyOutput {
             answered_background_query: false,
             answered_device_query: false,
             screen: PtyScreen::new(),
+            timeline: TerminalTimeline::new(),
         }
     }
 

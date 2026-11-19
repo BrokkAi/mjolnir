@@ -233,7 +233,8 @@ mod tests {
         let mut partial = windows
             .iter()
             .filter(|window| {
-                AntigravityQuotaPool::of_window(window) == Some(AntigravityQuotaPool::Claude)
+                mj_client::quota::antigravity_pool_of_window(window)
+                    == Some(AntigravityQuotaPool::Claude)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -246,7 +247,8 @@ mod tests {
             .iter()
             .find(|window| {
                 window.label == "Week"
-                    && AntigravityQuotaPool::of_window(window) == Some(AntigravityQuotaPool::Claude)
+                    && mj_client::quota::antigravity_pool_of_window(window)
+                        == Some(AntigravityQuotaPool::Claude)
             })
             .unwrap();
         assert_eq!(
@@ -288,7 +290,7 @@ mod tests {
         for pool in AntigravityQuotaPool::ALL {
             let scoped = windows
                 .iter()
-                .filter(|window| AntigravityQuotaPool::of_window(window) == Some(pool))
+                .filter(|window| mj_client::quota::antigravity_pool_of_window(window) == Some(pool))
                 .collect::<Vec<_>>();
             assert!(
                 scoped.iter().any(|window| window.is_weekly_or_longer()),

@@ -2307,8 +2307,9 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
                     )
                     .await
                     .unwrap();
-                let lease = handle.lease_connection(&admission).await.unwrap();
+                let lease = handle.lease_connection(&admission).await?;
                 lease.release();
+                anyhow::Ok(())
             }
         })
     });
@@ -2327,10 +2328,16 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
             result.is_err(),
             "a person's foreground Move preempts scheduling"
         );
-        tokio::time::timeout(Duration::from_secs(5), moving)
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(5), moving)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+        {
+            panic!(
+                "the Move could not lease the connection: {error:#}\nlogged:\n{}",
+                log.at_or_above(tracing::Level::DEBUG).join("\n")
+            );
+        }
     } else {
         let scheduled = result.unwrap_or_else(|error| {
             panic!(

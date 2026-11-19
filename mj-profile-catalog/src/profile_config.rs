@@ -155,7 +155,7 @@ where
     let defaults = futures::future::join_all(candidates.into_iter().map(|id| async move {
         let result = probe(id.clone(), None)
             .await
-            .map(|choices| choices.restricted_to(&config.profiles[&id].models));
+            .map(|choices| choices.restricted_to(&config.profiles[&id].model_offer()));
         (id, result)
     }))
     .await;
@@ -183,7 +183,7 @@ where
                     let default = choices.model.clone();
                     let mut specific = probe(id.clone(), Some(offer.value)).await?;
                     let selected = std::mem::replace(&mut specific.model, default);
-                    specific = specific.restricted_to(&config.profiles[&id].models);
+                    specific = specific.restricted_to(&config.profiles[&id].model_offer());
                     specific.model = selected;
                     choices = specific;
                 }

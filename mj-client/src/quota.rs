@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+pub use mj_core::config::AntigravityQuotaPool;
 use mj_core::config::HarnessKind;
 
 /// Label used when a harness is billed by API usage rather than a subscription.
@@ -13,42 +14,10 @@ pub const API_LABEL: &str = "API";
 /// is no reading to take and none is missing.
 pub const NOT_REPORTED_LABEL: &str = "n/a";
 
-/// The independent subscription pools returned by Antigravity's `/usage`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AntigravityQuotaPool {
-    Gemini,
-    Claude,
-}
-
-impl AntigravityQuotaPool {
-    pub const ALL: [Self; 2] = [Self::Gemini, Self::Claude];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Gemini => "Ge",
-            Self::Claude => "Cl",
-        }
-    }
-
-    pub const fn bucket_prefix(self) -> &'static str {
-        match self {
-            Self::Gemini => "gemini-",
-            Self::Claude => "3p-",
-        }
-    }
-
-    pub const fn model_scope(self) -> &'static str {
-        match self {
-            Self::Gemini => "gemini",
-            Self::Claude => "claude,gpt",
-        }
-    }
-
-    pub fn of_window(window: &QuotaWindow) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|pool| window.model_scope.as_deref() == Some(pool.model_scope()))
-    }
+pub fn antigravity_pool_of_window(window: &QuotaWindow) -> Option<AntigravityQuotaPool> {
+    AntigravityQuotaPool::ALL
+        .into_iter()
+        .find(|pool| window.model_scope.as_deref() == Some(pool.model_scope()))
 }
 
 /// A quota window reported by a harness.
@@ -70,13 +39,9 @@ pub struct QuotaWindow {
 
 impl QuotaWindow {
     pub fn applies_to_model(&self, model: &str) -> bool {
-        self.model_scope.as_deref().is_none_or(|scope| {
-            let model = model.to_ascii_lowercase();
-            scope.split(',').any(|fragment| {
-                let fragment = fragment.trim();
-                !fragment.is_empty() && model.contains(&fragment.to_ascii_lowercase())
-            })
-        })
+        self.model_scope
+            .as_deref()
+            .is_none_or(|scope| mj_core::config::model_matches_scope(model, scope))
     }
 
     /// Whether this allowance spans a week or longer, including model-scoped labels.
@@ -166,6 +131,17 @@ pub fn refused_login_message(profile_id: &str) -> String {
 }
 
 impl ProfileQuota {
+    /// What people see of an Antigravity report: only the windows of `pools`,
+    /// the pools the profile uses. The stored report keeps every pool for
+    /// selection and quota recovery. Other harnesses are unchanged.
+    pub fn retain_antigravity_pools(&mut self, pools: &[AntigravityQuotaPool]) {
+        if self.harness == HarnessKind::Antigravity {
+            self.windows.retain(|window| {
+                antigravity_pool_of_window(window).is_none_or(|pool| pools.contains(&pool))
+            });
+        }
+    }
+
     /// A display projection of one pool; the original report retains all scopes
     /// for model selection and quota recovery.
     pub fn for_antigravity_pool(&self, pool: AntigravityQuotaPool) -> Self {
@@ -324,7 +300,7 @@ impl ProfileQuota {
                     _ => "available".to_string(),
                 };
                 let label = if self.harness == HarnessKind::Antigravity {
-                    AntigravityQuotaPool::of_window(window)
+                    antigravity_pool_of_window(window)
                         .map(|pool| format!("{} ({})", window.label, pool.label()))
                         .unwrap_or_else(|| window.label.clone())
                 } else {

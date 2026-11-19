@@ -106,7 +106,10 @@ pub async fn run_session_actor(
 ) {
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
-    let mut wake_credentials_on_connect = false;
+    // The session is owed a credential sync: a job was refused while the
+    // connection was leased or reconnecting. A new actor owes one too: the
+    // coordinator may have asked for its session before the actor existed.
+    let mut credentials_owed = true;
     let mut failures = 0_u32;
     let mut unreachable = false;
     let mut harness_readiness = HarnessStartupWatch::default();
@@ -139,8 +142,9 @@ pub async fn run_session_actor(
         Storage(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
-        if connection.is_some() && std::mem::take(&mut wake_credentials_on_connect) {
-            updates.session_gate.wake_credentials(&target.session_id);
+        if credentials_owed && connection.is_some() && !lifecycle.is_leased() {
+            credentials_owed = false;
+            updates.credential_wakes.wake(&target.session_id);
         }
         // The connection's owner invalidates the wait on every loss or lease,
         // including failures in commands whose display error is deferred.
@@ -1108,15 +1112,15 @@ pub async fn run_session_actor(
                     ActorCommand::RelayJob { job } => {
                         // The actor alone decides when its connection is
                         // free; a job never opens or reopens one.
-                        if let Some((_, lease)) = &lifecycle.active_lease {
-                            job.deferred_by_lease(lease);
+                        if lifecycle.active_lease.is_some() {
+                            credentials_owed |= job.wake_when_usable();
                             job.refuse(
                                 RelayJobDeferred(crate::session_manager::RELAY_JOB_LEASED).into(),
                             );
                             continue;
                         }
                         let Some(connection) = connection.as_mut() else {
-                            wake_credentials_on_connect |= job.deferred_by_reconnect();
+                            credentials_owed |= job.wake_when_usable();
                             job.refuse(
                                 RelayJobDeferred(crate::session_manager::RELAY_JOB_RECONNECTING)
                                     .into(),

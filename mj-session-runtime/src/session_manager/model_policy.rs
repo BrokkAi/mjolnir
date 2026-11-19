@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionModelPolicy {
     pub profile: String,
-    pub models: Vec<String>,
+    pub offer: mj_core::config::ModelOffer,
 }
 
 // Live sessions exempt their current model; catalog probes exempt the default.
@@ -15,13 +15,13 @@ impl SessionModelPolicy {
             efforts: Vec::new(),
             observed_at: 0,
         }
-        .restricted_to(&self.models)
+        .restricted_to(&self.offer)
         .models
     }
 
     pub fn filter(&self, state: &mut RelayOperationalState) {
         use agent_client_protocol::v1::schema::{SessionConfigKind, SessionConfigSelectOptions};
-        if self.models.is_empty() {
+        if self.offer.is_unrestricted() {
             return;
         }
         let offered = self.offered(state);
@@ -70,8 +70,7 @@ impl SessionModelPolicy {
                     .is_some_and(|option| option.id.to_string() == *key)
             });
         if !is_model
-            || self.models.is_empty()
-            || self.models.contains(value)
+            || self.offer.allows(value)
             || state.is_some_and(|state| {
                 self.offered(state)
                     .iter()
@@ -80,10 +79,7 @@ impl SessionModelPolicy {
         {
             return None;
         }
-        Some(format!(
-            "model {value:?} is hidden by profile {:?}'s models setting",
-            self.profile
-        ))
+        Some(self.offer.refusal(&self.profile, value))
     }
 }
 
@@ -101,10 +97,10 @@ impl SessionManagerControl {
                     id.clone(),
                     SessionModelPolicy {
                         profile: session.last_profile.clone(),
-                        models: config
+                        offer: config
                             .profiles
                             .get(&session.last_profile)
-                            .map(|profile| profile.models.clone())
+                            .map(|profile| profile.model_offer())
                             .unwrap_or_default(),
                     },
                 )

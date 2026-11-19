@@ -18,6 +18,7 @@ pub fn spawn_session_manager_observed(
     let (mut updates_tx, updates_rx) = coalesced_update_channel();
     updates_tx.delegation = delegation;
     let session_gate = updates_tx.session_gate.clone();
+    let credential_wakes = updates_tx.credential_wakes.clone();
     let session_cpu = updates_tx.cpu.subscribe();
     let model_policies = updates_tx.model_policies.clone();
     let harness_failure = updates_tx.harness_failure.clone();
@@ -157,6 +158,7 @@ pub fn spawn_session_manager_observed(
         targets: targets_tx,
         control: SessionManagerControl {
             session_gate,
+            credential_wakes,
             harness_failure,
             model_policies,
             commands: commands_tx,
