@@ -8,19 +8,19 @@ A relation diff is one introducing commit with at least one confirmed relation d
 
 | Repo | Window | Stop / pool | Relation diffs | Relation bugs | Local controls | Dev bugs | Disputed | Rejected |
 |---|---|---|---|---|---|---|---|---|
-| 1jehuang/jcode | 2025 | 125 / 483 | 25 | 25 | 5 | 0 | 8 | 1 |
+| 1jehuang/jcode | 2025 | 125 / 483 | 25 | 26 | 5 | 0 | 8 | 1 |
 | carthage-software/mago | 2025 | 136 / 771 | 25 | 25 | 11 | 1 | 3 | 0 |
 | Helvesec/rmux | 2025 | 79 / 80 | 16 | 16 | 3 | 0 | 6 | 2 |
 | j178/prek | 2024-extended | 68 / 69 | 15 | 19 | 5 | 0 | 5 | 5 |
 | kreuzberg-dev/kreuzberg | 2025 | 504 / 505 | 16 | 17 | 8 | 0 | 9 | 4 |
 | max-sixty/worktrunk | 2025 | 171 / 366 | 25 | 25 | 9 | 0 | 5 | 2 |
-| nushell/nushell | 2025 | 197 / 282 | 25 | 25 | 9 | 10 | 6 | 2 |
-| rust-lang/rust-analyzer | 2025 | 287 / 336 | 25 | 27 | 6 | 8 | 1 | 0 |
-| rustfs/rustfs | 2024-extended | 494 / 495 | 23 | 23 | 16 | 0 | 17 | 9 |
+| nushell/nushell | 2025 | 197 / 282 | 25 | 27 | 9 | 10 | 7 | 3 |
+| rust-lang/rust-analyzer | 2025 | 287 / 336 | 25 | 28 | 7 | 8 | 1 | 0 |
+| rustfs/rustfs | 2024-extended | 494 / 495 | 23 | 25 | 17 | 0 | 17 | 9 |
 | sinelaw/fresh | 2025 | 91 / 1085 | 25 | 25 | 2 | 0 | 4 | 4 |
 | uutils/coreutils | 2024-extended | 421 / 625 | 25 | 25 | 28 | 8 | 6 | 2 |
 | web-infra-dev/rspack | 2025 | 197 / 666 | 25 | 26 | 5 | 9 | 6 | 3 |
-| Total (12 repos) | | | 270 | 278 | 107 | 36 | 76 | 34 |
+| Total (12 repos) | | | 270 | 284 | 109 | 36 | 77 | 35 |
 
 ## Files per repo
 
@@ -40,7 +40,7 @@ A relation diff is one introducing commit with at least one confirmed relation d
 - An intro that only moved, refactored or reverted already-faulty code, or only made it reachable, doesn't introduce the defect. Those rows are rejected or disputed.
 - The fix commit's test must exercise the defect: a fix_test that passes before the fix fails the row. After tracing, an audit of every confirmed row's fix_test against its fix commit replaced 16 test names and disputed 14 rows whose fix adds no test that exercises the defect; short repos then resumed in seeded order.
 - A panic counts only if it happens in the shipped build. Integer-overflow panics in repos whose release profile has no overflow checks are disputed.
-- Spread allows at most two admitted diffs per feature or commit series. Where a third appeared, the latest in seeded order was rejected.
+- Spread allows at most two admitted diffs per feature or commit series. Where a third appeared, the latest in seeded order was rejected. A further defect of an already-admitted diff is not a spread case: an audit of all 61 spread rejections re-examined the 33 that traced to an admitted diff, admitted 10 of them for checking (8 confirmed), and re-rejected 9 with their real rule.
 - A short repo resumed from its recorded stop index in the same seeded order. When a window extended to 2024, rows rejected only for a 2024 introduction were re-evaluated at their original positions (the plan's Window section).
 
 The tracer brief is `tracer-brief.md`. The pending-then-check flow and the later repos were sent as messages.
