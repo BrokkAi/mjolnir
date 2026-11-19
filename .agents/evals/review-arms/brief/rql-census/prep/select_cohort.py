@@ -50,6 +50,8 @@ def main():
         return None
 
     waiting = {repo: why for repo in pins if (why := pending(repo))}
+    # Records from driver 676f6d7f2 have no environment key (None for all); the plan states
+    # that batch's single host and settings.
     provenance = {(measured[repo].get("binary_sha256"),
                    json.dumps(measured[repo].get("environment"), sort_keys=True))
                   for repo in pins if repo not in waiting}
