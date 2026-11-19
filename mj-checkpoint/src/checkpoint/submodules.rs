@@ -151,7 +151,11 @@ fn inspect_checkout(
     if gitlinks.is_empty() {
         return Ok(());
     }
-    let registered = registered_submodules(runner, checkout)?;
+    let registered = if snapshot.is_some() {
+        snapshot_registered_submodules(runner, checkout)?
+    } else {
+        registered_submodules(runner, checkout)?
+    };
     if let Some(snapshot) = snapshot.as_deref_mut() {
         snapshot
             .index_gitlinks
@@ -244,6 +248,12 @@ fn inspect_checkout(
                     .map(|notice| format!("{}: {notice}", named.display())),
             );
             let worktree_url_rules = captured_worktree_rules.rules;
+            if let Some(notice) = crate::snapshot::worktree_remote_notice(runner, &submodule)? {
+                snapshot
+                    .notices
+                    .push(format!("{}: {notice}", named.display()));
+            }
+
             snapshot
                 .initialized
                 .push(crate::snapshot::SnapshotSubmodule {
@@ -747,6 +757,38 @@ fn gitlinks(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<BTreeSet<P
 
 /// Submodule paths that `.gitmodules` registers. Git's own submodule commands
 /// read the file from the working tree, and so does this.
+fn snapshot_registered_submodules(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    let unmerged = submodule_git(
+        runner,
+        checkout,
+        &["ls-files", "--unmerged", "--", ".gitmodules"],
+    )?;
+    if unmerged.is_empty() {
+        return registered_submodules(runner, checkout);
+    }
+    // Use committed registration to inventory an unresolved operation. Managed
+    // capture aborts before repinning; raw capture skips the working overlay.
+    let committed = submodule_git(runner, checkout, &["ls-tree", "HEAD", "--", ".gitmodules"])?;
+    if committed.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let output = runner.run(
+        checkout,
+        &git_command(&[
+            "config",
+            "--blob",
+            "HEAD:.gitmodules",
+            "--null",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ]),
+    )?;
+    parse_registered_submodules(output)
+}
+
 fn registered_submodules(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -765,6 +807,11 @@ fn registered_submodules(
             r"^submodule\..*\.path$",
         ]),
     )?;
+    parse_registered_submodules(output)
+}
+fn parse_registered_submodules(
+    output: crate::archive::GitOutput,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
     // `git config` exits 1 when no key matches.
     if output.status == 1 {
         return Ok(std::collections::BTreeMap::new());
