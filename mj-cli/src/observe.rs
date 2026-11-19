@@ -85,7 +85,8 @@ fn status(args: ObserveStatusArgs) -> Result<()> {
     let delivery_enabled = delivery.as_ref().is_ok_and(Option::is_some);
     let delivery_error = delivery.err().map(|error| format!("{error:#}"));
     let configured_parts = configured_parts.unwrap_or_default();
-    let delivery_state = ObserveDeliveryState::load(&paths.state, mj_core::clock::epoch_millis())?;
+    let delivery_state =
+        ObserveDeliveryState::diagnostics(&paths.state, mj_core::clock::epoch_millis())?;
     let status = ObserveStatus {
         url_configured: configured_parts.0,
         token_configured: configured_parts.1,

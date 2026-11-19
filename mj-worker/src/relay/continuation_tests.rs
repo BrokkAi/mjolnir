@@ -504,6 +504,12 @@ fn a_users_own_goal_resume_still_takes_over_from_automation() {
     );
     let c = &relay.snapshot.continuation;
     assert!(c.suppressed && c.quota_suppressed);
+    // A user's native resume may remain in flight for its entire turn.
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed[0].command_id, "goal-resume-by-user");
+    submit_relay(&mut relay, "cancel-explicit-resume", RelayCommand::Cancel);
+    let cancel = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(cancel[0].command_id, "cancel-explicit-resume");
 }
 
 fn handback_request(relay: &DurableRelay) -> RelayCommand {

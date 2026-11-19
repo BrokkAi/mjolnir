@@ -7,9 +7,8 @@
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│  Outside filter                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -30,10 +29,11 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -49,9 +49,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│  Outside filter                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -72,10 +71,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -92,9 +92,8 @@ click=(6,3); action=None; filter retained=true
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│  Outside filter                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -115,10 +114,11 @@ click=(6,3); action=None; filter retained=true
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -135,9 +135,8 @@ click=(19,3); action=None; filter retained=true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -158,10 +157,11 @@ click=(19,3); action=None; filter retained=true
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -178,9 +178,8 @@ chip=(21,3) glyph='×'; action=None; filter active=false
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                                                                              |
-|  Outside filter                      ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
+|  |                                   ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -201,10 +200,11 @@ chip=(21,3) glyph='×'; action=None; filter active=false
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: refreshing..                                                      |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -220,9 +220,8 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                                                                              |
-|  Outside filter                      ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
+|  |                                   ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -243,10 +242,11 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: refreshing..                                                      |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -263,9 +263,8 @@ click=(6,3); action=None; filter retained=true
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                                                                              |
-|  Outside filter                      ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
+|  |                                   ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -286,10 +285,11 @@ click=(6,3); action=None; filter retained=true
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: refreshing..                                                      |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -306,9 +306,8 @@ click=(19,3); action=None; filter retained=true
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
+|  | No messages yet                   ||                               *  M J O L N I R                               |
+|  |                                   ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -329,10 +328,11 @@ click=(19,3); action=None; filter retained=true
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: refreshing..                                                      |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -349,9 +349,8 @@ chip=(21,3) glyph='x'; action=None; filter active=false
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -372,10 +371,11 @@ chip=(21,3) glyph='x'; action=None; filter active=false
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -392,9 +392,8 @@ Sessions action row: "│ Create   Open   Filter: ___________________│"; filte
 │hel ──────────────────────────────────││                                      │
 │› · ACP pretty name               ◇ ⋯ ││                                      │
 │  Idle  podman  codex-1               ││                                      │
-│  │ No messages yet                   ││                                      │
-│  │                                   ││           ✦  M J O L N I R           │
-│                                      ││                                      │
+│  │ No messages yet                   ││           ✦  M J O L N I R           │
+│  │                                   ││                                      │
 │                                      ││Select a session to open its conversat│
 │                                      ││                                      │
 │                                      ││                                      │
@@ -415,10 +414,11 @@ Sessions action row: "│ Create   Open   Filter: ___________________│"; filte
 │  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                        │
-│  claude-1  Claude Code  refreshing…                                          │
-│  codex-1   Codex        refreshing…                                          │
-│  codex-2   Codex        refreshing…                                          │
+│ANTHROPIC                                                                     │
+│  claude-1: refreshing…                                                       │
+│OPENAI                                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -435,7 +435,6 @@ Sessions action row: "│ Create   Open   Filter: _____________│"; filter acti
 │› · ACP pretty…◇  ││                                                                                                                      │
 │  Idle            ││                                                                                                                      │
 │  Outside filter  ││                                                                                                                      │
-│                  ││                                                                                                                      │
 │                  ││                                                   ✦  M J O L N I R                                                   │
 │                  ││                                                                                                                      │
 │                  ││                                      Select a session to open its conversation.                                      │
@@ -458,10 +457,11 @@ Sessions action row: "│ Create   Open   Filter: _____________│"; filter acti
 │                  ││  Host / fleet  Targets  CPU  RAM                                                                                     │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                  ││            Harness      Weekly      Resets  5H Resets                                                                │
-│                  ││  claude-1  Claude Code  refreshing…                                                                                  │
-│                  ││  codex-1   Codex        refreshing…                                                                                  │
-│                  ││  codex-2   Codex        refreshing…                                                                                  │
+│                  ││ANTHROPIC                                                                                                             │
+│                  ││  claude-1: refreshing…                                                                                               │
+│                  ││OPENAI                                                                                                                │
+│                  ││  codex-1: refreshing…                                                                                                │
+│                  ││  codex-2: refreshing…                                                                                                │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                                     │
@@ -479,9 +479,8 @@ click Filter input: None; editing: true
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -502,10 +501,11 @@ click Filter input: None; editing: true
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -522,9 +522,8 @@ query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filt
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -545,10 +544,11 @@ query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filt
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -565,9 +565,8 @@ filter active: false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -588,10 +587,11 @@ filter active: false
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -608,9 +608,8 @@ input/cursor: "alpha beta gamma"@15
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -631,10 +630,11 @@ input/cursor: "alpha beta gamma"@15
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -651,9 +651,8 @@ input/cursor: "alpha beta gamma"@16
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -674,10 +673,11 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -694,9 +694,8 @@ input/cursor: "alpha beta gamma"@0
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -717,10 +716,11 @@ input/cursor: "alpha beta gamma"@0
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -737,9 +737,8 @@ input/cursor: "alpha beta gamma"@16
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -760,10 +759,11 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -780,9 +780,8 @@ input/cursor: "alpha beta gamma"@0
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -803,10 +802,11 @@ input/cursor: "alpha beta gamma"@0
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -823,9 +823,8 @@ input/cursor: "alpha beta gamma"@16
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -846,10 +845,11 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -866,9 +866,8 @@ input/cursor: "alpha beta gamma"@15
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -889,10 +888,11 @@ input/cursor: "alpha beta gamma"@15
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -909,9 +909,8 @@ input/cursor: "alpha beta gamma"@16
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -932,10 +931,11 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -952,9 +952,8 @@ input/cursor: "alpha beta gamma"@11
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -975,10 +974,11 @@ input/cursor: "alpha beta gamma"@11
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -995,9 +995,8 @@ input/cursor: "alpha beta gamma"@6
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1018,10 +1017,11 @@ input/cursor: "alpha beta gamma"@6
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1038,9 +1038,8 @@ input/cursor: "alpha beta gamma"@10
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1061,10 +1060,11 @@ input/cursor: "alpha beta gamma"@10
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1081,9 +1081,8 @@ input/cursor: "alpha betagamma"@10
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1104,10 +1103,11 @@ input/cursor: "alpha betagamma"@10
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1124,9 +1124,8 @@ input/cursor: "alpha betgamma"@9
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1147,10 +1146,11 @@ input/cursor: "alpha betgamma"@9
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1167,9 +1167,8 @@ input/cursor: "alpha begamma"@8
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1190,10 +1189,11 @@ input/cursor: "alpha begamma"@8
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1210,9 +1210,8 @@ input/cursor: "alpha gamma"@6
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1233,10 +1232,11 @@ input/cursor: "alpha gamma"@6
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1253,9 +1253,8 @@ input/cursor: "alpha "@6
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1276,10 +1275,11 @@ input/cursor: "alpha "@6
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1296,9 +1296,8 @@ input/cursor: "alpha "@0
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1319,10 +1318,11 @@ input/cursor: "alpha "@0
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1339,9 +1339,8 @@ input/cursor: "xalpha "@1
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1362,10 +1361,11 @@ input/cursor: "xalpha "@1
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1382,9 +1382,8 @@ input/cursor: "alpha "@0
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1405,10 +1404,11 @@ input/cursor: "alpha "@0
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1425,9 +1425,8 @@ query/cursor after Up: ("alpha ", 0)
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1448,10 +1447,11 @@ query/cursor after Up: ("alpha ", 0)
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1468,9 +1468,8 @@ editing after slash: true
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1491,10 +1490,11 @@ editing after slash: true
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1511,9 +1511,8 @@ query after Enter: ("q", 1); editing: false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1534,10 +1533,11 @@ query after Enter: ("q", 1); editing: false
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1554,9 +1554,8 @@ editing after slash: true
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1577,10 +1576,11 @@ editing after slash: true
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1597,9 +1597,8 @@ filter active: false
 |> . ACP pretty name                     + . ||                                                                                            |
 |  Idle  podman  codex-1                     ||                                                                                            |
 |  | No messages yet                         ||                                                                                            |
-|  |                                         ||                                                                                            |
-|  Outside filter                            ||                                      *  M J O L N I R                                      |
-|                                            ||                                                                                            |
+|  |                                         ||                                      *  M J O L N I R                                      |
+|  Outside filter                            ||                                                                                            |
 |                                            ||                         Select a session to open its conversation.                         |
 |                                            ||                                                                                            |
 |                                            ||                                                                                            |
@@ -1620,10 +1619,11 @@ filter active: false
 |                                            ||  Host / fleet  Targets  CPU  RAM                                                           |
 |                                            |+--------------------------------------------------------------------------------------------+
 |                                            |+ Profiles v (not refreshed)---------------------------------------------------------- -   = +
-|                                            ||            Harness      Weekly       Resets  5H Resets                                     |
-|                                            ||  claude-1  Claude Code  refreshing..                                                       |
-|                                            ||  codex-1   Codex        refreshing..                                                       |
-|                                            ||  codex-2   Codex        refreshing..                                                       |
+|                                            ||ANTHROPIC                                                                                   |
+|                                            ||  claude-1: refreshing..                                                                    |
+|                                            ||OPENAI                                                                                      |
+|                                            ||  codex-1: refreshing..                                                                     |
+|                                            ||  codex-2: refreshing..                                                                     |
 |                                            |+--------------------------------------------------------------------------------------------+
 |                                            |+ Notifications (0) ------------------------------------------------------------------ -   = +
 |                                            ||Nothing needs you                                                                           |
@@ -1640,14 +1640,13 @@ filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 │  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman [1]  codex-1                 ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
-│› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Idle  podman [2]  codex-1                 ││                         Select a session to open its conversation.                         │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
+│› · ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
+│  Idle  podman [2]  codex-1                 ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
 │  Outside filter                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1663,10 +1662,11 @@ filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1683,9 +1683,8 @@ hidden sessions: 0
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
-│                                            ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1706,10 +1705,11 @@ hidden sessions: 0
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │

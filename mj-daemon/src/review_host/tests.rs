@@ -1007,7 +1007,13 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
         assert_eq!(children.len(), 1, "no reviewer starts before the brief");
         assert_eq!(children[0].1.profile, "writer");
         assert_eq!(children[0].1.main.effort.as_deref(), Some("high"));
-        assert!(children[0].2.contains("Relation brief for a code change"));
+        assert!(!children[0].2.contains("Relation brief for a code change"));
+        assert!(
+            children[0]
+                .2
+                .starts_with(mj_core::subagent::READ_ONLY_TASK_SCOPE)
+        );
+        assert!(children[0].2.contains("## The change"));
         assert!(children[0].2.contains(
             "git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new"
         ));
@@ -1124,16 +1130,14 @@ async fn a_brief_writer_that_ends_without_a_handback_leaves_the_review_to_run_wi
         environment.clone(),
     );
     let writer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
-    host.child_ended(
-        writer.clone(),
-        "the writer's session ended (stopped)".into(),
-    );
+    let reason = "error: Cannot start the relation brief writer: Muse adapter 0.0.0 does not advertise a persistent instruction channel";
+    host.child_ended(writer.clone(), reason.into());
     let notice = next_notice(&mut manager).await;
     assert!(
         notice.starts_with("Review started without a relation brief:"),
         "{notice}"
     );
-    assert!(notice.contains("session ended (stopped)"), "{notice}");
+    assert!(notice.contains(reason), "{notice}");
     let reviewer = wait_for_nth_child(&environment, 2).await;
     let prompt = environment.children.lock().unwrap()[1].2.clone();
     assert!(!prompt.contains("Relations computed"), "{prompt}");
@@ -1811,7 +1815,8 @@ async fn a_failed_review_closes_without_advancing_coverage() {
         armed(Some("reviewer")),
         environment.clone(),
     );
-    *environment.start_error.lock().unwrap() = Some("review harness failed to launch".to_owned());
+    let cause = "Cannot start the automated reviewer: Muse adapter 0.0.0 does not advertise a persistent instruction channel";
+    *environment.start_error.lock().unwrap() = Some(cause.to_owned());
     *environment.close_error.lock().unwrap() = Some("temporary close admission refusal".into());
     finish_a_turn(&manager, &host).await;
 
@@ -1860,11 +1865,22 @@ async fn a_failed_review_closes_without_advancing_coverage() {
     // Hard-won: f47500b6c: the close notice hid the reviewer launch failure reason.
     let notice = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
+            let request = manager.next().await;
+            assert!(
+                !matches!(
+                    &request,
+                    RemoteSessionRequest::Reviewer {
+                        action: ReviewerAction::RecordReviewed { .. },
+                        ..
+                    }
+                ),
+                "a failed reviewer must not advance the baseline"
+            );
             if let RemoteSessionRequest::Submit {
                 command: RelayCommand::RecordNotice { text },
                 reply,
                 ..
-            } = manager.next().await
+            } = request
             {
                 let _ = reply.send(Ok(1));
                 if text.starts_with("Review failed:") {
@@ -1875,10 +1891,7 @@ async fn a_failed_review_closes_without_advancing_coverage() {
     })
     .await
     .expect("failed review records a notice");
-    assert!(
-        notice.contains("review harness failed to launch"),
-        "{notice}"
-    );
+    assert!(notice.contains(cause), "{notice}");
 
     host.shutdown().await.expect("shutdown the host");
 }
@@ -3345,11 +3358,25 @@ async fn a_reviewer_that_ends_with_an_undelivered_handback_resolves_with_it() {
     let manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    let handback = stored_handback(&environment, "reviewer-1", "real defect").unwrap();
+    let recovered = mj_core::continuation::restart_continuation_id(&handback.command_id);
+    // Hard-won: ebb2e9611: the original handback did not answer its recovered turn.
+    assert_eq!(
+        ChildStanding {
+            ended: None,
+            handback: Some(handback.clone())
+        }
+        .answer_to(&recovered)
+        .as_deref(),
+        Some("real defect")
+    );
+    let mut handback = handback;
+    handback.command_id = recovered;
     environment.standings.lock().unwrap().insert(
         children[0].clone(),
         ChildStanding {
             ended: Some("stopped".into()),
-            handback: stored_handback(&environment, "reviewer-1", "real defect"),
+            handback: Some(handback),
         },
     );
 

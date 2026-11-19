@@ -24,7 +24,6 @@ fn serve<R: io::BufRead, W: io::Write + Send + Sync + 'static>(
         writer,
         crate::mcp_stdio::McpServer {
             name: "mj-memory",
-            instructions: history::GUIDANCE,
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, _: &crate::mcp_stdio::Progress| {
@@ -84,8 +83,14 @@ mod tests {
         });
 
         let mut output = BufReader::new(client.try_clone().unwrap());
-        send(&mut client, 1, "tools/list", json!({}));
+        send(&mut client, 0, "initialize", json!({}));
         let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let initialized: Value = serde_json::from_str(&line).unwrap();
+        assert!(initialized["result"].get("instructions").is_none());
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "mj-memory");
+        line.clear();
+        send(&mut client, 1, "tools/list", json!({}));
         output.read_line(&mut line).unwrap();
         let reply: Value = serde_json::from_str(&line).unwrap();
         let tools = reply["result"]["tools"].as_array().unwrap();

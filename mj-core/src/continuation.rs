@@ -2,6 +2,81 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
+/// Restart prompts retain their original payload; the note is added only when rendered.
+pub const RESTART_RECOVERY_NOTE: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted, and running tool calls were lost. The original request that began this turn is repeated below for context. Any corrections or redirections given during the turn, visible in the conversation, take precedence over it. If you had already started, continue from where you left off rather than starting over. Before repeating a command whose result you did not see, check whether it already took effect, especially for anything with external side effects.";
+
+const RESTART_PREFIX: &str = "auto-continue-restart-";
+
+fn restart_parts(id: &str) -> Option<(&str, &str)> {
+    let (generation, root) = id.strip_prefix(RESTART_PREFIX)?.split_once('-')?;
+    (!generation.is_empty()
+        && !generation.starts_with('0')
+        && generation.bytes().all(|c| c.is_ascii_digit())
+        && !root.is_empty())
+    .then_some((generation, root))
+}
+
+/// The original command carried by a restart continuation, across any number
+/// of restarts. The ID is the sole carrier; no journal lookup is needed.
+pub fn carried_command(mut id: &str) -> &str {
+    while let Some((_, root)) = restart_parts(id) {
+        id = root;
+    }
+    id
+}
+
+pub fn restart_continuation_id(command_id: &str) -> String {
+    // Decimal increment avoids imposing a machine-integer retry budget.
+    let mut generation = restart_parts(command_id)
+        .map_or("0", |(n, _)| n)
+        .as_bytes()
+        .to_vec();
+    let mut carry = true;
+    for digit in generation.iter_mut().rev() {
+        if *digit == b'9' {
+            *digit = b'0';
+        } else {
+            *digit += 1;
+            carry = false;
+            break;
+        }
+    }
+    if carry {
+        generation.insert(0, b'1');
+    }
+    format!(
+        "{RESTART_PREFIX}{}-{}",
+        String::from_utf8(generation).expect("decimal digits"),
+        carried_command(command_id)
+    )
+}
+
+/// Ordinary IDs retain their 8–128 byte bound. The worker-owned restart
+/// envelope adds only its prefix and generation to an already valid root.
+pub fn valid_command_id(id: &str) -> bool {
+    let root = if is_restart_continuation(id) {
+        let Some((_, root)) = restart_parts(id) else {
+            return false;
+        };
+        if is_restart_continuation(root) {
+            return false;
+        }
+        root
+    } else {
+        id
+    };
+    (8..=128).contains(&root.len())
+        && root
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+}
+
+pub fn is_restart_continuation(command_id: &str) -> bool {
+    GeneratedPrompt::AutoContinue
+        .suffix(command_id)
+        .is_some_and(|suffix| suffix.starts_with("restart-"))
+}
+
 pub const USER_BYTES: usize = 32 * 1024;
 pub const ASSISTANT_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -315,6 +390,23 @@ mod tests {
 
     // The mining script keeps its own copy of the rules, so the two sides
     // can drift without either failing to compile.
+    // Hard-won: 7c195cfd8: hashed recovery IDs lost the carried command's identity.
+    #[test]
+    fn restart_identity_survives_repeated_recovery_and_maximum_root_ids() {
+        let root = "r".repeat(128);
+        let mut id = root.clone();
+        for generation in 1..=11 {
+            let next = restart_continuation_id(&id);
+            assert_eq!(next, restart_continuation_id(&id));
+            assert_eq!(next, format!("auto-continue-restart-{generation}-{root}"));
+            assert_eq!(carried_command(&next), root);
+            assert!(valid_command_id(&next));
+            id = next;
+        }
+        assert!(!valid_command_id(&"r".repeat(129)));
+        assert!(!valid_command_id("auto-continue-restart-01-original-turn"));
+    }
+
     #[test]
     fn jev_extract_script_lists_the_same_generated_prompt_prefixes() {
         let script = std::fs::read_to_string(concat!(

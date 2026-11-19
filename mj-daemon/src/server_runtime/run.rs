@@ -657,7 +657,7 @@ pub(crate) async fn run_server(
                         Some(_) => tracing::debug!(
                             "the previous SessionWiki archive pass is still running; skipping this tick"
                         ),
-                        None => daemon_runtime.wiki().request_sync(true),
+                        None => { daemon_runtime.wiki().request_sync(true); },
                     }
                     // Only rows whose client id names a phone are considered:
                     // a terminal client's place in a conversation is not the

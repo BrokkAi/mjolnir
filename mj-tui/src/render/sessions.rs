@@ -1561,11 +1561,13 @@ pub(crate) fn render_sessions(
         content.width,
         content.height.min(SESSION_ACTIONS_HEIGHT),
     );
+    let sync_line = dashboard.sessions_sync_line(content.width);
+    let header_height = SESSION_ACTIONS_HEIGHT + u16::from(sync_line.is_some());
     let rows_area = Rect::new(
         content.x,
-        content.y.saturating_add(SESSION_ACTIONS_HEIGHT),
+        content.y.saturating_add(header_height),
         content.width,
-        content.height.saturating_sub(SESSION_ACTIONS_HEIGHT),
+        content.height.saturating_sub(header_height),
     );
     debug_assert_eq!(
         layout.width, content.width,
@@ -1621,6 +1623,17 @@ pub(crate) fn render_sessions(
         );
     }
     crate::surface_controls::render_session_buttons(frame, actions_area, dashboard);
+    if let Some(line) = sync_line {
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(
+                content.x,
+                content.y + SESSION_ACTIONS_HEIGHT,
+                content.width,
+                content.height.saturating_sub(SESSION_ACTIONS_HEIGHT).min(1),
+            ),
+        );
+    }
     let selected = dashboard
         .selected_visible_index()
         .filter(|index| *index < row_heights.len());
@@ -1876,19 +1889,25 @@ pub(crate) fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'sta
     })
 }
 
+/// The targets a Targets row lists. A standard runtime whose engine was never
+/// installed is not listed: the user never configured it. Any other missing
+/// runtime stays, marked unavailable.
+pub(crate) fn listed_capacity_targets<'a>(
+    target_ids: &'a [String],
+    dashboard: &'a DashboardState,
+) -> impl Iterator<Item = &'a String> + 'a {
+    target_ids
+        .iter()
+        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent))
+}
+
 pub(crate) fn capacity_target_labels(
     target_ids: &[String],
     dashboard: &DashboardState,
 ) -> Line<'static> {
     let config = &dashboard.config;
     let mut spans = Vec::new();
-    // A standard runtime whose engine was never installed is not listed:
-    // the user never configured it. Any other missing runtime stays, marked
-    // unavailable.
-    let listed = target_ids
-        .iter()
-        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent));
-    for (index, target_id) in listed.enumerate() {
+    for (index, target_id) in listed_capacity_targets(target_ids, dashboard).enumerate() {
         if index > 0 {
             spans.push(Span::raw(", "));
         }

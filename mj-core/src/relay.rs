@@ -175,7 +175,10 @@ pub const RELAY_HELD_LOGIN_PROTOCOL: u32 = 69;
 pub const RELAY_AUTHENTICATION_RETRY_INTENT_PROTOCOL: u32 = 70;
 /// 71 reports the notification stack and accepts exact Clear and read pruning.
 pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_NOTIFICATION_STACK_PROTOCOL;
+/// 72 atomically transfers an interrupted prompt into restart recovery. The
+/// continuation ID is digest-covered, so older readers must not consume it.
+pub const RELAY_RESTART_RECOVERY_PROTOCOL: u32 = 72;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RESTART_RECOVERY_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

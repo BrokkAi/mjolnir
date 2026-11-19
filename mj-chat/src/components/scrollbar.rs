@@ -52,6 +52,12 @@ impl ScrollbarDrag {
         self.grab_offset
     }
 
+    /// Release a gesture while keeping the currently displayed geometry.
+    pub fn cancel_pointer(&mut self) {
+        self.dragging = false;
+        self.grab_offset = 0;
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
     }

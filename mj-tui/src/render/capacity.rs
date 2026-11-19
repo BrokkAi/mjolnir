@@ -63,6 +63,18 @@ pub(crate) fn capacity_table_rows(
         .capacity_details
         .values()
         .map(|detail| {
+            // Every listed target is unavailable: say so once for the host
+            // and draw nothing else (no capacity, no Disks button).
+            if all_listed_targets_unavailable(&detail.target.target_ids, dashboard) {
+                return CapacityTableRow {
+                    host: detail.target.host.clone(),
+                    targets: Line::styled("unavailable", theme::muted()),
+                    cpu: Line::default(),
+                    memory: Line::default(),
+                    disks: Line::default(),
+                    staleness: None,
+                };
+            }
             let staleness = capacity_staleness(detail, now_epoch_seconds);
             let (cpu, memory) = capacity_cpu_and_memory(detail, staleness.is_some());
             CapacityTableRow {
@@ -75,6 +87,15 @@ pub(crate) fn capacity_table_rows(
             }
         })
         .collect()
+}
+
+/// Whether the row lists targets and every one of them is unavailable.
+pub(crate) fn all_listed_targets_unavailable(
+    target_ids: &[String],
+    dashboard: &DashboardState,
+) -> bool {
+    let mut listed = super::sessions::listed_capacity_targets(target_ids, dashboard).peekable();
+    listed.peek().is_some() && listed.all(|id| dashboard.target_missing(id).is_some())
 }
 
 /// The CPU and RAM cells of one row. A host reports how much of each is in

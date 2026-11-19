@@ -61,6 +61,23 @@ def main():
             'session_id = "reliability-native"',
             'session_id = __import__("uuid").uuid4().hex',
         )
+        # Hard-won: cdb6971bc: the fixture kept child role text in the first user prompt.
+        initialize_anchor = '            "protocolVersion": 1,\n'
+        assert initialize_anchor in script
+        script = script.replace(
+            initialize_anchor,
+            initialize_anchor + '            "agentCapabilities": {"sessionCapabilities": {"systemPrompt": {}}},\n',
+            1,
+        )
+        open_anchor = '    elif method in ("session/new", "session/load"):\n'
+        assert open_anchor in script
+        script = script.replace(
+            open_anchor,
+            open_anchor
+            + '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-system-prompt.jsonl"), "a") as marker:\n'
+            + '            marker.write(json.dumps(message.get("params", {}).get("systemPrompt")) + "\\n")\n',
+            1,
+        )
         options = [
             {
                 "id": "model",
@@ -808,7 +825,14 @@ def main():
         model_gate.unlink()
         prompt_marker = wait_prompt(child, "Return a short fixture report.")
         first_prompt = prompt_marker.read_text()
-        assert "You are a Mjolnir sub-agent" in first_prompt, first_prompt
+        assert "You are a Mjolnir sub-agent" not in first_prompt, first_prompt
+        assert "Your report directory is" in first_prompt, first_prompt
+        opening = json.loads(prompt_marker.with_name("fixture-system-prompt.jsonl").read_text().splitlines()[0])
+        assert opening["mode"] == "append", opening
+        standing = "\n".join(block.get("text", "") for block in opening["content"])
+        assert "You are a Mjolnir sub-agent" in standing, standing
+        assert "Your parent reads your report" in standing, standing
+        assert "Return a short fixture report." not in standing, standing
         assert worker_status(child)["config"]["effort"] == "high"
         deadline = time.monotonic() + WAIT_SECONDS
         while True:

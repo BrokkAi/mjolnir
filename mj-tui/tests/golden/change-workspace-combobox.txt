@@ -20,16 +20,16 @@
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace ›                                                                │                │
-│                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Change Workspace ›                                                                │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
+│                │  Move…                                                                             │  ──────────────╯
+│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -62,16 +62,16 @@ menu popup action: None
 │                   │  Organize  ────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Rename…                                                                         ctrl+b shift+t  │                   │
 │                   │  Pin…                                                                                            │                   │
-│                   │› Change Workspace ▾                                                                              │                   │
-│                   │  ╭ workspace · ↑/↓ select · Enter choose ╮                                                       │  ─────────────────╯
-│                   │  │Default (current)                      │─────────────────────────────────────────────────────  │  ─────────────────╮
+│                   │› Change Workspace ▾                                                                              │  ─────────────────╯
+│                   │  ╭ workspace · ↑/↓ select · Enter choose ╮                                                       │  ─────────────────╮
+│                   │  │Default (current)                      │─────────────────────────────────────────────────────  │                   │
 │                   │  │Other                                  │                                                       │                   │
-│                   │  │Third                                  │                                                       │                   │
-│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │  ─────────────────╯
-│                   │  Restart                                                                                         │  ────────── ▁   ▄ ╮
-│                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │                   │
-│                   │  Destroy…                                                                                        │  ─────────────────╯
-│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │  ────────── ▁   ▄ ╮
+│                   │  │Third                                  │                                                       │  ─────────────────╯
+│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │  ────────── ▁   ▄ ╮
+│                   │  Restart                                                                                         │                   │
+│                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │  ─────────────────╯
+│                   │  Destroy…                                                                                        │  ────────── ▁   ▄ ╮
+│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │                   │
 │                   │                                                                                                  │                   │
 │                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯                   │
 │                                                                                                                                          │
@@ -93,8 +93,8 @@ menu popup action: None
 │  Idle    ╭ × ACP pretty name ────────────────────────────────────╮           │
 │  │ No m  │                                      Copy session ID  │           │
 │  │       │  codex-1                                              │           │
-│          │  Sub-agents Native                                    │           │
-│          │  CPU        no CPU data yet                           │  conversat│
+│          │  Sub-agents Native                                    │  conversat│
+│          │  CPU        no CPU data yet                           │           │
 │          │                                                       │           │
 │          │  Content  ──────────────────────────────────────────  │           │
 │          │  Changed files — The session's target is …  ctrl+b d  │           │
@@ -104,18 +104,18 @@ menu popup action: None
 │          │  Organize  ─────────────────────────────────────────  │           │
 │          │  Rename…                              ctrl+b shift+t  │           │
 │          │  Pin…                                                 │           │
-│          │› Change Workspace ▾                                   │           │
-│          │  ╭ workspace · ↑/↓ select · Enter choose ╮            │  ─────────╯
-│          │  │Default (current)                      │──────────  │  ─────────╮
-│          │  │Other                                  │            │           │
-│          │  │Third                                  │            │  Enter on │
-╰────────  │  ╰───────────────────────────────────────╯+b shift+x  │  ─────────╯
-╭ Targets  │  Restart                                              │  ── ▁   ▄ ╮
-│  Host /  │  Interrupt all (parent + sub-agents)… — No turn i…    │           │
-╰────────  │  Destroy…                                             │  ─────────╯
-╭ Profile  │Move the selected session, and its sub-agents, to anoth│  ── ▁   ▄ ╮
-│          │                                                       │           │
-│  claude  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯           │
+│          │› Change Workspace ▾                                   │  ─────────╯
+│          │  ╭ workspace · ↑/↓ select · Enter choose ╮            │  ─────────╮
+│          │  │Default (current)                      │──────────  │           │
+│          │  │Other                                  │            │  Enter on │
+╰────────  │  │Third                                  │            │  ─────────╯
+╭ Targets  │  ╰───────────────────────────────────────╯+b shift+x  │  ── ▁   ▄ ╮
+│  Host /  │  Restart                                              │           │
+╰────────  │  Interrupt all (parent + sub-agents)… — No turn i…    │  ─────────╯
+╭ Profile  │  Destroy…                                             │  ── ▁   ▄ ╮
+│ANTHROPI  │Move the selected session, and its sub-agents, to anoth│           │
+│  claude  │                                                       │           │
+│OPENAI    ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯           │
 │  codex-                                                                      │
 │  codex-                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -134,10 +134,10 @@ palette popup action: None
 │hel ──────────────────────────────────││                                                          │
 │› · ACP pretty name               ◇ ⋯ ││                                                          │
 │  Idle  podman  codex-1               ││                                                          │
-│  │ No messages yet                   ││                                                          │
-│  │                                   ││                     ✦  M J O L N I R                     │
-│                                      ││                                                          │
+│  │ No messages yet                   ││                     ✦  M J O L N I R                     │
+│  │                                   ││                                                          │
 │                                      ││        Select a session to open its conversation.        │
+│                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                                                                                  │
@@ -147,24 +147,24 @@ palette popup action: None
 │             │  ACP pretty name  ─────────────────────────────────────────────────  │             │
 │             │› Change workspace ▾                                                  │             │
 │             │Move the selected session, and its sub-agents, to another workspace, a│             │
-│             │  │Default (current)                      │                           │             │
-│             ╰ ↑│Other                                  │ Esc closes ───────────────╯  ───────────╯
-│                │Third                                  │                              ───────────╮
-│                ╰───────────────────────────────────────╯                                         │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.    │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                         │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
+│             │  │Default (current)                      │                           │  ───────────╯
+│             ╰ ↑│Other                                  │ Esc closes ───────────────╯  ───────────╮
+│                │Third                                  │                                         │
+│                ╰───────────────────────────────────────╯                              o open.    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                         │
+│  claude-1: refreshing…                                                                           │
+│OPENAI                                                                                            │
+│  codex-1: refreshing…                                                                            │
+│  codex-2: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "other", workspace_name: "Other" }
 === dashboard after selecting Other (120x40) ===
@@ -176,9 +176,8 @@ select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "o
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -199,10 +198,11 @@ select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "o
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -230,16 +230,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │› Change Workspace ▾                                                                │                │
-│                │  ╭ workspace · ↑/↓ select · Enter choose ╮                                         │  ──────────────╯
-│                │  │Workspace default (current)           ▐│───────────────────────────────────────  │  ──────────────╮
+│                │› Change Workspace ▾                                                                │  ──────────────╯
+│                │  ╭ workspace · ↑/↓ select · Enter choose ╮                                         │  ──────────────╮
+│                │  │Workspace default (current)           ▐│───────────────────────────────────────  │                │
 │                │  │Workspace w2                          ▐│                                         │                │
-│                │  │Workspace w3                          ▐│                                         │                │
-│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │  ──────────────╯
-│                │  │Workspace w5                          ││                                         │  ─────── ▁   ▄ ╮
-│                │  │Workspace w6                          ││ turn is running here or in its sub-…    │                │
-│                │  ╰───────────────────────────────────────╯                                         │  ──────────────╯
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
+│                │  │Workspace w3                          ▐│                                         │  ──────────────╯
+│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │  ─────── ▁   ▄ ╮
+│                │  │Workspace w5                          ││                                         │                │
+│                │  │Workspace w6                          ││ turn is running here or in its sub-…    │  ──────────────╯
+│                │  ╰───────────────────────────────────────╯                                         │  ─────── ▁   ▄ ╮
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -272,16 +272,16 @@ first Escape action: None
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │› Change Workspace ›                                                                │                │
-│                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │› Change Workspace ›                                                                │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
-│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
+│                │  Move…                                                                             │  ──────────────╯
+│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│                │
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -301,9 +301,8 @@ second Escape action: None
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -324,10 +323,11 @@ second Escape action: None
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │

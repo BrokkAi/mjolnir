@@ -557,25 +557,22 @@ impl ApiBackend {
 
         // This is the single routing decision for send_message. Reuse the
         // published protocol fact and compatibility check used by the outbox.
-        let published_protocol = {
-            match self.sessions.session(child.to_owned()).await {
-                Ok(handle) => {
-                    mj_controller::mailbox_outbox::published_worker_relay_protocol(&handle.view())
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        child_session_id = child,
-                        error = %format!("{error:#}"),
-                        "child worker protocol is not published; queued parent message will use a turn"
-                    );
-                    None
-                }
-            }
-        };
-        let deliver_via_mailbox = published_protocol.is_some_and(|protocol| {
-            mj_controller::mailbox_outbox::trusted_parent_message_protocol_error(Some(protocol))
-                .is_none()
-        });
+        let deliver_via_mailbox =
+            match self.sessions.parent_message_route(child.to_owned()).await? {
+                // Fresh children use this daemon's mailbox-capable worker build.
+                // WorkerInstall::for_target (image_worker.rs) and
+                // worker_binary_prerequisite_with_verifier (binary_source.rs)
+                // enforce that identity, including explicit binary overrides.
+                mj_client::session::ParentMessageRoute::Starting => true,
+                mj_client::session::ParentMessageRoute::Published(protocol) => protocol
+                    .is_some_and(|protocol| {
+                        mj_controller::mailbox_outbox::trusted_parent_message_protocol_error(Some(
+                            protocol,
+                        ))
+                        .is_none()
+                    }),
+                mj_client::session::ParentMessageRoute::Unmanaged => false,
+            };
         if deliver_via_mailbox {
             self.enqueue_parent_message(child, message, request, &event_key)
                 .await?;

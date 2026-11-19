@@ -73,6 +73,7 @@ mod surface_controls;
 pub mod tile_layout;
 mod welcome;
 mod widgets;
+mod wiki_sync;
 mod wizards;
 
 #[cfg(test)]
@@ -121,7 +122,9 @@ pub use crate::actions::CommandId;
 pub use crate::availability::{
     AvailabilityChecked, LocalEngine, MachineFinding, MachineRuntimeProbe,
 };
-pub use crate::combined::{render_combined, render_combined_with_theme};
+pub use crate::combined::{
+    render_combined, render_combined_with_chat_access, render_combined_with_theme,
+};
 pub use crate::dashboard_conversation::SPLIT_REFUSED_NOTICE;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::go::GoMode;
@@ -1066,6 +1069,11 @@ pub struct DashboardState {
     pub(crate) sessions_scroll: Cell<usize>,
     pub(crate) targets_scroll: Cell<usize>,
     pub(crate) quota_scroll: Cell<usize>,
+    /// Height of the quota viewport at the previous render, in lines.
+    pub(crate) quota_viewport: Cell<usize>,
+    /// Selection and line range from the previous quota render, before refresh reordering.
+    pub(crate) quota_rendered_selection:
+        RefCell<Option<(render::quota_pools::QuotaRow, usize, usize)>>,
     /// The next render keeps one row beyond the selection visible in the
     /// direction of the latest keyboard or wheel navigation, when it fits.
     /// This is consumed by that pane's renderer after the movement.
@@ -1078,10 +1086,13 @@ pub struct DashboardState {
     /// Last rendered Disks button bounds, indexed like `capacity_details`.
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
-    pub(crate) quota_index: usize,
+    pub(crate) quota_selection: Option<render::quota_pools::QuotaRow>,
+    pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
+    pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,
     /// Last rendered Quota row bounds, by profile id, for the row's
     /// right-click menu.
     pub(crate) quota_row_areas: RefCell<Vec<(String, Rect)>>,
+    pub(crate) quota_pool_areas: RefCell<Vec<(crate::render::quota_pools::QuotaRow, Rect)>>,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
@@ -1269,7 +1280,7 @@ struct WorkspaceViewState {
     targets_scroll: usize,
     quota_scroll: usize,
     capacity_index: usize,
-    quota_index: usize,
+    quota_selection: Option<render::quota_pools::QuotaRow>,
     pane_sizes: PaneSizes,
     conversation_layout: mj_core::workspace::ConversationLayout,
     collapsed_project_keys: BTreeSet<String>,
@@ -1284,7 +1295,7 @@ impl WorkspaceViewState {
             targets_scroll: dashboard.targets_scroll.get(),
             quota_scroll: dashboard.quota_scroll.get(),
             capacity_index: dashboard.capacity_index,
-            quota_index: dashboard.quota_index,
+            quota_selection: dashboard.quota_selection.clone(),
             pane_sizes: dashboard.pane_sizes,
             conversation_layout: dashboard.export_conversation_layout(),
             collapsed_project_keys: dashboard.collapsed_project_keys.clone(),
@@ -1339,6 +1350,7 @@ impl DashboardState {
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             profile_hydration_sent: None,
+            quota_providers: render::quota_pools::ProviderDiscovery::start(&config),
             config: config.into(),
             state: state.into(),
             quotas,
@@ -1377,6 +1389,7 @@ impl DashboardState {
             target_storage: Vec::new(),
             capacity_disks_areas: RefCell::new(Vec::new()),
             quota_row_areas: RefCell::new(Vec::new()),
+            quota_pool_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {
@@ -1394,10 +1407,13 @@ impl DashboardState {
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
+            quota_viewport: Cell::new(0),
+            quota_rendered_selection: RefCell::new(None),
             recenter_on_selection: Cell::new(None),
             sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,
-            quota_index: 0,
+            quota_selection: None,
+            quota_expanded: Default::default(),
             focus: Focus::Sessions,
             pane_sizes: PaneSizes {
                 sessions: sidebar_size,

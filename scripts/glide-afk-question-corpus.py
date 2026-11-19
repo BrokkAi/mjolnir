@@ -195,6 +195,7 @@ def cmd_extract(out):
     qs = [f for f in forms if f["kind"] == "question"]
     write_jsonl(os.path.join(out, "forms.jsonl"), forms)
     # Global presence-return signal: a person accepting or cancelling any form.
+    # "closed" is bridge teardown, not a human response or a presence return.
     returns = sorted(seq for seq, sid, ts, typ, b in rows if typ == "input_resolved" and b["data"]["action"] in ("accept", "cancel"))
     import bisect
     groups = collections.defaultdict(list)

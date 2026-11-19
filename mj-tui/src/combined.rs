@@ -21,7 +21,7 @@ use crate::render::{
     MINIMUM_TERMINAL_WIDTH, NARROW_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, SessionsLayout,
     TerminalSizeRequirement, capacity_table_lines, capacity_table_width,
     minimized_pane_size_controls, minimized_quota_line, minimized_targets_line,
-    pane_size_control_areas, pane_title_content_width, quota_table_width, render_capacity,
+    pane_size_control_areas, pane_title_content_width, quota_pane_width, render_capacity,
     render_footer, render_modal, render_quotas, render_sessions, render_terminal_too_small,
 };
 use crate::resume::resume_sessions_pane;
@@ -141,14 +141,30 @@ fn allocate_combined_heights(
     desired_prompt: u16,
     sizes: [(SupportPane, PaneSize); 4],
 ) -> CombinedAllocation {
-    let required = sessions
+    let other_minimum = sessions
         .minimum
         .saturating_add(TRANSCRIPT_MINIMUM)
         .saturating_add(PROMPT_MINIMUM)
         .saturating_add(targets.minimum)
         .saturating_add(quota.minimum)
-        .saturating_add(notifications.minimum)
         .saturating_add(FOOTER_HEIGHT);
+    // A form's readable height is a preference above the notification
+    // band's structural minimum. Spend only the space this frame has left;
+    // a newly attached question must not turn a usable dashboard into a
+    // resize screen. Minimized bands retain their existing one-row minimum.
+    let notification_floor = notifications
+        .minimum
+        .min(if sizes[3].1 == PaneSize::Minimized {
+            notifications.minimum
+        } else {
+            PANE_MINIMUM
+        });
+    let notification_minimum = notifications.minimum.min(
+        frame_height
+            .saturating_sub(other_minimum)
+            .max(notification_floor),
+    );
+    let required = other_minimum.saturating_add(notification_minimum);
     if frame_height < required {
         return CombinedAllocation::TooSmall {
             required_frame_height: required,
@@ -160,7 +176,7 @@ fn allocate_combined_heights(
         prompt: PROMPT_MINIMUM,
         targets: targets.minimum,
         quota: quota.minimum,
-        notifications: notifications.minimum,
+        notifications: notification_minimum,
         footer: FOOTER_HEIGHT,
     };
     let mut surplus = frame_height.saturating_sub(required);
@@ -217,42 +233,49 @@ fn allocate_combined_heights(
 /// at this frame size. Maximized is exclusive, so the hypothetical maximum
 /// demotes any other maximum before running the same allocator used to draw
 /// the frame.
+/// The live layout and maximize probes use the same form-height reservation.
+fn support_bands(
+    dimensions: [(SupportPane, PaneDimensions); 4],
+    sizes: [(SupportPane, PaneSize); 4],
+    notification_minimum: Option<u16>,
+) -> [PaneBand; 4] {
+    std::array::from_fn(|index| {
+        let (_, dimensions) = dimensions[index];
+        let mut band = sized_band(
+            sizes[index].1,
+            dimensions.minimized,
+            dimensions.full,
+            dimensions.standard_cap,
+        );
+        if sizes[index].0 == SupportPane::Notifications
+            && sizes[index].1 != PaneSize::Minimized
+            && let Some(minimum) = notification_minimum
+        {
+            band.minimum = minimum;
+        }
+        band
+    })
+}
+
 fn maximized_pane_is_effective(
     frame_height: u16,
     dimensions: [(SupportPane, PaneDimensions); 4],
+    sessions: PaneBand,
     desired_prompt: u16,
     sizes: [(SupportPane, PaneSize); 4],
+    notification_minimum: Option<u16>,
 ) -> [(SupportPane, bool); 4] {
     let bands = dimensions;
     std::array::from_fn(|index| {
         let (pane, _) = bands[index];
         let standard_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Standard);
         let maximum_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Maximized);
-        let bands_for = |sizes: [(SupportPane, PaneSize); 4]| {
-            std::array::from_fn(|index| {
-                if index == 0 {
-                    return PaneBand {
-                        minimum: 0,
-                        full: 0,
-                        cap: 0,
-                    };
-                }
-                let (_, size) = sizes[index];
-                let dimensions = bands[index].1;
-                sized_band(
-                    size,
-                    dimensions.minimized,
-                    dimensions.full,
-                    dimensions.standard_cap,
-                )
-            })
-        };
-        let standard_bands: [PaneBand; 4] = bands_for(standard_sizes);
-        let maximum_bands: [PaneBand; 4] = bands_for(maximum_sizes);
+        let standard_bands = support_bands(dimensions, standard_sizes, notification_minimum);
+        let maximum_bands = support_bands(dimensions, maximum_sizes, notification_minimum);
         let effective = match (
             allocate_combined_heights(
                 frame_height,
-                standard_bands[0],
+                sessions,
                 standard_bands[1],
                 standard_bands[2],
                 standard_bands[3],
@@ -261,7 +284,7 @@ fn maximized_pane_is_effective(
             ),
             allocate_combined_heights(
                 frame_height,
-                maximum_bands[0],
+                sessions,
                 maximum_bands[1],
                 maximum_bands[2],
                 maximum_bands[3],
@@ -322,7 +345,7 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
 }
 
 fn support_panes_fit(content_width: u16, dashboard: &DashboardState) -> bool {
-    capacity_table_width(dashboard).max(quota_table_width(dashboard)) <= content_width
+    capacity_table_width(dashboard).max(quota_pane_width(dashboard)) <= content_width
 }
 
 /// Draws the whole combined surface: Sessions, the conversation, Prompt,
@@ -344,17 +367,44 @@ pub fn render_combined(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
-    // NO_COLOR wins over the configured theme; the symbol set follows the
-    // configuration or, unset, the terminal.
-    let theme = theme::effective_theme(dashboard.config.theme);
-    render_combined_with_theme(
+    render_combined_with_chat_access(
         frame,
         dashboard,
         chats,
         opening_panes,
         transcript_selected,
-        theme,
+        &|_, _| true,
     )
+}
+
+/// Draws conversations only when their attachment owner grants the pane access.
+/// Warm chats can still serve Notifications while a conversation is cancelled.
+pub fn render_combined_with_chat_access(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+    transcript_selected: bool,
+    can_show: &dyn Fn(PaneId, &str) -> bool,
+) -> Vec<String> {
+    render_combined_with_theme_and_symbols(
+        frame,
+        dashboard,
+        chats,
+        ConversationAccess {
+            opening: opening_panes,
+            can_show,
+        },
+        transcript_selected,
+        theme::effective_theme(dashboard.config.theme),
+        theme::symbols_for(dashboard.config.advanced.symbols),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ConversationAccess<'a> {
+    opening: &'a BTreeMap<PaneId, String>,
+    can_show: &'a dyn Fn(PaneId, &str) -> bool,
 }
 
 #[cfg(test)]
@@ -365,6 +415,7 @@ pub(crate) fn render_combined_for_test(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
+    dashboard.quota_providers.settle();
     // Golden output defaults to Unicode; cases can request ASCII in config.
     let symbols = dashboard
         .config
@@ -375,7 +426,10 @@ pub(crate) fn render_combined_for_test(
         frame,
         dashboard,
         chats,
-        opening_panes,
+        ConversationAccess {
+            opening: opening_panes,
+            can_show: &|_, _| true,
+        },
         transcript_selected,
         // Golden output is independent of NO_COLOR and of the terminal.
         theme::resolve(dashboard.config.theme, false, None).theme,
@@ -400,7 +454,10 @@ pub fn render_combined_with_theme(
         frame,
         dashboard,
         chats,
-        opening_panes,
+        ConversationAccess {
+            opening: opening_panes,
+            can_show: &|_, _| true,
+        },
         transcript_selected,
         selected_theme,
         symbols,
@@ -411,16 +468,19 @@ fn render_combined_with_theme_and_symbols(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
     chats: &mut BTreeMap<String, ActiveChat>,
-    opening_panes: &BTreeMap<PaneId, String>,
+    access: ConversationAccess<'_>,
     transcript_selected: bool,
     selected_theme: theme::UiTheme,
     symbols: theme::SymbolSet,
 ) -> Vec<String> {
+    if let Some(error) = dashboard.quota_providers.poll(&dashboard.config) {
+        dashboard.notices.set(error);
+    }
     dashboard.rendered_failure_dismissals.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =
-                render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected);
+                render_combined_themed(frame, dashboard, chats, access, transcript_selected);
             // Dialog titles, hints and notices spell marks like `·` and `…`
             // as literal text; ASCII mode folds whatever the glyph table did
             // not already draw.
@@ -436,16 +496,22 @@ fn render_combined_themed(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
     chats: &mut BTreeMap<String, ActiveChat>,
-    opening_panes: &BTreeMap<PaneId, String>,
+    access: ConversationAccess<'_>,
     transcript_selected: bool,
 ) -> Vec<String> {
     dashboard.rebuild_palette_entries();
     dashboard.reset_component_geometry();
     dashboard.begin_surface_frame();
-    for session_id in dashboard.pane_session_ids() {
-        if let Some(chat) = chats.get_mut(&session_id) {
-            chat.reset_component_geometry();
+    let notification = dashboard.notification_form_session();
+    let notification_changed = dashboard.notification_presentation_changed();
+    for chat in chats.values_mut() {
+        if notification_changed || notification.as_deref() != Some(chat.session_id()) {
+            chat.cancel_elicitation_pointer_in(mj_chat::chat::ElicitationSurface::Notification);
         }
+        if !dashboard.chat_input_available(chat.session_id()) {
+            chat.cancel_component_pointer();
+        }
+        chat.reset_component_geometry();
     }
     dashboard.pane_areas = None;
     dashboard.notifications_area = None;
@@ -566,7 +632,7 @@ fn render_combined_themed(
         .get(&focused_pane)
         .copied()
         .unwrap_or(content_area.width);
-    let focused_chat_session = focused_chat_on_screen(dashboard, chats, opening_panes);
+    let focused_chat_session = focused_chat_on_screen(dashboard, chats, access);
     let standby_drawn = match &selected_transition {
         Some((_, kind, failed)) => !failed && DashboardState::transition_accepts_prompts(*kind),
         None => {
@@ -609,8 +675,10 @@ fn render_combined_themed(
         let parked = dashboard
             .transition_kind(&session_id)
             .is_some_and(DashboardState::transition_accepts_prompts)
-            || opening_panes.get(&pane) == Some(&session_id);
-        let height = if parked {
+            || access.opening.get(&pane) == Some(&session_id);
+        let height = if !(access.can_show)(pane, &session_id) {
+            EMPTY_PROMPT_HEIGHT
+        } else if parked {
             dashboard
                 .standby_prompt_mut(&session_id)
                 .desired_prompt_height(*width)
@@ -656,7 +724,19 @@ fn render_combined_themed(
         .map_or_else(String::new, |entry| {
             dashboard.selected_notification_text(entry)
         });
+    let notification_minimum = dashboard
+        .notification_form_content_session()
+        .and_then(|session| chats.get(&session))
+        .and_then(|chat| chat.elicitation_minimum_height(notification_width.saturating_sub(4)))
+        .map(|height| height.saturating_add(4)); // Card borders, header, buttons.
     let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
+        if let Some(chat) = dashboard
+            .notification_form_content_session()
+            .and_then(|session| chats.get(&session))
+            && let Some(height) = chat.elicitation_height(notification_width.saturating_sub(4))
+        {
+            return height.saturating_add(4);
+        }
         let lines = Paragraph::new(notification_text.as_str())
             .wrap(Wrap { trim: false })
             .line_count(notification_width.saturating_sub(4).max(1));
@@ -673,9 +753,13 @@ fn render_combined_themed(
                     area.height,
                     sessions_layout.minimized_content_height().into(),
                 )
-                .saturating_add(SESSION_ACTIONS_HEIGHT)
+                .saturating_add(
+                    SESSION_ACTIONS_HEIGHT + u16::from(dashboard.sessions_sync_label().is_some()),
+                )
                 .saturating_add(2),
-                full: sessions_layout.content_height().saturating_add(2),
+                full: sessions_layout
+                    .content_height()
+                    .saturating_add(2 + u16::from(dashboard.sessions_sync_label().is_some())),
                 standard_cap: area.height / 3,
             },
         ),
@@ -691,7 +775,8 @@ fn render_combined_themed(
             SupportPane::Quota,
             PaneDimensions {
                 minimized: SUMMARY_ROW,
-                full: table_height(dashboard.quota_profile_rows().len()),
+                full: (crate::render::quota_content_height(dashboard) + 2).min(u16::MAX as usize)
+                    as u16,
                 standard_cap: proportional_support_height.min(STANDARD_SUPPORT_PANE_HEIGHT),
             },
         ),
@@ -701,19 +786,13 @@ fn render_combined_themed(
                 minimized: SUMMARY_ROW,
                 full: notification_full,
                 // Nine rows fit one line of notification text and the reply controls.
-                standard_cap: proportional_support_height.clamp(9, STANDARD_SUPPORT_PANE_HEIGHT),
+                standard_cap: proportional_support_height
+                    .clamp(9, STANDARD_SUPPORT_PANE_HEIGHT)
+                    .max(notification_minimum.unwrap_or_default()),
             },
         ),
     ];
-    let bands: [PaneBand; 4] = std::array::from_fn(|index| {
-        let (_, dimensions) = dimensions[index];
-        sized_band(
-            sizes[index].1,
-            dimensions.minimized,
-            dimensions.full,
-            dimensions.standard_cap,
-        )
-    });
+    let bands = support_bands(dimensions, sizes, notification_minimum);
     // Stacked, reserve one workspace content row, then grow its viewport
     // only after the other bands' minimums and the composer have room.
     let sessions = if narrow {
@@ -736,8 +815,14 @@ fn render_combined_themed(
     // Keep the support panes stacked together, using the space left by the
     // current sidebar size to decide whether they fit beside Sessions.
     let supports_adjacent = !narrow && support_panes_fit(content_area.width, dashboard);
-    let mut maximize_enabled =
-        maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
+    let mut maximize_enabled = maximized_pane_is_effective(
+        area.height,
+        dimensions,
+        sessions,
+        desired_prompt,
+        sizes,
+        notification_minimum,
+    );
     maximize_enabled[0].1 = !narrow
         && sessions_sidebar_width(area.width, PaneSize::Maximized)
             > sessions_sidebar_width(area.width, PaneSize::Standard);
@@ -879,12 +964,16 @@ fn render_combined_themed(
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let notifications_area = support_bands[2];
     dashboard.notifications_area = Some(notifications_area);
+    let notification_chat = dashboard
+        .notification_form_session()
+        .and_then(|session| chats.get_mut(&session));
     crate::notifications_pane::render(
         frame,
         notifications_area,
         dashboard,
         &notification_entries,
         notification_text,
+        notification_chat,
     );
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
@@ -944,6 +1033,7 @@ fn render_combined_themed(
                         dashboard.pane_maximize_enabled(SupportPane::Quota),
                     ),
                     focused,
+                    crate::render_changes::epoch_seconds(),
                 ))
                 .title(minimized_pane_size_controls(
                     focused,
@@ -1022,11 +1112,13 @@ fn render_combined_themed(
                             .map(|kind| (session_id.to_owned(), kind, true))
                     })
             });
-            let opening = opening_panes.get(&pane_id).map(String::as_str);
+            let opening = access.opening.get(&pane_id).map(String::as_str);
             let chat = pane_session
                 .as_deref()
                 .filter(|session_id| {
-                    pane_transition.is_none() && chat_shows_in_pane(opening, session_id)
+                    pane_transition.is_none()
+                        && (access.can_show)(pane_id, session_id)
+                        && chat_shows_in_pane(opening, session_id)
                 })
                 .and_then(|session_id| chats.get_mut(session_id))
                 .filter(|chat| chat.has_live_composer());
@@ -1390,17 +1482,17 @@ fn chat_shows_in_pane(opening: Option<&str>, session_id: &str) -> bool {
 fn focused_chat_on_screen(
     dashboard: &DashboardState,
     chats: &BTreeMap<String, ActiveChat>,
-    opening_panes: &BTreeMap<PaneId, String>,
+    access: ConversationAccess<'_>,
 ) -> Option<String> {
     let pane = dashboard.focused_pane();
     let session_id = dashboard.pane_session(pane)?;
-    let opening = opening_panes.get(&pane).map(String::as_str);
+    let opening = access.opening.get(&pane).map(String::as_str);
     (chats
         .get(session_id)
         .is_some_and(|chat| chat.has_live_composer())
+        && (access.can_show)(pane, session_id)
         && chat_shows_in_pane(opening, session_id)
-        && dashboard.transition_kind(session_id).is_none()
-        && dashboard.transition_failure_kind(session_id).is_none())
+        && dashboard.chat_input_available(session_id))
     .then(|| session_id.to_owned())
 }
 
@@ -2300,7 +2392,7 @@ mod tests {
         for side in [SessionsSide::Left, SessionsSide::Right] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.config.sessions_side = side;
-            let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+            let required = capacity_table_width(&dashboard).max(quota_pane_width(&dashboard));
             let width = (MINIMUM_TERMINAL_WIDTH..=480)
                 .find(|&width| {
                     width - sessions_sidebar_width(width, PaneSize::Minimized) >= required
@@ -2395,8 +2487,8 @@ mod tests {
             .started_at_epoch_seconds = u64::MAX;
     }
 
-    #[test]
-    fn golden_combined_dashboard_render() {
+    #[tokio::test]
+    async fn golden_combined_dashboard_render() {
         use std::fmt::Write as _;
 
         let mut output = String::new();
@@ -2614,7 +2706,7 @@ mod tests {
                 let mut dashboard = dashboard_with_session(running_session());
                 dashboard.config.sessions_side = side;
                 dashboard.set_pane_size(SupportPane::Sessions, size);
-                let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+                let required = capacity_table_width(&dashboard).max(quota_pane_width(&dashboard));
                 let threshold = (MINIMUM_TERMINAL_WIDTH..=480)
                     .find(|&width| width - sessions_sidebar_width(width, size) >= required)
                     .expect("support panes fit in a wide terminal");
@@ -2752,6 +2844,267 @@ mod tests {
             40,
             &lines,
         );
+
+        let mut inline = dashboard_with_session(running_session());
+        serve_attention(
+            &mut inline,
+            &["session-1"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        let mut request = crate::test_support::question("session-1");
+        request.fields[0].title = "Which deployment path should be used?".into();
+        request.fields[0].description =
+            Some("Keep the question visible on short terminals.".into());
+        inline
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut inline, "session-1", None, &request);
+        inline
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .last_activity_at_ms = Some(0);
+        inline.notifications.size = PaneSize::Maximized;
+        inline.focus = Focus::Notifications;
+        for (label, error) in [
+            ("notification form attaches in the background", None),
+            (
+                "notification form attachment fails visibly",
+                Some("Worker unavailable".to_owned()),
+            ),
+        ] {
+            inline.set_notification_form_error("session-1", error.clone());
+            let lines = render_combined_golden(&mut inline, 120, 44);
+            append_combined_golden(&mut output, label, 120, 44, &lines);
+            // Hard-won: b817d9202: compact loading/error cards reserved a hidden reply row and lost their status.
+            let entries = inline.notification_entries();
+            let text = inline.selected_notification_text(&entries[0]);
+            let mut terminal = Terminal::new(TestBackend::new(120, 8)).unwrap();
+            terminal
+                .draw(|frame| {
+                    crate::notifications_pane::render(
+                        frame,
+                        frame.area(),
+                        &mut inline,
+                        &entries,
+                        text,
+                        None,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            assert!(lines.iter().any(|line| line.contains(if error.is_some() {
+                "Could not load form"
+            } else {
+                "Loading form"
+            })));
+            append_combined_golden(
+                &mut output,
+                "compact form attachment status",
+                120,
+                8,
+                &lines,
+            );
+        }
+        inline.set_notification_form_error("session-1", None);
+        let (chat, _answers) =
+            crate::notifications_pane::tests::form_chat("session-1", request.clone());
+        let mut chats = BTreeMap::from([("session-1".to_owned(), chat)]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+        crate::with_no_color_override_for_test(true, || {
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(
+                        frame,
+                        &mut inline,
+                        &mut chats,
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+        });
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        append_combined_golden(
+            &mut output,
+            "notification and conversation share an inline form",
+            120,
+            44,
+            &lines,
+        );
+
+        // Hard-won: 1f62bc101: a dismissal failure was hidden when the form replaced the card text.
+        use mj_client::runtime_feed::{CardForm, NotificationCard};
+        use mj_core::attention::{
+            EntryMessage, NotificationDismissal, NotificationKind, NotificationStackEntry,
+        };
+        inline.set_notification_cards(Some(
+            [(
+                "session-1".into(),
+                NotificationCard {
+                    since_ms: 1,
+                    badge: NotificationKind::NeedsInput,
+                    entries: vec![NotificationStackEntry {
+                        completed_at_ms: 1,
+                        completed_ordinal: 1,
+                        kind: NotificationKind::Important,
+                        message: EntryMessage::None,
+                    }],
+                    dismissal: Some(NotificationDismissal::Stack { revision: 1 }),
+                    holder: None,
+                    form: Some(CardForm {
+                        source: mj_client::runtime_feed::CardFormSource::Elicitation,
+                        raised_at_ms: 2,
+                        request_id: "mixed-question".into(),
+                        message: "Choose a path".into(),
+                    }),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        assert!(matches!(
+            inline.handle_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('n'),
+                crossterm::event::KeyModifiers::ALT
+            )),
+            crate::DashboardAction::DismissNotification { .. }
+        ));
+        inline.notifications_dismissed(vec![(
+            "session-1".into(),
+            NotificationDismissal::Stack { revision: 1 },
+            Err("permission denied".into()),
+        )]);
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Could not clear: permission denied"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Which deployment path should be used?"))
+        );
+        append_combined_golden(
+            &mut output,
+            "inline form keeps dismissal failure visible",
+            120,
+            44,
+            &lines,
+        );
+        crate::test_support::serve_form_card(&mut inline, "session-1", None, &request);
+        inline.notifications.errors.clear();
+        inline.clear_notice();
+
+        inline.notifications.size = PaneSize::Standard;
+        for height in [21, 25, 31, 39] {
+            let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
+            crate::with_no_color_override_for_test(true, || {
+                terminal
+                    .draw(|frame| {
+                        render_combined_for_test(
+                            frame,
+                            &mut inline,
+                            &mut chats,
+                            &BTreeMap::new(),
+                            false,
+                        );
+                    })
+                    .unwrap();
+            });
+            let mut lines = buffer_lines(terminal.backend().buffer());
+            crate::test_support::pin_spinner_glyphs(&mut lines);
+            let card = inline.notifications_area.unwrap();
+            assert!(
+                lines[usize::from(card.y)..usize::from(card.bottom())]
+                    .iter()
+                    .any(|line| line.contains("Which deployment path should be used?"))
+            );
+            // Hard-won: dc29e81c6: maximize controls ignored the live form reservation and offered a size that added no rows.
+            if height == 21 {
+                assert!(!inline.pane_maximize_enabled(SupportPane::Quota));
+                assert!(!inline.pane_maximize_enabled(SupportPane::Notifications));
+            }
+            // Hard-won: 4c23909e0: attaching a form replaced an otherwise usable short dashboard with the resize screen.
+            assert!(lines.iter().any(|line| line.contains("Workspaces")));
+            append_combined_golden(
+                &mut output,
+                if height >= 31 {
+                    "standard notification form keeps its question readable"
+                } else {
+                    "short notification form keeps the dashboard usable"
+                },
+                120,
+                height,
+                &lines,
+            );
+        }
+
+        // Hard-won: 1f62bc101: minimized maximize probes measured only the short published message.
+        let mut choice = crate::test_support::question("session-1");
+        choice.fields[0].title = "Choose a deployment target".into();
+        choice.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::SingleSelect {
+            options: (0..20)
+                .map(|index| mj_core::elicitation::ElicitationOption {
+                    value: index.to_string(),
+                    title: format!("Deployment target {index}"),
+                    description: Some("Review this target before deploying".into()),
+                    preview: None,
+                })
+                .collect(),
+            default: None,
+        };
+        let (chat, _) = crate::notifications_pane::tests::form_chat("session-1", choice.clone());
+        chats.insert("session-1".into(), chat);
+        inline
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![choice.clone()];
+        crate::test_support::serve_form_card(&mut inline, "session-1", None, &choice);
+        inline.notifications.size = PaneSize::Minimized;
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        assert_eq!(inline.notifications_area.unwrap().height, 1);
+        assert!(inline.pane_maximize_enabled(SupportPane::Notifications));
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        append_combined_golden(
+            &mut output,
+            "minimized notification measures its warm expanded form",
+            120,
+            44,
+            &lines,
+        );
+        inline.set_pane_size(SupportPane::Notifications, PaneSize::Standard);
+        assert!(inline.notification_input_needs_frame());
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        assert!(!inline.notification_input_needs_frame());
+        let standard_height = inline.notifications_area.unwrap().height;
+        inline.set_pane_size(SupportPane::Notifications, PaneSize::Maximized);
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        assert!(inline.notifications_area.unwrap().height > standard_height);
 
         mj_core::golden::assert_golden(
             env!("CARGO_MANIFEST_DIR"),

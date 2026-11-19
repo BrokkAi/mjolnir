@@ -215,22 +215,27 @@ impl DashboardContext {
             .map(str::to_owned);
         if let Some(outgoing) = outgoing {
             self.selection.clear();
-            self.park_chat_composer(&outgoing);
-            // The pane is changing session. Save what the conversation
-            // leaving it holds, then drop it unless another pane shows it —
-            // which it cannot, since a session is in at most one pane.
+            // A visible form keeps its chat and clipboard result channel.
+            // Parking and immediately re-adopting would replace the channel
+            // underneath a read accepted by the retained form.
+            let form_retained = attachment::chat_retained_without_conversation(
+                &self.dashboard,
+                &self.chats,
+                &outgoing,
+            );
+            if !form_retained {
+                self.park_chat_composer(&outgoing);
+            }
+            // Save the outgoing conversation, then drop it unless the
+            // notification form still owns its live chat.
             self.capture_composer_draft(&outgoing);
             self.save_question_draft(&outgoing);
             self.record_chat_detach(&outgoing);
-            if self.dashboard.pane_for_session(&outgoing) == Some(pane) {
+            if self.dashboard.pane_for_session(&outgoing) == Some(pane) && !form_retained {
                 self.chats.remove(&outgoing);
             }
         }
         self.dashboard.set_pane_session(pane, Some(session_id));
-        let assignment = self.dashboard.pane_assignment(pane);
-        if self.attachments.entry(pane).or_default().bind(assignment) {
-            self.opening_chat_sessions.remove(&pane);
-        }
         if native {
             self.cancel_chat_open_in(pane);
             return;
@@ -249,7 +254,20 @@ impl DashboardContext {
             return;
         }
         self.capture_composer_draft(session_id);
-        self.attachments.entry(pane).or_default().select(session_id);
+        self.attachments
+            .entry(session_id.to_owned())
+            .or_default()
+            .observe_pane(&self.dashboard, pane, session_id);
+        if let Some(assignment) = self.dashboard.pane_assignment(pane) {
+            self.attachments
+                .entry(session_id.to_owned())
+                .or_default()
+                .request_pane(pane, assignment);
+        }
+        self.attachments
+            .entry(session_id.to_owned())
+            .or_default()
+            .select(session_id);
         self.save_question_draft(session_id);
         // A lifecycle owns the row's conversation until its authoritative
         // completion. Do not start an attach that can arrive after Stop/Move
@@ -268,12 +286,31 @@ impl DashboardContext {
             self.release_suspended_pane(pane, session_id);
             return;
         }
+        self.start_chat_attach(session_id);
+        if self
+            .attachments
+            .get(session_id)
+            .is_some_and(|attachment| attachment.pending())
+        {
+            let detach = self
+                .dashboard
+                .first_key_label(mj_tui::CommandId::QuitDetach)
+                .map(|key| format!("; {key} quits"))
+                .unwrap_or_default();
+            self.dashboard.set_notice(format!(
+                "Opening session{} Esc cancels; select another session to switch{detach}.",
+                mj_chat::theme::glyphs().ellipsis,
+            ));
+        }
+    }
+
+    /// One session-keyed background preparation, shared by all display surfaces.
+    pub(super) fn start_chat_attach(&mut self, session_id: &str) {
         if self
             .chats
             .get(session_id)
             .is_some_and(mj_chat::chat::ActiveChat::session_feed_open)
         {
-            self.cancel_chat_open_in(pane);
             if let Some(composer) = self.dashboard.take_standby_composer(session_id)
                 && let Some(chat) = self.chats.get_mut(session_id)
             {
@@ -283,14 +320,26 @@ impl DashboardContext {
             self.acknowledge_visible_chats();
             return;
         }
-        if self.opening_chat_sessions.get(&pane).map(String::as_str) == Some(session_id) {
+        for (pane, session) in self.dashboard.pane_sessions() {
+            if session == session_id {
+                self.attachments
+                    .entry(session.to_owned())
+                    .or_default()
+                    .observe_pane(&self.dashboard, pane, session_id);
+            }
+        }
+        if self
+            .attachments
+            .get(session_id)
+            .is_some_and(|attachment| attachment.pending())
+        {
             return;
         }
-        self.cancel_chat_open_in(pane);
         let Some(session_record) = self.controller.state.sessions.get(session_id).cloned() else {
-            self.dashboard.set_notice(format!(
-                "Could not open session: unknown session {session_id}"
-            ));
+            let error = format!("Unknown session {session_id}");
+            self.dashboard
+                .set_notification_form_error(session_id, Some(error.clone()));
+            self.dashboard.report_open_failure(session_id, &error);
             return;
         };
         let header = mj_chat::chat::SessionHeaderIdentity {
@@ -332,57 +381,56 @@ impl DashboardContext {
             session: session_record,
         };
         let persistence_tx = self.chat_daemon_requests(&session_id);
-        self.opening_chat_sessions.insert(pane, session_id.clone());
+        for (pane, session) in self.dashboard.pane_sessions() {
+            if session == session_id {
+                self.opening_chat_sessions.insert(pane, session.clone());
+            }
+        }
+        self.dashboard
+            .set_notification_form_error(&session_id, None);
         self.sync_opening_session();
-        let detach = self
-            .dashboard
-            .first_key_label(mj_tui::CommandId::QuitDetach)
-            .map(|key| format!("; {key} quits"))
-            .unwrap_or_default();
-        self.dashboard.set_notice(format!(
-            "Opening session{} Esc cancels; select another session to switch{detach}.",
-            mj_chat::theme::glyphs().ellipsis
-        ));
         let reported_session_id = session_id.clone();
         let attachment_session_id = session_id.clone();
-        let assignment = assignment.expect("opening an assigned conversation pane");
-        self.attachments.entry(pane).or_default().spawn(
-            &attachment_session_id,
-            attachment::ATTACH_TIMEOUT,
-            async move {
-                let managed = sessions
-                    .wait_for_session(&session_id, attachment::ATTACH_TIMEOUT)
+        self.attachments
+            .entry(attachment_session_id.clone())
+            .or_default()
+            .spawn(
+                &attachment_session_id,
+                attachment::ATTACH_TIMEOUT,
+                async move {
+                    let managed = sessions
+                        .wait_for_session(&session_id, attachment::ATTACH_TIMEOUT)
+                        .await
+                        .map_err(|error| format!("{error:#}"))?;
+                    tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(
+                        move || {
+                            mj_chat::chat::ActiveChat::prepare_with_persistence(
+                                managed.client(),
+                                &bundle_id,
+                                Some(context),
+                                sessions.client(),
+                                header,
+                                draft,
+                                notices,
+                                Some(persistence_tx),
+                            )
+                        },
+                    ))
                     .await
-                    .map_err(|error| format!("{error:#}"))?;
-                tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
-                    mj_chat::chat::ActiveChat::prepare_with_persistence(
-                        managed.client(),
-                        &bundle_id,
-                        Some(context),
-                        sessions.client(),
-                        header,
-                        draft,
-                        notices,
-                        Some(persistence_tx),
-                    )
-                }))
-                .await
-                .map_err(|error| format!("chat preparation task failed: {error}"))
-            },
-            move |generation, result| {
-                report(
-                    "opening a session",
-                    &updates,
-                    DashboardIoUpdate::ChatOpened {
-                        generation,
-                        assignment,
-                        pane,
-                        session_id: reported_session_id.clone(),
-                        result: Box::new(result),
-                    },
-                );
-            },
-        );
+                    .map_err(|error| format!("chat preparation task failed: {error}"))
+                },
+                move |generation, result| {
+                    report(
+                        "opening a session",
+                        &updates,
+                        DashboardIoUpdate::ChatOpened {
+                            generation,
+                            session_id: reported_session_id.clone(),
+                            result: Box::new(result),
+                        },
+                    );
+                },
+            );
     }
 
     /// Tells every operation still in flight to stop. Cancellation is

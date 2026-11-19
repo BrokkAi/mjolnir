@@ -221,12 +221,16 @@ impl DashboardState {
         action
     }
 
+    /// A pointer press abandons keyboard-only navigation modes on every surface.
+    pub(crate) fn begin_pointer_press(&mut self) {
+        self.notices.dismiss(Instant::now());
+        self.prefix_pending = false;
+        self.resize_mode = false;
+    }
+
     pub(crate) fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> DashboardAction {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            self.notices.dismiss(Instant::now());
-            // Reaching for the mouse abandons a half-typed chord.
-            self.prefix_pending = false;
-            self.resize_mode = false;
+            self.begin_pointer_press();
         }
         if self.pane_menu.is_some() {
             return self.handle_pane_menu_event(Event::Mouse(mouse));
@@ -387,6 +391,30 @@ impl DashboardState {
             self.scroll_workspaces(delta);
             return DashboardAction::None;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let hit = self
+                .quota_pool_areas
+                .borrow()
+                .iter()
+                .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
+                .map(|(row, _)| row.clone());
+            if let Some(row) = hit {
+                let Some(index) = self.quota_rows().iter().position(|current| *current == row)
+                else {
+                    return DashboardAction::None;
+                };
+                self.focus = Focus::Quota;
+                self.set_selection_for(Focus::Quota, index);
+                if matches!(
+                    self.selected_quota_row(),
+                    Some(crate::render::quota_pools::QuotaRow::Pool(_))
+                ) {
+                    self.toggle_quota_pool();
+                }
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+        }
         let hovered = self.pane_areas.and_then(|areas| {
             areas
                 .into_iter()
@@ -413,10 +441,16 @@ impl DashboardState {
         // hit-tested against has to be rebuilt after it.
         match mouse.kind {
             // The Sessions wheel scrolls the list under a fixed selection; the
-            // short Targets and Quota lists move their selection instead.
+            // Targets list moves its selection instead; Quota scrolls by line.
             MouseEventKind::ScrollUp if rows_visible => {
                 if hovered == Focus::Sessions {
                     self.scroll_sessions_view(-1);
+                } else if hovered == Focus::Quota {
+                    self.quota_scroll
+                        .set(self.quota_scroll.get().saturating_sub(1));
+                    if self.recenter_on_selection.get() == Some(Focus::Quota) {
+                        self.recenter_on_selection.set(None);
+                    }
                 } else {
                     self.scroll_selection_for(hovered, -1);
                 }
@@ -425,6 +459,12 @@ impl DashboardState {
             MouseEventKind::ScrollDown if rows_visible => {
                 if hovered == Focus::Sessions {
                     self.scroll_sessions_view(1);
+                } else if hovered == Focus::Quota {
+                    self.quota_scroll
+                        .set(self.quota_scroll.get().saturating_add(1));
+                    if self.recenter_on_selection.get() == Some(Focus::Quota) {
+                        self.recenter_on_selection.set(None);
+                    }
                 } else {
                     self.scroll_selection_for(hovered, 1);
                 }
@@ -569,7 +609,17 @@ impl DashboardState {
                     self.record_event_handled();
                     return DashboardAction::None;
                 }
+                (KeyCode::PageUp, false) if self.focus == Focus::Quota => {
+                    self.move_selection(-1);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
                 (KeyCode::Down | KeyCode::Char('j'), false) | (KeyCode::Char('n'), true) => {
+                    self.move_selection(1);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::PageDown, false) if self.focus == Focus::Quota => {
                     self.move_selection(1);
                     self.record_event_handled();
                     return DashboardAction::None;

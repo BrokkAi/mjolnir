@@ -76,6 +76,7 @@ pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str)
 /// The whole dashboard surface drawn into a terminal of the given size, as one
 /// string per row.
 pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
+    dashboard.quota_providers.settle();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
         .expect("terminal");
     terminal
@@ -522,6 +523,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
         },
         BTreeMap::new(),
     );
+    dashboard.quota_providers.settle();
     // This fixture represents a conversation already opened by the host.
     serve_attention(
         &mut dashboard,
@@ -908,4 +910,29 @@ pub(crate) fn answer_availability(
     };
     let answer = answer(dashboard);
     dashboard.apply_availability_check(generation, Ok(answer));
+}
+
+/// Publish authoritative form provenance, as the daemon runtime feed does.
+pub(crate) fn serve_form_card(
+    dashboard: &mut DashboardState,
+    owner: &str,
+    holder: Option<&str>,
+    request: &mj_core::elicitation::ElicitationRequest,
+) {
+    use mj_client::runtime_feed::{CardForm, NotificationCard};
+    dashboard.set_notification_cards(Some(
+        [(
+            owner.to_owned(),
+            NotificationCard {
+                since_ms: 0,
+                badge: mj_core::attention::NotificationKind::NeedsInput,
+                entries: Vec::new(),
+                dismissal: None,
+                holder: holder.map(str::to_owned),
+                form: Some(CardForm::elicitation(request, 0)),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    ));
 }

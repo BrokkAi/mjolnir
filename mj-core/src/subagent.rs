@@ -1106,6 +1106,16 @@ pub static HANDBACK_REPORT_RULES: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// Assignment safety scope also applies when an adapter cannot receive standing instructions.
+pub const READ_ONLY_TASK_SCOPE: &str =
+    "This is a read-only consultation: do not edit files, build, or run tests.";
+
+/// Per-task directory note; the standing role contract travels separately.
+#[must_use]
+pub fn report_directory_note(report_dir: &str) -> String {
+    format!("Your report directory is {report_dir}.")
+}
+
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
 /// showed children skipping it. `report_dir` is the directory Mjolnir created
@@ -1219,6 +1229,7 @@ pub enum HoldFollowUpKind {
 /// report, which is how [`report_state`] tells it from the task it follows up.
 #[must_use]
 pub fn is_handback_reminder(command_id: &str) -> bool {
+    let command_id = crate::continuation::carried_command(command_id);
     GeneratedPrompt::HandbackReminder
         .suffix(command_id)
         .is_some()
@@ -1236,6 +1247,7 @@ pub fn handback_reminder_command_id(completed_ordinal: u64) -> String {
 /// handback reminder.
 #[must_use]
 pub fn reminded_turn_ordinal(command_id: &str) -> Option<u64> {
+    let command_id = crate::continuation::carried_command(command_id);
     GeneratedPrompt::HandbackReminder
         .suffix(command_id)?
         .parse()
@@ -1265,6 +1277,7 @@ pub fn hold_follow_up_command_id(
 /// The kind and reminder-turn ordinal a hold follow-up command id names.
 #[must_use]
 pub fn hold_follow_up_of(command_id: &str) -> Option<(HoldFollowUpKind, u64)> {
+    let command_id = crate::continuation::carried_command(command_id);
     [HoldFollowUpKind::ProcessesExited, HoldFollowUpKind::GiveUp]
         .into_iter()
         .find_map(|kind| {
@@ -1286,8 +1299,16 @@ impl SubagentHandback {
     /// an earlier or later task of the same child answers none of the others.
     #[must_use]
     pub fn answers(&self, command_id: &str) -> bool {
-        self.command_id == command_id
+        report_answers(&self.command_id, command_id)
     }
+}
+
+/// Whether a report recorded for `report_command_id` answers the turn
+/// `command_id` names; a restart continuation is the turn it carries out.
+#[must_use]
+pub fn report_answers(report_command_id: &str, command_id: &str) -> bool {
+    crate::continuation::carried_command(report_command_id)
+        == crate::continuation::carried_command(command_id)
 }
 
 /// The reminder Mjolnir sent after the turn `for_command_id` ended without a
@@ -1504,7 +1525,7 @@ pub fn report_state(
     if let Some(handback) = report
         .handback
         .as_ref()
-        .filter(|handback| handback.command_id == turn.command_id)
+        .filter(|handback| handback.answers(&turn.command_id))
     {
         return ReportState::Delivered(handback.message.clone());
     }
@@ -1721,12 +1742,24 @@ const HANDBACK_NOTE_OPENING: &str = "You are a Mjolnir sub-agent. ";
 pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<String> {
     let mut task = initial_prompt;
     if let Some(rest) = report_dir.and_then(|directory| {
+        task.strip_prefix(report_directory_note(directory).as_str())
+            .and_then(|rest| rest.strip_prefix("\n\n"))
+    }) {
+        task = rest;
+    }
+    if let Some(rest) = report_dir.and_then(|directory| {
         task.strip_prefix(handback_prompt_note(directory).as_str())
             .and_then(|rest| rest.strip_prefix("\n\n"))
     }) {
         task = rest;
     } else if task.starts_with(HANDBACK_NOTE_OPENING)
         && let Some((_, rest)) = task.split_once("\n\n")
+    {
+        task = rest;
+    }
+    if let Some(rest) = task
+        .strip_prefix(READ_ONLY_TASK_SCOPE)
+        .and_then(|rest| rest.strip_prefix("\n\n"))
     {
         task = rest;
     }
@@ -2253,12 +2286,26 @@ mod tests {
         );
     }
 
+    // Hard-won: ebb2e9611: a handback recorded before restart lost its completed turn.
     #[test]
     fn a_handback_for_the_last_turn_is_the_report_whatever_the_turn_did() {
         let report = SubagentReport {
             handback: handback("task"),
             ..SubagentReport::default()
         };
+        let recovered = crate::continuation::restart_continuation_id("task");
+        assert!(report.handback.as_ref().unwrap().answers(&recovered));
+        assert_eq!(
+            report_state(
+                true,
+                &report,
+                Some(&finished(&recovered, "end_turn")),
+                &Liveness::Known(None),
+                &[],
+                0
+            ),
+            ReportState::Delivered("the report".into())
+        );
         for stop_reason in ["end_turn", "cancelled", "refusal"] {
             assert_eq!(
                 report_state(
@@ -2398,101 +2445,116 @@ mod tests {
         );
     }
 
+    // Hard-won: 7c195cfd8: recovered reminders lost their reminder and give-up identity.
     #[test]
     fn a_reminder_turn_that_left_processes_running_holds_the_child() {
-        use crate::work_facts::WorkLiveness;
-        let reminded = SubagentReport {
-            reminder: reminder("task"),
-            ..SubagentReport::default()
-        };
-        let reminder_turn = finished("handback-reminder-r", "end_turn");
-        let ordinal = reminder_turn.completed_ordinal;
-        let live = |ordinal, alive| WorkLiveness {
-            completed_ordinal: ordinal,
-            alive,
-            checked_at_ms: 0,
-        };
-        let known = |liveness| Liveness::Known(Some(liveness));
-        let held = |now_ms, liveness: &Liveness| {
-            report_state(true, &reminded, Some(&reminder_turn), liveness, &[], now_ms)
-        };
-        let give_up_at_ms = reminder_turn.completed_at_ms + HOLD_GIVE_UP_MS;
-        let hold = |follow_up| ReportState::Held {
-            since_ms: reminder_turn.completed_at_ms,
-            give_up_at_ms,
-            waiting_on: Vec::new(),
-            follow_up,
-        };
-        assert_eq!(
-            held(give_up_at_ms - 1, &known(live(ordinal, 2))),
-            hold(None)
-        );
-        assert_eq!(
-            held(give_up_at_ms, &known(live(ordinal, 2))),
-            hold(Some(HoldFollowUpKind::GiveUp))
-        );
-        assert_eq!(
-            held(5, &known(live(ordinal, 0))),
-            hold(Some(HoldFollowUpKind::ProcessesExited))
-        );
-        // A worker that publishes nothing, or liveness of another turn, never holds.
-        assert_eq!(held(5, &Liveness::Known(None)), ReportState::Fallback);
-        assert_eq!(held(5, &known(live(ordinal + 1, 2))), ReportState::Fallback);
-        // A reader with no worker to ask cannot say the child is not waiting.
-        assert_eq!(
-            held(5, &Liveness::Unknown),
-            ReportState::Pending { remind: false }
-        );
-        // A follow-up already on its way is pending, not due again.
-        let wake = hold_follow_up_command_id(HoldFollowUpKind::ProcessesExited, ordinal);
-        assert_eq!(
-            report_state(
-                true,
-                &reminded,
-                Some(&reminder_turn),
-                &known(live(ordinal, 0)),
-                &[wake.as_str()],
-                5
-            ),
-            ReportState::Pending { remind: false }
-        );
-        // The give-up turn ends the hold; a wake turn is an ordinary task turn
-        // that owes a reminder, so the child can be held again.
-        let give_up = hold_follow_up_command_id(HoldFollowUpKind::GiveUp, ordinal);
-        assert_eq!(
-            report_state(
-                true,
-                &reminded,
-                Some(&finished(&give_up, "end_turn")),
-                &Liveness::Known(None),
-                &[],
-                5
-            ),
-            ReportState::Fallback
-        );
-        assert_eq!(
-            report_state(
-                true,
-                &reminded,
-                Some(&finished(&wake, "end_turn")),
-                &Liveness::Known(None),
-                &[],
-                5
-            ),
-            ReportState::Pending { remind: true }
-        );
-        assert_eq!(
-            hold_follow_up_of(&wake),
-            Some((HoldFollowUpKind::ProcessesExited, ordinal))
-        );
-        assert_eq!(
-            hold_follow_up_of(&give_up),
-            Some((HoldFollowUpKind::GiveUp, ordinal))
-        );
-        assert_eq!(
-            finished(&give_up, "end_turn").answered_ordinal(),
-            Some(ordinal)
-        );
+        for recovering in [false, true] {
+            use crate::work_facts::WorkLiveness;
+            let reminded = SubagentReport {
+                reminder: reminder("task"),
+                ..SubagentReport::default()
+            };
+            let reminder_id = if recovering {
+                crate::continuation::restart_continuation_id(
+                    &crate::continuation::restart_continuation_id("handback-reminder-r"),
+                )
+            } else {
+                "handback-reminder-r".into()
+            };
+            let reminder_turn = finished(&reminder_id, "end_turn");
+            let ordinal = reminder_turn.completed_ordinal;
+            let live = |ordinal, alive| WorkLiveness {
+                completed_ordinal: ordinal,
+                alive,
+                checked_at_ms: 0,
+            };
+            let known = |liveness| Liveness::Known(Some(liveness));
+            let held = |now_ms, liveness: &Liveness| {
+                report_state(true, &reminded, Some(&reminder_turn), liveness, &[], now_ms)
+            };
+            let give_up_at_ms = reminder_turn.completed_at_ms + HOLD_GIVE_UP_MS;
+            let hold = |follow_up| ReportState::Held {
+                since_ms: reminder_turn.completed_at_ms,
+                give_up_at_ms,
+                waiting_on: Vec::new(),
+                follow_up,
+            };
+            assert_eq!(
+                held(give_up_at_ms - 1, &known(live(ordinal, 2))),
+                hold(None)
+            );
+            assert_eq!(
+                held(give_up_at_ms, &known(live(ordinal, 2))),
+                hold(Some(HoldFollowUpKind::GiveUp))
+            );
+            assert_eq!(
+                held(5, &known(live(ordinal, 0))),
+                hold(Some(HoldFollowUpKind::ProcessesExited))
+            );
+            // A worker that publishes nothing, or liveness of another turn, never holds.
+            assert_eq!(held(5, &Liveness::Known(None)), ReportState::Fallback);
+            assert_eq!(held(5, &known(live(ordinal + 1, 2))), ReportState::Fallback);
+            // A reader with no worker to ask cannot say the child is not waiting.
+            assert_eq!(
+                held(5, &Liveness::Unknown),
+                ReportState::Pending { remind: false }
+            );
+            // A follow-up already on its way is pending, not due again.
+            let wake = hold_follow_up_command_id(HoldFollowUpKind::ProcessesExited, ordinal);
+            assert_eq!(
+                report_state(
+                    true,
+                    &reminded,
+                    Some(&reminder_turn),
+                    &known(live(ordinal, 0)),
+                    &[wake.as_str()],
+                    5
+                ),
+                ReportState::Pending { remind: false }
+            );
+            // The give-up turn ends the hold; a wake turn is an ordinary task turn
+            // that owes a reminder, so the child can be held again.
+            let give_up = hold_follow_up_command_id(HoldFollowUpKind::GiveUp, ordinal);
+            let give_up = if recovering {
+                crate::continuation::restart_continuation_id(&give_up)
+            } else {
+                give_up
+            };
+            assert_eq!(
+                report_state(
+                    true,
+                    &reminded,
+                    Some(&finished(&give_up, "end_turn")),
+                    &Liveness::Known(None),
+                    &[],
+                    5
+                ),
+                ReportState::Fallback
+            );
+            assert_eq!(
+                report_state(
+                    true,
+                    &reminded,
+                    Some(&finished(&wake, "end_turn")),
+                    &Liveness::Known(None),
+                    &[],
+                    5
+                ),
+                ReportState::Pending { remind: true }
+            );
+            assert_eq!(
+                hold_follow_up_of(&wake),
+                Some((HoldFollowUpKind::ProcessesExited, ordinal))
+            );
+            assert_eq!(
+                hold_follow_up_of(&give_up),
+                Some((HoldFollowUpKind::GiveUp, ordinal))
+            );
+            assert_eq!(
+                finished(&give_up, "end_turn").answered_ordinal(),
+                Some(ordinal)
+            );
+        }
     }
 
     // Hard-won: a91cfd04: A live wait reported a child completed 45 ms before its first turn and hid failures.
@@ -2824,6 +2886,22 @@ mod tests {
         assert_eq!(
             task_summary(&prompt, Some(report_dir)).as_deref(),
             Some("Fix the parser. Keep the tests green.")
+        );
+        let assignment = format!(
+            "{}\n\nFix the parser.\nKeep the tests green.\n\n<parent_context>\nprivate\n</parent_context>",
+            report_directory_note(report_dir)
+        );
+        assert_eq!(
+            task_summary(&assignment, Some(report_dir)).as_deref(),
+            Some("Fix the parser. Keep the tests green.")
+        );
+        let consultation = format!(
+            "{}\n\n{READ_ONLY_TASK_SCOPE}\n\nWhich option?",
+            report_directory_note(report_dir)
+        );
+        assert_eq!(
+            task_summary(&consultation, Some(report_dir)).as_deref(),
+            Some("Which option?")
         );
         // Without the recorded directory the note is still recognised.
         assert_eq!(

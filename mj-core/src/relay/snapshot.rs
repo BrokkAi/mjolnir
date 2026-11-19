@@ -243,6 +243,26 @@ pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[S
 }
 
 impl RelayCommand {
+    /// Effective prompt, including the worker-authored restart note.
+    pub fn prompt_blocks_for_command(
+        &self,
+        command_id: &str,
+    ) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
+        let prompt = self.prompt_blocks()?;
+        if crate::continuation::is_restart_continuation(command_id)
+            && !crate::acp::prompt_is_slash_command(&prompt)
+        {
+            let mut prompt = prompt.into_owned();
+            prompt.insert(
+                0,
+                ContentBlock::from(crate::continuation::RESTART_RECOVERY_NOTE.to_owned()),
+            );
+            Some(std::borrow::Cow::Owned(prompt))
+        } else {
+            Some(prompt)
+        }
+    }
+
     pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         match self {
             Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
@@ -1230,6 +1250,17 @@ pub struct MailboxHookSteering {
     pub queued_prompt_id: String,
 }
 
+// Protocol 71 peers hash the pre-systemPrompt AgentInitialized wire shape.
+// Negotiation uses the original capabilities; only this journal view omits it.
+fn serialize_initialized_capabilities<S: serde::Serializer>(
+    capabilities: &AgentCapabilities,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let mut compatible = capabilities.clone();
+    compatible.session_capabilities.system_prompt = None;
+    compatible.serialize(serializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
@@ -1264,6 +1295,7 @@ pub enum RelayObservation {
     },
     AgentInitialized {
         protocol_version: AcpProtocolVersion,
+        #[serde(serialize_with = "serialize_initialized_capabilities")]
         capabilities: Box<AgentCapabilities>,
         agent_info: Option<Implementation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1344,6 +1376,9 @@ pub enum RelayObservation {
         message: String,
     },
     CommandInterrupted {
+        /// Atomically transfer the interrupted prompt's payload to recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<crate::event_outcome::OutcomeReason>,
         command_id: String,
@@ -1972,6 +2007,16 @@ impl RelaySnapshot {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Choose recovery identity from this ledger so occupied generations cannot
+    /// reject a restart transfer. Replay sees the same ledger and choice.
+    pub fn restart_continuation_id(&self, command_id: &str) -> String {
+        let mut id = crate::continuation::restart_continuation_id(command_id);
+        while self.handled_commands.contains_key(&id) {
+            id = crate::continuation::restart_continuation_id(&id);
+        }
+        id
     }
 
     pub fn operational_state(&self) -> RelayOperationalState {

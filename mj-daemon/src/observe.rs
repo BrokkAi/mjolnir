@@ -8,13 +8,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use mj_core::observe::{
     OBSERVE_COLLECTOR, OBSERVE_ENVELOPE_VERSION, ObserveCommit, ObserveEnvelope, ObserveGitMeta,
@@ -527,6 +528,17 @@ pub fn usage_envelopes(
     Ok(envelopes)
 }
 
+/// A queued file may exist without its durable id record. The delivery-loop
+/// owner retains the spool for this cycle; unrelated projection errors do not.
+#[derive(Debug)]
+pub(crate) struct ObserveIdsNotDurable;
+impl std::fmt::Display for ObserveIdsNotDurable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Observe queued ids are not durable")
+    }
+}
+impl std::error::Error for ObserveIdsNotDurable {}
+
 /// A directory of newline-delimited Observe envelopes waiting for delivery.
 ///
 /// Files are named by timestamp, transcript position, ordinal, and the digest
@@ -536,6 +548,8 @@ pub fn usage_envelopes(
 #[derive(Debug, Clone)]
 pub struct ObserveSpool {
     root: PathBuf,
+    ids: ObserveEmittedIds,
+    cancellation: CancellationToken,
 }
 
 impl ObserveSpool {
@@ -543,9 +557,34 @@ impl ObserveSpool {
         let requested = root.into();
         fs::create_dir_all(&requested)
             .with_context(|| format!("create Observe spool {}", requested.display()))?;
+        let ids = ObserveEmittedIds::new(&requested.with_file_name("delivery.json"));
         let root = fs::canonicalize(&requested)
             .with_context(|| format!("resolve Observe spool {}", requested.display()))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            ids,
+            cancellation: CancellationToken::new(),
+        })
+    }
+
+    /// The logical Observe state path owns id logs, independently of where a
+    /// symlink places the spool.
+    pub fn open_for_delivery(
+        paths: &ObservePaths,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        let mut spool = Self::open(&paths.spool)?;
+        spool.ids = ObserveEmittedIds::new(&paths.state);
+        spool.cancellation = cancellation.clone();
+        Ok(spool)
+    }
+
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub fn emitted_ids(&self) -> &ObserveEmittedIds {
+        &self.ids
     }
 
     pub fn root(&self) -> &Path {
@@ -585,42 +624,52 @@ impl ObserveSpool {
         }
         drop(file);
         if let Err(error) = fs::hard_link(&temporary, &path) {
-            let collision = error.kind() == std::io::ErrorKind::AlreadyExists;
-            let matching =
-                collision && fs::read(&path).is_ok_and(|existing| existing == line.as_bytes());
             let _ = fs::remove_file(&temporary);
-            if !matching {
-                return if collision {
-                    bail!(
-                        "Observe spool collision at {} for a different envelope",
-                        path.display()
-                    );
-                } else {
-                    Err(error).context("publish Observe spool entry")
-                };
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(error).context("publish Observe spool entry");
             }
+            Self::check_queued_identity(&path, envelope).context(ObserveIdsNotDurable)?;
+            mj_core::config::sync_directory(&self.root).context(ObserveIdsNotDurable)?;
             return Ok(path);
         }
         fs::remove_file(&temporary)
-            .with_context(|| format!("remove Observe spool link {}", temporary.display()))?;
+            .with_context(|| format!("remove Observe spool link {}", temporary.display()))
+            .context(ObserveIdsNotDurable)?;
+        mj_core::config::sync_directory(&self.root).context(ObserveIdsNotDurable)?;
         Ok(path)
     }
 
+    fn check_queued_identity(path: &Path, envelope: &ObserveEnvelope) -> Result<()> {
+        let existing: ObserveEnvelope = serde_json::from_slice(&fs::read(path)?)
+            .context("read existing Observe spool envelope")?;
+        ensure!(
+            existing.meta.event_id == envelope.meta.event_id
+                && existing.event["session_id"] == envelope.event["session_id"],
+            "Observe spool collision at {} for a different identity",
+            path.display()
+        );
+        // A crash can leave the spool ahead of the id log. The first queued
+        // version wins even when a later projection has grown its content.
+        Ok(())
+    }
+
     pub fn pending(&self) -> Result<Vec<PathBuf>> {
-        let mut paths = fs::read_dir(&self.root)
+        self.pending_cancellable(&CancellationToken::new())
+    }
+
+    pub fn pending_cancellable(&self, cancellation: &CancellationToken) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&self.root)
             .with_context(|| format!("list Observe spool {}", self.root.display()))?
-            .filter_map(|entry| match entry {
-                Ok(entry)
-                    if entry.path().extension().and_then(|value| value.to_str())
-                        == Some("json") =>
-                {
-                    Some(Ok(entry.path()))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<std::io::Result<Vec<_>>>()
-            .context("read Observe spool entries")?;
+        {
+            if cancellation.is_cancelled() {
+                return Ok(Vec::new());
+            }
+            let path = entry.context("read Observe spool entry")?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                paths.push(path);
+            }
+        }
         paths.sort();
         Ok(paths)
     }
@@ -634,7 +683,8 @@ impl ObserveSpool {
             self.root.display()
         );
         fs::remove_file(&path)
-            .with_context(|| format!("remove delivered Observe spool entry {}", path.display()))
+            .with_context(|| format!("remove delivered Observe spool entry {}", path.display()))?;
+        Ok(())
     }
 }
 
@@ -661,10 +711,6 @@ impl ObservePaths {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveSessionDelivery {
-    /// Stable Observe event ids already committed to the local spool. Replaying
-    /// the projection is harmless because entries are filtered through this
-    /// set before the spool's own idempotent filename check.
-    pub emitted_event_ids: BTreeSet<String>,
     /// The session record revision whose transcript was last examined.
     pub record_updated_at: String,
     /// Materialized event frontier whose transcript was last examined.
@@ -709,29 +755,93 @@ pub struct ObserveDeliveryState {
 }
 
 impl ObserveDeliveryState {
-    pub const VERSION: u32 = 1;
+    // Breaking delivery format: older daemons reject v2 before publication.
+    pub const VERSION: u32 = 2;
+
+    fn empty(now_ms: i64) -> Self {
+        Self {
+            version: Self::VERSION,
+            initialized_at_ms: now_ms,
+            sessions: BTreeMap::new(),
+            last_success_ms: None,
+            last_failure_ms: None,
+            last_failure: None,
+        }
+    }
 
     pub fn load(path: &Path, now_ms: i64) -> Result<Self> {
+        Self::load_cancellable(path, now_ms, &CancellationToken::new())
+    }
+
+    pub fn load_cancellable(
+        path: &Path,
+        now_ms: i64,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
         if !path.exists() {
-            return Ok(Self {
-                version: Self::VERSION,
-                initialized_at_ms: now_ms,
-                sessions: BTreeMap::new(),
-                last_success_ms: None,
-                last_failure_ms: None,
-                last_failure: None,
-            });
+            return Ok(Self::empty(now_ms));
         }
-        let body = fs::read(path)
-            .with_context(|| format!("read Observe delivery state {}", path.display()))?;
-        let state: Self = serde_json::from_slice(&body)
-            .with_context(|| format!("parse Observe delivery state {}", path.display()))?;
+        let header = Self::diagnostics_cancellable(path, now_ms, cancellation)?;
+        let reader = BufReader::new(ObserveStateReader {
+            file: fs::File::open(path)?,
+            cancellation,
+        });
+        if header.version == 1 {
+            let mut decoder = serde_json::Deserializer::from_reader(reader);
+            let state = serde::de::DeserializeSeed::deserialize(
+                MigrateDelivery { path, cancellation },
+                &mut decoder,
+            )
+            .context("migrate Observe delivery state")?;
+            decoder.end()?;
+            ensure!(!cancellation.is_cancelled(), "Observe state load cancelled");
+            state.save(path)?;
+            return Ok(state);
+        }
+        serde_json::from_reader(reader)
+            .with_context(|| format!("parse Observe delivery state {}", path.display()))
+    }
+
+    /// Read diagnostics without migrating or writing state. The daemon alone
+    /// owns migration and publication; a CLI status request must not race it.
+    pub fn diagnostics(path: &Path, now_ms: i64) -> Result<Self> {
+        Self::diagnostics_cancellable(path, now_ms, &CancellationToken::new())
+    }
+
+    fn diagnostics_cancellable(
+        path: &Path,
+        now_ms: i64,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::empty(now_ms));
+        }
+        #[derive(Deserialize)]
+        struct Header {
+            version: u32,
+            initialized_at_ms: i64,
+            last_success_ms: Option<i64>,
+            last_failure_ms: Option<i64>,
+            last_failure: Option<String>,
+        }
+        let header: Header = serde_json::from_reader(BufReader::new(ObserveStateReader {
+            file: fs::File::open(path)?,
+            cancellation,
+        }))
+        .with_context(|| format!("parse Observe delivery state {}", path.display()))?;
         ensure!(
-            state.version == Self::VERSION,
+            matches!(header.version, 1 | Self::VERSION),
             "unsupported Observe delivery state version {}",
-            state.version
+            header.version
         );
-        Ok(state)
+        Ok(Self {
+            version: header.version,
+            initialized_at_ms: header.initialized_at_ms,
+            sessions: BTreeMap::new(),
+            last_success_ms: header.last_success_ms,
+            last_failure_ms: header.last_failure_ms,
+            last_failure: header.last_failure,
+        })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -748,6 +858,242 @@ impl ObserveDeliveryState {
     pub fn mark_failure(&mut self, at_ms: i64, error: impl Into<String>) {
         self.last_failure_ms = Some(at_ms);
         self.last_failure = Some(error.into());
+    }
+}
+
+/// Exact deduplication lives on disk and is loaded only for a changed session.
+/// Hashing the complete id keeps arbitrary imported ids inside this directory.
+#[derive(Debug, Clone)]
+pub struct ObserveEmittedIds {
+    root: PathBuf,
+}
+
+impl ObserveEmittedIds {
+    pub fn new(state_path: &Path) -> Self {
+        Self {
+            root: state_path.with_file_name("emitted"),
+        }
+    }
+
+    fn path(&self, session_id: &str) -> PathBuf {
+        self.root.join(mj_core::hex::lower_hex(Sha256::digest(
+            session_id.as_bytes(),
+        )))
+    }
+
+    pub fn load(&self, session_id: &str) -> Result<BTreeSet<String>> {
+        self.load_cancellable(session_id, &CancellationToken::new())
+    }
+
+    pub fn load_cancellable(
+        &self,
+        session_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<BTreeSet<String>> {
+        let path = self.path(session_id);
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeSet::new());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read emitted ids {}", path.display()));
+            }
+        };
+        Self::read(
+            BufReader::new(ObserveStateReader { file, cancellation }),
+            cancellation,
+        )
+        .with_context(|| format!("read emitted ids {}", path.display()))
+    }
+
+    fn read(
+        mut reader: impl BufRead,
+        cancellation: &CancellationToken,
+    ) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        let mut line = String::new();
+        loop {
+            ensure!(
+                !cancellation.is_cancelled(),
+                "Observe emitted-id load cancelled"
+            );
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            if let Some(id) = line.strip_suffix('\n') {
+                ids.insert(id.to_owned());
+            }
+            line.clear();
+        }
+        Ok(ids)
+    }
+
+    pub fn append(&self, session_id: &str, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            // An unchanged projection syncs existing records without creating
+            // entries or changing their length. Windows requires
+            // write access on the handle used by FlushFileBuffers.
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(self.path(session_id))?
+                .sync_all()?;
+            return self.sync_directories();
+        }
+        fs::create_dir_all(&self.root)?;
+        let path = self.path(session_id);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        // Discard an incomplete trailing record from a crashed write before
+        // appending. All complete records remain append-only.
+        use std::io::{Read, Seek, SeekFrom};
+        let mut end = file.metadata()?.len();
+        while end > 0 {
+            file.seek(SeekFrom::Start(end - 1))?;
+            let mut byte = [0];
+            file.read_exact(&mut byte)?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            end -= 1;
+        }
+        file.set_len(end)?;
+        file.seek(SeekFrom::End(0))?;
+        for id in ids {
+            ensure!(!id.contains(['\n', '\r']), "invalid Observe event id");
+            writeln!(file, "{id}")?;
+        }
+        file.sync_all()?;
+        self.sync_directories()
+    }
+
+    fn sync_directories(&self) -> Result<()> {
+        mj_core::config::sync_directory(&self.root)?;
+        mj_core::config::sync_directory(
+            self.root
+                .parent()
+                .context("Observe emitted directory has no parent")?,
+        )
+    }
+}
+
+/// Check cancellation on each buffered read, including the header-only scan.
+struct ObserveStateReader<'a> {
+    file: fs::File,
+    cancellation: &'a CancellationToken,
+}
+impl std::io::Read for ObserveStateReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(std::io::Error::other("Observe state load cancelled"));
+        }
+        std::io::Read::read(&mut self.file, buffer)
+    }
+}
+
+/// Stream one legacy session at a time instead of retaining millions of ids.
+struct MigrateDelivery<'a> {
+    path: &'a Path,
+    cancellation: &'a CancellationToken,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for MigrateDelivery<'_> {
+    type Value = ObserveDeliveryState;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        decoder: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        decoder.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for MigrateDelivery<'_> {
+    type Value = ObserveDeliveryState;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy Observe delivery state")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut metadata = Map::new();
+        let mut sessions = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "sessions" {
+                sessions = map.next_value_seed(MigrateSessions {
+                    ids: ObserveEmittedIds::new(self.path),
+                    cancellation: self.cancellation,
+                })?;
+            } else {
+                metadata.insert(key, map.next_value::<Value>()?);
+            }
+        }
+        metadata.insert("version".into(), Value::from(ObserveDeliveryState::VERSION));
+        let mut state: ObserveDeliveryState =
+            serde_json::from_value(Value::Object(metadata)).map_err(serde::de::Error::custom)?;
+        state.sessions = sessions;
+        Ok(state)
+    }
+}
+
+struct MigrateSessions<'a> {
+    ids: ObserveEmittedIds,
+    cancellation: &'a CancellationToken,
+}
+impl<'de> serde::de::DeserializeSeed<'de> for MigrateSessions<'_> {
+    type Value = BTreeMap<String, ObserveSessionDelivery>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        decoder: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        decoder.deserialize_map(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for MigrateSessions<'_> {
+    type Value = BTreeMap<String, ObserveSessionDelivery>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy Observe sessions")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut sessions = BTreeMap::new();
+        while let Some((id, mut value)) = map.next_entry::<String, Value>()? {
+            if self.cancellation.is_cancelled() {
+                return Err(serde::de::Error::custom("Observe migration cancelled"));
+            }
+            let emitted: Vec<String> = serde_json::from_value(
+                value
+                    .as_object_mut()
+                    .and_then(|value| value.remove("emitted_event_ids"))
+                    .ok_or_else(|| serde::de::Error::custom("legacy session has no emitted ids"))?,
+            )
+            .map_err(serde::de::Error::custom)?;
+            let cursor = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            fs::create_dir_all(&self.ids.root).map_err(serde::de::Error::custom)?;
+            // v1 stays authoritative until every file is durable. A retry
+            // overwrites partial migration output rather than appending it.
+            let mut body = String::new();
+            for event in emitted {
+                if event.contains(['\n', '\r']) {
+                    return Err(serde::de::Error::custom("invalid Observe event id"));
+                }
+                body.push_str(&event);
+                body.push('\n');
+            }
+            mj_core::config::atomic_write(&self.ids.path(&id), body.as_bytes())
+                .map_err(serde::de::Error::custom)?;
+            sessions.insert(id, cursor);
+        }
+        mj_core::config::sync_directory(self.ids.root.parent().unwrap())
+            .map_err(serde::de::Error::custom)?;
+        Ok(sessions)
     }
 }
 
@@ -825,6 +1171,111 @@ mod tests {
         );
         item.text = text.into();
         item
+    }
+
+    // Hard-won: e2421d353: loading a large emitted-id log ignored handoff cancellation.
+    #[test]
+    fn observe_emitted_id_load_cancels_after_reading_a_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let ids = ObserveEmittedIds::new(&root.path().join("delivery.json"));
+        let events = (0..1000)
+            .map(|index| format!("sha256:{index:064x}"))
+            .collect::<Vec<_>>();
+        ids.append("large-session", &events).unwrap();
+        let before = fs::read(ids.path("large-session")).unwrap();
+        assert!(before.len() > 64 * 1024);
+        let cancellation = CancellationToken::new();
+        struct CancelOnRefill<'a> {
+            input: ObserveStateReader<'a>,
+            read_once: bool,
+        }
+        impl std::io::Read for CancelOnRefill<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.read_once {
+                    self.input.cancellation.cancel();
+                }
+                self.read_once = true;
+                std::io::Read::read(&mut self.input, buffer)
+            }
+        }
+        let input = CancelOnRefill {
+            input: ObserveStateReader {
+                file: fs::File::open(ids.path("large-session")).unwrap(),
+                cancellation: &cancellation,
+            },
+            read_once: false,
+        };
+        assert!(ObserveEmittedIds::read(BufReader::new(input), &cancellation).is_err());
+        assert!(cancellation.is_cancelled());
+        assert!(
+            ids.load_cancellable("large-session", &cancellation)
+                .is_err()
+        );
+        assert_eq!(fs::read(ids.path("large-session")).unwrap(), before);
+        assert_eq!(
+            ids.load("large-session").unwrap(),
+            events.into_iter().collect()
+        );
+    }
+
+    // Hard-won: 66409e7c5: legacy migration could hold daemon handoff until completion.
+    #[test]
+    fn observe_migration_cancels_after_partial_output_and_retries_from_v1() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("delivery.json");
+        let sessions = (0..1000).map(|index| (format!("session-{index:04}"), json!({
+            "record_updated_at": "before", "emitted_event_ids": [format!("sha256:{index:064x}")]
+        }))).collect::<Map<_, _>>();
+        let legacy =
+            serde_json::to_vec(&json!({"version":1,"initialized_at_ms":10,"sessions":sessions}))
+                .unwrap();
+        fs::write(&path, &legacy).unwrap();
+        let cancellation = CancellationToken::new();
+        struct StopAfterSession<'a> {
+            input: ObserveStateReader<'a>,
+            emitted: PathBuf,
+        }
+        impl std::io::Read for StopAfterSession<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                // The next buffered read follows a completed session write.
+                // Cancel in this thread so scheduling cannot miss the window.
+                if self.emitted.exists()
+                    && fs::read_dir(&self.emitted)?.next().transpose()?.is_some()
+                {
+                    self.input.cancellation.cancel();
+                }
+                std::io::Read::read(&mut self.input, buffer)
+            }
+        }
+        let input = StopAfterSession {
+            input: ObserveStateReader {
+                file: fs::File::open(&path).unwrap(),
+                cancellation: &cancellation,
+            },
+            emitted: root.path().join("emitted"),
+        };
+        let mut decoder = serde_json::Deserializer::from_reader(BufReader::new(input));
+        assert!(
+            serde::de::DeserializeSeed::deserialize(
+                MigrateDelivery {
+                    path: &path,
+                    cancellation: &cancellation
+                },
+                &mut decoder
+            )
+            .is_err()
+        );
+        assert!(cancellation.is_cancelled());
+        assert!(ObserveDeliveryState::load_cancellable(&path, 20, &cancellation).is_err());
+        assert_eq!(fs::read(&path).unwrap(), legacy);
+        assert_eq!(
+            ObserveDeliveryState::load(&path, 30)
+                .unwrap()
+                .sessions
+                .len(),
+            1000
+        );
+        assert_eq!(ObserveDeliveryState::load(&path, 40).unwrap().version, 2);
     }
 
     #[test]
