@@ -877,6 +877,55 @@ mv "$CLAUDE_CONFIG_DIR/.credentials.json.new" "$CLAUDE_CONFIG_DIR/.credentials.j
     (request, credentials)
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn another_daemons_claude_login_change_is_forwarded_to_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
+    let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        grants: vec![request.clone()],
+        ..Default::default()
+    });
+    let (sender, mut updates) = tokio::sync::mpsc::channel(4);
+    let loop_task = tokio::spawn(renew_claude_grant_when_due(
+        request.clone(),
+        receiver,
+        QUOTA_REFRESH_INTERVAL,
+        open_gate_renewal(directory.path()),
+        Some(sender),
+    ));
+
+    assert_quiet(&mut updates).await;
+    let expires_at_ms = mj_core::clock::epoch_millis() + 9 * ONE_HOUR_MS;
+    std::fs::write(
+        credentials,
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"external-login","refreshToken":"external-refresh","expiresAt":{expires_at_ms},"scopes":["user:inference"]}}}}"#
+        ),
+    )
+    .unwrap();
+    batches.send_modify(|_| {});
+
+    let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            update,
+            QuotaUpdate::ClaudeGrant {
+                check: mj_controller::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) },
+                login_changed: true,
+                ..
+            }
+        ),
+        "{update:?}"
+    );
+    batches.send_modify(|batch| batch.grants.clear());
+    loop_task.await.unwrap();
+}
+
 // Hard-won: #1529: an unexpired refused login waited hours for its scheduled renewal.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
