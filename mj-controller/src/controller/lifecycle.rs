@@ -97,6 +97,59 @@ pub(super) enum SourceTargetDisposition {
 pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 impl Controller {
+    fn explicit_suspend_export_policy(
+        &self,
+        session_id: &str,
+        ignore_nested_repositories: bool,
+    ) -> Result<CheckpointExportPolicy> {
+        let checkout = self.state.checkout(session_id)?;
+        if checkout.managed_worktree().is_some_and(|worktree| {
+            worktree.kind == ManagedCheckoutKind::Clone
+                && matches!(
+                    worktree.target,
+                    mj_core::state::ManagedWorktreeTarget::Local
+                )
+        }) {
+            Ok(CheckpointExportPolicy::OriginDelta)
+        } else if ignore_nested_repositories {
+            Ok(CheckpointExportPolicy::IgnoreNestedRepositories)
+        } else {
+            Ok(CheckpointExportPolicy::ReuseUnchangedArchive)
+        }
+    }
+
+    pub async fn preflight_origin_delta_suspension(&self, session_id: &str) -> Result<()> {
+        if self.explicit_suspend_export_policy(session_id, false)?
+            != CheckpointExportPolicy::OriginDelta
+        {
+            return Ok(());
+        }
+        let checkout = self.state.checkout(session_id)?;
+        let worktree = checkout
+            .managed_worktree()
+            .context("managed clone is missing")?;
+        let input = mj_checkpoint::checkpoint::managed_clone_snapshot_input(
+            "workspace",
+            &worktree.worktree_root,
+            PathBuf::new(),
+        );
+        mj_core::runtime::spawn_blocking(move || {
+            use mj_checkpoint::snapshot::{
+                SnapshotRefused, require_managed_snapshot_without_consent,
+            };
+            require_managed_snapshot_without_consent(&mj_checkpoint::archive::SystemGit, &input)
+                .map_err(|error| {
+                    if let Some(reason) = error.downcast_ref::<SnapshotRefused>() {
+                        mj_core::refusal::Refusal::precondition(reason.to_string()).into()
+                    } else {
+                        error
+                    }
+                })
+        })
+        .await
+        .context("join managed clone suspend inventory")?
+    }
+
     /// Checkpoint, ask the harness to close, and only then tear down the exact
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
     /// except when the checkpoint's worker restart left no live worker: that
@@ -122,6 +175,7 @@ impl Controller {
                 .await
                 .map(|_| ());
         }
+        let export_policy = self.explicit_suspend_export_policy(session_id, false)?;
         if self
             .suspend_session_controlled_with_manager(
                 admission,
@@ -130,7 +184,7 @@ impl Controller {
                 None,
                 None,
                 SourceTargetDisposition::Destroy,
-                CheckpointExportPolicy::ReuseUnchangedArchive,
+                export_policy,
                 true,
                 None,
                 None,
@@ -154,6 +208,8 @@ impl Controller {
         ignore_nested_repositories: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
+        let export_policy =
+            self.explicit_suspend_export_policy(session_id, ignore_nested_repositories)?;
         self.suspend_session_controlled_with_manager(
             admission,
             session_id,
@@ -161,11 +217,7 @@ impl Controller {
             Some(manager),
             None,
             SourceTargetDisposition::Destroy,
-            if ignore_nested_repositories {
-                CheckpointExportPolicy::IgnoreNestedRepositories
-            } else {
-                CheckpointExportPolicy::ReuseUnchangedArchive
-            },
+            export_policy,
             acknowledge_unpublished_work,
             before_close,
             None,
@@ -300,6 +352,16 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        if checkpoint_export_policy == CheckpointExportPolicy::OriginDelta
+            && let Err(error) = self.preflight_origin_delta_suspension(session_id).await
+        {
+            if previous.state == SessionState::Closing {
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                apply_close_checkpoint_failure(record, &previous, &error, now());
+                return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+            }
+            return Err(error);
+        }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         // Persist the close intent before beginning its checkpoint. A process
         // exit anywhere below must leave enough state for the next controller
@@ -353,7 +415,7 @@ impl Controller {
         // Retained environments are not being published or retired. A profile
         // switch must not wait on the repository's network remote.
         let session_handoff = checkpoint_export_policy == CheckpointExportPolicy::SessionHandoff;
-        let publication = if session_handoff || disposition == SourceTargetDisposition::RetainForInPlaceSwap {
+        let publication = if session_handoff || checkpoint_export_policy == CheckpointExportPolicy::OriginDelta || disposition == SourceTargetDisposition::RetainForInPlaceSwap {
             None
         } else {
             let checkout = self.state.checkout(session_id)?;
@@ -709,6 +771,13 @@ impl Controller {
             }
             RelayExecutionState::Idle | RelayExecutionState::Running => {
                 lease.release();
+                let export_policy = if before_close.is_some() {
+                    self.explicit_suspend_export_policy(session_id, ignore_nested_repositories)?
+                } else if ignore_nested_repositories {
+                    CheckpointExportPolicy::IgnoreNestedRepositories
+                } else {
+                    CheckpointExportPolicy::ReuseUnchangedArchive
+                };
                 return self
                     .suspend_session_controlled_with_manager(admission,
                         session_id,
@@ -716,11 +785,7 @@ impl Controller {
                         Some(manager),
                         None,
                         SourceTargetDisposition::Destroy,
-                        if ignore_nested_repositories {
-                            CheckpointExportPolicy::IgnoreNestedRepositories
-                        } else {
-                            CheckpointExportPolicy::ReuseUnchangedArchive
-                        },
+                        export_policy,
                         acknowledge_unpublished_work,
                         before_close,
                         None,

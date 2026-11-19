@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 137;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 141;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -385,6 +385,15 @@ pub(super) fn forget_verified_schema(path: &Path) {
 
 /// New stores start at the revision Mjolnir 2.7.2 shipped. Existing stores
 /// retain the complete migration path, even when users skip many releases.
+fn migrate_origin_delta_archives(connection: &Connection) -> Result<()> {
+    connection.execute_batch("BEGIN IMMEDIATE;
+        UPDATE schema_compatibility SET minimum_compatible_version = 141 WHERE singleton = 1;
+        INSERT INTO schema_migrations(version, applied_at) VALUES (141, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        PRAGMA user_version = 141;
+        COMMIT;")?;
+    Ok(())
+}
+
 const BASELINE_SCHEMA_VERSION: i64 = 33;
 
 /// The compatibility floor a baseline store records. Migration 32 (ZCode) was
@@ -2688,6 +2697,11 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
             PRAGMA user_version=140;
             COMMIT;")?;
     }
+    // Breaking: older archive readers cannot restore an origin-delta archive
+    // after suspend removes its independent clone.
+    if version < 141 {
+        migrate_origin_delta_archives(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4476,6 +4490,34 @@ mod reader_tests {
             )
             .unwrap();
         assert_eq!(lifecycle, (None, None, None));
+    }
+
+    #[test]
+    fn origin_delta_archive_migration_fences_legacy_readers_and_writers() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_compatibility (
+                singleton INTEGER PRIMARY KEY,
+                minimum_compatible_version INTEGER NOT NULL
+            );
+            INSERT INTO schema_compatibility VALUES (1, 137);
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT);
+            INSERT INTO schema_migrations VALUES (140, 'previous release');
+            PRAGMA user_version = 140;",
+            )
+            .unwrap();
+        read_schema_state(&connection)
+            .unwrap()
+            .ensure_supported_by(140)
+            .unwrap();
+
+        migrate_origin_delta_archives(&connection).unwrap();
+
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.minimum_compatible, Some(141));
+        assert!(state.ensure_supported_by(140).is_err());
+        state.ensure_supported_by(141).unwrap();
     }
 
     /// Revision 130 is breaking. Build a store at revision 129 with a watch, its

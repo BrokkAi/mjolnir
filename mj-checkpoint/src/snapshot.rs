@@ -41,99 +41,27 @@ fn scoped<T>(checkout: &CheckoutKey, value: T) -> Scoped<T> {
         value,
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SnapshotHead {
-    Branch { name: String, commit: String },
-    Detached(String),
-}
-impl SnapshotHead {
-    pub fn commit(&self) -> &str {
-        match self {
-            Self::Branch { commit, .. } | Self::Detached(commit) => commit,
-        }
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotStashEntry {
-    pub commit: String,
-    pub message: String,
-}
-mod relative_path_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-    pub fn serialize<S: Serializer>(
-        path: &Path,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer
-            .serialize_str(&crate::archive::slash_path(path).map_err(serde::ser::Error::custom)?)
-    }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<PathBuf, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        let path = PathBuf::from(&text);
-        let normalized = crate::archive::slash_path(&path).map_err(serde::de::Error::custom)?;
-        if normalized != text {
-            return Err(serde::de::Error::custom(
-                "snapshot path is not slash-separated",
-            ));
-        }
-        Ok(path)
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotSubmodule {
-    #[serde(with = "relative_path_serde")]
-    pub path: PathBuf,
-    pub commit: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotGitlink {
-    #[serde(with = "relative_path_serde")]
-    pub path: PathBuf,
-    pub commit: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotWorktree {
-    pub has_uncommitted_state: bool,
-    #[serde(with = "relative_path_serde")]
-    pub relative_path: PathBuf,
-    pub head: SnapshotHead,
-    pub working_state: Option<String>,
-    pub working_state_skipped: bool,
-    pub initialized_submodules: Vec<SnapshotSubmodule>,
-    /// Only this checkout's index; module indexes do not travel.
-    pub index_gitlinks: Vec<SnapshotGitlink>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BranchTracking {
-    pub remote: Option<String>,
-    pub merge: Vec<String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub use mj_core::archive::{
+    BranchTracking, SnapshotGitlink, SnapshotHead, SnapshotStashEntry, SnapshotSubmodule,
+    SnapshotWorktree, WorkspaceSnapshotMetadata,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
-    /// Configured origin URL, redacted. None is an in-place-only raw snapshot.
-    pub origin_url: Option<String>,
-    pub object_format: String,
-    pub notices: Vec<String>,
-    pub head: SnapshotHead,
-    pub refs: BTreeMap<String, String>,
-    pub branch_tracking: BTreeMap<String, BranchTracking>,
-    pub stash: Vec<SnapshotStashEntry>,
-    pub working_state: Option<String>,
-    pub working_state_skipped: bool,
-    pub has_uncommitted_state: bool,
-    pub worktrees: Vec<SnapshotWorktree>,
-    pub initialized_submodules: Vec<SnapshotSubmodule>,
-    /// Only this checkout's index; module indexes do not travel.
-    pub index_gitlinks: Vec<SnapshotGitlink>,
-    pub remote_refs_stale: bool,
-    /// Non-thin Git pack; `None` when origin already supplies every object.
+    #[serde(flatten)]
+    pub metadata: WorkspaceSnapshotMetadata,
+    /// Non-thin Git pack, if origin does not supply every object.
     pub pack: Option<PathBuf>,
-    /// Boundary commits and saved tips omitted from the origin-relative pack.
-    pub prerequisites: Vec<String>,
 }
+
+impl std::ops::Deref for WorkspaceSnapshot {
+    type Target = WorkspaceSnapshotMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckoutOwnership {
     Managed,
@@ -327,10 +255,12 @@ impl std::fmt::Display for SnapshotRefused {
             Self::OperationInProgress(operation) => {
                 write!(
                     f,
-                    "{:?} in progress at {}:{}; abort consent is required",
+                    "{:?} in progress at {}:{}; finish it or run `git {command} {argument}` there before suspending",
                     operation.kind,
                     operation.checkout.repository_id,
-                    operation.checkout.checkout_path.display()
+                    operation.checkout.checkout_path.display(),
+                    command = abort_operation_arguments(operation.kind)[0],
+                    argument = abort_operation_arguments(operation.kind)[1],
                 )
             }
             Self::Untracked(items) => {
@@ -367,7 +297,7 @@ impl std::fmt::Display for SnapshotRefused {
                         )?,
                     }
                 }
-                Ok(())
+                write!(f, ". Commit wanted files, move them outside the clone, or remove them before suspending. Preserve wanted stash contents outside the clone before dropping those stashes.")
             }
         }
     }
@@ -2361,22 +2291,24 @@ fn capture_in_place_metadata(
     };
     let hidden = inventory.hidden_tracked_edits;
     Ok(WorkspaceSnapshot {
-        object_format: git_text(runner, checkout, ["rev-parse", "--show-object-format"])?,
-        origin_url: None,
-        notices,
-        head: read_head(runner, checkout)?,
-        refs: BTreeMap::new(),
-        branch_tracking: BTreeMap::new(),
-        stash: Vec::new(),
-        working_state: None,
-        working_state_skipped: skipped,
-        has_uncommitted_state: skipped || dirty || !hidden.is_empty(),
-        worktrees: Vec::new(),
-        initialized_submodules: Vec::new(),
-        index_gitlinks: Vec::new(),
-        remote_refs_stale: false,
+        metadata: WorkspaceSnapshotMetadata {
+            object_format: git_text(runner, checkout, ["rev-parse", "--show-object-format"])?,
+            origin_url: None,
+            notices,
+            head: read_head(runner, checkout)?,
+            refs: BTreeMap::new(),
+            branch_tracking: BTreeMap::new(),
+            stash: Vec::new(),
+            working_state: None,
+            working_state_skipped: skipped,
+            has_uncommitted_state: skipped || dirty || !hidden.is_empty(),
+            worktrees: Vec::new(),
+            initialized_submodules: Vec::new(),
+            index_gitlinks: Vec::new(),
+            remote_refs_stale: false,
+            prerequisites: Vec::new(),
+        },
         pack: None,
-        prerequisites: Vec::new(),
     })
 }
 
@@ -2472,38 +2404,40 @@ fn capture_prepared_workspace(
     let pack = owned.as_ref().map(|path| path.to_path_buf());
     pending_packs.extend(owned);
     Ok(WorkspaceSnapshot {
-        object_format: git_text(runner, checkout, ["rev-parse", "--show-object-format"])?,
-        origin_url,
-        notices,
-        head,
-        refs: refs.clone(),
-        branch_tracking: branch_tracking(runner, checkout, &refs, &cut)?,
-        stash,
-        has_uncommitted_state: working.is_some()
-            || skipped
-            || staged_gitlink_changes(runner, checkout)?
-            || submodule_uncommitted_state(runner, checkout, &inventory)?,
-        working_state: working,
-        working_state_skipped: skipped,
-        worktrees,
-        initialized_submodules: inventory
-            .initialized_submodules
-            .into_iter()
-            .map(|entry| entry.value)
-            .collect(),
-        index_gitlinks: inventory
-            .index_gitlinks
-            .into_iter()
-            .map(|entry| entry.value)
-            .collect(),
-        remote_refs_stale: exclusions.stale
-            || inventory.remote_refs_stale
-            || inventory
-                .worktrees
-                .iter()
-                .any(|(_, tree)| tree.remote_refs_stale),
+        metadata: WorkspaceSnapshotMetadata {
+            object_format: git_text(runner, checkout, ["rev-parse", "--show-object-format"])?,
+            origin_url,
+            notices,
+            head,
+            refs: refs.clone(),
+            branch_tracking: branch_tracking(runner, checkout, &refs, &cut)?,
+            stash,
+            has_uncommitted_state: working.is_some()
+                || skipped
+                || staged_gitlink_changes(runner, checkout)?
+                || submodule_uncommitted_state(runner, checkout, &inventory)?,
+            working_state: working,
+            working_state_skipped: skipped,
+            worktrees,
+            initialized_submodules: inventory
+                .initialized_submodules
+                .into_iter()
+                .map(|entry| entry.value)
+                .collect(),
+            index_gitlinks: inventory
+                .index_gitlinks
+                .into_iter()
+                .map(|entry| entry.value)
+                .collect(),
+            remote_refs_stale: exclusions.stale
+                || inventory.remote_refs_stale
+                || inventory
+                    .worktrees
+                    .iter()
+                    .any(|(_, tree)| tree.remote_refs_stale),
+            prerequisites,
+        },
         pack,
-        prerequisites,
     })
 }
 fn head_for_working_state(
@@ -2756,6 +2690,27 @@ pub fn session_inventory(
         inventory.blockers = inventory_blockers(inventory)?;
     }
     Ok(result)
+}
+
+/// Read-only suspend preflight. Final capture independently evaluates the same
+/// policy against the quiesced checkout.
+pub fn require_managed_snapshot_without_consent(
+    runner: &dyn GitCommandRunner,
+    repository: &RepositoryInput,
+) -> Result<()> {
+    let inventories = session_inventory(runner, std::slice::from_ref(repository))?;
+    let inventory = inventories
+        .get(&repository.id)
+        .context("snapshot inventory is missing")?;
+    let inputs = check_unconditional_blockers(inventory)?;
+    check_consent_inputs(
+        false,
+        inputs,
+        &CaptureConsent {
+            untracked: UntrackedConsent::None,
+            operations: OperationConsent::None,
+        },
+    )
 }
 
 fn teardown_roots(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<Vec<PathBuf>> {

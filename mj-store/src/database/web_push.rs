@@ -1008,6 +1008,7 @@ mod tests {
              DROP TABLE push_entry_cutover;
              DROP TABLE alert_events;
              DELETE FROM schema_migrations WHERE version>=138;
+             UPDATE schema_compatibility SET minimum_compatible_version=137;
              PRAGMA user_version=137;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
         )
@@ -1019,7 +1020,9 @@ mod tests {
         schema::migrate_schema(&db).unwrap();
         let schema = schema::read_schema_state(&db).unwrap();
         assert_eq!(schema.revision, super::super::SCHEMA_VERSION);
-        schema.ensure_supported_by(137).unwrap();
+        schema
+            .ensure_supported_by(super::super::SCHEMA_VERSION)
+            .unwrap();
 
         let mut runtime = runtime(true);
         runtime.metadata.notification_cards = None;

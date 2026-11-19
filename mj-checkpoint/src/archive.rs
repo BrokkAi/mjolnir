@@ -39,6 +39,7 @@ const ZSTD_LEVEL: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositorySnapshot {
+    pub origin_delta_pack: Option<PathBuf>,
     pub metadata: RepositoryMetadata,
     pub committed_bundle: Vec<u8>,
     pub staged_patch: Vec<u8>,
@@ -858,8 +859,55 @@ fn prepare_archive_view_with_part_size(
                 repository.metadata.id
             );
         }
-        validate_untracked_tar(&repository.untracked_tar)?;
         let root = format!("repositories/{}", repository.metadata.id);
+        if repository.metadata.origin_delta.is_some() {
+            ensure!(
+                repository.committed_bundle.is_empty()
+                    && repository.staged_patch.is_empty()
+                    && repository.unstaged_patch.is_empty()
+                    && repository.untracked_tar.is_empty()
+                    && repository.operation_payloads.is_none()
+                    && repository.linked_worktrees.is_empty(),
+                "origin delta repository has legacy Git payloads"
+            );
+            let origin_delta_pack_path = repository
+                .origin_delta_pack
+                .as_deref()
+                .map(|pack| -> Result<String> {
+                    let path = format!("{root}/origin.pack");
+                    push_payload(
+                        &mut payloads,
+                        path.clone(),
+                        Cow::Borrowed(&[]),
+                        0o600,
+                        PayloadRole::GitOriginDeltaPack {
+                            repository_id: repository.metadata.id.clone(),
+                        },
+                    )?;
+                    let payload = payloads.last_mut().expect("just inserted pack payload");
+                    payload.source = Some(pack);
+                    payload.descriptor.size = fs::metadata(pack)?.len();
+                    Ok(path)
+                })
+                .transpose()?;
+            repositories.push(RepositoryManifest {
+                metadata: repository.metadata.clone(),
+                committed_bundle_path: String::new(),
+                staged_patch_path: String::new(),
+                unstaged_patch_path: String::new(),
+                untracked_tar_path: String::new(),
+                conflicted_worktree_tar_path: None,
+                operation_state_tar_path: None,
+                linked_worktrees: Vec::new(),
+                origin_delta_pack_path,
+            });
+            continue;
+        }
+        ensure!(
+            repository.origin_delta_pack.is_none(),
+            "legacy repository has an origin delta pack"
+        );
+        validate_untracked_tar(&repository.untracked_tar)?;
         let operation = match (
             &repository.metadata.git_operation,
             &repository.operation_payloads,
@@ -1045,6 +1093,7 @@ fn prepare_archive_view_with_part_size(
             });
         }
         repositories.push(RepositoryManifest {
+            origin_delta_pack_path: None,
             metadata: repository.metadata.clone(),
             committed_bundle_path,
             staged_patch_path,
@@ -1115,7 +1164,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if input.canonical_session.notification_stack.is_some() {
+        schema_version: if carries_origin_delta(&repositories) {
+            ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        } else if input.canonical_session.notification_stack.is_some() {
             ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
         } else if carries_linked_worktrees(&repositories) {
             ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
@@ -1181,7 +1232,9 @@ fn push_payload<'a>(
 /// which is substantially faster than DEFLATE for checkpoint-sized history.
 fn payload_compression(role: &PayloadRole) -> CompressionMethod {
     match role {
-        PayloadRole::GitBundle { .. } => CompressionMethod::Stored,
+        PayloadRole::GitBundle { .. } | PayloadRole::GitOriginDeltaPack { .. } => {
+            CompressionMethod::Stored
+        }
         PayloadRole::CanonicalSession
         | PayloadRole::NativeArtifact { .. }
         | PayloadRole::GitStagedPatch { .. }
@@ -1215,6 +1268,7 @@ fn tar_payload_validator(role: &PayloadRole) -> Option<fn(&mut dyn Read) -> Resu
         PayloadRole::CanonicalSession
         | PayloadRole::NativeArtifact { .. }
         | PayloadRole::GitBundle { .. }
+        | PayloadRole::GitOriginDeltaPack { .. }
         | PayloadRole::GitStagedPatch { .. }
         | PayloadRole::GitUnstagedPatch { .. }
         | PayloadRole::GitLinkedWorktreeStagedPatch { .. }
@@ -1589,7 +1643,10 @@ impl std::io::Seek for ArchiveFile {
 fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
     retention == PayloadRetention::All
         || (retention == PayloadRetention::Repositories
-            && !matches!(role, PayloadRole::NativeArtifact { .. }))
+            && !matches!(
+                role,
+                PayloadRole::NativeArtifact { .. } | PayloadRole::GitOriginDeltaPack { .. }
+            ))
         || (retention == PayloadRetention::Restore
             && match role {
                 PayloadRole::NativeArtifact { relative_path } => {
@@ -1597,6 +1654,7 @@ fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
                         || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
                         || relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT)
                 }
+                PayloadRole::GitOriginDeltaPack { .. } => false,
                 _ => true,
             })
         || *role == PayloadRole::CanonicalSession
@@ -1954,7 +2012,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -2015,9 +2074,22 @@ fn carries_review_refs(repositories: &[RepositoryManifest]) -> bool {
     })
 }
 
+fn carries_origin_delta(repositories: &[RepositoryManifest]) -> bool {
+    repositories
+        .iter()
+        .any(|repository| repository.metadata.origin_delta.is_some())
+}
+
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
+    ensure!(
+        (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA)
+            == carries_origin_delta(&manifest.repositories),
+        "origin delta repository metadata and archive schema disagree"
+    );
     let expected_schema =
-        if carries_linked_worktrees(&manifest.repositories) {
+        if carries_origin_delta(&manifest.repositories) {
+            ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        } else if carries_linked_worktrees(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
         } else if carries_review_refs(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
@@ -2144,6 +2216,44 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
                 metadata.id
             );
         }
+        if let Some(snapshot) = &metadata.origin_delta {
+            ensure!(
+                snapshot.origin_url.as_deref() == Some(metadata.origin.as_str())
+                    && !metadata.origin.is_empty()
+                    && snapshot.head.commit() == metadata.head_commit
+                    && !metadata.remote_workspace
+                    && !metadata.plain_directory
+                    && metadata.git_operation.is_none()
+                    && repository.committed_bundle_path.is_empty()
+                    && repository.staged_patch_path.is_empty()
+                    && repository.unstaged_patch_path.is_empty()
+                    && repository.untracked_tar_path.is_empty()
+                    && repository.conflicted_worktree_tar_path.is_none()
+                    && repository.operation_state_tar_path.is_none()
+                    && repository.linked_worktrees.is_empty(),
+                "repository '{}' carries incompatible origin delta metadata",
+                metadata.id
+            );
+            if let Some(path) = &repository.origin_delta_pack_path {
+                ensure!(
+                    manifest.payloads.iter().any(|payload| {
+                        payload.path == *path
+                            && payload.size > 0
+                            && payload.role
+                                == (PayloadRole::GitOriginDeltaPack {
+                                    repository_id: metadata.id.clone(),
+                                })
+                    }),
+                    "repository '{}' is missing its origin delta pack",
+                    metadata.id
+                );
+            }
+            continue;
+        }
+        ensure!(
+            repository.origin_delta_pack_path.is_none(),
+            "legacy repository has an origin delta pack"
+        );
         let expected = [
             (
                 repository.committed_bundle_path.as_str(),
@@ -2280,6 +2390,17 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     }
     for payload in &manifest.payloads {
         let repository_id = match &payload.role {
+            PayloadRole::GitOriginDeltaPack { repository_id } => {
+                ensure!(
+                    manifest.repositories.iter().any(|repository| {
+                        repository.metadata.id == *repository_id
+                            && repository.origin_delta_pack_path.as_ref() == Some(&payload.path)
+                    }),
+                    "unreferenced origin delta pack '{}'",
+                    payload.path
+                );
+                Some(repository_id)
+            }
             PayloadRole::GitBundle { repository_id }
             | PayloadRole::GitStagedPatch { repository_id }
             | PayloadRole::GitUnstagedPatch { repository_id }
@@ -2539,20 +2660,7 @@ pub(crate) fn validate_worktree_relative_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn slash_path(path: &Path) -> Result<String> {
-    validate_archive_relative_path(path)?;
-    let parts = path
-        .components()
-        .map(|component| match component {
-            Component::Normal(part) => part
-                .to_str()
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow!("archive path '{}' is not UTF-8", path.display())),
-            _ => unreachable!("validated normal path component"),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(parts.join("/"))
-}
+pub(crate) use mj_core::archive::archive_path_text as slash_path;
 
 pub fn validate_component(value: &str, label: &str) -> Result<()> {
     ensure!(!value.is_empty(), "{label} is empty");

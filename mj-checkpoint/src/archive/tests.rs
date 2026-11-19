@@ -144,7 +144,9 @@ fn tar_with_file(path: &str, contents: &[u8], mode: u32) -> Vec<u8> {
 
 fn repository(id: &str) -> RepositorySnapshot {
     RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),
@@ -173,6 +175,7 @@ fn repository(id: &str) -> RepositorySnapshot {
 fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepositoryBundle {
     CheckpointRepositoryBundle {
         metadata: RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),

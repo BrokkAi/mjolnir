@@ -267,7 +267,9 @@ pub fn collect_git_metadata_snapshot(
     // needed to finalize the independently transferred destination checkout.
     let managed_base = remote_workspace_base(runner, repository)?;
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             // Every capture here is metadata only, whether or not it carries
             // refs: restore must never check out its commit into a checkout
             // other sessions or the user may be working in.
@@ -315,7 +317,9 @@ pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<Repo
         "a plain project directory has no origin to override"
     );
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             review_refs_metadata_only: false,
             review_baseline_ref: None,
             saved_refs: BTreeMap::new(),
@@ -342,13 +346,16 @@ pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<Repo
 }
 
 /// A Git checkout, found from a directory somewhere inside it.
-struct CheckoutLocation {
-    top_level: PathBuf,
+pub(crate) struct CheckoutLocation {
+    pub(crate) top_level: PathBuf,
     /// The directory's path below `top_level`; `None` at the top level.
-    subdirectory: Option<PathBuf>,
+    pub(crate) subdirectory: Option<PathBuf>,
 }
 
-fn locate_checkout(runner: &dyn GitCommandRunner, directory: &Path) -> Result<CheckoutLocation> {
+pub(crate) fn locate_checkout(
+    runner: &dyn GitCommandRunner,
+    directory: &Path,
+) -> Result<CheckoutLocation> {
     let output = git_bytes(
         runner,
         directory,
@@ -2011,7 +2018,9 @@ fn collect_git_contents(
     let untracked_tar = untracked_tar?;
 
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),

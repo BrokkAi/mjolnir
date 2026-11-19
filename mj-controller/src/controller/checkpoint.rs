@@ -20,9 +20,9 @@ use mj_checkpoint::archive::{
     verify_archive_streaming,
 };
 use mj_checkpoint::checkpoint::{
-    CHECKPOINT_EXPORT_PROTOCOL_VERSION, CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint,
-    CheckpointCaptureSpec, CheckpointExportSpec, CheckpointPackSpecRef,
-    CheckpointRepositoryCapture, CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
+    CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint, CheckpointCaptureSpec,
+    CheckpointExportSpec, CheckpointPackSpecRef, CheckpointRepositoryCapture,
+    CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
     current_native_session_received_prompt,
 };
 use mj_core::config::{HarnessKind, sessions_dir};
@@ -130,3 +130,5 @@ pub(super) use staging::*;
 pub mod stand_in;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+use mj_checkpoint::checkpoint::CHECKPOINT_EXPORT_PROTOCOL_VERSION;

@@ -1999,12 +1999,21 @@ impl Controller {
             self.state.remember_container_size(host, *size);
         }
 
+        let origin_delta = archive_manifest.repositories.iter()
+            .any(|repository| repository.metadata.origin_delta.is_some());
         let mut recreated_managed_worktree = false;
         // Set once a conversion has written its archive, so the success path can
         // retire the archive it replaced and the failure path can remove it.
         let mut conversion_checkpoint_written: Option<mj_core::state::CheckpointMetadata> = None;
         let result = async {
-            if let Some(worktree) = previous_managed_worktree.as_ref() {
+            if origin_delta {
+                let worktree = previous_managed_worktree.as_ref().context("origin delta requires a managed clone")?;
+                ensure!(!transferring_workspace && plan == ResumePlan::InPlace, "origin delta conversion is unavailable");
+                resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    executor, worktree, &archive_path, archive_manifest,
+                )?);
+                recreated_managed_worktree = true;
+            } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if !transferring_workspace && recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
                     if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
@@ -2139,7 +2148,7 @@ impl Controller {
             if transferring_workspace {
                 self.restore_move_workspace(session_id, executor)?;
             }
-            let restore_repositories = !transferring_workspace && ((resumed_project_directory.is_none()
+            let restore_repositories = !origin_delta && !transferring_workspace && ((resumed_project_directory.is_none()
                 && conversion.is_none())
                 || plan == ResumePlan::RawToWorkspace
                 || (recreated_managed_worktree && plan == ResumePlan::InPlace));

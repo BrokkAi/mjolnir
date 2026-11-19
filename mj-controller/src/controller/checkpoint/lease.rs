@@ -165,6 +165,8 @@ impl LatchExclusivity {
 pub(in crate::controller) enum CheckpointExportPolicy {
     /// Always export, transfer, and install a new archive.
     Always,
+    /// Explicit suspend of an independent managed clone.
+    OriginDelta,
     /// Fresh verified export with explicit consent to omit nested repositories.
     IgnoreNestedRepositories,
     /// Export session state and repository metadata; the lifecycle intent owns
