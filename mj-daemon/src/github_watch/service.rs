@@ -773,7 +773,7 @@ async fn build_session_evidence(
             .into_iter()
             .zip(&pairs)
             .map(|(spans, pair)| {
-                mj_transcript::github_history::build_evidence(&pair.base, spans)
+                mj_transcript::github_history::build_evidence(&pair.base, spans.spans)
                     .map(|(evidence, _)| evidence)
             })
             .collect()

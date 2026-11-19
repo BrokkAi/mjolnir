@@ -1062,7 +1062,8 @@ impl std::error::Error for GithubHistoryScanCancelled {}
 /// Reads one session's transcript from a single read snapshot and streams it
 /// through `history`, which renders it for every item of the session: a light
 /// pass that counts rows for the headers, then the bodies in order, one at a
-/// time, then the few rows around the windows that were selected. Nothing is
+/// time, then the rows around the windows that were selected, each fetched
+/// once by its rowid for all items. Nothing is
 /// collected: memory does not grow with the transcript. Raw JSON preserves
 /// persisted tool-call field order for the frozen Python renderer.
 ///
@@ -1074,7 +1075,7 @@ pub fn scan_github_history<S: mj_transcript::github_history::HistorySink>(
     session_id: &str,
     history: mj_transcript::github_history::SessionHistory<S>,
     stop: &dyn Fn() -> bool,
-) -> Result<Vec<S::Output>> {
+) -> Result<Vec<mj_transcript::github_history::HistoryResult<S::Done>>> {
     scan_github_history_from(&database_path(), session_id, history, stop)
 }
 
@@ -1083,7 +1084,7 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
     session_id: &str,
     mut history: mj_transcript::github_history::SessionHistory<S>,
     stop: &dyn Fn() -> bool,
-) -> Result<Vec<S::Output>> {
+) -> Result<Vec<mj_transcript::github_history::HistoryResult<S::Done>>> {
     use mj_transcript::github_history::RowMeta;
     let Some(latest) = history.max_cutoff_ms() else {
         return Ok(Vec::new());
@@ -1124,7 +1125,8 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
                     json_extract(body_json, '$.event.body.number'),
                     json_extract(body_json, '$.event.body.repo')
              FROM materialized_transcript_items
-             WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2",
+             WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2
+               AND json_extract(body_json, '$.kind') IN ('user', 'agent', 'tool', 'message')",
         )?;
         let mut rows = statement.query(params![session_id, latest])?;
         while let Some(row) = rows.next()? {
@@ -1153,54 +1155,44 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
         }
     }
     history.begin()?;
-    const ORDERED_ROWS: &str = "SELECT created_at_ms, last_changed_at_ms, body_json
-         FROM materialized_transcript_items
-         WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2
-         ORDER BY position, stable_id";
     {
-        let mut statement = connection.prepare(ORDERED_ROWS)?;
+        // Only kinds the transcript shows, as in the count above; the rest are
+        // never decoded.
+        let mut statement = connection.prepare(
+            "SELECT rowid, created_at_ms, last_changed_at_ms, body_json
+             FROM materialized_transcript_items
+             WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2
+               AND json_extract(body_json, '$.kind') IN ('user', 'agent', 'tool', 'message')
+             ORDER BY position, stable_id",
+        )?;
         let mut rows = statement.query(params![session_id, latest])?;
         while let Some(row) = rows.next()? {
             check()?;
-            let body = row.get_ref(2)?.as_str()?;
-            history.row(row.get(0)?, row.get(1)?, body)?;
+            let body = row.get_ref(3)?.as_str()?;
+            history.row(row.get(0)?, row.get(1)?, row.get(2)?, body)?;
         }
     }
     struct Rows<'a> {
         connection: &'a rusqlite::Connection,
-        session_id: &'a str,
-        latest: i64,
         check: &'a dyn Fn() -> Result<()>,
     }
     impl mj_transcript::github_history::RowFetch for Rows<'_> {
-        fn rows_from(
-            &mut self,
-            ordinal: usize,
-            visit: &mut dyn FnMut(usize, i64, i64, &str) -> Result<bool>,
-        ) -> Result<()> {
-            let mut statement = self
-                .connection
-                .prepare(&format!("{ORDERED_ROWS} LIMIT -1 OFFSET ?3"))?;
-            let mut rows =
-                statement.query(params![self.session_id, self.latest, ordinal as i64])?;
-            let mut at = ordinal;
-            while let Some(row) = rows.next()? {
-                (self.check)()?;
-                let body = row.get_ref(2)?.as_str()?;
-                if !visit(at, row.get(0)?, row.get(1)?, body)? {
-                    break;
-                }
-                at += 1;
-            }
-            Ok(())
+        fn body(&mut self, key: i64) -> Result<String> {
+            (self.check)()?;
+            Ok(self.connection.query_row(
+                "SELECT body_json FROM materialized_transcript_items WHERE rowid=?1",
+                params![key],
+                |row| row.get(0),
+            )?)
         }
     }
-    history.complete(&mut Rows {
-        connection: &connection,
-        session_id,
-        latest,
-        check: &check,
-    })
+    history.complete(
+        &mut Rows {
+            connection: &connection,
+            check: &check,
+        },
+        &check,
+    )
 }
 
 #[cfg(test)]
@@ -1433,7 +1425,8 @@ mod history_snapshot_tests {
         let rendered = scan_github_history_from(&path, "session-1", history, &|| false)
             .unwrap()
             .pop()
-            .unwrap();
+            .unwrap()
+            .done;
         assert_eq!(
             rendered,
             "Session transcript as of 1970-01-01T00:00:02.000Z (UTC)\nSession id: session-1\nTranscript rows included: 2; withheld because changed after cutoff: 2; excluded because created later: 1; item-specific GitHub mailbox notices removed: 1.\nRows come only from Mjolnir materialized transcript records; timestamps are row creation times.\n\n[1970-01-01T00:00:01.000Z] USER\nbefore\ncutoff\n\n[1970-01-01T00:00:01.000Z] TOOL EXECUTE\nTITLE: first\nCALL: {\"title\":\"first\",\"kind\":\"execute\",\"toolCallId\":\"c\"}\n"
@@ -1476,7 +1469,8 @@ mod history_snapshot_tests {
         let rendered = scan_github_history_from(&path, "session-1", history(), &|| false)
             .unwrap()
             .pop()
-            .unwrap();
+            .unwrap()
+            .done;
         assert!(rendered.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 1;"));
         let error = scan_github_history_from(&path, "session-1", history(), &|| true).unwrap_err();
         assert!(error.downcast_ref::<GithubHistoryScanCancelled>().is_some());
