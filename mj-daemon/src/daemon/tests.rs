@@ -7369,6 +7369,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             no_project_memory: false,
             no_github_events: false,
             no_github_credentials: false,
+            notifications_ignored: false,
             create_managed_worktree: Some(false),
             at: None,
             branch: None,

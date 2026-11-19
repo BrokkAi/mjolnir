@@ -1456,6 +1456,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         no_project_memory: carried.no_project_memory,
                         no_github_events: carried.no_github_events,
                         no_github_credentials: carried.no_github_credentials,
+                        notifications_ignored: false,
                         at: None,
                         branch: None,
                         base: None,

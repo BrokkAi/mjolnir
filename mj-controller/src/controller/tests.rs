@@ -777,6 +777,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         no_project_memory: false,
         no_github_events: false,
         no_github_credentials: false,
+        notifications_ignored: false,
         at: None,
         branch: None,
         base: None,

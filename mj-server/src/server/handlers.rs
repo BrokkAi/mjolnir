@@ -1338,6 +1338,7 @@ pub fn validate_new_preflight(
         no_project_memory: false,
         no_github_events: false,
         no_github_credentials: false,
+        notifications_ignored: false,
         create_managed_worktree: None,
         at: None,
         branch: None,

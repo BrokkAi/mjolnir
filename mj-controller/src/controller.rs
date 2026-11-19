@@ -621,6 +621,8 @@ pub struct SessionLaunchOptions {
     pub no_github_events: bool,
     /// Withhold GitHub credentials; inherited by children.
     pub no_github_credentials: bool,
+    /// Start with notifications ignored; see `SessionRecord::notifications_ignored`.
+    pub notifications_ignored: bool,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -899,6 +901,7 @@ impl Controller {
             no_project_memory,
             no_github_events,
             no_github_credentials,
+            notifications_ignored,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1068,7 +1071,7 @@ impl Controller {
         let record = SessionRecord {
             oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
-            notifications_ignored: false,
+            notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
             build_cache: None,

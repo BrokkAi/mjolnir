@@ -194,6 +194,10 @@ pub(crate) struct NewArgs {
     /// Withhold GitHub credentials from this session and its children.
     #[arg(long)]
     no_github_credentials: bool,
+    /// Deliver notifications for this session. Without this flag a session
+    /// started from the command line ignores notifications.
+    #[arg(long)]
+    with_notifications: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -1288,6 +1292,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
         no_github_credentials: args.no_github_credentials,
+        notifications_ignored: !args.with_notifications,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),

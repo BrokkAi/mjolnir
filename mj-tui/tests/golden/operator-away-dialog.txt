@@ -28,7 +28,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │Quick reply:                                                                                 Send │
-│ Go to Session   Clear & Next   Skip   Clear all ! (0)                                            │
+│ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK classifier intervention only (100x32) ===
@@ -61,7 +61,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │Quick reply:                                                                                 Send │
-│ Go to Session   Clear & Next   Skip   Clear all ! (0)                                            │
+│ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK waiting requests cleared (100x32) ===
@@ -127,7 +127,7 @@
 |                                                                                                  |
 |                                                                                                  |
 |Quick reply:                                                                                 Send |
-| Go to Session   Clear & Next   Skip   Clear all ! (0)                                            |
+| Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                           |
 +--------------------------------------------------------------------------------------------------+
 / search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - a read - : / ? palette
 === AFK small (32x12) ===

@@ -823,6 +823,7 @@ impl DashboardState {
                             CommandId::NotificationOpen
                                 | CommandId::NotificationClear
                                 | CommandId::NotificationSkip
+                                | CommandId::NotificationIgnoreSession
                                 | CommandId::NotificationClearImportant
                                 | CommandId::NotificationPreviousMessage
                                 | CommandId::NotificationNextMessage
@@ -1165,7 +1166,7 @@ impl DashboardState {
                     target,
                 }
             }
-            CommandId::NotificationSkip => {
+            CommandId::NotificationSkip | CommandId::NotificationIgnoreSession => {
                 let entries = self.notification_entries();
                 let skipped = identity.skip_identity();
                 self.notifications.skipped.retain(|previous| {
@@ -1179,6 +1180,12 @@ impl DashboardState {
                 let card = card.clone();
                 self.sync_notification_selection(self.notification_entries().first());
                 self.notifications.scroll = 0;
+                if command == CommandId::NotificationIgnoreSession {
+                    return DashboardAction::SetSessionNotificationsIgnored {
+                        session_id: card.session_id.clone(),
+                        ignored: true,
+                    };
+                }
                 DashboardAction::NotificationSkip { card }
             }
             CommandId::NotificationPreviousMessage | CommandId::NotificationNextMessage => {
@@ -1376,6 +1383,7 @@ pub(crate) fn render(
         CommandId::NotificationRestore,
         CommandId::NotificationClear,
         CommandId::NotificationSkip,
+        CommandId::NotificationIgnoreSession,
         CommandId::NotificationPreviousMessage,
         CommandId::NotificationNextMessage,
     ]
@@ -1650,6 +1658,11 @@ pub(crate) fn render(
             entry.target.is_some() && !dashboard.notification_dismissal_pending(&entry.session_id),
         ),
         (CommandId::NotificationSkip, "Skip".to_owned(), true),
+        (
+            CommandId::NotificationIgnoreSession,
+            "Ignore Session".to_owned(),
+            true,
+        ),
         (
             CommandId::NotificationClearImportant,
             format!("Clear all ! ({important})"),

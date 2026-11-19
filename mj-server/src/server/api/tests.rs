@@ -2960,6 +2960,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             no_project_memory: false,
             no_github_events: true,
             no_github_credentials: true,
+            notifications_ignored: false,
             at: None,
             branch: None,
             base: None,

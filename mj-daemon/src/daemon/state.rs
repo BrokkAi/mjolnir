@@ -365,6 +365,7 @@ impl RuntimeState {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,
