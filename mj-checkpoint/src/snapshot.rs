@@ -130,6 +130,9 @@ pub enum PushEvidence {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
+    /// False when origin_urls contains only a capture/restore source override.
+    #[serde(default = "source_had_origin_default")]
+    pub source_had_origin: bool,
     pub object_format: String,
     pub worktree_config_enabled: bool,
     pub origin_urls: Vec<String>,
@@ -153,6 +156,9 @@ pub struct WorkspaceSnapshot {
     pub remote_refs_stale: bool,
     /// Non-thin Git pack; `None` when origin already supplies every object.
     pub pack: Option<PathBuf>,
+}
+fn source_had_origin_default() -> bool {
+    true
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckoutOwnership {
@@ -426,10 +432,26 @@ pub struct WorkspaceInventory {
     pub worktrees: Vec<(PathBuf, WorkspaceInventory)>,
 }
 
-/// Disable maintenance at the capture boundary: lazy promisor fetches started
-/// by rev-list/pack-objects inherit these -c settings through Git's child config.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct OriginQueryKey {
+    repository: PathBuf,
+    arguments: Vec<OsString>,
+    configuration: [u8; 32],
+}
+type CachedOriginQuery = std::result::Result<crate::archive::GitOutput, String>;
+/// Capture owns network evidence for its duration and disables maintenance in
+/// every Git command, including lazy promisor fetches through child config.
 struct CaptureGit<'a> {
     inner: &'a dyn GitCommandRunner,
+    origin_queries: std::sync::Mutex<BTreeMap<OriginQueryKey, CachedOriginQuery>>,
+}
+impl<'a> CaptureGit<'a> {
+    fn new(inner: &'a dyn GitCommandRunner) -> Self {
+        Self {
+            inner,
+            origin_queries: Default::default(),
+        }
+    }
 }
 impl GitCommandRunner for CaptureGit<'_> {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
@@ -490,7 +512,79 @@ impl GitCommandRunner for CaptureGit<'_> {
         command.env.push(("GIT_NO_LAZY_FETCH".into(), "0".into()));
         // Inspection must not refresh or lock a user's real index.
         command.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
-        self.inner.run(repository, &command)
+        let named_origin_query = command
+            .arguments
+            .windows(2)
+            .any(|pair| pair[0] == "ls-remote" && pair[1] == "origin");
+        let objects_only_fetch = command.arguments.iter().any(|arg| arg == "fetch")
+            && command
+                .arguments
+                .iter()
+                .any(|arg| arg == "--no-write-fetch-head")
+            && command.arguments.iter().any(|arg| arg == "--refmap=");
+        if !named_origin_query && !objects_only_fetch {
+            return self.inner.run(repository, &command);
+        }
+        // Keep one network observation per effective configuration within this
+        // capture. Local refs, indexes, files and consent are still reread.
+        let config = self.inner.run(
+            repository,
+            &GitCommand {
+                arguments: [
+                    "-c",
+                    "gc.auto=0",
+                    "-c",
+                    "maintenance.auto=false",
+                    "config",
+                    "--null",
+                    "--list",
+                    "--includes",
+                ]
+                .map(OsString::from)
+                .to_vec(),
+                env: command.env.clone(),
+                ..Default::default()
+            },
+        )?;
+        ensure!(
+            config.status == 0,
+            "{}",
+            git_failure("read origin query configuration", &config)
+        );
+        let mut configuration = blake3::Hasher::new();
+        configuration.update(&config.stdout);
+        for (name, value) in &command.env {
+            for bytes in [name.as_encoded_bytes(), value.as_encoded_bytes()] {
+                configuration.update(&(bytes.len() as u64).to_be_bytes());
+                configuration.update(bytes);
+            }
+        }
+        let key = OriginQueryKey {
+            repository: repository.to_path_buf(),
+            arguments: command.arguments.clone(),
+            configuration: *configuration.finalize().as_bytes(),
+        };
+        let cached = self
+            .origin_queries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("origin query cache poisoned"))?
+            .get(&key)
+            .cloned();
+        let result = if let Some(cached) = cached {
+            cached
+        } else {
+            let observed = self
+                .inner
+                .run(repository, &command)
+                .map_err(|error| format!("{error:#}"));
+            self.origin_queries
+                .lock()
+                .map_err(|_| anyhow::anyhow!("origin query cache poisoned"))?
+                .entry(key)
+                .or_insert(observed)
+                .clone()
+        };
+        result.map_err(anyhow::Error::msg)
     }
 }
 
@@ -2269,7 +2363,7 @@ fn write_snapshot_pack(
     tips: &[String],
     exclusions: &[String],
     base: &Path,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<tempfile::TempPath>> {
     let mut tips = tips.to_vec();
     tips.sort();
     tips.dedup();
@@ -2286,6 +2380,10 @@ fn write_snapshot_pack(
     if let Some(parent) = base.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Git owns its scratch files until it exits; the directory then removes
+    // incomplete packs on every failure before any final artifact is published.
+    let scratch = tempfile::tempdir_in(base.parent().context("pack has no parent")?)?;
+    let scratch_base = scratch.path().join("objects");
     // A snapshot has one pack artifact; ignore repository-configured splitting.
     let output = runner.run(
         checkout,
@@ -2295,7 +2393,7 @@ fn write_snapshot_pack(
                 "pack.packSizeLimit=0".into(),
                 "pack-objects".into(),
                 "--revs".into(),
-                base.as_os_str().to_owned(),
+                scratch_base.as_os_str().to_owned(),
             ],
             stdin: revisions.into_bytes(),
             ..Default::default()
@@ -2311,19 +2409,33 @@ fn write_snapshot_pack(
         (hash.len() == 40 || hash.len() == 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "Git returned an invalid pack hash"
     );
-    let path = append_pack_extension(&base, &hash, "pack");
+    let path = append_pack_extension(&scratch_base, &hash, "pack");
     let mut header = [0_u8; 12];
     fs::File::open(&path)?.read_exact(&mut header)?;
     ensure!(
         header.starts_with(b"PACK"),
         "Git returned an invalid snapshot pack"
     );
-    fs::remove_file(append_pack_extension(&base, &hash, "idx"))?;
     if header[8..12] == [0, 0, 0, 0] {
         fs::remove_file(path)?;
         Ok(None)
     } else {
-        Ok(Some(path))
+        let mut published =
+            tempfile::TempPath::try_from_path(append_pack_extension(&base, &hash, "pack"))?;
+        let produced = tempfile::NamedTempFile::from_parts(
+            fs::File::open(&path)?,
+            tempfile::TempPath::try_from_path(path)?,
+        );
+        match produced.persist_noclobber(&published) {
+            Ok(file) => drop(file),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // An earlier successful snapshot may own this exact pack.
+                // A failed retry must not remove its already published file.
+                published.disable_cleanup(true);
+            }
+            Err(error) => return Err(error).context("publish snapshot pack"),
+        }
+        Ok(Some(published))
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2370,7 +2482,7 @@ fn estimate_delta_with_source(
     origin_override: Option<String>,
     source: &ExclusionSource,
 ) -> Result<DeltaEstimate> {
-    let capture = CaptureGit { inner: runner };
+    let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
     let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
     let remote = if configured.status == 0 {
@@ -2581,7 +2693,7 @@ pub fn capture_session_snapshot(
     repositories: &[RepositoryInput],
     consent: &SessionCaptureConsent,
 ) -> Result<SessionSnapshot> {
-    let capture = CaptureGit { inner: runner };
+    let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
     let none = CaptureConsent {
         untracked: UntrackedConsent::None,
@@ -2631,6 +2743,7 @@ pub fn capture_session_snapshot(
         .map_err(|error| session_error(&repository.id, error))?;
     }
     let mut snapshots = BTreeMap::new();
+    let mut pending_packs = Vec::new();
     for repository in repositories {
         if matches!(inventories[&repository.id], CaptureMode::InPlaceOnly) {
             snapshots.insert(
@@ -2644,6 +2757,7 @@ pub fn capture_session_snapshot(
             repository,
             consent.repositories.get(&repository.id).unwrap_or(&none),
             &repository_key(&repository.id),
+            &mut pending_packs,
         )
         .map_err(|error| session_error(&repository.id, error))?;
         snapshots.insert(repository.id.clone(), snapshot);
@@ -2660,6 +2774,9 @@ pub fn capture_session_snapshot(
             consent.repositories.get(&repository.id).unwrap_or(&none),
         )
         .map_err(|error| session_error(&repository.id, error))?;
+    }
+    for pack in &mut pending_packs {
+        pack.disable_cleanup(true);
     }
     Ok(SessionSnapshot {
         repositories: snapshots,
@@ -2741,6 +2858,7 @@ fn capture_in_place_metadata(
     Ok(WorkspaceSnapshot {
         object_format: git_text(runner, checkout, ["rev-parse", "--show-object-format"])?,
         worktree_config_enabled: worktree_config_enabled(runner, checkout)?,
+        source_had_origin: false,
         origin_urls: Vec::new(),
         push_urls: Vec::new(),
         push_evidence: PushEvidence::Unavailable {
@@ -2771,6 +2889,7 @@ fn capture_prepared_workspace(
     repository: &RepositoryInput,
     consent: &CaptureConsent,
     key: &CheckoutKey,
+    pending_packs: &mut Vec<tempfile::TempPath>,
 ) -> Result<WorkspaceSnapshot> {
     let checkout = repository.checkout.as_path();
     let ownership = &repository.ownership;
@@ -3022,7 +3141,10 @@ fn capture_prepared_workspace(
                 .into());
             }
         }
-        let pack = write_snapshot_pack(runner, checkout, &tips, &exclusions.objects, pack_path)?;
+        let owned_pack =
+            write_snapshot_pack(runner, checkout, &tips, &exclusions.objects, pack_path)?;
+        let pack = owned_pack.as_ref().map(|path| path.to_path_buf());
+        pending_packs.extend(owned_pack);
         check_repository_consent(
             repository,
             &repository_inventory(runner, repository)?,
@@ -3042,6 +3164,7 @@ fn capture_prepared_workspace(
         }
         tracking.retain(|_, tracking| tracking.remote.as_deref() == Some("origin"));
         return Ok(WorkspaceSnapshot {
+            source_had_origin: has_origin,
             object_format,
             worktree_config_enabled,
             origin_urls,
@@ -3254,7 +3377,7 @@ pub fn workspace_inventory(
     checkout: &Path,
     ownership: &CheckoutOwnership,
 ) -> Result<WorkspaceInventory> {
-    let capture = CaptureGit { inner: runner };
+    let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
     workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default(), None)
 }
@@ -3262,7 +3385,7 @@ pub fn session_inventory(
     runner: &dyn GitCommandRunner,
     repositories: &[RepositoryInput],
 ) -> Result<BTreeMap<String, WorkspaceInventory>> {
-    let capture = CaptureGit { inner: runner };
+    let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
     let mut result = BTreeMap::new();
     for repository in repositories {
@@ -4115,16 +4238,16 @@ fn fetch_missing_object(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     oid: &str,
-    allowed: bool,
+    remote: Option<&str>,
     attempted: &mut std::collections::BTreeSet<String>,
     failures: &mut Vec<String>,
 ) -> Result<()> {
     if attempted.insert(oid.to_owned()) {
-        if !allowed {
+        let Some(remote) = remote else {
             failures.push(format!("origin fetch is disabled for missing object {oid}"));
             return Ok(());
-        }
-        match run_git(runner, checkout, ["fetch", "origin", oid], &[]) {
+        };
+        match run_git(runner, checkout, ["fetch", remote, oid], &[]) {
             Ok(output) if output.status == 0 => {}
             Ok(output) => {
                 failures.push(git_failure("fetch missing snapshot object", &output).to_string())
@@ -4394,7 +4517,9 @@ pub fn restore_workspace_snapshot(
                 )?;
             }
             restore_worktree_rules(runner, destination, &snapshot.worktree_url_rules)?;
-            if let Some(first) = snapshot.origin_urls.first() {
+            if snapshot.source_had_origin
+                && let Some(first) = snapshot.origin_urls.first()
+            {
                 git_text(
                     runner,
                     destination,
@@ -4464,6 +4589,13 @@ pub fn restore_workspace_snapshot(
     }
     tips.sort();
     tips.dedup();
+    let fetch_remote = if !allow_origin_fetch {
+        None
+    } else if matches!(base, RestoreBase::Provisioned { .. }) && !snapshot.source_had_origin {
+        snapshot.origin_urls.first().map(String::as_str)
+    } else {
+        Some("origin")
+    };
     let mut attempted = std::collections::BTreeSet::new();
     let mut fetch_failures = Vec::new();
     for oid in missing_tips(runner, destination, &tips)? {
@@ -4471,7 +4603,7 @@ pub fn restore_workspace_snapshot(
             runner,
             destination,
             &oid,
-            allow_origin_fetch,
+            fetch_remote,
             &mut attempted,
             &mut fetch_failures,
         )?;
@@ -4568,7 +4700,7 @@ pub fn restore_workspace_snapshot(
                     runner,
                     destination,
                     std::str::from_utf8(oid)?,
-                    allow_origin_fetch,
+                    fetch_remote,
                     &mut attempted,
                     &mut fetch_failures,
                 )?;
@@ -7137,6 +7269,8 @@ mod tests {
             }
         }
         let r = Repo::new();
+        r.commit("nonempty snapshot pack\n");
+        let previous = r.capture(&CheckoutOwnership::Managed).pack.unwrap();
         let error = capture_workspace_snapshot(
             &WritingGit(r.checkout.clone()),
             &r.checkout,
@@ -7152,6 +7286,19 @@ mod tests {
         assert!(
             matches!(error.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(items)) if items == &vec![item_path(&r.checkout, "new-during-pack")])
         );
+        assert!(
+            previous.exists(),
+            "a failed retry deleted an earlier successful pack"
+        );
+        let packs = fs::read_dir(r.temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(packs, vec![previous]);
     }
     #[test]
     fn cutoff_exclusions_pack_published_session_work_without_origin_fetch() {
@@ -7159,12 +7306,13 @@ mod tests {
         let cutoff = git(&r.checkout, &["rev-parse", "HEAD"]);
         r.commit("published beyond cutoff\n");
         git(&r.checkout, &["push", "origin", "main"]);
+        git(&r.checkout, &["remote", "remove", "origin"]);
         let repository = RepositoryInput {
             in_container: false,
             id: "cutoff".into(),
             checkout: r.checkout.clone(),
             ownership: CheckoutOwnership::Managed,
-            origin_override: None,
+            origin_override: Some(r.origin.to_str().unwrap().to_owned()),
             pack_path: r.temp.path().join("cutoff.pack"),
             exclusions: ExclusionSource::Commits(vec![cutoff.clone()]),
             keep_dir: None,
@@ -7181,6 +7329,7 @@ mod tests {
         let estimate = estimate_repository_delta(&FileGit, &repository).unwrap();
         let session = capture_session_snapshot(&FileGit, &[repository], &consent).unwrap();
         let snapshot = &session.repositories["cutoff"];
+        assert!(!snapshot.source_had_origin);
         assert!(snapshot.pack.is_some());
         assert_eq!(
             estimate.total_bytes,
@@ -7202,6 +7351,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(git(&destination, &["remote"]).is_empty());
         assert_eq!(
             git(&destination, &["rev-parse", "HEAD"]),
             snapshot.head.commit()
@@ -11496,7 +11646,7 @@ mod tests {
         git(&root.checkout, &["push", "--force", "origin", "HEAD:main"]);
         git(&partial, &["fetch", "origin"]);
         git_text(
-            &CaptureGit { inner: &FileGit },
+            &CaptureGit::new(&FileGit),
             &partial,
             ["checkout", "-B", "main", "origin/main"],
         )
@@ -11515,5 +11665,224 @@ mod tests {
             historical.trim_end_matches('\n')
         );
         git(&restored, &["fsck", "--full"]);
+    }
+    // Hard-won: 267680121: legacy worktree porcelain C-quoted paths were silently omitted.
+    #[cfg(unix)]
+    #[test]
+    fn integration_review_legacy_git_preserves_quoted_nested_worktree_paths() {
+        let root = Repo::new();
+        let relative = Path::new("lanes/tab\tquote\"slash\\café");
+        let nested = root.checkout.join(relative);
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        );
+        fs::write(nested.join("file"), "unpublished nested commit\n").unwrap();
+        git(&nested, &["commit", "-am", "nested commit"]);
+        fs::write(nested.join("file"), "nested working edits\n").unwrap();
+        let snapshot = capture_workspace_snapshot(
+            &crate::test_support::Git231,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("quoted.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(snapshot.worktrees.len(), 1);
+        assert_eq!(snapshot.worktrees[0].relative_path, relative);
+        let restored = root.restore(&snapshot, None).join(relative);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD"]),
+            git(&nested, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(git(&restored, &["diff"]), git(&nested, &["diff"]));
+    }
+    // Hard-won: 267680121: an override fetch source became an origin in provisioned no-origin checkouts.
+    #[test]
+    fn integration_review_source_override_fetches_without_adding_provisioned_origin() {
+        let root = Repo::new();
+        git(&root.checkout, &["remote", "remove", "origin"]);
+        let snapshot = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("override.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::None,
+                operations: OperationConsent::None,
+            },
+            Some(root.origin.to_str().unwrap().to_owned()),
+        )
+        .unwrap();
+        assert!(!snapshot.source_had_origin);
+        let destination = root.temp.path().join("provisioned");
+        git(root.temp.path(), &["init", destination.to_str().unwrap()]);
+        restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            git(&destination, &["rev-parse", "HEAD"]),
+            snapshot.head.commit()
+        );
+        assert!(git(&destination, &["remote"]).is_empty());
+        let cloned = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&cloned, &["remote", "get-url", "origin"]),
+            root.origin.to_str().unwrap()
+        );
+        let mut old = serde_json::to_value(&snapshot).unwrap();
+        old.as_object_mut().unwrap().remove("source_had_origin");
+        assert!(
+            serde_json::from_value::<WorkspaceSnapshot>(old)
+                .unwrap()
+                .source_had_origin
+        );
+    }
+
+    // Hard-won: 267680121: a later repository failure leaked every earlier completed snapshot pack.
+    #[test]
+    fn integration_review_failed_session_cleans_all_new_snapshot_packs() {
+        struct NewFileAfterPack(PathBuf);
+        impl GitCommandRunner for NewFileAfterPack {
+            fn run(
+                &self,
+                repository: &Path,
+                command: &GitCommand,
+            ) -> Result<crate::archive::GitOutput> {
+                let output = FileGit.run(repository, command)?;
+                if repository == self.0 && command.arguments.iter().any(|arg| arg == "pack-objects")
+                {
+                    fs::write(repository.join("late-note"), "needs consent")?;
+                }
+                Ok(output)
+            }
+        }
+        let first = Repo::new();
+        let second = Repo::new();
+        first.commit("first unpublished work\n");
+        second.commit("second unpublished work\n");
+        let inputs = [("first", &first), ("second", &second)].map(|(id, root)| RepositoryInput {
+            in_container: false,
+            id: id.into(),
+            checkout: root.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: root.temp.path().join("session"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: None,
+        });
+        let error = capture_session_snapshot(
+            &NewFileAfterPack(second.checkout.clone()),
+            &inputs,
+            &SessionCaptureConsent::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
+            "{error:#}"
+        );
+        for root in [&first, &second] {
+            assert!(
+                fs::read_dir(root.temp.path()).unwrap().all(|entry| {
+                    let name = entry.unwrap().file_name();
+                    name == "checkout" || name == "origin.git"
+                }),
+                "failed session left pack artifacts"
+            );
+        }
+    }
+
+    // Hard-won: 267680121: each inventory repeated a submodule's unreachable-origin round trip.
+    #[test]
+    fn integration_review_capture_reuses_network_evidence_but_rechecks_local_consent() {
+        struct CountOrigin {
+            module: PathBuf,
+            root: PathBuf,
+            queries: std::sync::atomic::AtomicUsize,
+            add_note: std::sync::atomic::AtomicBool,
+        }
+        impl GitCommandRunner for CountOrigin {
+            fn run(
+                &self,
+                repository: &Path,
+                command: &GitCommand,
+            ) -> Result<crate::archive::GitOutput> {
+                let args = git_arguments(command);
+                if repository == self.module
+                    && args.starts_with(&["ls-remote".into(), "origin".into()])
+                {
+                    self.queries
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let output = FileGit.run(repository, command)?;
+                if repository == self.root
+                    && args.iter().any(|arg| arg == "pack-objects")
+                    && self
+                        .add_note
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    fs::write(repository.join("late-note"), "local consent must be reread")?;
+                }
+                Ok(output)
+            }
+        }
+        let root = Repo::new();
+        let module = Repo::new();
+        let module_path = add_submodule(&root, &module);
+        fs::rename(&module.origin, module.temp.path().join("offline.git")).unwrap();
+        let runner = CountOrigin {
+            module: module_path,
+            root: root.checkout.clone(),
+            queries: 0.into(),
+            add_note: false.into(),
+        };
+        let consent = CaptureConsent {
+            untracked: UntrackedConsent::None,
+            operations: OperationConsent::None,
+        };
+        let first = capture_workspace_snapshot(
+            &runner,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("cache.pack"),
+            &consent,
+            None,
+        )
+        .unwrap();
+        assert!(first.remote_refs_stale);
+        assert_eq!(runner.queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        runner
+            .add_note
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = capture_workspace_snapshot(
+            &runner,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("cache.pack"),
+            &consent,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
+            "{error:#}"
+        );
+        assert_eq!(runner.queries.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

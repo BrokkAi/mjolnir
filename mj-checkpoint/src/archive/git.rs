@@ -2057,6 +2057,51 @@ struct PreparedWorktree {
     operation: Option<operation::CollectedOperation>,
 }
 
+/// Without -z, Git C-quotes paths (including octal-escaped raw bytes).
+fn legacy_worktree_path(path: &[u8]) -> Result<PathBuf> {
+    let Some(quoted) = path.strip_prefix(b"\"") else {
+        return mj_core::path_input::from_git_bytes(path);
+    };
+    let mut quoted = quoted
+        .strip_suffix(b"\"")
+        .context("unterminated quoted worktree path")?;
+    let mut decoded = Vec::new();
+    while let Some((&byte, rest)) = quoted.split_first() {
+        quoted = rest;
+        if byte != b'\\' {
+            decoded.push(byte);
+            continue;
+        }
+        let (&escape, rest) = quoted
+            .split_first()
+            .context("incomplete worktree path escape")?;
+        quoted = rest;
+        decoded.push(match escape {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            b'\\' | b'"' => escape,
+            b'0'..=b'7' => {
+                ensure!(
+                    quoted.len() >= 2 && quoted[..2].iter().all(|byte| matches!(byte, b'0'..=b'7')),
+                    "invalid octal worktree path escape"
+                );
+                let value = u16::from(escape - b'0') * 64
+                    + u16::from(quoted[0] - b'0') * 8
+                    + u16::from(quoted[1] - b'0');
+                quoted = &quoted[2..];
+                u8::try_from(value).context("worktree path octal escape exceeds one byte")?
+            }
+            _ => anyhow::bail!("invalid worktree path escape"),
+        });
+    }
+    mj_core::path_input::from_git_bytes(&decoded)
+}
+
 /// The linked worktrees of `repository`'s checkout that live inside it, at any
 /// depth, parents before children.
 ///
@@ -2130,7 +2175,11 @@ pub(crate) fn discover_linked_worktrees(
         let Some(path) = line.strip_prefix(b"worktree ") else {
             continue;
         };
-        let path = mj_core::path_input::from_git_bytes(path)?;
+        let path = if delimiter == b'\n' {
+            legacy_worktree_path(path)?
+        } else {
+            mj_core::path_input::from_git_bytes(path)?
+        };
         // `worktree list` names the user's worktrees anywhere on disk. Only a
         // path that can lie inside the checkout may fail the capture, so
         // decide that lexically, against the top level as given and resolved.
