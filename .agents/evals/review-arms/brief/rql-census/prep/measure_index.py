@@ -43,6 +43,12 @@ STOP_SECONDS = 120
 # SIGTERM/SIGINT never raise into the driver: they set a cancellation flag, which the request and readiness
 # waits poll, so cancellation always runs through the ordinary teardown path (one owner, no
 # window between launching a server and protecting it).
+# The host lock's descriptor, passed to every systemd-run launch (server and git). flock locks
+# belong to the open file description, so the lock stays held while any process from this
+# batch still has it - including a launch still registering its scope after the driver died -
+# and a replacement driver can't start until all of them are gone.
+HOST_LOCK_FDS = ()
+
 _CANCELLED = [False]  # written only by the signal handler; a plain flag takes no lock
 
 
@@ -53,8 +59,11 @@ def cancelled():
 def cancellable_sleep(seconds):
     """Sleep in short slices; True if the batch was cancelled meanwhile."""
     end = time.monotonic() + seconds
-    while time.monotonic() < end and not cancelled():
-        time.sleep(min(0.2, end - time.monotonic()))
+    while not cancelled():
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.2, remaining))
     return cancelled()
 
 
@@ -75,11 +84,13 @@ class Server:
         # and every process it starts, enforces the memory cap on that whole tree, and its
         # memory.peak is the tree's peak, not just the parent's VmHWM.
         self.unit = f"rql-bifrost-{os.getpid()}-{time.monotonic_ns()}"
+        self.peak_lock = threading.Lock()
         self.proc = subprocess.Popen(
             ["systemd-run", "--user", "--scope", "--quiet", f"--unit={self.unit}",
              "-p", f"MemoryMax={MEMORY_MAX}", "-p", "MemorySwapMax=0",
              binary, "--root", str(root), "--mcp", "extended|workspace"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env, cwd=root)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env, cwd=root,
+            pass_fds=HOST_LOCK_FDS)
         try:
             self._start()
         except BaseException:
@@ -107,7 +118,8 @@ class Server:
         threading.Thread(target=self._sample, daemon=True).start()
 
     def note_peak(self, kib):
-        self.sample["peak_tree_kib"] = max(kib, self.sample.get("peak_tree_kib") or 0)
+        with self.peak_lock:  # sampler thread and driver both report; the maximum must win
+            self.sample["peak_tree_kib"] = max(kib, self.sample.get("peak_tree_kib") or 0)
 
     def _cgroup_dir(self):
         """The server's own scope cgroup, or None until systemd-run has moved the process into it
@@ -364,7 +376,8 @@ def git(*args, cwd=None):
     # the next run before it touches the clone or worktree.
     unit = f"rql-git-{os.getpid()}-{time.monotonic_ns()}"
     proc = subprocess.Popen(["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
-                             "git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             "git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            pass_fds=HOST_LOCK_FDS)
     while True:
         try:
             out, err = proc.communicate(timeout=1)
@@ -442,6 +455,8 @@ def main():
     try:
         lock = open("/var/tmp/rql-index-measure.lock", "a")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        global HOST_LOCK_FDS
+        HOST_LOCK_FDS = (lock.fileno(),)
     except (BlockingIOError, PermissionError) as e:
         sys.exit(f"another measure_index.py holds this host ({e!r})")
     reap_leftover_scopes()
