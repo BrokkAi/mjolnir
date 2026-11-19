@@ -870,7 +870,7 @@ async fn reconcile_profile_observed(
         return Vec::new();
     };
     if let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync)
-        && profile.refresh(runtime, target).await
+        && profile.refresh(runtime, target, log.cause.is_some()).await
         && log.targeted
     {
         profile.send(PassEvent::Pulled(target.profile_id.clone()));
@@ -1396,20 +1396,19 @@ async fn reconcile_target(
     }
     .await;
     // The session whose authentication failure asked for this sync learns
-    // whether its rejected token is the profile's current one from a reading
-    // taken under the native login lock, not from the pass's earlier one: a
+    // whether its rejected token is the profile's current one only from a
+    // login read under the native lock, which the pass also delivered: a
     // renewal in progress would otherwise make the old login look refused.
+    // Without that reading the verdict is unknown.
     if *triggered_by == Some(target.session_id.as_str())
         && target.harness == mj_core::config::HarnessKind::Claude
         && !target.skips_login_file_sync
         && let Ok(Some(sync)) = &mut result
-        && sync.current_access_token.is_some()
+        && !profile
+            .for_target(target)
+            .is_ok_and(|login| login.read_under_lock)
     {
-        sync.current_access_token = claude_access_token_under_lock(target.harness.login_store(
-            mj_core::config::HarnessHost::current(),
-            &target.profile_home,
-        ))
-        .await;
+        sync.current_access_token = None;
     }
     let deferred = matches!(&result, Err(error) if RelayJobDeferred::marks(error));
     let awaits_worker_observation = runtime.is_some()
@@ -2231,6 +2230,7 @@ impl CanonicalSkills {
 }
 
 /// The profile's login as the controller holds it.
+#[derive(Clone)]
 pub(super) struct CanonicalLogin {
     profile_home: std::path::PathBuf,
     harness: mj_core::config::HarnessKind,
@@ -2238,6 +2238,10 @@ pub(super) struct CanonicalLogin {
     pub(super) access: LoginAccess,
     pub(super) credential: CredentialSnapshot,
     pub(super) bytes: Vec<u8>,
+    /// Read while holding the native login lock, so no renewal was in
+    /// progress: only such a reading can say whether a rejected token was the
+    /// profile's current one.
+    read_under_lock: bool,
 }
 
 /// A login as read from where its store keeps it.
@@ -2446,10 +2450,11 @@ impl ProfileLogin {
         &self,
         runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
+        under_lock: bool,
     ) -> bool {
         let _decision = self.decide.lock().await;
         let before = self.for_target(target).ok();
-        let login = self.read(target).await;
+        let login = self.read(target, under_lock).await;
         if runtime.is_some_and(|runtime| !runtime.credential_profile_source_is_current(target)) {
             return false;
         }
@@ -2459,13 +2464,55 @@ impl ProfileLogin {
         changed && before.is_some()
     }
 
-    async fn read(&self, target: &CredentialSyncTarget) -> Result<Arc<CanonicalLogin>, String> {
-        let target = target.clone();
-        tokio::task::spawn_blocking(move || read_canonical_login(&target, &PassLogin::PerSession))
+    /// The profile's login for this pass, read once: the pass delivers it and
+    /// judges an authentication failure against it, so the two cannot see
+    /// different logins. A pass that follows an authentication failure
+    /// (`under_lock`) reads a Claude login under the native lock, which waits
+    /// for a renewal in progress. If the lock cannot be taken in time the
+    /// login is read plainly (a worker keeps the newer login, so delivering it
+    /// is safe) and the reading is not marked as taken under the lock.
+    async fn read(
+        &self,
+        target: &CredentialSyncTarget,
+        under_lock: bool,
+    ) -> Result<Arc<CanonicalLogin>, String> {
+        let plain = |target: CredentialSyncTarget| async move {
+            tokio::task::spawn_blocking(move || {
+                read_canonical_login(&target, &PassLogin::PerSession)
+            })
             .await
             .context("profile login reader stopped")
             .and_then(|result| result)
             .map_err(|error| format!("{error:#}"))
+        };
+        if under_lock
+            && target.harness == mj_core::config::HarnessKind::Claude
+            && !target.skips_login_file_sync
+        {
+            let store = target.harness.login_store(
+                mj_core::config::HarnessHost::current(),
+                &target.profile_home,
+            );
+            let locked_target = target.clone();
+            if let Some(login) = mj_core::credentials::read_login_under_native_lock(
+                target.harness,
+                &store,
+                mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT,
+                move || read_canonical_login(&locked_target, &PassLogin::PerSession),
+            )
+            .await
+            {
+                return login
+                    .map(|login| {
+                        let mut login =
+                            Arc::try_unwrap(login).unwrap_or_else(|shared| shared.as_ref().clone());
+                        login.read_under_lock = true;
+                        Arc::new(login)
+                    })
+                    .map_err(|error| format!("{error:#}"));
+            }
+        }
+        plain(target.clone()).await
     }
 
     fn for_target(&self, target: &CredentialSyncTarget) -> Result<Arc<CanonicalLogin>> {
@@ -2536,7 +2583,8 @@ impl ProfileLogin {
         if installed.installed || installed.snapshot != login.credential {
             // A pull and the host's own concurrent renewal both invalidate the
             // deliveries selected against the previous generation.
-            self.current.send_replace(Some(self.read(target).await));
+            self.current
+                .send_replace(Some(self.read(target, false).await));
             self.send(PassEvent::Pulled(target.profile_id.clone()));
         }
         Ok(installed)
@@ -2580,6 +2628,7 @@ fn read_canonical_login(
         bytes,
         profile_home: target.profile_home.clone(),
         harness: kind,
+        read_under_lock: false,
     }))
 }
 

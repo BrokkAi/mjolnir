@@ -623,6 +623,18 @@ impl QuotaWait {
     }
 }
 
+/// The profiles' host logins read for one batch of children, one reading per
+/// profile. It lives only as long as the batch.
+#[derive(Default)]
+struct BatchLogins(
+    std::sync::Mutex<
+        BTreeMap<
+            String,
+            Arc<tokio::sync::OnceCell<Option<mj_core::credentials::LoginFingerprint>>>,
+        >,
+    >,
+);
+
 impl ApiBackend {
     pub(crate) async fn discover_profile_candidates(
         &self,
@@ -1728,13 +1740,32 @@ impl ApiBackend {
             ChildProgress,
         )],
     ) -> Result<()> {
-        for (id, _, progress) in children {
+        // One reading of each profile's login for the whole batch (read under
+        // the native login lock, which can take a while during a renewal), and
+        // the children resolved together so distinct profiles wait together.
+        let logins = BatchLogins::default();
+        let resolved = futures::future::join_all(
+            children
+                .iter_mut()
+                .map(|(id, _, progress)| self.resolve_child_state(id, progress, &logins)),
+        )
+        .await;
+        resolved.into_iter().collect()
+    }
+
+    async fn resolve_child_state(
+        &self,
+        id: &str,
+        progress: &mut ChildProgress,
+        logins: &BatchLogins,
+    ) -> Result<()> {
+        {
             let record = self.exports.session_record(id);
             let view = if record
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state))
             {
-                self.session_handle(id.clone())
+                self.session_handle(id.to_owned())
                     .await?
                     .map(|handle| handle.view())
             } else {
@@ -1766,7 +1797,7 @@ impl ApiBackend {
                 })
             {
                 progress.state = ChildState::WaitingForWorker;
-                continue;
+                return Ok(());
             }
             let state = self
                 .child_state(
@@ -1774,6 +1805,7 @@ impl ApiBackend {
                     progress,
                     record.as_ref().map(|record| record.last_profile.as_str()),
                     connected.is_some(),
+                    logins,
                 )
                 .await?;
             progress.state = if active
@@ -1794,6 +1826,7 @@ impl ApiBackend {
         progress: &ChildProgress,
         profile: Option<&str>,
         actor_connected: bool,
+        logins: &BatchLogins,
     ) -> Result<ChildState> {
         use mj_core::credentials::CredentialSyncCause;
         if let Some(error) = &progress.wake_error {
@@ -1803,7 +1836,9 @@ impl ApiBackend {
                 staged_login,
             }) = evidence
             {
-                let current = self.current_child_profile_login(&profile_id).await?;
+                let current = self
+                    .current_child_profile_login(&profile_id, logins)
+                    .await?;
                 let verdict = self
                     .rejected_logins
                     .lock()
@@ -1833,7 +1868,7 @@ impl ApiBackend {
             })
             .await?;
             let profile = selection.map_or_else(|| profile.to_owned(), |(profile, _)| profile);
-            let current = self.current_child_profile_login(&profile).await?;
+            let current = self.current_child_profile_login(&profile, logins).await?;
             let verdict = self
                 .rejected_logins
                 .lock()
@@ -1864,6 +1899,23 @@ impl ApiBackend {
     }
 
     async fn current_child_profile_login(
+        &self,
+        profile_id: &str,
+        logins: &BatchLogins,
+    ) -> Result<Option<mj_core::credentials::LoginFingerprint>> {
+        let cell = logins
+            .0
+            .lock()
+            .map_err(|_| anyhow!("batch login table poisoned"))?
+            .entry(profile_id.to_owned())
+            .or_default()
+            .clone();
+        cell.get_or_try_init(|| self.read_child_profile_login(profile_id))
+            .await
+            .cloned()
+    }
+
+    async fn read_child_profile_login(
         &self,
         profile_id: &str,
     ) -> Result<Option<mj_core::credentials::LoginFingerprint>> {

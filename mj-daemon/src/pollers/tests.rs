@@ -882,7 +882,7 @@ mv "$CLAUDE_CONFIG_DIR/.credentials.json.new" "$CLAUDE_CONFIG_DIR/.credentials.j
 async fn another_daemons_claude_login_change_is_forwarded_to_policy() {
     let directory = tempfile::tempdir().unwrap();
     let (request, credentials) =
-        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
     let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
         grants: vec![request.clone()],
         ..Default::default()
@@ -896,7 +896,23 @@ async fn another_daemons_claude_login_change_is_forwarded_to_policy() {
         Some(sender),
     ));
 
-    assert_quiet(&mut updates).await;
+    // The login starts due, so the loop's first check renews it. That update
+    // proves the loop has observed its baseline before the file changes.
+    let first = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            first,
+            QuotaUpdate::ClaudeGrant {
+                check: mj_controller::quota::ClaudeGrantCheck::Renewed { .. },
+                login_changed: false,
+                ..
+            }
+        ),
+        "{first:?}"
+    );
     let expires_at_ms = mj_core::clock::epoch_millis() + 9 * ONE_HOUR_MS;
     std::fs::write(
         credentials,
