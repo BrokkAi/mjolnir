@@ -1048,13 +1048,12 @@ mod tests {
         connection.execute("INSERT INTO session_moves(session_id,operation_id,operation_json) VALUES (?1,'old-move',?2)",params![parent.id,operation.to_string()]).unwrap();
         connection.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES ('old-move',?1,?2,'[]','now')",params![parent.id,serde_json::to_string(&source_json).unwrap()]).unwrap();
         connection.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE sessions SET harness_kind='removed-harness' WHERE session_id='33333333333333333333333333333333';
-            PRAGMA ignore_check_constraints=OFF; ALTER TABLE session_moves DROP COLUMN source_environment_id; ALTER TABLE retained_move_sources DROP COLUMN environment_id; DROP TRIGGER environment_report_registered; DROP TRIGGER environment_report_updated; DROP TRIGGER reclaimed_environment_owner_deleted; DROP TRIGGER reclaimed_environment_binding_deleted; DROP TABLE environment_reports; DROP TABLE environment_bindings; DROP TABLE environment_workers; DROP TABLE environments;
-            DELETE FROM schema_migrations WHERE version>=122;
+            PRAGMA ignore_check_constraints=OFF;").unwrap();
+        super::super::schema::drop_environment_schema(&connection);
+        connection.execute_batch("DELETE FROM schema_migrations WHERE version>=122;
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;
             CREATE TRIGGER interrupt_ownership_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=122 BEGIN SELECT RAISE(ABORT,'fixture interruption'); END;").unwrap();
-        super::super::legacy_schema::ensure_session_container_override_columns(&connection)
-            .unwrap();
         assert!(super::super::schema::migrate_schema(&connection).is_err());
         assert_eq!(
             connection
