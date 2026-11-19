@@ -5956,6 +5956,13 @@ mod terminals {
     fn start_scripted_runtime_with_owner(
         terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
     ) -> ScriptedRuntime {
+        start_scripted_runtime_with_pause(terminal_owner, None)
+    }
+
+    fn start_scripted_runtime_with_pause(
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+        mut pause: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    ) -> ScriptedRuntime {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let (scripted_tx, scripted_rx) = mpsc::unbounded_channel();
         let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -5977,6 +5984,12 @@ mod terminals {
         let events = tokio::spawn(async move {
             let mut in_flight = BTreeMap::new();
             while let Some(event) = event_rx.recv().await {
+                if matches!(&event, RuntimeEvent::SessionUpdate { update } if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("agent_message_chunk"))
+                    && let Some((reached, release)) = pause.take()
+                {
+                    reached.send(()).unwrap();
+                    release.await.unwrap();
+                }
                 if let Some(owner) = event_owner.as_ref().and_then(std::sync::Weak::upgrade) {
                     crate::worker_runtime::record_runtime_event(
                         &owner,
@@ -6101,6 +6114,64 @@ mod terminals {
             .to_owned()
     }
 
+    // Hard-won: 1f0ee89: synchronous terminal card admission overtook an earlier ACP chunk.
+    #[tokio::test]
+    async fn terminal_admission_preserves_queued_assistant_output_order() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-order", "test").unwrap(),
+        ));
+        let (reached, paused) = oneshot::channel();
+        let (release, resumed) = oneshot::channel();
+        let mut runtime = start_scripted_runtime_with_pause(
+            Some(Arc::downgrade(&owner)),
+            Some((reached, resumed)),
+        );
+        runtime.agent.scripted.send(serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{
+                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Introducing the terminal"}
+            }}
+        })).unwrap();
+        tokio::time::timeout(ANSWER_TIMEOUT, paused)
+            .await
+            .unwrap()
+            .unwrap();
+        let terminal = create_terminal(
+            &mut runtime.agent,
+            serde_json::json!({
+                "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "sleep 600"]
+            }),
+        )
+        .await;
+        let mut cut = owner.lock().unwrap().reserve_live_baseline();
+        assert!(
+            cut.try_recv().is_err(),
+            "inventory blocks the cut before the FIFO is drained"
+        );
+        release.send(()).unwrap();
+        runtime
+            .agent
+            .call("terminal/kill", terminal_params(&terminal))
+            .await;
+        tokio::time::timeout(ANSWER_TIMEOUT, cut)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let events = owner
+            .lock()
+            .unwrap()
+            .events_after(0, crate::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap();
+        let chunk = events.iter().position(|event| matches!(&event.observation, mj_core::relay::RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), SessionUpdate::AgentMessageChunk(_)))).unwrap();
+        let card = events.iter().position(|event| matches!(&event.observation, mj_core::relay::RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), SessionUpdate::ToolCall(_)))).unwrap();
+        assert!(
+            chunk < card,
+            "a later terminal card cannot precede the queued introduction"
+        );
+        runtime.stop().await;
+    }
+
     #[tokio::test]
     async fn terminal_spawn_failure_releases_its_cut_registration() {
         let root = tempfile::tempdir().unwrap();
@@ -6121,6 +6192,20 @@ mod terminals {
             "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "exit 0"], "cwd":root.path().join("missing-directory")
         })).await;
         assert!(failed.get("error").is_some(), "{failed}");
+        tokio::time::timeout(ANSWER_TIMEOUT, async {
+            while owner
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals
+                .len()
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
             owner
                 .lock()

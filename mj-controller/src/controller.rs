@@ -30,7 +30,7 @@ pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
 pub use recovery_scan::{
     AdoptionControl, AdoptionInstall, AdoptionOutcome, AdoptionPublication,
-    recovery_destroy_command,
+    adoption_destroy_command, recovery_destroy_command,
 };
 pub mod resume;
 mod reviewer;

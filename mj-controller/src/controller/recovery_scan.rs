@@ -370,6 +370,13 @@ impl Controller {
             _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff; rerun recover adopt"),
             client = StandaloneSession::prepare_adoption(&spec, session_id) => client.context("orphan relay could not attach")?,
         };
+        let operational = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled; the worker continues running"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff"),
+            state = client.status() => state?,
+        };
+        ensure_adoptable_worker(&operational)?;
         client.set_adoption_wait_progress(control.progress.clone());
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let needs_cut = tokio::select! {
@@ -717,18 +724,44 @@ fn unsupported_orphan_adoption(
     )
 }
 
-pub fn recovery_destroy_command(session_id: &str, target: &str, all_instances: bool) -> String {
-    let id = mj_core::targets::posix_quote(session_id);
-    let target = mj_core::targets::posix_quote(target);
+/// Choose advice from the current durable owner, including provisional retries.
+pub fn adoption_destroy_command(
+    session_id: &str,
+    target: &str,
+    all_instances: bool,
+) -> Result<String> {
+    if crate::database::read_durable_session_record(session_id)?
+        .is_some_and(|record| record.target.is_some() && record.target_template_id == target)
+    {
+        Ok(format!(
+            "{} destroy --session {}",
+            recovery_cli_prefix(),
+            mj_core::targets::posix_quote(session_id)
+        ))
+    } else {
+        Ok(recovery_destroy_command(session_id, target, all_instances))
+    }
+}
+
+fn recovery_cli_prefix() -> String {
     let instance = mj_core::config::instance_name()
         .map(|name| format!(" --instance {}", mj_core::targets::posix_quote(&name)))
         .unwrap_or_default();
+    format!("mj{instance}")
+}
+
+pub fn recovery_destroy_command(session_id: &str, target: &str, all_instances: bool) -> String {
+    let id = mj_core::targets::posix_quote(session_id);
+    let target = mj_core::targets::posix_quote(target);
     let scope = if all_instances {
         " --all-instances"
     } else {
         ""
     };
-    format!("mj{instance} recover destroy --session {id} --target {target} --confirm {id}{scope}")
+    format!(
+        "{} recover destroy --session {id} --target {target} --confirm {id}{scope}",
+        recovery_cli_prefix()
+    )
 }
 
 /// States in which the controller is itself writing the session's locator.

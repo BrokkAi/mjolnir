@@ -830,31 +830,38 @@ where
                 let terminal_id = create_terminals.allocate_id();
                 let owner = create_terminal_owner.as_ref().map(|owner| owner.upgrade().ok_or_else(|| anyhow::anyhow!("the relay owner is gone; refusing to spawn an unregistered terminal"))).transpose();
                 let mut registered = false;
-                let spawned = (|| -> Result<String> {
+                let mut announced = false;
+                let spawned = async {
                     if let Some(owner) = owner.as_ref().map_err(|error| anyhow::anyhow!("{error:#}"))? {
                         registered = true;
-                        owner.lock().expect("relay state lock poisoned").admit_agent_terminal(mj_core::relay::ActiveAgentTerminal {
+                        owner.lock().expect("relay state lock poisoned").agent_terminal_started(mj_core::relay::ActiveAgentTerminal {
                             terminal_id: terminal_id.clone(), command: command.clone(), started_at_ms,
                         })?;
+                    }
+                    create_events.send(RuntimeEvent::TerminalStarted {
+                        terminal_id: terminal_id.clone(), command, started_at_ms,
+                    }).await.map_err(|_| relay_event_channel_error())?;
+                    announced = true;
+                    if registered {
                         mj_core::test_hooks::reach_test_hook("adoption_terminal_admitted_before_spawn")?;
                     }
                     create_terminals.create_with_id(terminal_id.clone(), spawn, create_events.clone())
-                })();
+                }.await;
                 match spawned {
                     Ok(terminal_id) => {
-                        if !registered {
-                            create_events.send(RuntimeEvent::TerminalStarted {
-                                terminal_id: terminal_id.clone(), command, started_at_ms,
-                            }).await.map_err(|_| relay_event_channel_error())?;
-                        }
-                        responder
-                            .respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
+                        responder.respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
                     }
                     Err(error) => {
-                        let error = if registered && let Ok(Some(owner)) = &owner {
-                            match owner.lock().expect("relay state lock poisoned").agent_terminal_start_failed(&terminal_id) {
+                        // Keep ordinary failure behind the same FIFO as the start
+                        // card. A closed FIFO cannot apply it, so withdraw only
+                        // the inventory then; no process was created.
+                        let failure_queued = if announced {
+                            create_events.send(RuntimeEvent::TerminalStartFailed { terminal_id: terminal_id.clone() }).await.is_ok()
+                        } else { false };
+                        let error = if registered && !failure_queued && let Ok(Some(owner)) = &owner {
+                            match owner.lock().expect("relay state lock poisoned").agent_terminal_closed(&terminal_id) {
                                 Ok(()) => error,
-                                Err(cleanup) => error.context(format!("could not withdraw failed terminal admission: {cleanup:#}")),
+                                Err(cleanup) => error.context(format!("could not withdraw failed terminal inventory: {cleanup:#}")),
                             }
                         } else { error };
 
@@ -863,7 +870,7 @@ where
                                 message: format!("a client terminal failed to start: {error:#}"),
                             })
                             .await
-                            .map_err(|_| relay_event_channel_error())?;
+                            .map_err(|_| relay_event_channel_error().data(format!("terminal spawn failed: {error:#}; worker event channel closed")))?;
                         responder.respond_with_error(
                             agent_client_protocol::Error::internal_error()
                                 .data(serde_json::Value::String(format!("{error:#}"))),

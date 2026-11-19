@@ -9752,6 +9752,25 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
     relay.lock().unwrap().native_goal_resume_sent(2, None);
     let mut rejected_cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(rejected_cut.try_recv().is_err());
+    // Hard-won: 1f0ee89: arrival after a marker did not tie idle to that resume.
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"idle","turnId":"resumed-goal"}}
+    })).unwrap()).unwrap();
+    assert_eq!(
+        relay
+            .observe()
+            .unwrap()
+            .snapshot
+            .goal
+            .execution
+            .as_ref()
+            .unwrap()
+            .status,
+        "idle"
+    );
+    assert!(rejected_cut.try_recv().is_err());
+    assert!(!relay.observe().unwrap().pending_native_resumes.is_empty());
+
     relay
         .lock()
         .unwrap()

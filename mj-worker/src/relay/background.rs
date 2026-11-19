@@ -704,7 +704,8 @@ impl DurableRelay {
         Ok(true)
     }
 
-    /// Inventory and the fallback card have one lifecycle, before any process exists.
+    /// Apply the ordered card; the inventory was reserved before process spawn.
+    #[cfg(unix)]
     pub(crate) fn admit_agent_terminal(&mut self, terminal: ActiveAgentTerminal) -> Result<()> {
         let id = terminal.terminal_id.clone();
         let command = terminal.command.clone();
@@ -716,6 +717,7 @@ impl DurableRelay {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub(crate) fn agent_terminal_start_failed(&mut self, id: &str) -> Result<()> {
         use agent_client_protocol::v1::schema::{
             ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,

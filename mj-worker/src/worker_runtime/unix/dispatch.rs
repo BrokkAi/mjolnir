@@ -1258,6 +1258,9 @@ pub(crate) fn record_runtime_event_with_facts(
             })?;
             relay.agent_terminal_closed(&terminal_id)?;
         }
+        RuntimeEvent::TerminalStartFailed { terminal_id } => {
+            relay.agent_terminal_start_failed(&terminal_id)?;
+        }
         RuntimeEvent::TerminalStarted {
             terminal_id,
             command,

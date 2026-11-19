@@ -397,11 +397,6 @@ pub(super) async fn serve_client(
                 let _cancel_processes =
                     crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
                 let (progress, mut waiting) = tokio::sync::watch::channel(None);
-                let destroy_command = mj_controller::controller::recovery_destroy_command(
-                    &adoption.session_id,
-                    &adoption.target_id,
-                    adoption.all_instances,
-                );
                 let (installed, mut installation) = tokio::sync::oneshot::channel();
                 let mut installation_open = true;
                 let work_state = state.clone();
@@ -497,15 +492,20 @@ pub(super) async fn serve_client(
                                 let blockers = waiting.borrow_and_update().clone();
                                 if blockers != previous_blockers {
                                     previous_blockers = blockers.clone();
-                                    if let Some(blockers) = blockers && !disconnected
-                                        && let Err(error) = write_adoption_response(&mut stream, ResponseEnvelope {
+                                    if let Some(blockers) = blockers && !disconnected {
+                                        let advice = adoption.clone();
+                                        let destroy_command = blocking(move || mj_controller::controller::adoption_destroy_command(
+                                            &advice.session_id, &advice.target_id, advice.all_instances,
+                                        )).await?;
+                                        if let Err(error) = write_adoption_response(&mut stream, ResponseEnvelope {
                                             protocol_version: request.protocol_version, request_id,
-                                            result: Ok(DaemonReply::AdoptionWaiting { blockers, destroy_command: Some(destroy_command.clone()) }),
+                                            result: Ok(DaemonReply::AdoptionWaiting { blockers, destroy_command: Some(destroy_command) }),
                                         }, &wait_cancel).await {
                                             tracing::debug!(%error, "adoption progress connection closed");
                                             disconnected = true;
                                             cancelled.store(true, Ordering::Release);
                                             wait_cancel.cancel();
+                                        }
                                     }
                                 }
                             } else { progress_open = false; }

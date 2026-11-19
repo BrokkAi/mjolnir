@@ -272,6 +272,10 @@ fn move_queue_relay_child() {
         if root.join("release-native-identity").exists()
             && relay.operational_state().native_session_id.is_none()
         {
+            if matches!(request.request, RelayRequest::BeginLiveBaseline) {
+                fs::write(root.join("live-cut-requested"), b"1").unwrap();
+            }
+
             relay
                 .record_observation(mj_core::relay::RelayObservation::SessionOpened {
                     native_session_id: "ready-after-adoption".into(),
@@ -7356,6 +7360,24 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 },
             })
             .unwrap();
+        if matches!(disposition, AdoptionProbe::Unusable(_)) {
+            // Hard-won: 1f0ee89: an unusable worker's promoted prompt can never settle.
+            let accepted = relay.handle(mj_core::relay::RelayRequestEnvelope {
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request_id: "stranded".into(),
+                request: RelayRequest::Submit {
+                    command_id: "stranded".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from("accepted before shutdown")],
+                    },
+                },
+            });
+            assert!(matches!(
+                accepted.body,
+                mj_core::relay::RelayResponseBody::Ok { .. }
+            ));
+            relay.claim_pending_commands(true).unwrap();
+        }
         let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
             request_id: "collect-before-adoption".into(),
             protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
@@ -7448,6 +7470,10 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
                     .unwrap()
                     .is_none_or(|(ordinal, _)| ordinal == 0)
+            );
+            assert!(
+                !root.join("live-cut-requested").exists(),
+                "refuse before requesting a cut from a worker without a runnable harness"
             );
             return;
         }

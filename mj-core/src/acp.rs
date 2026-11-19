@@ -655,13 +655,18 @@ pub enum RuntimeEvent {
     Warning {
         message: String,
     },
-    /// A client terminal started successfully. The worker records an interim
+    /// A terminal's ordered fallback card, queued before process spawn. The worker records an interim
     /// tool call so agents that omit the ACP association do not strand its
     /// eventual result as a standalone transcript item.
     TerminalStarted {
         terminal_id: String,
         command: String,
         started_at_ms: i64,
+    },
+    /// Spawn failed after its ordered start marker; release the inventory only
+    /// when the owner applies this event, after writing the failed card.
+    TerminalStartFailed {
+        terminal_id: String,
     },
     /// A client-run terminal was reaped. Exactly one of these is emitted per
     /// terminal, by the supervisor that waits on the child, so kill and

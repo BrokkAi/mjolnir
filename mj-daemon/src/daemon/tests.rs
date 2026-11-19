@@ -16323,3 +16323,45 @@ async fn adoption_backpressured_response_releases_admission_on_handoff() {
     assert!(mj_controller::upgrade::active_labels().is_empty());
     drop(client);
 }
+
+// Hard-won: 1f0ee89: a retry's orphan-destroy command could not reach its tracked worker.
+#[test]
+fn adoption_destroy_advice_follows_durable_worker_ownership() {
+    const NAME: &str = "adoption_destroy_advice_follows_durable_worker_ownership";
+    if std::env::var_os("MJ_ADOPTION_ADVICE_CHILD").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env("MJ_ADOPTION_ADVICE_CHILD", "1")
+        .env("MJ_INSTANCE", "adoption-advice-test")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let mut record = runtime_test_session(
+        "owned-adoption",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Disconnected,
+    );
+    record.native_session_id = None;
+    record.target_template_id = "bare".into();
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(&record.id),
+    }));
+    mj_controller::database::save_session(&record).unwrap();
+    assert_eq!(
+        mj_controller::controller::adoption_destroy_command(&record.id, "bare", true).unwrap(),
+        "mj --instance 'adoption-advice-test' destroy --session 'owned-adoption'"
+    );
+    // The row alone is not ownership: a lost session without a locator remains an orphan.
+    record.state = SessionState::Lost;
+    record.target = None;
+    mj_controller::database::save_session(&record).unwrap();
+    assert_eq!(
+        mj_controller::controller::adoption_destroy_command(&record.id, "bare", true).unwrap(),
+        "mj --instance 'adoption-advice-test' recover destroy --session 'owned-adoption' --target 'bare' --confirm 'owned-adoption' --all-instances"
+    );
+}

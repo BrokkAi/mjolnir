@@ -1969,36 +1969,24 @@ impl DurableRelay {
                 },
             )?;
         }
-        // This owner sees only updates after each FIFO resume marker. Earlier
-        // startup metadata was drained before registration, so cannot settle it.
-        let (goal_reported, execution_idle) = if let SessionUpdate::SessionInfoUpdate(info) =
-            &update
-        {
-            let meta = info.meta.as_ref();
-            (
-                meta.is_some_and(|meta| mj_core::goal::goal_meta(meta).is_some()),
-                meta.and_then(|meta| meta.get("execution"))
-                    .and_then(|value| {
-                        serde_json::from_value::<mj_core::goal::GoalExecution>(value.clone()).ok()
-                    })
-                    .is_some_and(|execution| {
-                        execution.status == "idle"
-                            && native_after.execution.as_ref() == Some(&execution)
-                    }),
-            )
+        // Arrival after the marker does not associate an idle update with
+        // this resume. Only running proof or an explicit goal change settles it.
+        let goal_reported = if let SessionUpdate::SessionInfoUpdate(info) = &update {
+            info.meta
+                .as_ref()
+                .is_some_and(|meta| mj_core::goal::goal_meta(meta).is_some())
         } else {
-            (false, false)
+            false
         };
         self.pending_native_resumes.retain(|pending| {
-            let settled = execution_idle
-                || (goal_reported
-                    && native_after.snapshot.as_ref().is_none_or(|goal| {
-                        !goal.active()
-                            || pending
-                                .goal
-                                .as_ref()
-                                .is_some_and(|expected| !goal.same_goal(expected))
-                    }));
+            let settled = goal_reported
+                && native_after.snapshot.as_ref().is_none_or(|goal| {
+                    !goal.active()
+                        || pending
+                            .goal
+                            .as_ref()
+                            .is_some_and(|expected| !goal.same_goal(expected))
+                });
             !(settled
                 || (resumed_native
                     && self.snapshot.harness_turn.is_some()

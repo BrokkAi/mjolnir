@@ -239,12 +239,15 @@ mj recover scan --json
 mj recover adopt --session <session-id> --target <target-id>
 ```
 
-If the daemon's store was lost after the worker discarded acknowledged history,
-adoption restores the journal events still held by the worker, starting at
-its last acknowledgement, and records where the recovered transcript begins.
-Earlier acknowledged transcript may be unavailable. The agent's own native
-conversation and queued work remain on the worker. Workers that still retain
-the journal from its beginning restore the full transcript.
+If the daemon's store was lost and the worker no longer retains its journal
+from the beginning, adoption waits for a quiet point and recovers the worker's
+current operational state at that point. All transcript through that recovery
+cut is omitted, including any unacknowledged events still readable on the worker.
+The recovered transcript shows “History before recovery unavailable.” Adoption
+advances the worker's acknowledgement to the cut, so those omitted events can
+then be discarded. The agent's native conversation, current configuration,
+pending questions and queued work are preserved. Workers whose journal still
+reaches its beginning restore the full transcript instead.
 
 
 Older resources without current ownership metadata may additionally require
