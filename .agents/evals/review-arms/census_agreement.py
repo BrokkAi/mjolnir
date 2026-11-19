@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from census_label import (
-    LABELS, RUST, canonical_site, exclude_families, input_documents, inputs_sha, item_sets, labeller_item,
+    LABELS, RUST, canonical_site, checkout_revision, exclude_families, input_documents, inputs_sha, item_sets, labeller_item,
     read_current_labels,
 )
 
@@ -149,13 +149,17 @@ def comparison(pairs):
     }
 
 
-def compare_split(directory, split, cohort, documents):
-    expected_hashes = {(item["repo"], item["id"]): inputs_sha(labeller_item(item, split), documents)
-                       for item in cohort}
-    first, stale_primary = read_current_labels(directory / f"{split}-primary.jsonl", expected_hashes)
-    second, stale_replication = read_current_labels(directory / f"{split}-replication.jsonl", expected_hashes)
+def compare_split(directory, split, cohort, documents, heads):
+    items = {(item["repo"], item["id"]): labeller_item(item, split) for item in cohort}
+
+    def read_role(role):
+        expected = {key: inputs_sha(item, documents, role, heads[key[0]]) for key, item in items.items()}
+        return read_current_labels(directory / f"{split}-{role}.jsonl", expected)
+
+    first, stale_primary = read_role("primary")
+    second, stale_replication = read_role("replication")
     groups = defaultdict(set)
-    all_keys = expected_hashes.keys()
+    all_keys = items.keys()
     for key in all_keys:
         groups[key[0]].add(key)
 
@@ -179,10 +183,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels-dir", type=Path, default=LABELS)
     parser.add_argument("--check-clones", type=Path, default=RUST / "check-clones")
+    parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     args = parser.parse_args()
-    cohorts, _, _ = item_sets()
+    cohorts, pins, _ = item_sets()
     exclude_families(cohorts, args.check_clones)
     documents = input_documents()
+    repos = {item["repo"] for cohort in cohorts.values() for item in cohort}
+    heads = {repo: checkout_revision(repo, pins, args.mjolnir_clone) for repo in repos}
     report = {
         "field_descriptions": {
             "stale_rows": "Saved rows with missing or mismatched input hashes or outside the current cohort.",
@@ -192,7 +199,7 @@ def main():
                                          "labellers point at the same code. Comparing claim text "
                                          "would require a judge.",
         },
-        **{split: compare_split(args.labels_dir, split, cohort, documents) for split, cohort in cohorts.items()},
+        **{split: compare_split(args.labels_dir, split, cohort, documents, heads) for split, cohort in cohorts.items()},
     }
     print(json.dumps(report, indent=2))
 

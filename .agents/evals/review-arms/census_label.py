@@ -26,6 +26,25 @@ MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path",
 ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
 INPUTS = ("id", "repo", "intro_commit", "base_commit", "fix_commit", "defect", "trigger", "location")
 
+LABELLER_EFFORT = "high"
+LABEL_PROMPT = (
+    "Read .rql-census/label-SPEC.md and .rql-census/batch.json. "
+    "Follow the specification as the {role} labeller. The RQL reference is next to the spec. "
+    "Write the batch's JSON lines to .rql-census/labels.jsonl. "
+    "Only edit that output file. Keep the checkout untouched and use Git read-only. "
+    "Read only the input files and Git history/code for the listed items. "
+    "Some older records lack a trigger, location, or named test. Use the commits as evidence. "
+    "For development items use the reduced task, with null anchoring. Use nested RQL "
+    "S-expressions for documented queries, with wrapper options before the nested input. "
+    'Example: (callers :depth 1 (enclosing-decl (function :name "handle"))).'
+)
+REPAIR_PROMPT = (
+    "Correct the census output once. Write only rows for these requested IDs to "
+    ".rql-census/repaired.jsonl. Omit every other row. "
+    "If there are no requested IDs, write an empty file to acknowledge the rejected lines.\n"
+    "Requested IDs: {ids}\nValidation errors:\n{errors}\n"
+)
+
 
 def canonical_site(site):
     """One repository-relative spelling of a path:line citation, so ./src/a.rs:4 and
@@ -127,10 +146,14 @@ def input_documents():
             for name in ("label-SPEC.md", "rql-documented-steps.md")}
 
 
-def inputs_sha(item, documents):
-    encoded_item = json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
+def inputs_sha(item, documents, role, head):
+    # The repair template is stable across resumes. Its requested IDs and
+    # validation errors are filled in from the first turn's submitted output.
+    metadata = {"item": item, "head": head, "model": ROLES[role][1], "effort": LABELLER_EFFORT,
+                "label_prompt": LABEL_PROMPT.format(role=role), "repair_prompt": REPAIR_PROMPT}
+    encoded_inputs = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256()
-    for part in (*documents.values(), encoded_item):
+    for part in (*documents.values(), encoded_inputs):
         # Frame each input so a document boundary is part of the hash.
         digest.update(len(part).to_bytes(8, "big"))
         digest.update(part)
@@ -610,16 +633,21 @@ def quota(args, role):
     return True
 
 
-def checkout(args, repo, pins, unit):
+def checkout_revision(repo, pins, mjolnir_clone):
+    if repo == "mjolnir":
+        return git(mjolnir_clone, "rev-parse", "origin/master").decode().strip()
+    if repo == "bifrost-dev":
+        return json.loads((HERE / "corpus-bifrost/FREEZE.json").read_text())["snapshot"]
+    return pins[repo]
+
+
+def checkout(args, repo, revision, unit):
     if repo == "mjolnir":
         source = args.mjolnir_clone
-        revision = git(source, "rev-parse", "origin/master").decode().strip()
     elif repo == "bifrost-dev":
         source = args.bifrost_clone
-        revision = json.loads((HERE / "corpus-bifrost/FREEZE.json").read_text())["snapshot"]
     else:
         source = args.check_clones / repo.replace("/", "_")
-        revision = pins[repo]
     if git(source, "rev-parse", "--is-shallow-repository").strip() != b"false":
         raise ValueError(f"{source}: full Git history is required")
 
@@ -663,17 +691,24 @@ def fetch_output(sid, path):
             if fetch.returncode == 0:
                 return fetch.stdout.decode(errors="replace")
             problem = fetch.stderr.decode(errors="replace").strip() or f"exit status {fetch.returncode}"
+            # The export layer names the missing path. A missing session or
+            # an unrelated file error still belongs to fetch recovery.
+            if f"{path} does not exist on the session's target" in problem:
+                return None
     raise RuntimeError(problem)
 
 
-def run_batch(args, split, role, repo, batch, pins, allowed, documents):
+def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     profile, model, _ = ROLES[role]
     ids = [item["id"] for item in batch]
     if not args.work_dir.is_absolute():
         raise ValueError("--work-dir must be absolute")
     args.work_dir.mkdir(parents=True, exist_ok=True)
     unit = Path(mkdtemp(prefix=f"{split}-{role}-", dir=args.work_dir))
-    work = checkout(args, repo, pins, unit)
+    work = checkout(args, repo, revision, unit)
+    head = git(work, "rev-parse", "HEAD").decode().strip()
+    if head != revision:
+        raise RuntimeError(f"{repo}: checkout HEAD {head} differs from requested revision {revision}")
     for item in batch:
         for field in ("base_commit", "intro_commit", "fix_commit"):
             git(work, "cat-file", "-e", item[field] + "^{commit}")
@@ -683,22 +718,12 @@ def run_batch(args, split, role, repo, batch, pins, allowed, documents):
         (inputs / filename).write_bytes(content)
     save(inputs / "batch.json", {"labeller": role, "output": "labels.jsonl", "items": batch})
     prompt = unit / "prompt.txt"
-    prompt.write_text(
-        f"Read .rql-census/label-SPEC.md and .rql-census/batch.json. "
-        f"Follow the specification as the {role} labeller. The RQL reference is next to the spec. "
-        f"Write the batch's JSON lines to .rql-census/labels.jsonl. "
-        f"Only edit that output file. Keep the checkout untouched and use Git read-only. "
-        f"Read only the input files and Git history/code for the listed items. "
-        f"Some older records lack a trigger, location, or named test. Use the commits as evidence. "
-        f"For development items use the reduced task, with null anchoring. Use nested RQL "
-        "S-expressions for documented queries, with wrapper options before the nested input. "
-        'Example: (callers :depth 1 (enclosing-decl (function :name "handle"))).'
-    )
+    prompt.write_text(LABEL_PROMPT.format(role=role), encoding="utf-8")
     quota(args, role)
     tag = hashlib.sha256(unit.name.encode()).hexdigest()[:8]
     title = f"RQL census {role} {repo} {tag}"
     log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
-        ids=ids, unit=str(unit), profile=profile, model=model, effort="high")
+        ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
     sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
                     "--project-directory", work, "--branch", "rql-census-input",
                     "--profile", profile, "--effort", "high",
@@ -710,7 +735,7 @@ def run_batch(args, split, role, repo, batch, pins, allowed, documents):
     try:
         log(args.labels_dir, "launched", title=title, session=sid)
         driver.wait_idle(sid)
-        for key, value in (("model", model), ("effort", "high")):
+        for key, value in (("model", model), ("effort", LABELLER_EFFORT)):
             while True:
                 try:
                     driver.mj("set-config", "--session", sid, "--key", key, "--value", value)
@@ -721,9 +746,9 @@ def run_batch(args, split, role, repo, batch, pins, allowed, documents):
                     time.sleep(10)
         state = driver.session(sid)
         selected = {field["key"]: field.get("current") for field in state["config_options"]}
-        if state["profile_id"] != profile or selected.get("model") != model or selected.get("effort") != "high":
-            raise RuntimeError(f"{title}: requested {profile}/{model}/high, got {state['profile_id']}/{selected}")
-        log(args.labels_dir, "configured", title=title, profile=profile, model=model, effort="high")
+        if state["profile_id"] != profile or selected.get("model") != model or selected.get("effort") != LABELLER_EFFORT:
+            raise RuntimeError(f"{title}: requested {profile}/{model}/{LABELLER_EFFORT}, got {state['profile_id']}/{selected}")
+        log(args.labels_dir, "configured", title=title, profile=profile, model=model, effort=LABELLER_EFFORT)
         for source in inputs.iterdir():
             driver.mj("put-file", "--session", sid, "--path", f".rql-census/{source.name}", source)
         expected = indexed(batch, "census batch")
@@ -750,10 +775,14 @@ def run_batch(args, split, role, repo, batch, pins, allowed, documents):
                        {"time": datetime.now(timezone.utc).isoformat(), **recovery})
                 log(args.labels_dir, "fetch-failed", **recovery)
                 raise
-            (unit / f"attempt-{attempt}.jsonl").write_text(raw)
-            valid, errors = collect(raw, expected, role, work, allowed)
+            (unit / f"attempt-{attempt}.jsonl").write_text(raw or "")
+            if raw is None:
+                valid = {}
+                errors = {bug: [f"output file missing: {output_path}"] for bug in expected or ("<output>",)}
+            else:
+                valid, errors = collect(raw, expected, role, work, allowed)
             if valid:
-                append_rows(destination, (dict(row, inputs_sha=inputs_sha(expected[bug], documents))
+                append_rows(destination, (dict(row, inputs_sha=inputs_sha(expected[bug], documents, role, head))
                                           for bug, row in valid.items()))
             log(args.labels_dir, "validated", title=title, attempt=attempt, ids=list(valid), errors=errors)
             if not errors:
@@ -761,13 +790,8 @@ def run_batch(args, split, role, repo, batch, pins, allowed, documents):
             if attempt == 1:
                 expected = {bug: item for bug, item in expected.items() if bug not in valid}
                 prompt = unit / "repair.txt"
-                prompt.write_text(
-                    "Correct the census output once. Write only rows for these requested IDs to "
-                    ".rql-census/repaired.jsonl. Omit every other row. "
-                    "If there are no requested IDs, write an empty file to acknowledge the rejected lines.\n"
-                    f"Requested IDs: {json.dumps(list(expected))}\nValidation errors:\n"
-                    f"{json.dumps(errors, indent=2)}\n"
-                )
+                repair = REPAIR_PROMPT.format(ids=json.dumps(list(expected)), errors=json.dumps(errors, indent=2))
+                prompt.write_text(repair, encoding="utf-8")
         if errors:
             append_rows(args.labels_dir / "invalid.jsonl", [
                 {"id": bug, "repo": repo, "census": split, "labeller": role, "errors": problems,
@@ -837,7 +861,9 @@ def main():
         if not selected:
             parser.error("no items match this selection")
         destination = args.labels_dir / f"{args.split}-{args.labeller}.jsonl"
-        expected_hashes = {(item["repo"], item["id"]): inputs_sha(item, documents) for item in selected}
+        heads = {repo: checkout_revision(repo, pins, args.mjolnir_clone) for repo in {item["repo"] for item in selected}}
+        expected_hashes = {(item["repo"], item["id"]): inputs_sha(item, documents, args.labeller, heads[item["repo"]])
+                           for item in selected}
         done, _ = read_current_labels(destination, expected_hashes)
         by_repo = defaultdict(list)
         for item in selected:
@@ -847,7 +873,7 @@ def main():
             indexed(subset, f"{args.split}/{repo}")
             for batch in batches(subset, args.batch_size):
                 try:
-                    run_batch(args, args.split, args.labeller, repo, batch, pins, allowed, documents)
+                    run_batch(args, args.split, args.labeller, repo, batch, heads[repo], allowed, documents)
                 except Exception as error:
                     log(args.labels_dir, "batch-failed", split=args.split, role=args.labeller,
                         repo=repo, ids=[item["id"] for item in batch], error=str(error))
