@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -536,6 +536,7 @@ pub fn usage_envelopes(
 #[derive(Debug, Clone)]
 pub struct ObserveSpool {
     root: PathBuf,
+    queued: std::sync::Arc<std::sync::Mutex<BTreeMap<String, PathBuf>>>,
 }
 
 impl ObserveSpool {
@@ -545,7 +546,29 @@ impl ObserveSpool {
             .with_context(|| format!("create Observe spool {}", requested.display()))?;
         let root = fs::canonicalize(&requested)
             .with_context(|| format!("resolve Observe spool {}", requested.display()))?;
-        Ok(Self { root })
+        let mut queued = BTreeMap::new();
+        for entry in fs::read_dir(&root)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                let digest = Self::filename_digest(&path)?;
+                queued.insert(digest.to_owned(), path);
+            }
+        }
+        Ok(Self {
+            root,
+            queued: std::sync::Arc::new(std::sync::Mutex::new(queued)),
+        })
+    }
+
+    fn filename_digest(path: &Path) -> Result<&str> {
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.rsplit('-').next())
+            .context("invalid Observe spool filename")
+    }
+
+    pub fn emitted_ids(&self) -> ObserveEmittedIds {
+        ObserveEmittedIds::new(&self.root.with_file_name("delivery.json"))
     }
 
     pub fn root(&self) -> &Path {
@@ -559,6 +582,16 @@ impl ObserveSpool {
             .context("Observe envelope lost its session id")?;
         let digest = Sha256::digest(format!("{session_id}\0{}", envelope.meta.event_id).as_bytes());
         let digest = mj_core::hex::lower_hex(digest);
+        let mut queued = self
+            .queued
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Observe spool lock poisoned"))?;
+        if let Some(path) = queued.get(&digest) {
+            Self::check_queued_identity(path, envelope)?;
+            mj_core::config::sync_directory(&self.root)?;
+            return Ok(path.clone());
+        }
+
         let name = format!(
             "{:020}-{:020}-{:03}-{digest}.json",
             envelope.meta.ts.max(0),
@@ -585,25 +618,34 @@ impl ObserveSpool {
         }
         drop(file);
         if let Err(error) = fs::hard_link(&temporary, &path) {
-            let collision = error.kind() == std::io::ErrorKind::AlreadyExists;
-            let matching =
-                collision && fs::read(&path).is_ok_and(|existing| existing == line.as_bytes());
             let _ = fs::remove_file(&temporary);
-            if !matching {
-                return if collision {
-                    bail!(
-                        "Observe spool collision at {} for a different envelope",
-                        path.display()
-                    );
-                } else {
-                    Err(error).context("publish Observe spool entry")
-                };
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(error).context("publish Observe spool entry");
             }
+            Self::check_queued_identity(&path, envelope)?;
+            mj_core::config::sync_directory(&self.root)?;
+            queued.insert(digest, path.clone());
             return Ok(path);
         }
         fs::remove_file(&temporary)
             .with_context(|| format!("remove Observe spool link {}", temporary.display()))?;
+        mj_core::config::sync_directory(&self.root)?;
+        queued.insert(digest, path.clone());
         Ok(path)
+    }
+
+    fn check_queued_identity(path: &Path, envelope: &ObserveEnvelope) -> Result<()> {
+        let existing: ObserveEnvelope = serde_json::from_slice(&fs::read(path)?)
+            .context("read existing Observe spool envelope")?;
+        ensure!(
+            existing.meta.event_id == envelope.meta.event_id
+                && existing.event["session_id"] == envelope.event["session_id"],
+            "Observe spool collision at {} for a different identity",
+            path.display()
+        );
+        // A crash can leave the spool ahead of the id log. The first queued
+        // version wins even when a later projection has grown its content.
+        Ok(())
     }
 
     pub fn pending(&self) -> Result<Vec<PathBuf>> {
@@ -633,8 +675,14 @@ impl ObserveSpool {
             "refusing to remove an Observe spool file outside {}",
             self.root.display()
         );
+        let mut queued = self
+            .queued
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Observe spool lock poisoned"))?;
         fs::remove_file(&path)
-            .with_context(|| format!("remove delivered Observe spool entry {}", path.display()))
+            .with_context(|| format!("remove delivered Observe spool entry {}", path.display()))?;
+        queued.remove(Self::filename_digest(&path)?);
+        Ok(())
     }
 }
 
@@ -661,10 +709,6 @@ impl ObservePaths {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveSessionDelivery {
-    /// Stable Observe event ids already committed to the local spool. Replaying
-    /// the projection is harmless because entries are filtered through this
-    /// set before the spool's own idempotent filename check.
-    pub emitted_event_ids: BTreeSet<String>,
     /// The session record revision whose transcript was last examined.
     pub record_updated_at: String,
     /// Materialized event frontier whose transcript was last examined.
@@ -709,29 +753,68 @@ pub struct ObserveDeliveryState {
 }
 
 impl ObserveDeliveryState {
-    pub const VERSION: u32 = 1;
+    // Breaking delivery format: older daemons reject v2 before publication.
+    pub const VERSION: u32 = 2;
+
+    fn empty(now_ms: i64) -> Self {
+        Self {
+            version: Self::VERSION,
+            initialized_at_ms: now_ms,
+            sessions: BTreeMap::new(),
+            last_success_ms: None,
+            last_failure_ms: None,
+            last_failure: None,
+        }
+    }
 
     pub fn load(path: &Path, now_ms: i64) -> Result<Self> {
         if !path.exists() {
-            return Ok(Self {
-                version: Self::VERSION,
-                initialized_at_ms: now_ms,
-                sessions: BTreeMap::new(),
-                last_success_ms: None,
-                last_failure_ms: None,
-                last_failure: None,
-            });
+            return Ok(Self::empty(now_ms));
         }
-        let body = fs::read(path)
-            .with_context(|| format!("read Observe delivery state {}", path.display()))?;
-        let state: Self = serde_json::from_slice(&body)
+        let header = Self::diagnostics(path, now_ms)?;
+        let reader = BufReader::new(fs::File::open(path)?);
+        if header.version == 1 {
+            let mut decoder = serde_json::Deserializer::from_reader(reader);
+            let state =
+                serde::de::DeserializeSeed::deserialize(MigrateDelivery { path }, &mut decoder)
+                    .context("migrate Observe delivery state")?;
+            decoder.end()?;
+            state.save(path)?;
+            return Ok(state);
+        }
+        serde_json::from_reader(reader)
+            .with_context(|| format!("parse Observe delivery state {}", path.display()))
+    }
+
+    /// Read diagnostics without migrating or writing state. The daemon alone
+    /// owns migration and publication; a CLI status request must not race it.
+    pub fn diagnostics(path: &Path, now_ms: i64) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::empty(now_ms));
+        }
+        #[derive(Deserialize)]
+        struct Header {
+            version: u32,
+            initialized_at_ms: i64,
+            last_success_ms: Option<i64>,
+            last_failure_ms: Option<i64>,
+            last_failure: Option<String>,
+        }
+        let header: Header = serde_json::from_reader(BufReader::new(fs::File::open(path)?))
             .with_context(|| format!("parse Observe delivery state {}", path.display()))?;
         ensure!(
-            state.version == Self::VERSION,
+            matches!(header.version, 1 | Self::VERSION),
             "unsupported Observe delivery state version {}",
-            state.version
+            header.version
         );
-        Ok(state)
+        Ok(Self {
+            version: header.version,
+            initialized_at_ms: header.initialized_at_ms,
+            sessions: BTreeMap::new(),
+            last_success_ms: header.last_success_ms,
+            last_failure_ms: header.last_failure_ms,
+            last_failure: header.last_failure,
+        })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -748,6 +831,181 @@ impl ObserveDeliveryState {
     pub fn mark_failure(&mut self, at_ms: i64, error: impl Into<String>) {
         self.last_failure_ms = Some(at_ms);
         self.last_failure = Some(error.into());
+    }
+}
+
+/// Exact deduplication lives on disk and is loaded only for a changed session.
+/// Hashing the complete id keeps arbitrary imported ids inside this directory.
+pub struct ObserveEmittedIds {
+    root: PathBuf,
+}
+
+impl ObserveEmittedIds {
+    pub fn new(state_path: &Path) -> Self {
+        Self {
+            root: state_path.with_file_name("emitted"),
+        }
+    }
+
+    fn path(&self, session_id: &str) -> PathBuf {
+        self.root.join(mj_core::hex::lower_hex(Sha256::digest(
+            session_id.as_bytes(),
+        )))
+    }
+
+    pub fn load(&self, session_id: &str) -> Result<BTreeSet<String>> {
+        let path = self.path(session_id);
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeSet::new());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read emitted ids {}", path.display()));
+            }
+        };
+        let mut ids = BTreeSet::new();
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        while reader.read_line(&mut line)? > 0 {
+            if let Some(id) = line.strip_suffix('\n') {
+                ids.insert(id.to_owned());
+            }
+            line.clear();
+        }
+        Ok(ids)
+    }
+
+    pub fn append(&self, session_id: &str, ids: &[String]) -> Result<()> {
+        fs::create_dir_all(&self.root)?;
+        let path = self.path(session_id);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        // Discard an incomplete trailing record from a crashed write before
+        // appending. All complete records remain append-only.
+        use std::io::{Read, Seek, SeekFrom};
+        let mut end = file.metadata()?.len();
+        while end > 0 {
+            file.seek(SeekFrom::Start(end - 1))?;
+            let mut byte = [0];
+            file.read_exact(&mut byte)?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            end -= 1;
+        }
+        file.set_len(end)?;
+        file.seek(SeekFrom::End(0))?;
+        for id in ids {
+            ensure!(!id.contains(['\n', '\r']), "invalid Observe event id");
+            writeln!(file, "{id}")?;
+        }
+        file.sync_all()?;
+        mj_core::config::sync_directory(&self.root)?;
+        mj_core::config::sync_directory(
+            self.root
+                .parent()
+                .context("Observe emitted directory has no parent")?,
+        )
+    }
+}
+
+/// Stream one legacy session at a time instead of retaining millions of ids.
+struct MigrateDelivery<'a> {
+    path: &'a Path,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for MigrateDelivery<'_> {
+    type Value = ObserveDeliveryState;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        decoder: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        decoder.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for MigrateDelivery<'_> {
+    type Value = ObserveDeliveryState;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy Observe delivery state")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut metadata = Map::new();
+        let mut sessions = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "sessions" {
+                sessions = map.next_value_seed(MigrateSessions {
+                    ids: ObserveEmittedIds::new(self.path),
+                })?;
+            } else {
+                metadata.insert(key, map.next_value::<Value>()?);
+            }
+        }
+        metadata.insert("version".into(), Value::from(ObserveDeliveryState::VERSION));
+        let mut state: ObserveDeliveryState =
+            serde_json::from_value(Value::Object(metadata)).map_err(serde::de::Error::custom)?;
+        state.sessions = sessions;
+        Ok(state)
+    }
+}
+
+struct MigrateSessions {
+    ids: ObserveEmittedIds,
+}
+impl<'de> serde::de::DeserializeSeed<'de> for MigrateSessions {
+    type Value = BTreeMap<String, ObserveSessionDelivery>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        decoder: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        decoder.deserialize_map(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for MigrateSessions {
+    type Value = BTreeMap<String, ObserveSessionDelivery>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy Observe sessions")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut sessions = BTreeMap::new();
+        while let Some((id, mut value)) = map.next_entry::<String, Value>()? {
+            let emitted: Vec<String> = serde_json::from_value(
+                value
+                    .as_object_mut()
+                    .and_then(|value| value.remove("emitted_event_ids"))
+                    .ok_or_else(|| serde::de::Error::custom("legacy session has no emitted ids"))?,
+            )
+            .map_err(serde::de::Error::custom)?;
+            let cursor = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            fs::create_dir_all(&self.ids.root).map_err(serde::de::Error::custom)?;
+            // v1 stays authoritative until every file is durable. A retry
+            // overwrites partial migration output rather than appending it.
+            let mut body = String::new();
+            for event in emitted {
+                if event.contains(['\n', '\r']) {
+                    return Err(serde::de::Error::custom("invalid Observe event id"));
+                }
+                body.push_str(&event);
+                body.push('\n');
+            }
+            mj_core::config::atomic_write(&self.ids.path(&id), body.as_bytes())
+                .map_err(serde::de::Error::custom)?;
+            sessions.insert(id, cursor);
+        }
+        mj_core::config::sync_directory(self.ids.root.parent().unwrap())
+            .map_err(serde::de::Error::custom)?;
+        Ok(sessions)
     }
 }
 
