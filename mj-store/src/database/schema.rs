@@ -138,7 +138,6 @@ fn open_writable(path: &Path) -> Result<Connection> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA journal_mode = WAL;
          PRAGMA synchronous = FULL;",
     )?;
     verify_schema_once(path, &connection)?;
@@ -353,6 +352,11 @@ fn verify_schema_once(path: &Path, connection: &Connection) -> Result<()> {
     let mut verified = verified_schemas()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // Converting a fresh file to WAL fails at once with SQLITE_BUSY, without
+    // the busy handler, while another connection is migrating it. This lock
+    // is what keeps first opens from overlapping, so the conversion belongs
+    // under it. Once the file is WAL the pragma only reads the mode.
+    connection.execute_batch("PRAGMA journal_mode = WAL;")?;
     let state = read_schema_state(connection)?;
     if state.revision > SCHEMA_VERSION
         || (state.revision == SCHEMA_VERSION && verified.contains(&key))
