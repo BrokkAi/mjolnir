@@ -186,6 +186,64 @@ fn inspect_checkout(
         };
         let submodule = checkout.join(&gitlink);
         if !submodule.join(".git").exists() {
+            if let Some(snapshot) = snapshot.as_deref_mut() {
+                // Git normally stops at an indexed gitlink. Remove it only
+                // from a private index so its ordinary files enter consent,
+                // with the parent's and directory's ignore rules intact.
+                let index = crate::snapshot::private_index(runner, checkout)?;
+                let env = vec![("GIT_INDEX_FILE".into(), index.path().as_os_str().to_owned())];
+                let removed = runner.run(
+                    checkout,
+                    &GitCommand {
+                        arguments: [
+                            std::ffi::OsString::from("--literal-pathspecs"),
+                            "update-index".into(),
+                            "--force-remove".into(),
+                            "--".into(),
+                            gitlink.as_os_str().to_owned(),
+                        ]
+                        .to_vec(),
+                        env: env.clone(),
+                        ..Default::default()
+                    },
+                )?;
+                ensure!(
+                    removed.status == 0,
+                    "inspect uninitialized module files: {}",
+                    String::from_utf8_lossy(&removed.stderr)
+                );
+                let files = runner.run(
+                    checkout,
+                    &GitCommand {
+                        arguments: [
+                            std::ffi::OsString::from("--literal-pathspecs"),
+                            "ls-files".into(),
+                            "--others".into(),
+                            "--exclude-standard".into(),
+                            "-z".into(),
+                            "--".into(),
+                            gitlink.as_os_str().to_owned(),
+                        ]
+                        .to_vec(),
+                        env,
+                        ..Default::default()
+                    },
+                )?;
+                ensure!(
+                    files.status == 0,
+                    "list uninitialized module files: {}",
+                    String::from_utf8_lossy(&files.stderr)
+                );
+                for path in files
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|path| !path.is_empty())
+                {
+                    snapshot
+                        .untracked
+                        .push(prefix.join(mj_core::path_input::from_git_bytes(path)?));
+                }
+            }
             if snapshot.is_some()
                 && !uninitialized_gitlink_available(
                     runner,

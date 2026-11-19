@@ -485,6 +485,9 @@ impl GitCommandRunner for CaptureGit<'_> {
                 ));
             }
         }
+        // Snapshot packs must hydrate promised objects they carry. The -c
+        // maintenance settings above also reach Git's lazy-fetch children.
+        command.env.push(("GIT_NO_LAZY_FETCH".into(), "0".into()));
         // Inspection must not refresh or lock a user's real index.
         command.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
         self.inner.run(repository, &command)
@@ -933,13 +936,22 @@ fn prepare_operation(
     }
     Ok(false)
 }
-fn submodule_positions_differ(inventory: &WorkspaceInventory) -> bool {
-    inventory.initialized_submodules.iter().any(|module| {
-        !inventory.index_gitlinks.iter().any(|link| {
+fn submodule_uncommitted_state(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    inventory: &WorkspaceInventory,
+) -> Result<bool> {
+    for module in &inventory.initialized_submodules {
+        if !inventory.index_gitlinks.iter().any(|link| {
             link.value.path == module.value.path && link.value.commit == module.value.commit
-        })
-    })
+        }) || staged_gitlink_changes(runner, &checkout.join(&module.value.path))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
+
 fn staged_gitlink_changes(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<bool> {
     let raw = git_bytes(
         runner,
@@ -1015,17 +1027,12 @@ pub(crate) fn intent_to_add_paths(
     .collect()
 }
 
-fn working_state(
+/// A private index beside the real one preserves split-index lookup while
+/// letting snapshot inspection remove gitlinks or create stashes safely.
+pub(crate) fn private_index(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
-    skipped: bool,
-) -> Result<Option<String>> {
-    if skipped {
-        return Ok(None);
-    }
-    // stash create refreshes and writes its index even with optional locks off.
-    // Give it a private copy beside the real index (also preserving split-index
-    // lookup), so estimation and raw capture never write or lock the live index.
+) -> Result<tempfile::NamedTempFile> {
     let index = git_path(runner, checkout, "index")?;
     let temporary =
         tempfile::NamedTempFile::new_in(index.parent().context("index has no parent")?)?;
@@ -1034,6 +1041,18 @@ fn working_state(
     } else {
         fs::remove_file(temporary.path())?;
     }
+    Ok(temporary)
+}
+fn working_state(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    skipped: bool,
+) -> Result<Option<String>> {
+    if skipped {
+        return Ok(None);
+    }
+    // stash create writes its index even with optional locks disabled.
+    let temporary = private_index(runner, checkout)?;
     let mut env = synthetic_git_commit_identity();
     env.push((
         "GIT_INDEX_FILE".into(),
@@ -1511,11 +1530,25 @@ fn clear_direct_url_rules(
     }
     Ok(())
 }
+fn validate_url_rules<'a>(rules: impl IntoIterator<Item = &'a SnapshotConfigEntry>) -> Result<()> {
+    for rule in rules {
+        let (base, kind) = url_rule_parts(&rule.name)?;
+        ensure!(
+            !base.is_empty()
+                && (kind.eq_ignore_ascii_case("insteadof")
+                    || kind.eq_ignore_ascii_case("pushinsteadof")),
+            "unsupported snapshot URL rewrite key {:?}",
+            rule.name
+        );
+    }
+    Ok(())
+}
 fn restore_url_rules(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     rules: &[SnapshotConfigEntry],
 ) -> Result<()> {
+    validate_url_rules(rules)?;
     clear_direct_url_rules(runner, checkout, false)?;
     for rule in rules {
         git_text(
@@ -2857,7 +2890,11 @@ fn capture_prepared_workspace(
                     .worktrees
                     .iter()
                     .find(|(path, _)| path == &tree.relative_path)
-                    .is_some_and(|(_, inventory)| submodule_positions_differ(inventory));
+                    .map(|(_, inventory)| {
+                        submodule_uncommitted_state(runner, &directory, inventory)
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
             let saved_head = if let SnapshotHead::Branch { name, commit } = &tree.head {
                 let (owner_commit, owner_path) = owners[name.as_str()];
                 if commit != owner_commit {
@@ -3033,7 +3070,7 @@ fn capture_prepared_workspace(
             has_uncommitted_state: working.is_some()
                 || skipped
                 || staged_gitlink_changes(runner, checkout)?
-                || submodule_positions_differ(&inventory),
+                || submodule_uncommitted_state(runner, checkout, &inventory)?,
             working_state: working,
             working_state_skipped: skipped,
             worktrees,
@@ -4132,6 +4169,7 @@ fn restore_worktree_rules(
     checkout: &Path,
     rules: &[SnapshotConfigEntry],
 ) -> Result<()> {
+    validate_url_rules(rules)?;
     // `worktree add` copies config.worktree from the primary checkout. Replace
     // those inherited URL rules so each restored checkout keeps its own scope.
     if worktree_config_enabled(runner, checkout)? {
@@ -4265,6 +4303,23 @@ pub fn restore_workspace_snapshot(
     destination: &Path,
     base: &RestoreBase,
 ) -> Result<()> {
+    let modules = snapshot.initialized_submodules.iter().chain(
+        snapshot
+            .worktrees
+            .iter()
+            .flat_map(|tree| &tree.initialized_submodules),
+    );
+    validate_url_rules(
+        snapshot
+            .url_rules
+            .iter()
+            .chain(&snapshot.worktree_url_rules)
+            .chain(snapshot.worktrees.iter().flat_map(|tree| &tree.url_rules))
+            .chain(
+                modules
+                    .flat_map(|module| module.url_rules.iter().chain(&module.worktree_url_rules)),
+            ),
+    )?;
     // Validate every persisted working-tree path before creating or changing
     // any repository, including paths below Git administration directories.
     for path in snapshot
@@ -9688,7 +9743,12 @@ mod tests {
         );
         fs::write(nested.join("file"), "detached nested commit\n").unwrap();
         git(&nested, &["commit", "-am", "detached nested commit"]);
+        fs::write(nested.join("file"), "nested staged edits\n").unwrap();
+        git(&nested, &["add", "file"]);
         fs::write(nested.join("file"), "nested tracked edits\n").unwrap();
+        fs::write(root.checkout.join("file"), "primary staged edits\n").unwrap();
+        git(&root.checkout, &["add", "file"]);
+        fs::write(root.checkout.join("file"), "primary unstaged edits\n").unwrap();
         let snapshot = root.capture(&CheckoutOwnership::Managed);
         let destination = root.temp.path().join("provisioned");
         git(
@@ -9752,6 +9812,15 @@ mod tests {
             git(&nested, &["rev-parse", "HEAD"])
         );
         assert_eq!(git(&restored, &["diff"]), git(&nested, &["diff"]));
+        assert_eq!(
+            git(&restored, &["diff", "--cached"]),
+            git(&nested, &["diff", "--cached"])
+        );
+        assert_eq!(git(&destination, &["diff"]), git(&root.checkout, &["diff"]));
+        assert_eq!(
+            git(&destination, &["diff", "--cached"]),
+            git(&root.checkout, &["diff", "--cached"])
+        );
     }
 
     // Hard-won: bae1ae4d3: provisioned offline restore still fetched submodules.
@@ -11206,5 +11275,245 @@ mod tests {
         )
         .unwrap();
         assert_ne!(output.status, 0);
+    }
+    // Hard-won: 3f919bd96: snapshot rewrite keys could set arbitrary executable Git configuration.
+    #[test]
+    fn integration_review_rewrite_keys_are_validated_in_every_scope_before_restore() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let nested = root.checkout.join("lanes/agent");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        );
+        git(
+            &nested,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+            ],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        for key in ["core.sshCommand", "include.path", "url.evil.unsupported"] {
+            for scope in 0..7 {
+                let mut invalid = snapshot.clone();
+                let rules = match scope {
+                    0 => &mut invalid.url_rules,
+                    1 => &mut invalid.worktree_url_rules,
+                    2 => &mut invalid.worktrees[0].url_rules,
+                    3 => &mut invalid.initialized_submodules[0].url_rules,
+                    4 => &mut invalid.initialized_submodules[0].worktree_url_rules,
+                    5 => &mut invalid.worktrees[0].initialized_submodules[0].url_rules,
+                    _ => &mut invalid.worktrees[0].initialized_submodules[0].worktree_url_rules,
+                };
+                rules.push(SnapshotConfigEntry {
+                    name: key.into(),
+                    value: "injected".into(),
+                });
+                let destination = root.temp.path().join("invalid-config");
+                assert!(
+                    restore_workspace_snapshot(
+                        &FileGit,
+                        &invalid,
+                        &destination,
+                        &clone_base(&invalid, None)
+                    )
+                    .is_err()
+                );
+                assert!(
+                    !destination.exists(),
+                    "key {key}, scope {scope} changed destination"
+                );
+                let before = fs::read(root.checkout.join(".git/config")).unwrap();
+                assert!(
+                    restore_workspace_snapshot(
+                        &FileGit,
+                        &invalid,
+                        &root.checkout,
+                        &RestoreBase::Provisioned {
+                            allow_origin_fetch: false
+                        }
+                    )
+                    .is_err()
+                );
+                assert_eq!(fs::read(root.checkout.join(".git/config")).unwrap(), before);
+            }
+        }
+    }
+
+    // Hard-won: 3f919bd96: indexed gitlinks hid ordinary files in uninitialized module directories.
+    #[test]
+    fn integration_review_uninitialized_module_files_require_discard_consent() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let directory = add_submodule(&root, &module);
+        fs::write(
+            root.checkout.join(".gitignore"),
+            "sub/*.ignored\nsub/cache/\n",
+        )
+        .unwrap();
+        git(&root.checkout, &["add", ".gitignore"]);
+        git(
+            &root.checkout,
+            &["commit", "-m", "ignore generated module files"],
+        );
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
+        fs::create_dir_all(directory.join("deep")).unwrap();
+        fs::create_dir_all(directory.join("cache")).unwrap();
+        fs::write(directory.join("notes"), "user note").unwrap();
+        fs::write(directory.join("deep/file\nname"), "nested note").unwrap();
+        fs::write(directory.join("generated.ignored"), "ignored").unwrap();
+        fs::write(directory.join("cache/data"), "ignored").unwrap();
+        let index = fs::read(root.checkout.join(".git/index")).unwrap();
+        let inventory =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        assert_eq!(
+            inventory
+                .untracked
+                .iter()
+                .map(|path| (path.path.clone(), path.bytes))
+                .collect::<Vec<_>>(),
+            vec![
+                (PathBuf::from("sub/deep/file\nname"), 11),
+                (PathBuf::from("sub/notes"), 9)
+            ]
+        );
+        assert_eq!(fs::read(root.checkout.join(".git/index")).unwrap(), index);
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::None,
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
+            "{error:#}"
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        assert!(!restored.join("sub/notes").exists());
+        assert_eq!(fs::read(directory.join("notes")).unwrap(), b"user note");
+    }
+
+    // Hard-won: 3f919bd96: staged nested gitlinks were omitted from the uncommitted-state flag.
+    #[test]
+    fn integration_review_staged_nested_gitlinks_mark_each_checkout_uncommitted() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let leaf = Repo::new();
+        add_submodule(&module, &leaf);
+        add_submodule(&root, &module);
+        let nested = root.checkout.join("lanes/agent");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        );
+        for checkout in [&root.checkout, &nested] {
+            git(
+                checkout,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                ],
+            );
+        }
+        leaf.commit("new published nested pin\n");
+        git(&leaf.checkout, &["push", "origin", "main"]);
+        let pin = git(&leaf.checkout, &["rev-parse", "HEAD"]);
+        for checkout in [&root.checkout, &nested] {
+            git(&checkout.join("sub/sub"), &["fetch", "origin"]);
+            git(&checkout.join("sub/sub"), &["checkout", "--detach", &pin]);
+            git(&checkout.join("sub"), &["add", "sub"]);
+        }
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert!(snapshot.has_uncommitted_state);
+        assert!(snapshot.worktrees[0].has_uncommitted_state);
+        assert!(snapshot.working_state.is_none());
+        assert!(snapshot.worktrees[0].working_state.is_none());
+        let restored = root.restore(&snapshot, None);
+        for checkout in [&restored, &restored.join("lanes/agent")] {
+            assert_eq!(git(&checkout.join("sub"), &["rev-parse", ":sub"]), pin);
+            assert!(!git(&checkout.join("sub"), &["diff", "--cached"]).is_empty());
+        }
+    }
+
+    // Hard-won: 3f919bd96: capture inherited the archival runner's lazy-promisor-fetch prohibition.
+    #[test]
+    fn integration_review_partial_clone_hydrates_removed_origin_history_for_pack() {
+        let mut root = Repo::new();
+        let historical = "promised historical content\n".repeat(4000);
+        fs::write(root.checkout.join("historical"), &historical).unwrap();
+        git(&root.checkout, &["add", "historical"]);
+        git(
+            &root.checkout,
+            &["commit", "-m", "history retained only locally"],
+        );
+        git(&root.checkout, &["push", "origin", "main"]);
+        let blob = git(&root.checkout, &["rev-parse", "HEAD:historical"]);
+        git(&root.origin, &["config", "uploadpack.allowFilter", "true"]);
+        git(
+            &root.origin,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        let partial = root.temp.path().join("partial");
+        let url = url::Url::from_directory_path(&root.origin)
+            .unwrap()
+            .to_string();
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                &url,
+                partial.to_str().unwrap(),
+            ],
+        );
+        git(&partial, &["branch", "retained", "HEAD"]);
+        git(&root.checkout, &["checkout", "--orphan", "replacement"]);
+        git(&root.checkout, &["rm", "-rf", "."]);
+        fs::write(root.checkout.join("current"), "new origin root\n").unwrap();
+        git(&root.checkout, &["add", "current"]);
+        git(&root.checkout, &["commit", "-m", "replace origin history"]);
+        git(&root.checkout, &["push", "--force", "origin", "HEAD:main"]);
+        git(&partial, &["fetch", "origin"]);
+        git_text(
+            &CaptureGit { inner: &FileGit },
+            &partial,
+            ["checkout", "-B", "main", "origin/main"],
+        )
+        .unwrap();
+        let absent = run_git(&FileGit, &partial, ["cat-file", "-e", &blob], &[]).unwrap();
+        assert_ne!(
+            absent.status, 0,
+            "fixture unexpectedly hydrated the historical blob"
+        );
+        root.checkout = partial;
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert!(snapshot.pack.is_some());
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["show", "retained:historical"]),
+            historical.trim_end_matches('\n')
+        );
+        git(&restored, &["fsck", "--full"]);
     }
 }
