@@ -61,15 +61,17 @@ impl CodexLauncher {
     pub(crate) async fn prepare(
         &self,
         env: &HashMap<String, String>,
-    ) -> anyhow::Result<crate::quota_harness::QuotaProgram> {
+    ) -> anyhow::Result<Arc<crate::quota_harness::QuotaProgram>> {
         match self {
-            Self::Host => crate::quota_harness::locate(HarnessKind::Codex, env).await,
+            Self::Host => crate::quota_harness::locate(HarnessKind::Codex, env)
+                .await
+                .map(Arc::new),
             #[cfg(any(test, feature = "test-support"))]
-            Self::Program(command) => Ok(crate::quota_harness::QuotaProgram {
+            Self::Program(command) => Ok(Arc::new(crate::quota_harness::QuotaProgram {
                 command: command.clone(),
                 environment: HashMap::new(),
                 _installation: None,
-            }),
+            })),
         }
     }
 }
@@ -79,7 +81,7 @@ pub struct CodexUsageClient {
     /// Which launcher started this client; a poll that asks for another one
     /// replaces it.
     launcher: CodexLauncher,
-    _program: crate::quota_harness::QuotaProgram,
+    program: Arc<crate::quota_harness::QuotaProgram>,
     stdin: crate::streamed_child::ProxyWriter,
     stdout: BufReader<crate::streamed_child::ProxyReader>,
     stderr: StderrTail,
@@ -89,11 +91,25 @@ pub struct CodexUsageClient {
 }
 
 impl CodexUsageClient {
+    fn matches_launcher(&self, launcher: &CodexLauncher) -> bool {
+        &self.launcher == launcher
+    }
+
+    /// Reuse the selected program and leases while its app-server is alive;
+    /// a changed or damaged installation cannot invalidate a running client.
+    pub(crate) fn prepared_program(
+        &self,
+        launcher: &CodexLauncher,
+    ) -> Option<Arc<crate::quota_harness::QuotaProgram>> {
+        self.matches_launcher(launcher)
+            .then(|| Arc::clone(&self.program))
+    }
+
     async fn spawn(
         cwd: PathBuf,
         env: HashMap<String, String>,
         launcher: &CodexLauncher,
-        program: crate::quota_harness::QuotaProgram,
+        program: Arc<crate::quota_harness::QuotaProgram>,
     ) -> Result<Self, QueryError> {
         let mut env = env;
         env.extend(program.environment.clone());
@@ -108,7 +124,7 @@ impl CodexUsageClient {
         Ok(Self {
             child,
             launcher: launcher.clone(),
-            _program: program,
+            program,
             stdin,
             stdout: BufReader::new(stdout),
             stderr,
@@ -347,9 +363,9 @@ async fn start(
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
-    prepared: &mut Option<crate::quota_harness::QuotaProgram>,
+    prepared: &mut Option<Arc<crate::quota_harness::QuotaProgram>>,
 ) -> Result<(), QueryError> {
-    if let Some(stale) = client.take_if(|ready| &ready.launcher != launcher) {
+    if let Some(stale) = client.take_if(|ready| !ready.matches_launcher(launcher)) {
         stale.shutdown().await;
     }
     if client.is_none() {
@@ -396,7 +412,7 @@ pub(crate) async fn refresh_with_cache_root(
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
-    prepared: &mut Option<crate::quota_harness::QuotaProgram>,
+    prepared: &mut Option<Arc<crate::quota_harness::QuotaProgram>>,
 ) -> CodexUsageStatus {
     let result = match start(client, cwd, env, launcher, prepared).await {
         Ok(()) => {
@@ -444,7 +460,7 @@ pub(crate) async fn refresh_login_with_cache_root(
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
-    prepared: &mut Option<crate::quota_harness::QuotaProgram>,
+    prepared: &mut Option<Arc<crate::quota_harness::QuotaProgram>>,
 ) -> Result<(), LoginRefreshFailure> {
     let result = match start(client, cwd, env, launcher, prepared).await {
         Ok(()) => {

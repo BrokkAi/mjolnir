@@ -706,6 +706,118 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
     );
 }
 
+#[cfg(unix)]
+// Hard-won: 7f4649508: re-preparing Codex rejected a healthy cached client after its CLI disappeared.
+#[tokio::test]
+async fn cached_codex_keeps_polling_after_its_launcher_disappears() {
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(36_000),
+        Duration::from_secs(3_600),
+    );
+    let script = r#"#!/bin/sh
+id=0
+while IFS= read -r line; do
+    case "$line" in
+        *'"method":"initialized"'*) continue ;;
+    esac
+    id=$((id + 1))
+    case "$line" in
+        *'"method":"account/read"'*) result='{"account":{"type":"chatgpt"}}' ;;
+        *'"method":"account/rateLimits/read"'*) result='{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}' ;;
+        *) result='{}' ;;
+    esac
+    printf '{"id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
+    mj_core::test_hooks::install_fake_command(directory.path(), "codex", script);
+    let request = codex_quota_request(
+        directory.path(),
+        BTreeMap::from([
+            (
+                "PATH".into(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            // If lookup is retried after the executable disappears, preparation
+            // fails deterministically without touching the host cache or network.
+            ("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into()),
+        ]),
+    );
+    let (first, client) = refresh_profile_with_cache_root(request.clone(), None, None).await;
+    assert_eq!(first.report.error, None);
+    assert!(client.is_some());
+    std::fs::remove_file(directory.path().join("codex")).unwrap();
+    let (second, client) = refresh_profile_with_cache_root(request, client, None).await;
+    // Stop the child even if the assertion below detects the regression.
+    client.expect("cached app-server survives").shutdown().await;
+    assert_eq!(second.report.error, None);
+    assert_eq!(
+        second.report.five_hour_window().unwrap().remaining_percent,
+        Some(75)
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: 7f4649508: an ambient CLI's non-UTF-8 directory was replaced before process startup.
+#[tokio::test]
+async fn inherited_native_path_starts_codex_from_a_non_utf8_directory() {
+    use std::os::unix::ffi::OsStringExt as _;
+    const CHILD_HOME: &str = "MJ_NATIVE_QUOTA_PATH_HOME";
+    if let Some(home) = std::env::var_os(CHILD_HOME) {
+        let request = codex_quota_request(
+            Path::new(&home),
+            BTreeMap::from([("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into())]),
+        );
+        let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+        assert_eq!(outcome.report.error, None);
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(36_000),
+        Duration::from_secs(3_600),
+    );
+    let bin = directory
+        .path()
+        .join(std::ffi::OsString::from_vec(b"bin-\xff".to_vec()));
+    std::fs::create_dir(&bin).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "codex",
+        r#"#!/bin/sh
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+IFS= read -r line
+"#,
+    );
+    let child = crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+        module_path!(),
+        "inherited_native_path_starts_codex_from_a_non_utf8_directory",
+    ))
+    .env(CHILD_HOME, directory.path())
+    .env("PATH", std::env::join_paths([bin]).unwrap())
+    .isolated_store(&directory.path().join("child-instance"));
+    let output = tokio::task::spawn_blocking(move || child.output())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A profile switched off the ChatGPT login stops the app-server cached for it
 /// instead of handing it back to be kept until the daemon exits.
 #[cfg(unix)]

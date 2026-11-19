@@ -749,10 +749,15 @@ async fn refresh_profile_with_cache_root(
                 let _ = cache_root;
                 // Installation touches no credentials; finish it before
                 // reserving the login slot used by credential synchronization.
-                let mut prepared = match launcher.prepare(&environment).await {
-                    Ok(program) => Some(program),
-                    Err(error) => break 'codex Err(error),
-                };
+                let mut prepared = codex_client
+                    .as_ref()
+                    .and_then(|client| client.prepared_program(&launcher));
+                if prepared.is_none() {
+                    prepared = match launcher.prepare(&environment).await {
+                        Ok(program) => Some(program),
+                        Err(error) => break 'codex Err(error),
+                    };
+                }
                 // Serialize the expiry decision and every app-server request with
                 // other daemons and credential syncs using this login slot.
                 // Waiting for ownership is outside the RPC request timeout.

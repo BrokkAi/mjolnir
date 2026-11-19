@@ -35,16 +35,25 @@ pub(crate) async fn locate(
             name,
             program_search
                 .iter()
-                .find(|(key, _)| {
+                .filter(|(key, _)| {
                     if cfg!(windows) {
                         key.eq_ignore_ascii_case("PATH")
                     } else {
                         *key == "PATH"
                     }
                 })
+                // CommandSpec passes its BTreeMap environment in key order;
+                // Windows folds aliases, so the last spelling wins there too.
+                .max_by(|left, right| left.0.cmp(right.0))
                 .map(|(_, value)| std::ffi::OsStr::new(value))
                 .or(inherited_path.as_deref()),
         )
+        .map(|selected| {
+            // Ambient programs launch through the child's native PATH. Keep
+            // non-UTF-8 directories out of CommandSpec's UTF-8 program field;
+            // retain the selected suffix for Windows npm shims.
+            PathBuf::from(selected.file_name().expect("CLI lookup names a file"))
+        })
         .or_else(|| {
             // Grok's official installer also installs under the profile home.
             if harness != HarnessKind::Grok {
