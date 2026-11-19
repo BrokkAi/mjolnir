@@ -2003,7 +2003,7 @@ pub(crate) async fn sessions(
         println!(
             "  target {}  host {}  profile {}",
             sanitize_terminal_text(&session.target_id),
-            host_of_target(&rows, &session.target_id).unwrap_or("-"),
+            sanitize_terminal_text(host_of_target(&rows, &session.target_id).unwrap_or("-")),
             sanitize_terminal_text(&session.profile_id)
         );
         if let Some(error) = &session.profile_login_error {
@@ -2044,7 +2044,8 @@ fn select_sessions(
 ) -> Result<Vec<ApiSession>> {
     let known = |names: Vec<&str>| {
         let names: std::collections::BTreeSet<_> = names.into_iter().collect();
-        names.into_iter().collect::<Vec<_>>().join(", ")
+        let joined = names.into_iter().collect::<Vec<_>>().join(", ");
+        sanitize_terminal_text(&joined)
     };
     if let Some(target) = target
         && !rows
