@@ -40,10 +40,22 @@ REQUEST_SECONDS = 600
 STOP_SECONDS = 120
 
 
-# SIGTERM/SIGINT never raise into the driver: they set CANCEL, which the request and readiness
+# SIGTERM/SIGINT never raise into the driver: they set a cancellation flag, which the request and readiness
 # waits poll, so cancellation always runs through the ordinary teardown path (one owner, no
 # window between launching a server and protecting it).
-CANCEL = threading.Event()
+_CANCELLED = [False]  # written only by the signal handler; a plain flag takes no lock
+
+
+def cancelled():
+    return _CANCELLED[0]
+
+
+def cancellable_sleep(seconds):
+    """Sleep in short slices; True if the batch was cancelled meanwhile."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end and not cancelled():
+        time.sleep(min(0.2, end - time.monotonic()))
+    return cancelled()
 
 
 class Cancelled(RuntimeError):
@@ -140,7 +152,7 @@ class Server:
         self.proc.stdin.flush()
         deadline = min(time.monotonic() + REQUEST_SECONDS, deadline or float("inf"))
         while True:
-            if CANCEL.is_set():
+            if cancelled():
                 raise Cancelled("cancelled while waiting for a reply")
             if time.monotonic() >= deadline:  # also while notifications keep arriving
                 raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
@@ -176,7 +188,7 @@ class Server:
             if err:
                 incomplete = (err.get("data") or {}).get("io.bifrost/workspace-incomplete") or {}
                 if incomplete.get("reason") == "busy":
-                    if CANCEL.wait(1):
+                    if cancellable_sleep(1):
                         raise Cancelled("cancelled while waiting for readiness")
                     continue
                 raise RuntimeError(f"readiness error: {json.dumps(err)[:1000]}")
@@ -190,7 +202,7 @@ class Server:
             if all(payload.get(k) is True for k in ("analyzer_ready", "usage_index_ready", "semantic_packs_ready")) \
                     and status in ("ready", "complete", "completed"):
                 return payload, polls
-            if CANCEL.wait(1):
+            if cancellable_sleep(1):
                 raise Cancelled("cancelled while waiting for readiness")
 
 
@@ -233,31 +245,47 @@ class Server:
         # neither), and its cgroup holds no process. Anything else stops the batch for this repo.
         deadline = time.monotonic() + STOP_SECONDS
         while True:
-            state = run_bounded(["systemctl", "--user", "show", scope, "-p", "ActiveState", "--value"],
-                                   capture_output=True, text=True).stdout.strip()
-            procs = ""
-            if self.cgroup:
-                try:
-                    procs = open(f"{self.cgroup}/cgroup.procs").read().strip()
-                except FileNotFoundError:
-                    procs = ""
-            if state in ("inactive", "failed") and not procs:
+            gone, detail = scope_tree_gone(scope, self.cgroup)
+            if gone:
                 # Read the Result only now, after every process in the scope has exited, so an
                 # OOM kill of a child during shutdown is caught too (the uncollected failed
-                # scope keeps it until reset-failed).
-                self.sample["scope_result"] = run_bounded(
-                    ["systemctl", "--user", "show", scope, "-p", "Result", "--value"],
-                    capture_output=True, text=True).stdout.strip()
+                # scope keeps it until reset-failed). An unreadable Result is "unknown", which
+                # fails the phase: it may be the only evidence of an OOM.
+                shown = run_bounded(["systemctl", "--user", "show", scope, "-p", "Result", "--value"],
+                                    capture_output=True, text=True)
+                result = shown.stdout.strip()
+                self.sample["scope_result"] = result if shown.returncode == 0 and result else "unknown"
                 break
             if time.monotonic() > deadline:
-                raise TeardownUnconfirmed(f"{scope} not confirmed stopped (state={state!r}, procs={procs[:80]!r}, "
-                                   f"stop exit {stopped.returncode}: {stopped.stderr.strip()[-200:]}); "
-                                   "refusing to touch its worktree")
+                raise TeardownUnconfirmed(f"{scope} not confirmed stopped ({detail}; stop exit "
+                                          f"{stopped.returncode}: {stopped.stderr.strip()[-200:]}); "
+                                          "refusing to touch its worktree")
             time.sleep(1)
         run_bounded(["systemctl", "--user", "reset-failed", scope], capture_output=True)
         self.sampling = False
         self.log.close()
         return rc
+
+
+def scope_tree_gone(unit, known_cgroup=None):
+    """(gone, detail): positive proof that a scope's process tree has exited. systemd must answer
+    (a failed lookup proves nothing), report the unit inactive or failed, and its cgroup - from
+    systemd, plus any path the sampler recorded - must be absent or hold no process."""
+    shown = run_bounded(["systemctl", "--user", "show", unit, "-p", "ActiveState", "-p", "ControlGroup"],
+                        capture_output=True, text=True)
+    if shown.returncode:
+        return False, f"systemctl show failed: {shown.stderr.strip()[-200:]}"
+    props = dict(l.split("=", 1) for l in shown.stdout.splitlines() if "=" in l)
+    state = props.get("ActiveState", "")
+    for cg in {props.get("ControlGroup", ""), (known_cgroup or "").removeprefix("/sys/fs/cgroup")} - {""}:
+        try:
+            if open(f"/sys/fs/cgroup{cg}/cgroup.procs").read().strip():
+                return False, f"state={state} with processes in {cg}"
+        except FileNotFoundError:
+            pass
+    if state not in ("inactive", "failed"):
+        return False, f"state={state}"
+    return True, f"state={state}"
 
 
 def run_bounded(cmd, **kw):
@@ -271,7 +299,7 @@ def du(path):
 
 
 def phase(binary, root, cache, log):
-    if CANCEL.is_set():  # never launch a server after cancellation (e.g. during a checkout)
+    if cancelled():  # never launch a server after cancellation (e.g. during a checkout)
         raise Cancelled("cancelled before launching a server")
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0 = time.monotonic()
@@ -299,7 +327,7 @@ def phase(binary, root, cache, log):
     except Exception as e:
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
     rec["exit"] = server.stop()
-    if CANCEL.is_set():
+    if cancelled():
         # Torn down; now stop the batch before any checkout or another index launch.
         raise Cancelled("cancelled; this phase's server was torn down")
     if rec.get("ready") and rec["exit"] != 0:
@@ -308,10 +336,11 @@ def phase(binary, root, cache, log):
         rec["ready"] = False
         rec["error"] = f"unclean shutdown after ready (exit {rec['exit']})"
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
-    if rec.get("scope_result") == "oom-kill" or rec.get("oom_kill"):
+    if rec.get("scope_result") in ("oom-kill", "unknown") or rec.get("oom_kill"):
         # Hitting the cap at any point, even after a ready reply, invalidates the phase.
         rec["ready"] = False
-        rec.setdefault("error", f"memory cap {MEMORY_MAX} reached (scope_result={rec.get('scope_result')})")
+        rec.setdefault("error", f"memory cap {MEMORY_MAX} reached or scope result unreadable "
+                                f"(scope_result={rec.get('scope_result')})")
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     rec.update(cpu_user=after.ru_utime - before.ru_utime, cpu_sys=after.ru_stime - before.ru_stime,
                cache_bytes=du(cache))
@@ -320,7 +349,7 @@ def phase(binary, root, cache, log):
 
 def git(*args, cwd=None):
     """Run git, but stop it if the batch is cancelled: a long clone or fetch mustn't delay
-    cancellation, and nothing launches after it (phase() checks CANCEL first)."""
+    cancellation, and nothing launches after it (phase() checks the flag first)."""
     # Its own process group, so cancelling stops transport and index-pack children too.
     proc = subprocess.Popen(["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True)
@@ -329,7 +358,7 @@ def git(*args, cwd=None):
             out, err = proc.communicate(timeout=1)
             break
         except subprocess.TimeoutExpired:
-            if CANCEL.is_set():
+            if cancelled():
                 import signal
                 for sig in (signal.SIGTERM, signal.SIGKILL):
                     try:
@@ -384,34 +413,19 @@ def reap_leftover_scopes():
         run_bounded(["systemctl", "--user", "stop", unit], capture_output=True)
         deadline = time.monotonic() + STOP_SECONDS
         while True:
-            state = run_bounded(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"],
-                                   capture_output=True, text=True).stdout.strip()
-            shown = run_bounded(["systemctl", "--user", "show", unit, "-p", "ControlGroup", "--value"],
-                                capture_output=True, text=True)
-            if shown.returncode:  # a failed lookup proves nothing: treat the tree as possibly alive
-                if time.monotonic() > deadline:
-                    sys.exit(f"leftover {unit}: ControlGroup lookup failed ({shown.stderr.strip()[-200:]}); "
-                             "refusing to clean up any worktree")
-                time.sleep(1)
-                continue
-            cg = shown.stdout.strip()  # empty for a stopped unit, which has no cgroup
-            try:
-                procs = open(f"/sys/fs/cgroup{cg}/cgroup.procs").read().strip() if cg else ""
-            except FileNotFoundError:
-                procs = ""
-            # "failed" can follow a stop timeout with a process still alive: require an empty cgroup.
-            if state in ("inactive", "failed") and not procs:
+            gone, detail = scope_tree_gone(unit)
+            if gone:
                 run_bounded(["systemctl", "--user", "reset-failed", unit], capture_output=True)
                 break
             if time.monotonic() > deadline:
-                sys.exit(f"leftover {unit} won't stop (state={state!r}); refusing to clean up any worktree")
+                sys.exit(f"leftover {unit} not confirmed stopped ({detail}); refusing to clean up any worktree")
             time.sleep(1)
 
 
 def main():
     import signal
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: CANCEL.set())
+        signal.signal(sig, lambda *_: _CANCELLED.__setitem__(0, True))
     require_ec2()
     # One driver per host: a second invocation would reap the first's live scopes and race on
     # its worktrees. The lock is held for the process lifetime.
@@ -449,7 +463,7 @@ def main():
             and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
             and r.get("head") == pins[repo][0]}
     for repo in repos:
-        if CANCEL.is_set():
+        if cancelled():
             sys.exit("cancelled; the last server's scope was torn down")
         if repo in done:
             continue
