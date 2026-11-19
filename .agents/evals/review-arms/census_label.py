@@ -9,6 +9,7 @@ import json
 import posixpath
 from pathlib import Path
 import re
+import shutil
 import sys
 import subprocess
 from tempfile import mkdtemp
@@ -20,6 +21,9 @@ from label_facts import HERE, batches, indexed, save
 CENSUS = HERE / "brief/rql-census"
 LABELS = CENSUS / "labels"
 RUST = Path("/mnt/optane/tmp/rust10")
+# HEAD of the Mjolnir development batches launched by census runner 95af720f8,
+# verified in census-label-work/development-primary-6cq5biub/repo and the following batch.
+MJOLNIR_REVISION = "fb0a4c0ac5cfe0396e1bce2740b6a1148c47fdb9"
 # Missing-step kinds from label-SPEC.md; the menu ranks these.
 MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
                  "keyed_matching", "contract", "other")
@@ -88,9 +92,11 @@ def item_sets():
     return items, pins, unconfirmed_dev
 
 
+ISSUE_REPO = r"[\w.-]+/[\w.-]+"
 FIXES_ISSUE = re.compile(
     r"(?i)\b(?:fix(?:e[sd])?|clos(?:e[sd]?|ing)|resolv(?:e[sd]?|ing))\s+"
-    r"(?:issue\s+)?(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)"
+    rf"(?:issue\s+)?(?:https://github\.com/(?P<url_repo>{ISSUE_REPO})/issues/|"
+    rf"(?:(?P<repo>{ISSUE_REPO}))?#)(?P<number>\d+)\b"
 )
 
 
@@ -98,7 +104,8 @@ FIXES_ISSUE = re.compile(
 def fix_message_issues(source, revision, repo):
     message = git(source, "show", "-s", "--format=%B", revision).decode(errors="replace")
     return {int(match["number"]) for match in FIXES_ISSUE.finditer(message)
-            if match["repo"] is None or match["repo"].lower() == repo.lower()}
+            if (match["url_repo"] or match["repo"] or repo).lower() == repo.lower()}
+
 
 
 def issue_ids(item, source):
@@ -338,6 +345,43 @@ def check_query(query, allowed, *, query_heads=None):
             else:
                 embedded(arg)
 
+    def option_forms(options):
+        # The pinned sexp.rs decoder passes :enclosing to pattern_to_json
+        # for references-of and edge traversal. The other list-valued
+        # operands below have their own documented, contextual form heads.
+        if ":enclosing" in options:
+            pattern(options[":enclosing"])
+
+        def operand(value, heads):
+            if isinstance(value, list) and value and isinstance(value[0], str):
+                head = value[0]
+                if re.fullmatch(r"[A-Za-z_][\w/-]*", head) and head not in heads:
+                    errors.append(f"undocumented RQL form {head!r}")
+                for child in value[1:]:
+                    operand(child, heads)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    operand(child, heads)
+
+        # reference/code-query.md:839,981–985
+        for option in (":receiver-type", ":receiver_type"):
+            operand(options.get(option), {"assignable-to", "assignable_to"})
+        for option in (":route", ":routes"):
+            operand(options.get(option), {"key", "index", "any"})
+
+        # A row predicate's first item is a field name. Only the operand
+        # can introduce a form ((field NAME) or (enum LABEL), reference:767).
+        predicates = options.get(":where")
+        if isinstance(predicates, (list, tuple)):
+            for predicate in predicates:
+                if isinstance(predicate, (list, tuple)) and len(predicate) == 3:
+                    _, operator, value = predicate
+                    if operator == "in" and isinstance(value, (list, tuple)):
+                        for member in value:
+                            operand(member, {"enum"})
+                    else:
+                        operand(value, {"field", "enum"})
+
     def compatible(context, actual, expected):
         kinds = row_kinds(expected)
         if kinds and len(actual) > 1:
@@ -361,6 +405,7 @@ def check_query(query, allowed, *, query_heads=None):
             errors.append(f"{name}: expected a query form")
             return set()
         args, options = arguments(form)
+        option_forms(options)
         missing = [aliases[0] for aliases in required if not any(option in options for option in aliases)]
         if missing:
             errors.append(f"{name}: missing required options {', '.join(missing)}")
@@ -407,9 +452,6 @@ def check_query(query, allowed, *, query_heads=None):
                 if signature == "any code row" and actual & {
                         "configuration_fact", "dependency_evidence", "cross_domain"}:
                     errors.append(f"{name} {option}: expected a programming-code query")
-        for option in (":route", ":routes"):
-            if option in options:
-                embedded(options[option])
         if output == "no rows":
             errors.append(f"{name}: describes a plan without executing and returns no rows")
             return set()
@@ -633,9 +675,9 @@ def quota(args, role):
     return True
 
 
-def checkout_revision(repo, pins, mjolnir_clone):
+def checkout_revision(repo, pins):
     if repo == "mjolnir":
-        return git(mjolnir_clone, "rev-parse", "origin/master").decode().strip()
+        return MJOLNIR_REVISION
     if repo == "bifrost-dev":
         return json.loads((HERE / "corpus-bifrost/FREEZE.json").read_text())["snapshot"]
     return pins[repo]
@@ -811,6 +853,9 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
             except Exception as error:
                 log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
                 raise
+    # Only the completed, suspended batch reaches here. Keep the evidence
+    # beside the checkout, and release the full clone.
+    shutil.rmtree(work)
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
@@ -861,7 +906,7 @@ def main():
         if not selected:
             parser.error("no items match this selection")
         destination = args.labels_dir / f"{args.split}-{args.labeller}.jsonl"
-        heads = {repo: checkout_revision(repo, pins, args.mjolnir_clone) for repo in {item["repo"] for item in selected}}
+        heads = {repo: checkout_revision(repo, pins) for repo in {item["repo"] for item in selected}}
         expected_hashes = {(item["repo"], item["id"]): inputs_sha(item, documents, args.labeller, heads[item["repo"]])
                            for item in selected}
         done, _ = read_current_labels(destination, expected_hashes)

@@ -183,13 +183,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels-dir", type=Path, default=LABELS)
     parser.add_argument("--check-clones", type=Path, default=RUST / "check-clones")
-    parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     args = parser.parse_args()
     cohorts, pins, _ = item_sets()
     exclude_families(cohorts, args.check_clones)
     documents = input_documents()
     repos = {item["repo"] for cohort in cohorts.values() for item in cohort}
-    heads = {repo: checkout_revision(repo, pins, args.mjolnir_clone) for repo in repos}
+    heads = {repo: checkout_revision(repo, pins) for repo in repos}
     report = {
         "field_descriptions": {
             "stale_rows": "Saved rows with missing or mismatched input hashes or outside the current cohort.",
