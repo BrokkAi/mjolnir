@@ -53,7 +53,14 @@ pub fn inspect_submodules(
     let top_level = top_level.strip_suffix(b"\n").unwrap_or(&top_level);
     let top_level = mj_core::path_input::from_git_bytes(top_level)?;
     let mut inspection = SubmoduleInspection::default();
-    inspect_checkout(runner, &top_level, Path::new(""), &mut inspection, None)?;
+    inspect_checkout(
+        runner,
+        &top_level,
+        Path::new(""),
+        &mut inspection,
+        None,
+        None,
+    )?;
     Ok(inspection)
 }
 
@@ -76,6 +83,7 @@ pub(crate) struct SnapshotSubmoduleInspection {
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
     repository: &Path,
+    origin_override: Option<&str>,
 ) -> Result<SnapshotSubmoduleInspection> {
     let mut inspection = SubmoduleInspection::default();
     let mut snapshot = SnapshotSubmoduleInspection {
@@ -88,6 +96,7 @@ pub(crate) fn inspect_snapshot_submodules(
         Path::new(""),
         &mut inspection,
         Some(&mut snapshot),
+        origin_override,
     )?;
     let modules = crate::snapshot::git_path(runner, repository, "modules")?;
     inspect_cached_children(runner, &modules, Path::new(""), &mut snapshot)?;
@@ -155,6 +164,7 @@ fn inspect_checkout(
     prefix: &Path,
     inspection: &mut SubmoduleInspection,
     mut snapshot: Option<&mut SnapshotSubmoduleInspection>,
+    origin_override: Option<&str>,
 ) -> Result<()> {
     let mut gitlinks = gitlinks(runner, checkout)?;
     if snapshot.is_some() {
@@ -213,7 +223,13 @@ fn inspect_checkout(
         let submodule = checkout.join(&gitlink);
         if !submodule.join(".git").exists() {
             if snapshot.is_some()
-                && !uninitialized_gitlink_available(runner, checkout, &gitlink, config_key)?
+                && !uninitialized_gitlink_available(
+                    runner,
+                    checkout,
+                    &gitlink,
+                    config_key,
+                    origin_override,
+                )?
             {
                 inspection.dirty.push(named);
             }
@@ -224,7 +240,9 @@ fn inspect_checkout(
             let (admin, _) = crate::archive::git::git_directories(runner, &submodule)?;
             snapshot
                 .inspected_admins
-                .insert(std::fs::canonicalize(admin)?);
+                .insert(std::fs::canonicalize(&admin)?);
+            inspect_cached_worktree_heads(runner, &admin, &named, snapshot)?;
+            inspect_cached_children(runner, &admin.join("modules"), &named, snapshot)?;
             snapshot.intent_to_add.extend(
                 crate::snapshot::intent_to_add_paths(runner, &submodule)?
                     .into_iter()
@@ -397,6 +415,7 @@ fn inspect_checkout(
             &named,
             inspection,
             snapshot.as_deref_mut(),
+            None,
         )?;
     }
     Ok(())
@@ -445,8 +464,8 @@ fn inspect_cached_local_work(
             &evidence.objects,
             true,
         )?);
+        inspect_cached_worktree_heads(runner, admin, named, snapshot)?;
     }
-    inspect_cached_worktree_heads(runner, admin, named, snapshot)?;
     inspect_cached_children(runner, &admin.join("modules"), named, snapshot)
 }
 
@@ -716,6 +735,7 @@ fn uninitialized_gitlink_available(
     checkout: &Path,
     path: &Path,
     config_key: &[u8],
+    origin_override: Option<&str>,
 ) -> Result<bool> {
     let indexed = snapshot_index_gitlinks(runner, checkout)?
         .into_iter()
@@ -764,7 +784,7 @@ fn uninitialized_gitlink_available(
         return Ok(false);
     }
     let mut url = std::str::from_utf8(&url.stdout)?.trim().to_owned();
-    url = crate::snapshot::resolve_submodule_url(runner, checkout, &url)?;
+    url = crate::snapshot::resolve_submodule_url(runner, checkout, &url, origin_override)?;
     // Match the clone used by submodule update: host config applies, but the
     // parent's repository-local rewrite rules must not reroute this probe.
     let neutral = tempfile::tempdir().context("create neutral submodule probe directory")?;

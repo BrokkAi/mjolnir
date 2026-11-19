@@ -2087,6 +2087,13 @@ pub(crate) fn discover_linked_worktrees(
                     if entry.file_type()?.is_dir() {
                         let path = fs::read(entry.path().join("gitdir"))?;
                         let path = path.strip_suffix(b"\n").unwrap_or(&path);
+                        let registered = mj_core::path_input::from_git_bytes(path)?;
+                        let checkout = registered
+                            .parent()
+                            .context("worktree registration has no checkout")?;
+                        if !checkout.starts_with(repository) && !checkout.starts_with(&top_level) {
+                            continue;
+                        }
                         ensure!(
                             !path.contains(&b'\n'),
                             "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"

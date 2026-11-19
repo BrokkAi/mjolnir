@@ -1170,7 +1170,13 @@ fn absolute_config_url(checkout: &Path, value: &str) -> Result<String> {
     }
     // Preserve URL text for prefix rewrites; filesystem canonicalization can
     // move a symlinked destination outside its configured pushInsteadOf prefix.
-    let mut stored = std::path::absolute(checkout.join(value))?
+    let anchor = if checkout.is_absolute() {
+        checkout.to_path_buf()
+    } else {
+        std::path::absolute(checkout)?
+    };
+    let mut stored = anchor
+        .join(value)
         .to_str()
         .context("Git config path is not UTF-8")?
         .to_owned();
@@ -1359,12 +1365,13 @@ pub(crate) fn resolve_submodule_url(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     url: &str,
+    origin_override: Option<&str>,
 ) -> Result<String> {
     if !url.starts_with("./") && !url.starts_with("../") {
         return absolute_config_url(checkout, url);
     }
     let base = config_values(runner, checkout, "remote.origin.url")?;
-    match base.first() {
+    match base.first().map(String::as_str).or(origin_override) {
         Some(base) => relative_submodule_url(base, url, checkout),
         None => resolve_remote_path(checkout, url),
     }
@@ -2061,8 +2068,13 @@ fn estimate_delta_with_source(
             remote_refs_stale: false,
         });
     };
-    let inventory =
-        workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default())?;
+    let inventory = workspace_inventory_scoped(
+        runner,
+        checkout,
+        ownership,
+        &CheckoutKey::default(),
+        Some(&remote),
+    )?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?.refs;
@@ -2781,6 +2793,7 @@ fn repository_inventory(
         &repository.checkout,
         &repository.ownership,
         &repository_key(&repository.id),
+        repository.origin_override.as_deref(),
     )?;
     if let Some(keep) = keep_relative(repository)? {
         inventory.keep_dir = repository.keep_dir.clone();
@@ -2833,7 +2846,7 @@ pub fn workspace_inventory(
 ) -> Result<WorkspaceInventory> {
     let capture = CaptureGit { inner: runner };
     let runner: &dyn GitCommandRunner = &capture;
-    workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default())
+    workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default(), None)
 }
 pub fn session_inventory(
     runner: &dyn GitCommandRunner,
@@ -2860,6 +2873,7 @@ fn workspace_inventory_scoped(
     checkout: &Path,
     ownership: &CheckoutOwnership,
     key: &CheckoutKey,
+    origin_override: Option<&str>,
 ) -> Result<WorkspaceInventory> {
     fn collect(
         runner: &dyn GitCommandRunner,
@@ -2867,6 +2881,7 @@ fn workspace_inventory_scoped(
         raw: bool,
         nested: &[PathBuf],
         key: &CheckoutKey,
+        origin_override: Option<&str>,
     ) -> Result<WorkspaceInventory> {
         let bytes = git_bytes(
             runner,
@@ -2875,7 +2890,8 @@ fn workspace_inventory_scoped(
             &[],
             "list untracked files",
         )?;
-        let mut submodules = crate::checkpoint::inspect_snapshot_submodules(runner, checkout)?;
+        let mut submodules =
+            crate::checkpoint::inspect_snapshot_submodules(runner, checkout, origin_override)?;
         if let Some(notice) = worktree_remote_notice(runner, checkout)? {
             submodules.notices.push(notice);
         }
@@ -2988,7 +3004,7 @@ fn workspace_inventory_scoped(
     let nested = discover_linked_worktrees(runner, checkout)?;
     let paths: Vec<_> = nested.iter().map(|tree| tree.relative.clone()).collect();
     let raw = matches!(ownership, CheckoutOwnership::Raw { .. });
-    let mut result = collect(runner, checkout, raw, &paths, key)?;
+    let mut result = collect(runner, checkout, raw, &paths, key, origin_override)?;
     for entry in selected_stash(runner, checkout, ownership)? {
         if stash_has_untracked(runner, checkout, &entry.commit)? {
             result.untracked_stashes.push(scoped(key, entry));
@@ -3007,7 +3023,14 @@ fn workspace_inventory_scoped(
         };
         result.worktrees.push((
             tree.relative,
-            collect(runner, &tree.directory, raw, &children, &nested_key)?,
+            collect(
+                runner,
+                &tree.directory,
+                raw,
+                &children,
+                &nested_key,
+                origin_override,
+            )?,
         ));
     }
     Ok(result)
@@ -3193,6 +3216,12 @@ fn restore_submodules(
         }
         crate::archive::ensure_no_symlink_ancestors(checkout, &submodule.path)?;
         let directory = checkout.join(&submodule.path);
+        // The saved index may contain a regular-file replacement while the
+        // saved working checkout is still an initialized module directory.
+        if directory.is_file() {
+            fs::remove_file(&directory)
+                .context("restore initialized module over its index overlay")?;
+        }
         let admin = if directory.join(".git").try_exists()? {
             crate::archive::git::git_directories(runner, &directory)?.0
         } else {
@@ -3336,6 +3365,26 @@ fn restore_submodules(
                 &submodule.url,
             ],
         )?;
+        let saved_index = runner.run(
+            &owner,
+            &GitCommand {
+                arguments: vec![
+                    "--literal-pathspecs".into(),
+                    "ls-files".into(),
+                    "--stage".into(),
+                    "-z".into(),
+                    "--".into(),
+                    relative.as_os_str().to_owned(),
+                ],
+                ..Default::default()
+            },
+        )?;
+        ensure!(
+            saved_index.status == 0,
+            "{}",
+            git_failure("save submodule overlay index entry", &saved_index)
+        );
+        let index_entry = saved_index.stdout;
         // absorbgitdirs resolves its path through the index, even when the
         // saved index intentionally deletes this still-initialized checkout.
         if !crate::checkpoint::snapshot_index_gitlinks(runner, &owner)?
@@ -3381,6 +3430,15 @@ fn restore_submodules(
             git_failure("register restored submodule repository", &output)
         );
         apply_index(parent)?;
+        if !index_entry.is_empty() {
+            git_bytes(
+                runner,
+                &owner,
+                ["update-index", "-z", "--index-info"],
+                &index_entry,
+                "restore submodule overlay index entry",
+            )?;
+        }
         apply_index(&submodule.path)?;
     }
     Ok(())
@@ -3913,6 +3971,9 @@ pub fn restore_workspace_snapshot(
         (!snapshot.working_state_skipped).then_some(snapshot.index_gitlinks.as_slice()),
         allow_origin_fetch,
     )?;
+    // A provisioned retry may have created some of these before a later
+    // module needed provisioning. Reuse only this repository's registrations.
+    let existing_worktrees = discover_linked_worktrees(runner, destination)?;
     for tree in &snapshot.worktrees {
         ensure!(
             !tree.relative_path.as_os_str().is_empty()
@@ -3941,19 +4002,24 @@ pub fn restore_workspace_snapshot(
                 oid
             }
         };
-        arguments.extend(["--".into(), path.as_os_str().to_owned(), rev.into()]);
-        let output = runner.run(
-            destination,
-            &GitCommand {
-                arguments,
-                ..Default::default()
-            },
-        )?;
-        ensure!(
-            output.status == 0,
-            "{}",
-            git_failure("restore nested worktree", &output)
-        );
+        if !existing_worktrees
+            .iter()
+            .any(|existing| existing.relative == tree.relative_path)
+        {
+            arguments.extend(["--".into(), path.as_os_str().to_owned(), rev.into()]);
+            let output = runner.run(
+                destination,
+                &GitCommand {
+                    arguments,
+                    ..Default::default()
+                },
+            )?;
+            ensure!(
+                output.status == 0,
+                "{}",
+                git_failure("restore nested worktree", &output)
+            );
+        }
         checkout_head(runner, &path, &tree.head)?;
         if let Some(state) = &tree.working_state {
             require_object(
@@ -4548,6 +4614,17 @@ mod tests {
     #[test]
     fn nested_detached_worktree_and_dirty_state_survive() {
         let r = Repo::new();
+        let outside = r.temp.path().join("outside\nworktree");
+        git(
+            &r.checkout,
+            &["worktree", "add", "--detach", outside.to_str().unwrap()],
+        );
+        workspace_inventory(
+            &crate::test_support::Git231,
+            &r.checkout,
+            &CheckoutOwnership::Managed,
+        )
+        .unwrap();
         let nested = r.checkout.join("lanes/nested\nline");
         git(
             &r.checkout,
@@ -7020,6 +7097,21 @@ mod tests {
         let module = Repo::new();
         add_submodule(&root, &module);
         let source = root.checkout.join("sub");
+        let admin = crate::archive::git::git_directories(&FileGit, &source)
+            .unwrap()
+            .0;
+        fs::remove_file(source.join(".git")).unwrap();
+        fs::rename(admin, source.join(".git")).unwrap();
+        git(
+            &source,
+            &[
+                "--work-tree",
+                source.to_str().unwrap(),
+                "config",
+                "--unset",
+                "core.worktree",
+            ],
+        );
         let outside = root.temp.path().join("outside-module-lane");
         git(
             &source,
@@ -7031,6 +7123,23 @@ mod tests {
                 "origin/main",
             ],
         );
+        fs::write(outside.join("file"), "sole detached commit\n").unwrap();
+        git(&outside, &["commit", "-am", "sole detached commit"]);
+        let private = git(&outside, &["rev-parse", "HEAD"]);
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("standalone.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(&private), "{error:#}");
+        git(&outside, &["checkout", "--detach", "origin/main"]);
         fs::write(outside.join("file"), "unrelated external edits\n").unwrap();
         root.capture(&CheckoutOwnership::Managed);
         let inside = source.join("local-lane");
@@ -7969,6 +8078,228 @@ mod tests {
         );
     }
 
+    // Hard-won: daa70eca2: anchoring removed literal dots and changed push-prefix matching.
+    #[test]
+    fn literal_dot_remote_does_not_gain_a_push_rewrite_match() {
+        let root = Repo::new();
+        let publisher = Repo::new();
+        let mirror = root.checkout.join("repo.git");
+        git(
+            &root.checkout,
+            &[
+                "clone",
+                "--bare",
+                root.origin.to_str().unwrap(),
+                mirror.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &["remote", "set-url", "origin", "./repo.git"],
+        );
+        git(
+            &root.checkout,
+            &[
+                "config",
+                &format!("url.{}.pushInsteadOf", publisher.origin.display()),
+                "repo.git",
+            ],
+        );
+        root.commit("new work for literal dot destination\n");
+        assert_eq!(
+            git(&root.checkout, &["remote", "get-url", "--push", "origin"]),
+            "./repo.git"
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        git(&restored, &["push", "origin", "main"]);
+        assert_eq!(git(&mirror, &["rev-parse", "main"]), snapshot.head.commit());
+        assert_ne!(
+            git(&publisher.origin, &["rev-parse", "main"]),
+            snapshot.head.commit()
+        );
+    }
+
+    // Hard-won: daa70eca2: absorbgitdirs' temporary gitlink erased a staged regular-file replacement.
+    #[test]
+    fn staged_regular_file_replacing_initialized_gitlink_restores_its_index_entry() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let held = root.temp.path().join("held-module");
+        fs::rename(root.checkout.join("sub"), &held).unwrap();
+        git(&root.checkout, &["rm", "--cached", "sub"]);
+        fs::write(root.checkout.join("sub"), "staged replacement file\n").unwrap();
+        git(&root.checkout, &["add", "sub"]);
+        fs::remove_file(root.checkout.join("sub")).unwrap();
+        fs::rename(held, root.checkout.join("sub")).unwrap();
+        let staged = git(&root.checkout, &["ls-files", "--stage", "sub"]);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(git(&restored, &["ls-files", "--stage", "sub"]), staged);
+        assert_eq!(
+            git(&restored.join("sub"), &["rev-parse", "HEAD"]),
+            snapshot.initialized_submodules[0].commit
+        );
+    }
+
+    // Hard-won: daa70eca2: no-origin relative module evidence ignored the restore origin override.
+    #[test]
+    fn origin_override_uses_the_restore_relative_submodule_endpoint() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let target = Repo::new();
+        add_submodule(&root, &module);
+        let authoritative = target.temp.path().join("lib.git");
+        git(
+            target.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.origin.to_str().unwrap(),
+                authoritative.to_str().unwrap(),
+            ],
+        );
+        module.commit("only the source sibling publishes this pin\n");
+        let pin = git(&module.checkout, &["rev-parse", "HEAD"]);
+        let local = root.temp.path().join("lib.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.checkout.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+        );
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.sub.url",
+                "../lib.git",
+            ],
+        );
+        git(&root.checkout, &["add", ".gitmodules"]);
+        git(
+            &root.checkout,
+            &["update-index", "--cacheinfo", &format!("160000,{pin},sub")],
+        );
+        git(&root.checkout, &["remote", "remove", "origin"]);
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("override.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            Some(target.origin.to_str().unwrap().to_owned()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::DirtySubmodule(_))
+            ),
+            "{error:#}"
+        );
+    }
+
+    // Hard-won: daa70eca2: retry failed on a nested registration left by module provisioning.
+    #[test]
+    fn provisioned_nested_worktree_restore_reuses_its_registration_after_module_failure() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let nested = root.checkout.join("lanes/retry");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        );
+        git(
+            &nested,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        fs::write(nested.join("file"), "detached nested commit\n").unwrap();
+        git(&nested, &["commit", "-am", "detached nested commit"]);
+        fs::write(nested.join("file"), "nested tracked edits\n").unwrap();
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let destination = root.temp.path().join("provisioned");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                root.origin.to_str().unwrap(),
+                destination.to_str().unwrap(),
+            ],
+        );
+        git(
+            &destination,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        let base = RestoreBase::Provisioned {
+            allow_origin_fetch: false,
+        };
+        let error =
+            restore_workspace_snapshot(&FileGit, &snapshot, &destination, &base).unwrap_err();
+        assert!(
+            error.to_string().contains("locally provisioned repository"),
+            "{error:#}"
+        );
+        let restored = destination.join("lanes/retry");
+        let registration = crate::archive::git::git_directories(&FileGit, &restored)
+            .unwrap()
+            .0;
+        git(
+            &restored,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        restore_workspace_snapshot(&FileGit, &snapshot, &destination, &base).unwrap();
+        assert_eq!(
+            crate::archive::git::git_directories(&FileGit, &restored)
+                .unwrap()
+                .0,
+            registration
+        );
+        assert_eq!(
+            discover_linked_worktrees(&FileGit, &destination)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD"]),
+            git(&nested, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(git(&restored, &["diff"]), git(&nested, &["diff"]));
+    }
+
     // Hard-won: bae1ae4d3: provisioned offline restore still fetched submodules.
     #[test]
     fn provisioned_submodules_require_local_objects_when_origin_fetch_is_disabled() {
@@ -8140,7 +8471,7 @@ mod tests {
             &["remote", "set-url", "origin", "https://host/org/app.git"],
         );
         assert_eq!(
-            resolve_submodule_url(&FileGit, &r.checkout, "../lib.git").unwrap(),
+            resolve_submodule_url(&FileGit, &r.checkout, "../lib.git", None).unwrap(),
             "https://host/org/lib.git"
         );
         git(
@@ -8149,7 +8480,7 @@ mod tests {
         );
         git(&r.checkout, &["config", "branch.main.remote", "upstream"]);
         assert_eq!(
-            resolve_submodule_url(&FileGit, &r.checkout, "../lib.git").unwrap(),
+            resolve_submodule_url(&FileGit, &r.checkout, "../lib.git", None).unwrap(),
             "https://host/org/lib.git"
         );
         // Exercise that resolved URL with real Git transport via insteadOf.
