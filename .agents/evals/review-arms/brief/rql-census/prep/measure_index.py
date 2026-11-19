@@ -251,10 +251,19 @@ class Server:
                 # OOM kill of a child during shutdown is caught too (the uncollected failed
                 # scope keeps it until reset-failed). An unreadable Result is "unknown", which
                 # fails the phase: it may be the only evidence of an OOM.
-                shown = run_bounded(["systemctl", "--user", "show", scope, "-p", "Result", "--value"],
+                # systemd unloads a scope that exits cleanly (LoadState=not-found), but keeps a
+                # failed one loaded with its Result (oom-kill) until reset-failed, since these
+                # scopes aren't --collect'ed. Verified on the EC2 host: a clean scope reads
+                # not-found/inactive, an OOM-killed one loaded/failed/oom-kill.
+                shown = run_bounded(["systemctl", "--user", "show", scope, "-p", "LoadState", "-p", "Result"],
                                     capture_output=True, text=True)
-                result = shown.stdout.strip()
-                self.sample["scope_result"] = result if shown.returncode == 0 and result else "unknown"
+                props = dict(l.split("=", 1) for l in shown.stdout.splitlines() if "=" in l)
+                if shown.returncode:
+                    self.sample["scope_result"] = "unknown"
+                elif props.get("LoadState") == "not-found":
+                    self.sample["scope_result"] = "success"  # unloaded after a clean exit
+                else:
+                    self.sample["scope_result"] = props.get("Result") or "unknown"
                 break
             if time.monotonic() > deadline:
                 raise TeardownUnconfirmed(f"{scope} not confirmed stopped ({detail}; stop exit "
