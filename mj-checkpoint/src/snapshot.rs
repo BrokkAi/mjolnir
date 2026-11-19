@@ -274,6 +274,7 @@ pub enum SnapshotRefused {
     },
     HiddenTrackedEdits(Vec<Scoped<PathBuf>>),
     IntentToAdd(Vec<Scoped<PathBuf>>),
+    UntrackedSubmoduleRegistration(Vec<Scoped<PathBuf>>),
     TrackedKeepFiles {
         keep_dir: PathBuf,
         paths: Vec<Scoped<PathBuf>>,
@@ -310,6 +311,10 @@ impl std::fmt::Display for SnapshotRefused {
                 paths.len(),
                 keep_dir.display()
             ),
+            Self::UntrackedSubmoduleRegistration(paths) => write!(f, "{}", paths.iter().map(|entry| {
+                let directory = if entry.checkout.checkout_path.as_os_str().is_empty() { String::new() } else { format!(" -C {}", mj_core::targets::posix_quote(&entry.checkout.checkout_path.to_string_lossy())) };
+                format!("submodule registration {}:{}:{} is untracked and would not survive discard; run `git{directory} add {}` to preserve it before suspending", entry.checkout.repository_id, entry.checkout.checkout_path.display(), entry.value.display(), mj_core::targets::posix_quote(&entry.value.to_string_lossy()))
+            }).collect::<Vec<_>>().join("; ")),
             Self::IntentToAdd(paths) => write!(f, "{}", paths.iter().map(|entry| {
                 let directory = if entry.checkout.checkout_path.as_os_str().is_empty() { String::new() }
                     else { format!(" -C {}", mj_core::targets::posix_quote(&entry.checkout.checkout_path.to_string_lossy())) };
@@ -455,6 +460,7 @@ pub struct WorkspaceInventory {
     pub tracked_keep_files: Vec<Scoped<PathBuf>>,
     pub keep_dir: Option<PathBuf>,
     pub dirty_submodules: Vec<Scoped<PathBuf>>,
+    pub untracked_submodule_registration: Vec<Scoped<PathBuf>>,
     pub submodule_local_work: Vec<Scoped<ModuleLocalWork>>,
     pub submodule_operations: Vec<Scoped<GitOperationKind>>,
     pub unrepresented_worktrees: Vec<Scoped<UnrepresentedWorktree>>,
@@ -1593,9 +1599,122 @@ fn absolute_url_rule(checkout: &Path, rule: &SnapshotConfigEntry) -> Result<Snap
     let (base, kind) = url_rule_parts(&rule.name)?;
     Ok(SnapshotConfigEntry {
         name: format!("url.{}.{kind}", absolute_config_url(checkout, base)?),
-        value: absolute_config_url(checkout, &rule.value)?,
+        // The RHS is Git's literal match prefix, not a filesystem path.
+        value: rule.value.clone(),
     })
 }
+/// Let Git own rewrite selection. Anchoring may merge distinct URL spellings,
+/// so a transfer refuses when that would change its effective destination.
+pub(crate) fn validate_origin_rewrite_anchoring(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<()> {
+    let urls = config_values(runner, checkout, "remote.origin.url")?;
+    if urls.is_empty() {
+        return Ok(());
+    }
+    let pushes = config_values(runner, checkout, "remote.origin.pushurl")?;
+    static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = loop {
+        let name = format!(
+            "mj-snapshot-url-{}-{}",
+            std::process::id(),
+            NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let existing = run_git(
+            runner,
+            checkout,
+            ["config", "--get-regexp", &format!(r"^remote\.{name}\.")],
+            &[],
+        )?;
+        ensure!(
+            matches!(existing.status, 0 | 1),
+            "{}",
+            git_failure("select temporary URL probe name", &existing)
+        );
+        if existing.status == 1 {
+            break name;
+        }
+    };
+    let resolve = |url: &str, push: bool, explicit_push: bool| -> Result<String> {
+        let mut arguments = vec!["-c".into(), format!("remote.{name}.url={url}").into()];
+        let push_listing = push && !explicit_push;
+        if push_listing {
+            arguments.extend(["remote".into(), "-v".into()]);
+        } else {
+            // Explicit pushurls use insteadOf, never pushInsteadOf. A named
+            // command-scoped remote also keeps a literal URL like "fork" from
+            // being confused with an existing source remote of that name.
+            arguments.extend(["ls-remote".into(), "--get-url".into(), name.clone().into()]);
+        }
+        let output = runner.run(
+            checkout,
+            &GitCommand {
+                arguments,
+                ..Default::default()
+            },
+        )?;
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure("resolve snapshot URL with Git", &output)
+        );
+        let text = std::str::from_utf8(&output.stdout)?;
+        let resolved = if push_listing {
+            // get-url requires a repository-scoped remote even though -v and
+            // ls-remote see command-scoped ones (also on Git 2.31). Reject
+            // ambiguous human-readable row delimiters before using the result.
+            let prefix = format!("{name}\t");
+            let rows = text
+                .split('\n')
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .collect::<Vec<_>>();
+            let fetch = rows.first().and_then(|line| line.strip_suffix(" (fetch)"));
+            let push = rows.get(1).and_then(|line| line.strip_suffix(" (push)"));
+            ensure!(
+                !url.contains(['\t', '\n'])
+                    && rows.len() == 2
+                    && fetch.is_some_and(|url| !url.contains('\t'))
+                    && push.is_some_and(|url| !url.contains('\t')),
+                "origin push URL {} has ambiguous tab/newline delimiters in Git's rewrite result; configure an unambiguous absolute destination with `git remote set-url --push origin <absolute>` and adjust its URL rule, then retry",
+                redact_snapshot_url(url)?
+            );
+            push.context("missing synthetic push URL")?
+        } else {
+            text.strip_suffix('\n').unwrap_or(text)
+        };
+        absolute_config_url(checkout, resolved)
+    };
+    for (url, push, explicit_push) in urls
+        .iter()
+        .map(|url| (url, false, false))
+        .chain(
+            urls.iter()
+                .filter(|_| pushes.is_empty())
+                .map(|url| (url, true, false)),
+        )
+        .chain(pushes.iter().map(|url| (url, true, true)))
+    {
+        let anchored = absolute_config_url(checkout, url)?;
+        let original_outcome = resolve(url, push, explicit_push)?;
+        let anchored_outcome = if url == &anchored {
+            original_outcome.clone()
+        } else {
+            resolve(&anchored, push, explicit_push)?
+        };
+        ensure!(
+            original_outcome == anchored_outcome,
+            "anchoring origin {} URL {} changes Git's destination from {} to {}; configure an absolute URL with `git remote set-url {}origin <absolute>` and adjust its URL rewrite rule to retain the intended destination, then retry",
+            if push { "push" } else { "fetch" },
+            redact_snapshot_url(url)?,
+            redact_snapshot_url(&original_outcome)?,
+            redact_snapshot_url(&anchored_outcome)?,
+            if push { "--push " } else { "" }
+        );
+    }
+    Ok(())
+}
+
 fn capture_url_rules(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -1746,83 +1865,60 @@ pub(crate) fn resolve_submodule_url(
         return absolute_config_url(checkout, url);
     }
     let base = config_values(runner, checkout, "remote.origin.url")?;
-    match origin_override.or_else(|| base.first().map(String::as_str)) {
+    match origin_override.or_else(|| base.last().map(String::as_str)) {
         Some(base) => relative_submodule_url(base, url, checkout),
         None => resolve_remote_path(checkout, url),
     }
 }
 /// Git treats the superproject URL as a directory when resolving ../sub.git.
 fn relative_submodule_url(base: &str, relative: &str, checkout: &Path) -> Result<String> {
-    if let Some((scheme, address)) = base.split_once("://")
-        && scheme.eq_ignore_ascii_case("file")
-    {
-        // Git resolves relative file URLs as literal slash-separated text,
-        // before decoding path bytes. Queries and fragments are path names.
-        let mut parts = address.trim_end_matches('/').split('/').collect::<Vec<_>>();
-        for part in relative.split('/') {
-            match part {
-                "" | "." => {}
-                ".." => {
-                    ensure!(parts.len() > 1, "relative submodule URL escapes its remote");
-                    parts.pop();
-                }
-                part => parts.push(part),
-            }
-        }
-        return Ok(format!("{scheme}://{}", parts.join("/")));
+    let is_url = base.contains("://");
+    let scp_colon = (!is_url && !Path::new(base).is_absolute())
+        .then(|| base.find(':'))
+        .flatten();
+    let mut base = if is_url || scp_colon.is_some() {
+        base.to_owned()
+    } else {
+        absolute_config_url(checkout, base)?
+    };
+    #[cfg(windows)]
+    if !is_url && scp_colon.is_none() {
+        base = base.replace('\\', "/");
     }
-    if let Ok(mut base) = url::Url::parse(base)
-        && !base.cannot_be_a_base()
-        && !Path::new(base.as_str()).is_absolute()
-    {
-        let path = format!("{}/", base.path().trim_end_matches('/'));
-        base.set_path(&path);
-        return Ok(base.join(relative)?.to_string());
-    }
-    if !Path::new(base).is_absolute()
-        && let Some((host, remote_path)) = base.split_once(':')
-    {
-        let absolute = remote_path.starts_with('/');
-        let mut parts: Vec<_> = remote_path
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .map(str::to_owned)
-            .collect();
-        for part in relative.split('/') {
-            match part {
-                "" | "." => {}
-                ".." => {
-                    ensure!(
-                        parts.pop().is_some(),
-                        "relative submodule URL escapes its remote"
-                    );
-                }
-                part => parts.push(part.to_owned()),
-            }
-        }
-        return Ok(format!(
-            "{host}:{}{}",
-            if absolute { "/" } else { "" },
-            parts.join("/")
-        ));
-    }
-    // Git removes relative URL components before consulting the filesystem.
-    // Resolving a symlink in the configured origin first changes its siblings.
-    let mut path = PathBuf::from(absolute_config_url(checkout, base)?);
-    for component in Path::new(relative).components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                ensure!(path.pop(), "relative submodule URL escapes its remote")
-            }
-            std::path::Component::Normal(part) => path.push(part),
-            _ => anyhow::bail!("invalid relative submodule URL"),
+    let minimum = if let Some((scheme, address)) = base.split_once("://") {
+        scheme.len() + 3 + address.find('/').unwrap_or(address.len())
+    } else {
+        scp_colon.map_or(0, |colon| colon + 1)
+    };
+    base.truncate(base.trim_end_matches('/').len());
+    let mut suffix = relative;
+    // Git consumes only the leading ./ and ../ components. Preserve the
+    // remaining suffix literally: an internal x/.. may cross a symlink.
+    loop {
+        if let Some(rest) = suffix.strip_prefix("./") {
+            suffix = rest;
+        } else if let Some(rest) = suffix.strip_prefix("../") {
+            let split = base
+                .rfind('/')
+                .filter(|split| *split >= minimum)
+                .or_else(|| {
+                    scp_colon
+                        .filter(|_| base.len() > minimum)
+                        .map(|colon| colon + 1)
+                });
+            let split = split.context("relative submodule URL escapes its remote")?;
+            base.truncate(split);
+            suffix = rest;
+        } else {
+            break;
         }
     }
-    Ok(path
-        .to_str()
-        .context("submodule URL path is not UTF-8")?
-        .to_owned())
+    let separator = if scp_colon.is_some() && base.ends_with(':') {
+        ""
+    } else {
+        "/"
+    };
+    Ok(format!("{base}{separator}{suffix}"))
 }
 
 fn append_pack_extension(base: &Path, hash: &str, extension: &str) -> PathBuf {
@@ -2029,6 +2125,11 @@ fn inventory_blockers(inventory: &WorkspaceInventory) -> Result<Vec<InventoryBlo
             });
         }
         if !(tree.raw && tree.operation.is_some()) {
+            if !tree.untracked_submodule_registration.is_empty() {
+                reasons.push(SnapshotRefused::UntrackedSubmoduleRegistration(
+                    tree.untracked_submodule_registration.clone(),
+                ));
+            }
             if !tree.intent_to_add.is_empty() {
                 reasons.push(SnapshotRefused::IntentToAdd(tree.intent_to_add.clone()));
             }
@@ -2071,7 +2172,8 @@ fn inventory_blockers(inventory: &WorkspaceInventory) -> Result<Vec<InventoryBlo
             let paths = match &kind {
                 SnapshotRefused::TrackedKeepFiles { paths, .. }
                 | SnapshotRefused::IntentToAdd(paths)
-                | SnapshotRefused::HiddenTrackedEdits(paths) => paths.clone(),
+                | SnapshotRefused::HiddenTrackedEdits(paths)
+                | SnapshotRefused::UntrackedSubmoduleRegistration(paths) => paths.clone(),
                 SnapshotRefused::OriginRemovedByTeardown(origins) => origins
                     .iter()
                     .map(|origin| scoped(&origin.checkout, origin.value.route.clone()))
@@ -2786,6 +2888,7 @@ fn in_place_only_inventory(
         tracked_keep_files: Vec::new(),
         keep_dir: None,
         dirty_submodules: Vec::new(),
+        untracked_submodule_registration: Vec::new(),
         submodule_local_work: Vec::new(),
         submodule_operations: Vec::new(),
         unrepresented_worktrees: Vec::new(),
@@ -2899,8 +3002,16 @@ pub fn capture_session_snapshot(
         if matches!(inventories[&repository.id], CaptureMode::InPlaceOnly) {
             continue;
         }
-        let inventory = repository_inventory(runner, repository)
+        let mut inventory = repository_inventory(runner, repository)
             .map_err(|error| session_error(&repository.id, error))?;
+        inventory_origin_dependencies(
+            runner,
+            &repository.checkout,
+            &mut inventory,
+            repository.origin_override.as_deref(),
+            &deletion_roots,
+        )?;
+        inventory.blockers = inventory_blockers(&inventory)?;
         check_repository_consent(
             repository,
             &inventory,
@@ -3993,6 +4104,11 @@ fn workspace_inventory_scoped(
             nested_repositories,
             tracked_keep_files: Vec::new(),
             keep_dir: None,
+            untracked_submodule_registration: submodules
+                .untracked_registration
+                .into_iter()
+                .map(|path| scoped(key, path))
+                .collect(),
             dirty_submodules: submodules
                 .dirty
                 .into_iter()
@@ -4046,7 +4162,7 @@ fn workspace_inventory_scoped(
     // worktrees, even when their source config contains a relative URL.
     let primary_origin = config_values(runner, checkout, "remote.origin.url")?;
     let restore_origin = primary_origin
-        .first()
+        .last()
         .map(String::as_str)
         .or(origin_override)
         .map(|origin| absolute_config_url(checkout, origin))
@@ -4208,6 +4324,7 @@ fn require_object(
 fn same_checkout_cut(left: &WorkspaceInventory, right: &WorkspaceInventory) -> bool {
     left.operation == right.operation
         && left.index_gitlinks == right.index_gitlinks
+        && left.untracked_submodule_registration == right.untracked_submodule_registration
         && left.initialized_submodules == right.initialized_submodules
         && left.submodule_local_work == right.submodule_local_work
         && left.submodule_operations == right.submodule_operations
@@ -9117,6 +9234,34 @@ mod tests {
         );
         root.commit("published through rewrite\n");
         // Raw keeps the lexical origin route; managed capture offers its canonical remedy.
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+            &root.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("anchoring origin push URL"),
+            "{error:#}"
+        );
+        // Explicit absolute publication URLs retain Git's source behavior when
+        // the original literal relative-prefix rewrite cannot be relocated.
+        git(
+            &root.checkout,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                publication.to_str().unwrap(),
+            ],
+        );
         let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
         let restored = root.restore(&snapshot, None);
         git(&restored, &["push", "origin", "main"]);
@@ -11813,6 +11958,34 @@ mod tests {
         );
         r.commit("publication target\n");
         // Raw keeps the lexical origin route; managed capture offers its canonical remedy.
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &r.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+            &r.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("anchoring origin push URL"),
+            "{error:#}"
+        );
+        // Explicit absolute publication URLs retain Git's source behavior when
+        // the original literal relative-prefix rewrite cannot be relocated.
+        git(
+            &r.checkout,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                push.to_str().unwrap(),
+            ],
+        );
         let snapshot = r.capture(&CheckoutOwnership::Raw { launch: None });
         let restored = r.temp.path().join("deep/another/restored");
         restore_workspace_snapshot(&FileGit, &snapshot, &restored, &clone_base(&snapshot, None))
@@ -14890,5 +15063,557 @@ mod tests {
             b"never discard"
         );
         assert!(format!("{error:#}").contains("injected module checkout interruption"));
+    }
+    // Hard-won: cc6b6a560: anchoring an inactive rewrite prefix could activate it on an absolute origin.
+    #[test]
+    fn review_ninth_absolute_origin_keeps_inactive_literal_rewrite_prefixes() {
+        for kind in ["insteadOf", "pushInsteadOf"] {
+            let root = Repo::new();
+            let publisher = Repo::new();
+            let mirror = root.checkout.join("repo.git");
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    root.origin.to_str().unwrap(),
+                    mirror.to_str().unwrap(),
+                ],
+            );
+            fs::write(root.checkout.join(".git/info/exclude"), "repo.git\n").unwrap();
+            git(
+                &root.checkout,
+                &["remote", "set-url", "origin", mirror.to_str().unwrap()],
+            );
+            git(
+                &root.checkout,
+                &[
+                    "config",
+                    &format!("url.{}.{kind}", publisher.origin.display()),
+                    "repo.git",
+                ],
+            );
+            root.commit("unpublished work for the actual mirror\n");
+            let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+            assert_eq!(snapshot.url_rules[0].value, "repo.git");
+            let restored = root.restore(&snapshot, None);
+            assert_eq!(
+                git(&restored, &["remote", "get-url", "origin"]),
+                mirror.to_str().unwrap()
+            );
+            assert_eq!(
+                git(&restored, &["remote", "get-url", "--push", "origin"]),
+                mirror.to_str().unwrap()
+            );
+            git(&restored, &["push", "origin", "main"]);
+            assert_eq!(git(&mirror, &["rev-parse", "main"]), snapshot.head.commit());
+            assert_ne!(
+                git(&publisher.origin, &["rev-parse", "main"]),
+                snapshot.head.commit()
+            );
+        }
+    }
+
+    // Hard-won: cc6b6a560: relative URL anchoring could change fetch/push rewrite winners after abort consent.
+    #[test]
+    fn review_ninth_ambiguous_relative_rewrites_refuse_before_aborting() {
+        for kind in ["insteadOf", "pushInsteadOf"] {
+            let root = Repo::new();
+            let target = Repo::new();
+            git(
+                &root.checkout,
+                &["remote", "set-url", "origin", "../origin.git"],
+            );
+            git(
+                &root.checkout,
+                &[
+                    "config",
+                    &format!("url.{}.{kind}", target.origin.display()),
+                    "../origin.git",
+                ],
+            );
+            root.conflict();
+            root.start_conflict("merge");
+            let error = capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Managed,
+                &root.temp.path().join("refused.pack"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::Any,
+                },
+                None,
+            )
+            .unwrap_err();
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("anchoring origin")
+                    && text.contains("../origin.git")
+                    && text.contains("from")
+                    && text.contains("to")
+                    && text.contains("git remote set-url"),
+                "{error:#}"
+            );
+            assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+            assert!(!root.temp.path().join("refused.pack").exists());
+            if kind == "pushInsteadOf" {
+                assert!(text.contains("--push origin"));
+                for runner in [
+                    &FileGit as &dyn GitCommandRunner,
+                    &crate::test_support::Git231,
+                ] {
+                    let listing = run_git(
+                        runner,
+                        &root.checkout,
+                        [
+                            "-c",
+                            "remote.source-synthetic.url=../origin.git",
+                            "remote",
+                            "-v",
+                        ],
+                        &[],
+                    )
+                    .unwrap();
+                    assert_eq!(listing.status, 0);
+                    let listing = std::str::from_utf8(&listing.stdout).unwrap();
+                    assert!(
+                        listing.lines().any(|line| line
+                            == format!("source-synthetic\t{} (push)", target.origin.display())),
+                        "{listing}"
+                    );
+                    let error =
+                        validate_origin_rewrite_anchoring(runner, &root.checkout).unwrap_err();
+                    assert!(
+                        error.to_string().contains(target.origin.to_str().unwrap()),
+                        "{error:#}"
+                    );
+                }
+                git(
+                    &root.checkout,
+                    &[
+                        "config",
+                        "--unset-all",
+                        &format!("url.{}.pushInsteadOf", target.origin.display()),
+                    ],
+                );
+                for delimiter in ["\t", "\n"] {
+                    let key = format!("url.{}\tambiguous.pushInsteadOf", target.origin.display());
+                    if delimiter == "\t" {
+                        git(&root.checkout, &["config", &key, "../origin.git"]);
+                    } else {
+                        // Git disallows a newline in a config key, but permits
+                        // one in a remote URL value and emits it literally.
+                        git(
+                            &root.checkout,
+                            &["remote", "set-url", "origin", "../origin.git\nambiguous"],
+                        );
+                    }
+                    let error =
+                        validate_origin_rewrite_anchoring(&FileGit, &root.checkout).unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("ambiguous tab/newline delimiters"),
+                        "{error:#}"
+                    );
+                    assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+                    if delimiter == "\t" {
+                        git(&root.checkout, &["config", "--unset-all", &key]);
+                    }
+                }
+            }
+        }
+    }
+
+    // Hard-won: cc6b6a560: an untracked .gitmodules was treated as durable registration for initialized pins.
+    #[test]
+    fn review_ninth_untracked_module_registration_must_be_staged_before_discard() {
+        let root = Repo::new();
+        let module = Repo::new();
+        git(
+            &root.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                module.origin.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&root.checkout, &["rm", "--cached", ".gitmodules"]);
+        let index = fs::read(root.checkout.join(".git/index")).unwrap();
+        let config = fs::read(root.checkout.join(".gitmodules")).unwrap();
+        let consent = CaptureConsent {
+            untracked: UntrackedConsent::Any,
+            operations: OperationConsent::Any,
+        };
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("refused.pack"),
+            &consent,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::UntrackedSubmoduleRegistration(_))
+            ),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains("add '.gitmodules'"));
+        assert_eq!(fs::read(root.checkout.join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(root.checkout.join(".gitmodules")).unwrap(), config);
+        git(&root.checkout, &["add", ".gitmodules"]);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(fs::read(restored.join(".gitmodules")).unwrap(), config);
+        assert_eq!(
+            git(&restored.join("sub"), &["rev-parse", "HEAD"]),
+            git(&module.checkout, &["rev-parse", "HEAD"])
+        );
+        // Raw operation conversion omits the introduced module rather than
+        // attempting to transport its untracked registration; source stays.
+        let raw = Repo::new();
+        raw.conflict();
+        raw.start_conflict("merge");
+        git(
+            &raw.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                module.origin.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&raw.checkout, &["rm", "--cached", ".gitmodules"]);
+        let snapshot = raw.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(snapshot.working_state_skipped);
+        let restored = raw.restore(&snapshot, None);
+        assert!(!restored.join("sub/.git").exists());
+        assert!(!restored.join(".gitmodules").exists());
+        assert!(raw.checkout.join(".git/MERGE_HEAD").exists());
+        assert!(raw.checkout.join("sub/.git").exists());
+        assert!(raw.checkout.join(".gitmodules").exists());
+    }
+
+    // Hard-won: cc6b6a560: Git uses the last configured origin URL when resolving relative submodules.
+    #[test]
+    fn review_ninth_relative_module_probe_uses_gits_last_origin_url() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let other = Repo::new();
+        add_submodule(&root, &module);
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules")).unwrap();
+        let first = root.temp.path().join("first");
+        let last = root.temp.path().join("last");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&last).unwrap();
+        for directory in [&first, &last] {
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    root.origin.to_str().unwrap(),
+                    directory.join("app.git").to_str().unwrap(),
+                ],
+            );
+        }
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.origin.to_str().unwrap(),
+                last.join("lib.git").to_str().unwrap(),
+            ],
+        );
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                other.origin.to_str().unwrap(),
+                first.join("lib.git").to_str().unwrap(),
+            ],
+        );
+        module.commit("pin advertised by the last URL sibling\n");
+        git(
+            &module.checkout,
+            &["push", last.join("lib.git").to_str().unwrap(), "main"],
+        );
+        let commit = git(&module.checkout, &["rev-parse", "HEAD"]);
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "remote.origin.url",
+                first.join("app.git").to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                last.join("app.git").to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.url",
+                "../lib.git",
+            ],
+        );
+        git(&root.checkout, &["add", ".gitmodules"]);
+        git(
+            &root.checkout,
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("160000,{commit},sub"),
+            ],
+        );
+        assert!(
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed)
+                .unwrap()
+                .dirty_submodules
+                .is_empty()
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        git(
+            &restored,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        assert_eq!(git(&restored.join("sub"), &["rev-parse", "HEAD"]), commit);
+        assert_eq!(
+            git(&restored.join("sub"), &["remote", "get-url", "origin"]),
+            last.join("lib.git").to_str().unwrap()
+        );
+    }
+
+    // Hard-won: cc6b6a560: canceling suffix x/.. lexically crossed the wrong side of a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn review_ninth_relative_module_suffix_keeps_filesystem_symlink_semantics() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let wrong = Repo::new();
+        add_submodule(&root, &module);
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules")).unwrap();
+        let namespace = root.temp.path().join("namespace");
+        let actual = root.temp.path().join("actual");
+        fs::create_dir_all(actual.join("target")).unwrap();
+        fs::create_dir_all(&namespace).unwrap();
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                root.origin.to_str().unwrap(),
+                namespace.join("app.git").to_str().unwrap(),
+            ],
+        );
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.origin.to_str().unwrap(),
+                actual.join("lib.git").to_str().unwrap(),
+            ],
+        );
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                wrong.origin.to_str().unwrap(),
+                namespace.join("lib.git").to_str().unwrap(),
+            ],
+        );
+        std::os::unix::fs::symlink(actual.join("target"), namespace.join("mirror-link")).unwrap();
+        module.commit("published only beyond the symlink\n");
+        let commit = git(&module.checkout, &["rev-parse", "HEAD"]);
+        git(
+            &module.checkout,
+            &["push", actual.join("lib.git").to_str().unwrap(), "main"],
+        );
+        git(
+            &root.checkout,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                namespace.join("app.git").to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.url",
+                "../mirror-link/../lib.git",
+            ],
+        );
+        git(&root.checkout, &["add", ".gitmodules"]);
+        git(
+            &root.checkout,
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("160000,{commit},sub"),
+            ],
+        );
+        assert!(
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed)
+                .unwrap()
+                .dirty_submodules
+                .is_empty()
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        git(
+            &restored,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        assert_eq!(git(&restored.join("sub"), &["rev-parse", "HEAD"]), commit);
+    }
+
+    // Hard-won: cc6b6a560: a consented bisect reset revealed a module remote inside another managed checkout.
+    #[test]
+    fn review_ninth_post_abort_routes_use_the_complete_session_teardown_set() {
+        let first = Repo::new();
+        let second = Repo::new();
+        let module = Repo::new();
+        add_submodule(&first, &module);
+        git(&first.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(first.checkout.join(".git/modules")).unwrap();
+        let mirror = second.checkout.join("mirror.git");
+        git(
+            second.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.origin.to_str().unwrap(),
+                mirror.to_str().unwrap(),
+            ],
+        );
+        fs::write(second.checkout.join(".git/info/exclude"), "mirror.git\n").unwrap();
+        git(
+            &first.checkout,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.url",
+                mirror.to_str().unwrap(),
+            ],
+        );
+        git(&first.checkout, &["commit", "-am", "unsafe module route"]);
+        git(&first.checkout, &["branch", "unsafe"]);
+        git(
+            &first.checkout,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.url",
+                module.origin.to_str().unwrap(),
+            ],
+        );
+        git(&first.checkout, &["commit", "-am", "safe module route"]);
+        first.commit("safe middle\n");
+        first.commit("bad tip\n");
+        git(&first.checkout, &["checkout", "unsafe"]);
+        git(&first.checkout, &["bisect", "start", "main", "unsafe"]);
+        assert_eq!(
+            git(
+                &first.checkout,
+                &["config", "-f", ".gitmodules", "submodule.sub.url"]
+            ),
+            module.origin.to_str().unwrap()
+        );
+        let inputs = [("first", &first), ("second", &second)].map(|(id, root)| RepositoryInput {
+            id: id.into(),
+            checkout: root.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: root.temp.path().join("pending.pack"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: None,
+            in_container: false,
+        });
+        let consent = SessionCaptureConsent {
+            repositories: inputs
+                .iter()
+                .map(|input| {
+                    (
+                        input.id.clone(),
+                        CaptureConsent {
+                            untracked: UntrackedConsent::Any,
+                            operations: OperationConsent::Any,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let error = capture_session_snapshot(&FileGit, &inputs, &consent).unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::OriginRemovedByTeardown(_))
+            ),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains(mirror.to_str().unwrap()),
+            "{error:#}"
+        );
+        assert!(
+            !git_path(&FileGit, &first.checkout, "BISECT_START")
+                .unwrap()
+                .exists()
+        );
+        for root in [&first, &second] {
+            assert!(!fs::read_dir(root.temp.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "pack")
+            }));
+        }
     }
 }

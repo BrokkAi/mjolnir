@@ -80,6 +80,7 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub local_work: Vec<crate::snapshot::ModuleLocalWork>,
     pub operations: Vec<(PathBuf, crate::snapshot::GitOperationKind)>,
     pub uninitialized_origins: Vec<crate::snapshot::UninitializedOrigin>,
+    pub untracked_registration: Vec<PathBuf>,
 }
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
@@ -135,6 +136,9 @@ fn inspect_checkout(
     origin_override: Option<&str>,
     managed: bool,
 ) -> Result<()> {
+    if snapshot.is_some() {
+        crate::snapshot::validate_origin_rewrite_anchoring(runner, checkout)?;
+    }
     let mut gitlinks = gitlinks(runner, checkout)?;
     if snapshot.is_some() {
         // Current index entries already cover unchanged gitlinks. The raw
@@ -169,6 +173,7 @@ fn inspect_checkout(
     let SnapshotModulesConfig {
         paths: registered,
         urls,
+        untracked_registration,
     } = if snapshot.is_some() {
         snapshot_registered_submodules(runner, checkout)?
     } else {
@@ -177,6 +182,14 @@ fn inspect_checkout(
             ..Default::default()
         }
     };
+    if untracked_registration
+        && registered.keys().any(|path| gitlinks.contains(path))
+        && let Some(snapshot) = snapshot.as_deref_mut()
+    {
+        snapshot
+            .untracked_registration
+            .push(prefix.join(".gitmodules"));
+    }
     // Cache gitlink OIDs per owning repository instead of rereading the index
     // for each uninitialized module.
     let indexed = if snapshot.is_some() {
@@ -911,6 +924,7 @@ fn gitlinks(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<BTreeSet<P
 struct SnapshotModulesConfig {
     paths: std::collections::BTreeMap<PathBuf, Vec<u8>>,
     urls: std::collections::BTreeMap<String, String>,
+    untracked_registration: bool,
 }
 fn snapshot_registered_submodules(
     runner: &dyn GitCommandRunner,
@@ -969,7 +983,25 @@ fn snapshot_registered_submodules(
             );
         }
     }
-    Ok(SnapshotModulesConfig { paths, urls })
+    let untracked_registration = if source[0] == "--file" {
+        let tracked = runner.run(
+            checkout,
+            &git_command(&["ls-files", "--error-unmatch", "--", ".gitmodules"]),
+        )?;
+        ensure!(
+            matches!(tracked.status, 0 | 1),
+            "failed to inspect submodule registration: {}",
+            String::from_utf8_lossy(&tracked.stderr)
+        );
+        tracked.status == 1
+    } else {
+        false
+    };
+    Ok(SnapshotModulesConfig {
+        paths,
+        urls,
+        untracked_registration,
+    })
 }
 
 /// Uninitialized gitlinks hide ordinary files from Git. Inspect all nonempty
