@@ -7,7 +7,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{Environment, default_true, is_false, is_true, validate_id};
-use crate::codex_provider::{BuiltInCodexProvider, CodexProvider, CodexProviderDefinition};
+use crate::codex_provider::{
+    BuiltInCodexProvider, CodexProvider, CodexProviderDefinition, CodexProviderKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1337,6 +1339,186 @@ impl std::str::FromStr for HarnessKind {
     }
 }
 
+/// The company that meters a profile's allowance, independent of its harness.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QuotaProvider {
+    Anthropic,
+    OpenAI,
+    Google,
+    XAI,
+    Moonshot,
+    DeepSeek,
+    Zai,
+    Meta,
+    Other(String),
+}
+
+impl QuotaProvider {
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAI => "OpenAI",
+            Self::Google => "Google",
+            Self::XAI => "xAI",
+            Self::Moonshot => "Moonshot",
+            Self::DeepSeek => "DeepSeek",
+            Self::Zai => "Z.ai",
+            Self::Meta => "Meta",
+            Self::Other(name) => name,
+        }
+    }
+
+    fn from_endpoint(id: &str, endpoint: Option<&str>) -> Self {
+        let host = endpoint
+            .and_then(|url| url::Url::parse(url).ok())
+            .and_then(|url| url.host_str().map(str::to_owned));
+        // The endpoint decides when there is one: an unrecognised host (a proxy,
+        // OpenRouter, a local server) is its own provider, never the table
+        // id's default vendor. Without an endpoint the provider id decides.
+        match host {
+            Some(host) => Self::recognise(&host).unwrap_or(Self::Other(host)),
+            None => Self::recognise(id).unwrap_or_else(|| Self::Other(id.to_owned())),
+        }
+    }
+
+    fn recognise(value: &str) -> Option<Self> {
+        match CodexProviderKind::from_host(value) {
+            CodexProviderKind::Zai => return Some(Self::Zai),
+            CodexProviderKind::DeepSeek => return Some(Self::DeepSeek),
+            CodexProviderKind::Other => {}
+        }
+        let value = value.to_ascii_lowercase();
+        let domain = |suffix: &str| value == suffix || value.ends_with(&format!(".{suffix}"));
+        if value == "deepseek" {
+            Some(Self::DeepSeek)
+        } else if domain("anthropic.com") || value == "anthropic" {
+            Some(Self::Anthropic)
+        } else if domain("openai.com") || value == "openai" {
+            Some(Self::OpenAI)
+        } else if domain("googleapis.com")
+            || matches!(value.as_str(), "google" | "gemini" | "google-vertex")
+        {
+            Some(Self::Google)
+        } else if domain("meta.ai") || domain("meta.com") || value == "meta" {
+            Some(Self::Meta)
+        } else if domain("x.ai") || matches!(value.as_str(), "xai" | "grok") {
+            Some(Self::XAI)
+        } else if domain("moonshot.ai")
+            || domain("moonshot.cn")
+            || matches!(value.as_str(), "moonshot" | "kimi" | "kimi-for-coding")
+        {
+            Some(Self::Moonshot)
+        } else {
+            None
+        }
+    }
+}
+
+/// Where a Codex profile's quota comes from, decided once from its provider
+/// configuration. Only Codex's own OpenAI login has ChatGPT rate-limit
+/// windows; every other provider must never be probed through that login,
+/// or it reports the ChatGPT account's quota as its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexQuotaSource {
+    /// No `model_provider`, or the built-in `openai` provider.
+    ChatGptLogin,
+    /// A custom provider whose API key and host Mjolnir can read; its quota
+    /// comes from the provider's own endpoint when it publishes one.
+    Provider(ProviderCredential),
+    /// Any other provider: a local or Bedrock built-in, or a custom provider
+    /// whose key Mjolnir cannot read. It has no allowance to report.
+    UsagePriced { provider: String },
+    /// The profile's Codex configuration could not be read.
+    Unreadable(String),
+}
+
+impl CodexQuotaSource {
+    /// The source for one configured profile. `mj doctor` reads the same
+    /// answer to say where each profile's quota comes from.
+    pub fn of_profile(profile: &HarnessProfile) -> Self {
+        Self::resolve(profile).0
+    }
+
+    /// Decide collection and attribution together from the same configuration.
+    fn resolve(profile: &HarnessProfile) -> (Self, QuotaProvider) {
+        let provider = match profile.codex_provider() {
+            Ok(None) => return (Self::ChatGptLogin, QuotaProvider::OpenAI),
+            Ok(Some(provider)) => provider,
+            Err(error) => {
+                tracing::warn!(home = %profile.home.display(), %error, "read quota provider");
+                return (
+                    Self::Unreadable(format!("{error:#}")),
+                    QuotaProvider::Other("Codex (provider unavailable)".into()),
+                );
+            }
+        };
+        if provider.uses_codex_login() {
+            // The quota collector reads ChatGPT's allowance, even for an API-key
+            // login whose launch environment redirects model requests elsewhere.
+            return (Self::ChatGptLogin, QuotaProvider::OpenAI);
+        }
+        let attribution = QuotaProvider::from_endpoint(
+            provider.id(),
+            provider.custom().map(|custom| custom.base_url.as_str()),
+        );
+        let source = match (
+            provider.custom(),
+            profile.codex_provider_api_key_from(&provider),
+            provider.host(),
+        ) {
+            (Some(_), Some(api_key), Some(host)) => Self::Provider(ProviderCredential {
+                id: provider.id().to_owned(),
+                host,
+                api_key,
+            }),
+            _ => Self::UsagePriced {
+                provider: provider.id().to_owned(),
+            },
+        };
+        (source, attribution)
+    }
+}
+
+/// Where a profile's quota lives when the profile authenticates with an API
+/// key against a provider named in its harness configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCredential {
+    /// Provider id from the harness configuration, for error messages.
+    pub id: String,
+    /// Host of the provider's base URL, for example `api.z.ai`.
+    pub host: String,
+    pub api_key: String,
+}
+
+/// Where Muse reads its allowance and refreshes its OAuth login.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuseQuotaEndpoints {
+    pub mint: String,
+    pub auth: String,
+}
+
+impl MuseQuotaEndpoints {
+    /// Muse's own TBH overrides take the profile environment first, then the
+    /// daemon environment, exactly as the quota adapter does.
+    pub fn of<'a>(environment: impl IntoIterator<Item = (&'a String, &'a String)>) -> Self {
+        let environment: BTreeMap<_, _> = environment
+            .into_iter()
+            .map(|(name, value)| (name.as_str(), value))
+            .collect();
+        let configured = |name: &str, default: &str| {
+            environment
+                .get(name)
+                .map(|value| (*value).clone())
+                .or_else(|| std::env::var(name).ok())
+                .unwrap_or_else(|| default.to_owned())
+        };
+        Self {
+            mint: configured("TBH_MINT_BASE_URL", "https://api.meta.ai"),
+            auth: configured("TBH_AUTH_BASE_URL", "https://auth.meta.com"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HarnessProfile {
     /// Whether Mjolnir may select this profile for new work or probe it.
@@ -1476,6 +1658,55 @@ fn installation_home(path: &Path) -> PathBuf {
 }
 
 impl HarnessProfile {
+    /// Reads the harness's own provider configuration. Call on a background
+    /// task, never from a UI event or render loop.
+    pub fn quota_provider(&self) -> QuotaProvider {
+        match self.kind {
+            // Claude's collector reads Anthropic's fixed OAuth usage endpoint,
+            // regardless of the model-request base URL. Bedrock is usage priced
+            // and has no subscription allowance to attribute elsewhere.
+            HarnessKind::Claude => QuotaProvider::Anthropic,
+            HarnessKind::Antigravity => QuotaProvider::Google,
+            HarnessKind::Grok => QuotaProvider::XAI,
+            HarnessKind::Kimi => QuotaProvider::Moonshot,
+            HarnessKind::Dsh => QuotaProvider::DeepSeek,
+            HarnessKind::Muse => {
+                let endpoints = MuseQuotaEndpoints::of(self.environment.resolved());
+                QuotaProvider::from_endpoint("meta", Some(&endpoints.mint))
+            }
+            HarnessKind::Codex => CodexQuotaSource::resolve(self).1,
+            HarnessKind::OpenCode => {
+                let mut configuration = serde_json::json!({});
+                for name in ["opencode.json", "opencode.jsonc"] {
+                    if let Ok(text) = std::fs::read_to_string(self.home.join(name))
+                        && let Some(value) = opencode_configuration(&text)
+                        && let Some(object) = value.as_object()
+                    {
+                        configuration
+                            .as_object_mut()
+                            .expect("configuration object")
+                            .extend(object.clone());
+                    }
+                }
+                let Some(id) = configuration
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|model| model.split_once('/'))
+                    .map(|(id, _)| id)
+                else {
+                    return QuotaProvider::Other("OpenCode".into());
+                };
+                let endpoint = configuration
+                    .get("provider")
+                    .and_then(|providers| providers.get(id))
+                    .and_then(|provider| provider.get("options"))
+                    .and_then(|options| options.get("baseURL"))
+                    .and_then(serde_json::Value::as_str);
+                QuotaProvider::from_endpoint(id, endpoint)
+            }
+        }
+    }
+
     /// Creates an enabled profile with all optional settings unset.
     pub fn new(kind: HarnessKind, home: impl Into<PathBuf>) -> Self {
         Self {
@@ -1690,6 +1921,10 @@ impl HarnessProfile {
     /// reports the missing variable before anything stages the profile.
     pub fn codex_provider_api_key(&self) -> Option<String> {
         let provider = self.codex_provider().ok().flatten()?;
+        self.codex_provider_api_key_from(&provider)
+    }
+
+    fn codex_provider_api_key_from(&self, provider: &CodexProvider) -> Option<String> {
         match provider.custom()?.key()? {
             crate::codex_provider::CodexProviderKey::EnvKey(env_key) => {
                 self.environment.get(env_key).cloned()
@@ -2169,6 +2404,23 @@ struct OpenCodeEnvironment {
     references: BTreeSet<String>,
 }
 
+// OpenCode uses JSONC with comments and trailing commas, not JavaScript.
+fn opencode_configuration(text: &str) -> Option<serde_json::Value> {
+    let options = jsonc_parser::ParseOptions {
+        allow_comments: true,
+        allow_trailing_commas: true,
+        allow_loose_object_property_names: false,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+        allow_bare_decimal_point_numbers: false,
+        allow_non_finite_numbers: false,
+        allow_extended_string_escapes: false,
+    };
+    jsonc_parser::parse_to_serde_value(text, &options).ok()
+}
+
 impl OpenCodeEnvironment {
     fn read(home: &Path) -> Self {
         let mut environment = Self {
@@ -2188,23 +2440,7 @@ impl OpenCodeEnvironment {
     }
 
     fn add_configuration(&mut self, text: &str) {
-        // OpenCode parses with Microsoft's jsonc-parser, which accepts
-        // comments and trailing commas and nothing else beyond JSON.
-        let options = jsonc_parser::ParseOptions {
-            allow_comments: true,
-            allow_trailing_commas: true,
-            allow_loose_object_property_names: false,
-            allow_missing_commas: false,
-            allow_single_quoted_strings: false,
-            allow_hexadecimal_numbers: false,
-            allow_unary_plus_numbers: false,
-            allow_bare_decimal_point_numbers: false,
-            allow_non_finite_numbers: false,
-            allow_extended_string_escapes: false,
-        };
-        let Ok(configuration) =
-            jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &options)
-        else {
+        let Some(configuration) = opencode_configuration(text) else {
             return;
         };
         static REFERENCE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

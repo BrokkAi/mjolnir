@@ -20,20 +20,20 @@
 │                 │  none                                                                            │                 │
 │                 │                                                                                  │                 │
 │                 │Attach host directory:                                                            │                 │
-│                 │Container destination:                                                            │                 │
-│                 │Access: ro · read-only ▾                                                          │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │Container destination:                                                            │  ───────────────╯
+│                 │Access: ro · read-only ▾                                                          │  ───────────────╮
+│                 │                                                                                  │                 │
 │                 │Build cache                                                                       │                 │
-│                 │  /mnt/nvme/mbx                                                                   │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ──────── ▁   ▄ ╮
-│                 │  Cancel     Save                                                                 │                 │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
-│                                                                                                       ──────── ▁   ▄ ╮
+│                 │  /mnt/nvme/mbx                                                                   │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -62,20 +62,20 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │  none                                                                            │                 │
 │                 │                                                                                  │                 │
 │                 │Attach host directory:                                                            │                 │
-│                 │Container destination:                                                            │                 │
-│                 │Access: ro · read-only ▾                                                          │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │Container destination:                                                            │  ───────────────╯
+│                 │Access: ro · read-only ▾                                                          │  ───────────────╮
+│                 │                                                                                  │                 │
 │                 │Build cache                                                                       │                 │
-│                 │  /mnt/nvme/mbx                                                                   │                 │
-│                 │CPU must be a positive whole number.                                              │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
-│                 │  Cancel     Save                                                                 │  ───────────────╯
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                 │  /mnt/nvme/mbx                                                                   │  ───────────────╯
+│                 │CPU must be a positive whole number.                                              │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ───────────────╯
+│                 │  Cancel     Save                                                                 │  ──────── ▁   ▄ ╮
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -104,20 +104,20 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 │  none                                                                            │                 │
 │                 │                                                                                  │                 │
 │                 │Attach host directory:                                                            │                 │
-│                 │Container destination:                                                            │                 │
-│                 │Access: ro · read-only ▾                                                          │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │Container destination:                                                            │  ───────────────╯
+│                 │Access: ro · read-only ▾                                                          │  ───────────────╮
+│                 │                                                                                  │                 │
 │                 │Build cache                                                                       │                 │
-│                 │  none for this session                                                           │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │  ──────── ▁   ▄ ╮
-│                 │  Cancel     Save                                                                 │                 │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
-│                                                                                                       ──────── ▁   ▄ ╮
+│                 │  none for this session                                                           │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -135,8 +135,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podm                                                                                      │
 │  │ No messa  ╭ × Edit container size and mounts ──────────────────────────────────╮              │
 │  │           │Session: ACP pretty name                                            │              │
-│              │Applies when a new environment is explicitly created; Restart keeps │              │
-│              │                                                                    │  ion.        │
+│              │Applies when a new environment is explicitly created; Restart keeps │  ion.        │
+│              │                                                                    │              │
 │              │CPUs:                                                               │              │
 │              │Memory (GiB):                                                       │              │
 │              │Empty keeps the target's value.                                     │              │
@@ -146,24 +146,24 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │              │                                                                    │              │
 │              │Attach host directory:                                              │              │
 │              │Container destination:                                              │              │
-│              │Access: ro · read-only ▾                                            │              │
-│              │                                                                    │  ────────────╯
-│              │Remembered directories                                              │  ────────────╮
-│              │/srv/models                                                         │              │
-│              │                                                                    │  to open.    │
-│              │Build cache                                                         │  ────────────╯
-│              │  none for this session                                             │  ───── ▁   ▄ ╮
-│              │                                                                    │              │
-│              │Enter attaches/accepts · Space edits · d removes · Tab moves        │  ────────────╯
-│              │  Cancel     Save                                                   │  ───── ▁   ▄ ╮
-│              ╰────────────────────────────────────────────────────────────────────╯  H Resets    │
-│                                                                                                  │
-│                                                                                                  │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+│              │Access: ro · read-only ▾                                            │  ────────────╯
+│              │                                                                    │  ────────────╮
+│              │Remembered directories                                              │              │
+│              │/srv/models                                                         │  to open.    │
+╰────────────  │                                                                    │  ────────────╯
+╭ Targets ▾ ─  │Build cache                                                         │  ───── ▁   ▄ ╮
+│  Host / fle  │  none for this session                                             │              │
+╰────────────  │                                                                    │  ────────────╯
+╭ Profiles ▾   │Enter attaches/accepts · Space edits · d removes · Tab moves        │  ───── ▁   ▄ ╮
+│ANTHROPIC     │  Cancel     Save                                                   │              │
+│  claude-1:   ╰────────────────────────────────────────────────────────────────────╯              │
+│OPENAI                                                                                            │
+│  codex-1: r                                                                                      │
+│  codex-2: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === Restart keeps its environment; container upgrade is a separate choice (120x32) ===
@@ -171,7 +171,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
 │  Idle  podman  ╭ × Restart agent ───────────────────────────────────────────────────────────────────╮                │
@@ -180,16 +180,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │Current image: ghcr.io/brokkai/mjolnir/agent-dev:2.51.0 (sha256:previous)           │                │
 │                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
 │                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
-│                │running turn.                                                                       │                │
-│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
-│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╮
+│                │running turn.                                                                       │  ──────────────╯
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╮
+│                │Writable-layer state, including manually installed packages, may be lost.           │                │
 │                │A checkpoint does not preserve the whole environment.                               │                │
-│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │                │
-│                │                                                                                    │  ──────────────╯
-│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │  ─────── ▁   ▄ ╮
-│                │                                                                                    │                │
+│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │  ──────────────╯
+│                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │c Cancel  ·  r Restart agent  ·  u Upgrade container and restart…                   │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
 │                │  Cancel     Restart agent     Upgrade container and restart…                       │                │
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                                      │
@@ -205,7 +205,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
 │  Idle  podman  ╭ × Upgrade container and restart? ──────────────────────────────────────────────────╮                │
@@ -214,16 +214,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │Current image: ghcr.io/brokkai/mjolnir/agent-dev:2.51.0 (sha256:previous)           │                │
 │                │Target image: ghcr.io/brokkai/mjolnir/agent-dev:2.52.0 (sha256:selected)            │                │
 │                │Restart agent keeps the current container and its filesystem; it interrupts any     │                │
-│                │running turn.                                                                       │                │
-│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╯
-│                │Writable-layer state, including manually installed packages, may be lost.           │  ──────────────╮
+│                │running turn.                                                                       │  ──────────────╯
+│                │Container upgrade reattaches the existing workspace and build cache mounts.         │  ──────────────╮
+│                │Writable-layer state, including manually installed packages, may be lost.           │                │
 │                │A checkpoint does not preserve the whole environment.                               │                │
-│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │                │
-│                │                                                                                    │  ──────────────╯
-│                │c Cancel  ·  u Upgrade container and restart…                                       │  ─────── ▁   ▄ ╮
-│                │                                                                                    │                │
+│                │Upgrades wait for accepted work; pending upgrades can be cancelled.                 │  ──────────────╯
+│                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │c Cancel  ·  u Upgrade container and restart…                                       │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
 │                │  Cancel     Upgrade container and restart…                                         │                │
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                                      │
