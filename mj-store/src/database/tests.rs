@@ -8687,3 +8687,43 @@ fn agent_message_through_an_ordinal_ignores_newer_replies() {
     assert_eq!(through(None).as_deref(), Some("Newer reply"));
     assert_eq!(through(Some(1)), None);
 }
+
+// Hard-won: c4688b4: a slower adoption overwrote a newer already acknowledged projection.
+#[test]
+fn adoption_seed_cannot_replace_another_attachments_durable_frontier() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let older = materialized_session("session-1");
+    let mut newer = older.clone();
+    newer.applied_event_ordinal += 1;
+    newer.applied_event_digest = event_digest(newer.applied_event_ordinal);
+    assert!(materialized::seed_adopted_materialized_session_to(&database, &newer, &[]).unwrap());
+    // The older attachment was paused after reading the worker but before its
+    // seed write. Even its side effects must not apply after the newer seed.
+    let invalid_side_effect = mj_core::relay::RelayEvent {
+        format: 2,
+        previous_digest: String::new(),
+        command_id: None,
+        ordinal: older.applied_event_ordinal,
+        digest: older.applied_event_digest.clone(),
+        recorded_at_ms: 1,
+        observation: mj_core::relay::RelayObservation::Notice {
+            message: "must never apply as a native event".into(),
+        },
+    };
+    assert!(
+        !materialized::seed_adopted_materialized_session_to(
+            &database,
+            &older,
+            &[invalid_side_effect]
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap(),
+        newer
+    );
+}

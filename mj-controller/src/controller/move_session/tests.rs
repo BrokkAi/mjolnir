@@ -481,7 +481,7 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
 }
 
 #[cfg(unix)]
-// Hard-won: 92ab7be: adoption erased a retained turn's acceptance and original start position.
+// Hard-won: 92ab7be/c4688b4: adoption lost retained turn metadata and native-child history.
 #[test]
 fn adoption_preserves_a_turn_started_in_retained_history() {
     let name = test_name("adoption_preserves_a_turn_started_in_retained_history");
@@ -528,6 +528,29 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
     relay.record_session_update(serde_json::from_value(serde_json::json!({
         "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"before adoption"}
     })).unwrap()).unwrap();
+    use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
+    relay
+        .record_observation(mj_core::relay::RelayObservation::NativeAgent {
+            event: NativeAgentEvent::Spawned {
+                session_id: "retained-child".into(),
+                parent_session_id: None,
+                name: "child".into(),
+                task: "retained work".into(),
+                capabilities: NativeAgentCapabilities {
+                    cancel: true,
+                    close: false,
+                },
+            },
+        })
+        .unwrap();
+    relay.record_observation(mj_core::relay::RelayObservation::NativeAgent {
+        event: NativeAgentEvent::Update {
+            session_id: "retained-child".into(),
+            update: Box::new(serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"retained child reply"}
+            })).unwrap()),
+        },
+    }).unwrap();
     drop(relay);
     crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
     let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
@@ -546,6 +569,15 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
         assert_eq!(turn.accepted_ordinal, Some(ordinal));
         assert_eq!(turn.turn_start_position, started);
     });
+    let child =
+        crate::database::load_native_agent_view(MOVE_QUEUE_SESSION_ID, "retained-child", 100)
+            .unwrap()
+            .unwrap();
+    assert!(
+        serde_json::to_string(&child)
+            .unwrap()
+            .contains("retained child reply")
+    );
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
     relay.claim_pending_commands(true).unwrap();
     relay
@@ -6556,4 +6588,59 @@ fn recording_executor() -> RecordingProcessExecutor {
             Ok(serde_json::to_vec(&checkpoint)?)
         },
     })
+}
+
+#[cfg(unix)]
+// Hard-won: c4688b4: adoption replaced an autonomous turn's clock with the Unix epoch.
+#[test]
+fn adoption_preserves_an_autonomous_turn_clock() {
+    let name = test_name("adoption_preserves_an_autonomous_turn_clock");
+    if !isolated_test_child(&name, "MJ_ADOPT_AUTONOMOUS_CLOCK_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::Notice {
+            message: "prefix".into(),
+        })
+        .unwrap();
+    relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "ack".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Acknowledge {
+            through_ordinal: relay.latest_ordinal(),
+            through_digest: relay.latest_digest().to_owned(),
+        },
+    });
+    relay
+        .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+            started_at_ms: 1234,
+        })
+        .unwrap();
+    assert!(relay.operational_state().active_prompt.is_none());
+    drop(relay);
+    crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
+    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let connection = crate::session_manager::StandaloneSession::connect_adopting(
+                &spec,
+                MOVE_QUEUE_SESSION_ID,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                connection.snapshot().materialized.execution,
+                mj_core::state::MaterializedExecutionState::Running {
+                    started_at_ms: 1234
+                }
+            );
+        });
 }

@@ -839,7 +839,20 @@ impl DurableRelay {
             || compacted_terminal_commands
             || registered_startup_owners
         {
-            relay.persist_snapshot()?;
+            relay.persist_snapshot().with_context(|| {
+                if recovered_questions {
+                    format!(
+                        "save upgraded worker pending questions {:?}",
+                        relay
+                            .snapshot
+                            .pending_elicitations
+                            .keys()
+                            .collect::<Vec<_>>()
+                    )
+                } else {
+                    "save recovered worker snapshot".to_owned()
+                }
+            })?;
         }
         relay.adopt_unqueued_queue_commands()?;
         relay.seed_initial_commands()?;

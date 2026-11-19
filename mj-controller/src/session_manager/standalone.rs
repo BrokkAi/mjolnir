@@ -146,7 +146,8 @@ impl StandaloneSession {
                         .client
                         .attach(snapshot.latest_ordinal, &snapshot.latest_digest)
                         .await?;
-                    let mut projection = connection.read_adoption_transcript(&snapshot).await?;
+                    let (mut projection, native_events) =
+                        connection.read_adoption_transcript(&snapshot).await?;
                     projection.configuration.values = snapshot
                         .config
                         .iter()
@@ -193,7 +194,15 @@ impl StandaloneSession {
                                 started_at_ms: snapshot
                                     .active_prompt
                                     .as_ref()
-                                    .map_or(0, |active| active.started_at_ms),
+                                    .map(|active| active.started_at_ms)
+                                    .or(snapshot.activity_turn_started_at_ms)
+                                    .or(match projection.execution {
+                                        mj_core::state::MaterializedExecutionState::Running {
+                                            started_at_ms,
+                                        } => Some(started_at_ms),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(mj_core::clock::epoch_millis),
                             }
                         }
                         mj_core::relay::RelayExecutionState::Closing => {
@@ -253,13 +262,22 @@ impl StandaloneSession {
                     });
                     // Persist the exact cursor before ACKing any replacement
                     // history. Native-use proof stays with its owning worker.
-                    save_materialized_session(&projection)?;
-                    connection.window = mj_core::state::ProjectionWindow::of(&projection);
-                    connection.materialized = projection;
-                    connection.window.trim(
-                        &mut connection.materialized,
-                        crate::database::PROJECTION_TAIL_ITEMS,
-                    );
+                    if crate::database::seed_adopted_materialized_session(
+                        &projection,
+                        native_events,
+                    )? {
+                        connection.window = mj_core::state::ProjectionWindow::of(&projection);
+                        connection.materialized = projection;
+                        connection.window.trim(
+                            &mut connection.materialized,
+                            crate::database::PROJECTION_TAIL_ITEMS,
+                        );
+                    } else {
+                        // Another attachment owns the durable frontier. Never ACK
+                        // the losing seed; reload its window and projection together.
+                        (connection.materialized, connection.window) =
+                            load_projection(&target.session_id).await?;
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -271,7 +289,8 @@ impl StandaloneSession {
     async fn read_adoption_transcript(
         &mut self,
         state: &RelayOperationalState,
-    ) -> Result<MaterializedSession> {
+    ) -> Result<(MaterializedSession, Vec<mj_core::relay::RelayEvent>)> {
+        let mut native_events = Vec::new();
         let mut projection = MaterializedSession::empty(&state.session_id);
         projection.applied_event_ordinal = state.acknowledged_through;
         projection.applied_event_digest = state.acknowledged_digest.clone();
@@ -286,7 +305,7 @@ impl StandaloneSession {
             };
             let page = self.client.next_catch_up_page(&after, &frontier).await?;
             self.cache_event_attachments(&page.events).await?;
-            projection = tokio::task::spawn_blocking(move || -> Result<_> {
+            (projection, native_events) = tokio::task::spawn_blocking(move || -> Result<_> {
                 let mut index = ProjectionIndex::new(&projection);
                 for event in page.events {
                     let mutation = mj_transcript::projection::project_retained_relay_event_indexed(
@@ -295,6 +314,9 @@ impl StandaloneSession {
                         &event,
                     )?
                     .mutation;
+                    if let Some(native) = &mutation.native_agent {
+                        native_events.push(native.clone());
+                    }
                     apply_committed_projection_event_indexed(
                         &mut projection,
                         &mut index,
@@ -302,12 +324,12 @@ impl StandaloneSession {
                         mutation,
                     )?;
                 }
-                Ok(projection)
+                Ok((projection, native_events))
             })
             .await
             .context("project retained adoption transcript")??;
         }
-        Ok(projection)
+        Ok((projection, native_events))
     }
 
     async fn cache_prompt_attachments(

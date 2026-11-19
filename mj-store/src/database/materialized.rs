@@ -1861,6 +1861,47 @@ pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSess
     Ok(())
 }
 
+/// Install recovered history only while no other attachment has established a cursor.
+/// Native-child effects and the owner frontier commit together before any ACK.
+pub fn seed_adopted_materialized_session(
+    materialized: &MaterializedSession,
+    native_events: Vec<mj_core::relay::RelayEvent>,
+) -> Result<bool> {
+    let materialized = materialized.clone();
+    submit_database_write("seed_adopted_materialized_session", move |_| {
+        seed_adopted_materialized_session_to(&database_path(), &materialized, &native_events)
+    })
+}
+
+pub(super) fn seed_adopted_materialized_session_to(
+    path: &Path,
+    materialized: &MaterializedSession,
+    native_events: &[mj_core::relay::RelayEvent],
+) -> Result<bool> {
+    materialized.validate()?;
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !session_exists(&tx, &materialized.session_id)? {
+        bail!("unknown session {}", materialized.session_id);
+    }
+    let frontier: Option<u64> = tx
+        .query_row(
+            "SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?1",
+            [&materialized.session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if frontier.is_some_and(|ordinal| ordinal > 0) {
+        return Ok(false);
+    }
+    for event in native_events {
+        native_agents::apply_native_agent_event(&tx, &materialized.session_id, event)?;
+    }
+    write_materialized_session(&tx, materialized)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// One relay page being applied inside a single write transaction. The relay
 /// retains everything past the last acknowledgement, so a page that fails
 /// part-way rolls back to the previous durable frontier and is simply
