@@ -18,7 +18,12 @@ import pathlib
 import sys
 
 BUG_PRECISION = 0.85
-TRACE_TARGET = 25  # the plan's per-repo tracing stop
+TRACE_TARGET = 25  # the plan's per-repo tracing stop, in admitted relation diffs
+# ADMISSION covers all admitted bifrost-dev bugs; only 17 of its 30 admitted bugs were relation
+# diffs. The multi-site proxy already leans toward relation bugs, so applying 17/30 again is
+# conservative, but the cap is in relation diffs and the joint rate on proxy-positive fixes is
+# unmeasured. Selection therefore caps a conservative relation estimate.
+RELATION_SHARE = 17 / 30
 ADMISSION = 31 / 67
 WINDOWS = {  # label: (intro and fix on or after, fix windows counted)
     "wide_2025": (dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
@@ -186,10 +191,12 @@ def main():
             "realistic_total_one_per_group": round(sum(best.values()), 1),
             "per_repo_realistic": dict(sorted(((r, round(v, 1)) for r, v in realistic.items()),
                                               key=lambda x: -x[1])),
-            # Tracing stops at TRACE_TARGET admitted bugs per repo, so selection ranks on the
-            # capped yield (bugs per indexing hour uses this figure).
-            "per_repo_realistic_capped": dict(sorted(((r, round(min(v, TRACE_TARGET), 1))
-                                                      for r, v in realistic.items()), key=lambda x: -x[1])),
+            # realistic is an all-bug proxy. Tracing stops at TRACE_TARGET admitted relation diffs,
+            # so selection ranks on a conservative relation estimate, capped at the stop (bugs per
+            # indexing hour uses this figure).
+            "per_repo_relation_estimate_capped": dict(sorted(
+                ((r, round(min(v * RELATION_SHARE, TRACE_TARGET), 1)) for r, v in realistic.items()),
+                key=lambda x: -x[1])),
         }
     json.dump(out, sys.stdout, indent=1)
 

@@ -43,10 +43,10 @@ STOP_SECONDS = 120
 # SIGTERM/SIGINT never raise into the driver: they set a cancellation flag, which the request and readiness
 # waits poll, so cancellation always runs through the ordinary teardown path (one owner, no
 # window between launching a server and protecting it).
-# The host lock's descriptor, passed to every systemd-run launch (server and git). flock locks
+# The tree lock's descriptor, passed to every systemd-run launch (server and git). flock locks
 # belong to the open file description, so the lock stays held while any process from this
-# batch still has it - including a launch still registering its scope after the driver died -
-# and a replacement driver can't start until all of them are gone.
+# batch still has it - including a launch still registering its scope after the driver died.
+# A replacement driver reaps those scopes before it can take the tree lock (see main()).
 HOST_LOCK_FDS = ()
 
 _CANCELLED = [False]  # written only by the signal handler; a plain flag takes no lock
@@ -450,16 +450,30 @@ def main():
     # One driver per host: a second invocation would reap the first's live scopes and race on
     # its worktrees. The lock is held for the process lifetime.
     import fcntl
-    # Host-wide, not per HOME or account: one batch per host keeps one 48G scope per host. A
-    # lock file owned by another account can't be opened for writing, which also refuses.
+    # Two host-wide locks (not per HOME or account; a file another account owns refuses too):
+    # - the driver lock, held only by this process, says a driver is alive;
+    # - the tree lock, inherited by every launch, says some process of a batch is alive.
+    # A replacement driver takes the driver lock, reaps and proves gone any scopes an earlier
+    # (dead) driver left, and only then can take the tree lock.
     try:
-        lock = open("/var/tmp/rql-index-measure.lock", "a")
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        global HOST_LOCK_FDS
-        HOST_LOCK_FDS = (lock.fileno(),)
+        driver_lock = open("/var/tmp/rql-index-measure.driver.lock", "a")
+        fcntl.flock(driver_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, PermissionError) as e:
-        sys.exit(f"another measure_index.py holds this host ({e!r})")
+        sys.exit(f"another measure_index.py driver is running on this host ({e!r})")
     reap_leftover_scopes()
+    tree_lock = open("/var/tmp/rql-index-measure.tree.lock", "a")
+    deadline = time.monotonic() + STOP_SECONDS
+    while True:
+        try:
+            fcntl.flock(tree_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                sys.exit("a process outside any rql scope still holds the batch tree lock; refusing to start")
+            time.sleep(1)
+            reap_leftover_scopes()  # a dead driver's launch may have registered its scope since
+    global HOST_LOCK_FDS
+    HOST_LOCK_FDS = (tree_lock.fileno(),)
     # Each line is `owner__repo <pinned sha> <origin url>`: the repo is cloned from its origin
     # and measured at that commit, so a reused record always matches its revision.
     entries = [l.split() for l in open(sys.argv[1]) if l.strip()]
@@ -521,7 +535,10 @@ def main():
             # A previous run may have left this worktree (registered or not). Its server scope is
             # already proven gone by reap_leftover_scopes(), so removing the files is safe.
             if wt.exists():
-                subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=clone, capture_output=True)
+                try:  # supervised like every git call: scoped and holding the tree lock
+                    git("worktree", "remove", "--force", str(wt), cwd=clone)
+                except subprocess.CalledProcessError:
+                    pass  # not a registered worktree; the directory is removed below
                 shutil.rmtree(wt, ignore_errors=True)
             git("worktree", "prune", cwd=clone)
             git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
