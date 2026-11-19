@@ -58,6 +58,18 @@ pub struct QuotaRefreshRequest {
     pub opencode_usage_priced: bool,
 }
 
+/// Whether a quota check for this harness can run a host harness program at
+/// all, decided from the kind alone, before reading any profile file. Whether
+/// one profile does ([`QuotaRefreshRequest::runs_host_harness`]) also depends
+/// on its login and provider.
+#[cfg(unix)]
+pub fn kind_may_run_host_harness(kind: HarnessKind) -> bool {
+    matches!(
+        kind,
+        HarnessKind::Codex | HarnessKind::Grok | HarnessKind::Claude
+    )
+}
+
 /// Where a Codex profile's quota comes from, decided once from its provider
 /// configuration. Only Codex's own OpenAI login has ChatGPT rate-limit
 /// windows; every other provider must never be probed through that login,
@@ -151,12 +163,12 @@ impl QuotaRefreshRequest {
     /// an HTTP endpoint.
     #[cfg(unix)]
     pub(crate) fn runs_host_harness(&self) -> bool {
-        match self.harness {
-            HarnessKind::Grok => true,
-            HarnessKind::Claude => self.auth_scheme != AuthScheme::AwsCredentialChain,
-            HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
-            _ => false,
-        }
+        kind_may_run_host_harness(self.harness)
+            && match self.harness {
+                HarnessKind::Claude => self.auth_scheme != AuthScheme::AwsCredentialChain,
+                HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
+                _ => true,
+            }
     }
 
     /// Build the request for one configured profile. The harness home

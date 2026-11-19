@@ -10,7 +10,8 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
-/// The enabled profiles, copied cheaply under the controller lock. Building
+/// The enabled profiles whose harness kind can need a managed quota harness
+/// (not OpenCode and the rest), copied cheaply under the controller lock. Building
 /// requests from them reads credential and provider files, so that happens off
 /// the lock ([`quota_requests_from`]).
 #[cfg(unix)]
@@ -19,6 +20,7 @@ pub fn enabled_quota_profiles(
 ) -> Vec<(String, mj_core::config::HarnessProfile)> {
     config
         .enabled_profiles()
+        .filter(|(_, profile)| mj_controller::quota::kind_may_run_host_harness(profile.kind))
         .map(|(id, profile)| (id.to_owned(), profile.clone()))
         .collect()
 }
@@ -48,14 +50,20 @@ pub fn spawn_quota_harness_prewarm(
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let requests = match tokio::task::spawn_blocking(move || quota_requests_from(profiles))
-            .await
-        {
-            Ok(requests) => requests,
-            Err(error) => {
-                tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
-                return;
-            }
+        // Building requests reads credential and provider files, which a
+        // stalled filesystem can hang. Shutdown must not wait for that, so the
+        // read races cancellation. Abandoning it is safe: it only reads, and
+        // deletes and publishes nothing.
+        let read = tokio::task::spawn_blocking(move || quota_requests_from(profiles));
+        let requests = tokio::select! {
+            () = cancellation.cancelled() => return,
+            read = read => match read {
+                Ok(requests) => requests,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
+                    return;
+                }
+            },
         };
         // The scope cancels its token when it ends, so it gets a child.
         let failures = mj_core::subprocess::with_preparation_cancellation(

@@ -731,7 +731,9 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
     let started = Instant::now();
     let cancellation = crate::subprocess::preparation_cancellation();
     loop {
-        anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+        if cancellation.is_cancelled() {
+            return Err(crate::subprocess::PreparationCancelled.into());
+        }
         let result = if shared {
             file.try_lock_shared()
         } else {
@@ -752,7 +754,7 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(25)) => {},
-            _ = cancellation.cancelled() => bail!("preparation cancelled"),
+            _ = cancellation.cancelled() => return Err(crate::subprocess::PreparationCancelled.into()),
         }
     }
 }
@@ -1156,10 +1158,10 @@ fn extract_archive_file(
         .entries()
         .with_context(|| format!("read archive {}", archive_name.display()))?
     {
-        anyhow::ensure!(
-            !cancellation.is_cancelled(),
-            "preparation cancelled while extracting"
-        );
+        if cancellation.is_cancelled() {
+            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
+                .context("while extracting"));
+        }
         let mut entry =
             entry.with_context(|| format!("read archive {}", archive_name.display()))?;
         let path = entry
@@ -1192,7 +1194,9 @@ async fn download_verified_async(
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
     let cancellation = crate::subprocess::preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(crate::subprocess::PreparationCancelled.into());
+    }
     let work = async {
         download_verified_inner(url, destination, environment).await?;
         let actual = crate::worker_launch::worker_executable_digest(destination)?;
@@ -1205,7 +1209,7 @@ async fn download_verified_async(
     };
     let result = tokio::select! {
         result = work => result,
-        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+        _ = cancellation.cancelled() => Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)),
     };
     if result.is_err() {
         let _ = std::fs::remove_file(destination);
@@ -1676,6 +1680,11 @@ async fn managed_node_health(
     let output = match bounded_env_output(&mut node, &probe_environment).await {
         Ok(output) => output,
         Err(error) => {
+            // A probe cut short by cancellation says nothing about the
+            // install, which the caller would otherwise remove.
+            if crate::subprocess::is_preparation_cancelled(&error) {
+                return Err(error);
+            }
             return Ok(ManagedNodeHealth::Unusable(format!(
                 "node --version could not run: {error:#}"
             )));
@@ -1700,6 +1709,9 @@ async fn managed_node_health(
         let output = match bounded_env_output(&mut command, &probe_environment).await {
             Ok(output) => output,
             Err(error) => {
+                if crate::subprocess::is_preparation_cancelled(&error) {
+                    return Err(error);
+                }
                 return Ok(ManagedNodeHealth::Unusable(format!(
                     "{name} --version could not run: {error:#}"
                 )));
@@ -1766,10 +1778,10 @@ fn extract_node_archive(
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
     for entry in archive.entries().context("read Node.js archive")? {
-        anyhow::ensure!(
-            !cancellation.is_cancelled(),
-            "preparation cancelled while extracting"
-        );
+        if cancellation.is_cancelled() {
+            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
+                .context("while extracting"));
+        }
         entry
             .context("read Node.js archive entry")?
             .unpack_in(destination)
@@ -1895,10 +1907,10 @@ fn extract_zstd_file(
         .with_context(|| format!("create Grok executable {}", destination.display()))?;
     let mut chunk = vec![0_u8; 1 << 20];
     loop {
-        anyhow::ensure!(
-            !cancellation.is_cancelled(),
-            "preparation cancelled while extracting"
-        );
+        if cancellation.is_cancelled() {
+            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
+                .context("while extracting"));
+        }
         let count = std::io::Read::read(&mut decoder, &mut chunk)
             .with_context(|| format!("read Grok archive {}", archive.display()))?;
         if count == 0 {
@@ -3285,7 +3297,7 @@ mod tests {
             }
         });
         assert!(
-            format!("{error:#}").contains("cancelled while extracting"),
+            format!("{error:#}").contains("while extracting"),
             "cancellation did not land during extraction: {error:#}"
         );
         assert!(staged(&root).is_empty(), "staging outlived the install");
@@ -3293,6 +3305,64 @@ mod tests {
 
         let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
         assert!(runtime.path().join("bin/node").is_file());
+    }
+
+    // A probe cut short by cancellation is not evidence that the cached Node.js
+    // is broken: the installer must report the cancellation and keep the cache.
+    #[test]
+    fn cancelling_the_cached_node_probe_keeps_the_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_archive, metadata) = fake_node_archive(temp.path());
+        let root = temp.path().join("node");
+        let install = root.join(format!("node-v{NODE_VERSION}-{}", environment_target()));
+        let started = temp.path().join("probe-started");
+        executable(
+            &install.join("bin/node"),
+            &format!("#!/bin/sh\n: > '{}'\nexec sleep 300\n", started.display()),
+        );
+        for name in ["npm", "npx"] {
+            executable(&install.join("bin").join(name), "#!/bin/sh\nexit 0\n");
+        }
+        open_lock(&install.join(LEASE_FILE)).unwrap();
+        let mut environment = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+
+        let error = run_async(async {
+            let token = tokio_util::sync::CancellationToken::new();
+            let call = crate::subprocess::with_preparation_cancellation(
+                token.clone(),
+                install_managed_node(&root, &mut environment, &metadata),
+            );
+            tokio::pin!(call);
+            let mut waited = 0;
+            while !started.exists() {
+                assert!(waited < 500, "the cached Node.js probe never started");
+                waited += 1;
+                tokio::select! {
+                    result = &mut call => panic!("call ended before the probe ran: {:?}", result.err()),
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+            token.cancel();
+            match call.await {
+                Err(error) => error,
+                Ok(_) => panic!("a cancelled call must fail"),
+            }
+        });
+        assert!(
+            crate::subprocess::is_preparation_cancelled(&error),
+            "not a cancellation: {error:#}"
+        );
+        assert!(
+            entrypoint_is_executable(&install.join("bin/node")),
+            "cancellation removed the cached Node.js"
+        );
+        assert!(
+            std::fs::read_dir(&root).unwrap().all(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                !name.starts_with(".install-")
+            }),
+            "cancellation left set-aside or staging directories"
+        );
     }
 
     #[test]
@@ -3522,7 +3592,16 @@ mod tests {
                 ),
             );
             tokio::pin!(install);
-            while !pid_file.exists() {
+            // The shell creates the file before it writes the PID, so wait for
+            // a complete one, and fail if it never appears.
+            let mut waited = 0;
+            while std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+                .is_none()
+            {
+                assert!(waited < 500, "npm never recorded its child's PID");
+                waited += 1;
                 tokio::select! {
                     result = &mut install => panic!("install ended before npm started: {result:?}"),
                     () = tokio::time::sleep(Duration::from_millis(20)) => {}
@@ -3536,7 +3615,9 @@ mod tests {
         let child = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
-            .to_owned();
+            .parse::<u32>()
+            .expect("the test waited for a complete PID")
+            .to_string();
         // `kill -0` also succeeds on a zombie, which has already stopped
         // running. Ask `ps` for the process state: no output (gone) or `Z`
         // means it is not running, whether or not anything reaped it.
