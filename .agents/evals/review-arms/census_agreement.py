@@ -74,12 +74,20 @@ def overlap(primary, replication):
 
 
 def unique_facts(sets):
-    facts = {}
+    """One entry per distinct fact across alternative sets. When a labeller repeats a fact with
+    different scored categories, those categories are marked conflicting, so they count as
+    disagreement whatever the order of the sets."""
+    occurrences = {}
     for group in sets:
         for fact in group:
             key = (fact["claim"], tuple(sorted({canonical_site(s) for s in fact["sites"]})))
-            facts.setdefault(key, fact)
-    return list(facts.values())
+            occurrences.setdefault(key, []).append(fact)
+    facts = []
+    for repeats in occurrences.values():
+        seen = [categories(fact) for fact in repeats]
+        conflicting = {key for key in seen[0] if len({json.dumps(c[key]) for c in seen}) > 1}
+        facts.append(dict(repeats[0], _conflicting=sorted(conflicting)) if conflicting else repeats[0])
+    return facts
 
 
 def categories(fact):
@@ -94,8 +102,12 @@ def categories(fact):
 
 def category_comparisons(a, b):
     second = categories(b)
+    conflicting = set(a.get("_conflicting", ())) | set(b.get("_conflicting", ()))
     for category, value in categories(a).items():
         other = second[category]
+        if category in conflicting:
+            yield category, False
+            continue
         if value is None and other is None:
             continue
         if category == "rql.locator_present" and (value is None or other is None):
