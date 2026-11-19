@@ -21,15 +21,15 @@ use mj_checkpoint::archive::{
 };
 use mj_checkpoint::checkpoint::{
     CHECKPOINT_EXPORT_PROTOCOL_VERSION, CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint,
-    CheckpointCaptureSpec, CheckpointExportSpec, CheckpointPackSpec, CheckpointRepositoryCapture,
-    CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
+    CheckpointCaptureSpec, CheckpointExportSpec, CheckpointPackSpecRef,
+    CheckpointRepositoryCapture, CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
     current_native_session_received_prompt,
 };
 use mj_core::config::{HarnessKind, sessions_dir};
 use mj_core::state::{
     CheckpointMetadata, ManagedSessionSnapshot, SessionRecord, SessionState, State,
 };
-use mj_transcript::projection::canonical_session_from_materialized;
+use mj_transcript::projection::canonical_session_from_materialized_owned;
 
 use crate::targets::{
     self, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor, ProvisionStage,

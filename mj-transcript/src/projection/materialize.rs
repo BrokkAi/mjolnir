@@ -307,28 +307,57 @@ pub(super) fn apply_imported_event(
     }
 }
 
+/// Build the canonical snapshot from a borrowed projection. Transcript items
+/// are shared by pointer, so this clones the handles and converts each body
+/// once; use [`canonical_session_from_materialized_owned`] when the caller can
+/// give the projection up.
 pub fn canonical_session_from_materialized(
     materialized: &MaterializedSession,
 ) -> Result<CanonicalSessionSnapshot> {
-    let transcript = materialized
-        .transcript
-        .iter()
+    canonical_session_from_materialized_owned(materialized.clone())
+}
+
+/// Build the canonical snapshot by consuming the projection. Each transcript
+/// item is converted and then dropped, and an item nobody else shares has its
+/// strings and chunks moved rather than copied, so the projection and the
+/// snapshot never both hold the whole conversation at once.
+pub fn canonical_session_from_materialized_owned(
+    materialized: MaterializedSession,
+) -> Result<CanonicalSessionSnapshot> {
+    let MaterializedSession {
+        applied_event_ordinal,
+        applied_event_digest,
+        last_activity_at_ms,
+        execution,
+        session_title,
+        configuration,
+        transcript,
+        queued_prompts,
+        ..
+    } = materialized;
+    let transcript = transcript
+        .into_iter()
         .map(|item| {
-            let body = match &item.body {
-                TranscriptBody::User { content } => CanonicalTranscriptBody::User {
-                    content: content.clone(),
-                },
-                TranscriptBody::Message { event } => CanonicalTranscriptBody::Message {
-                    event: event.clone(),
-                },
-                TranscriptBody::Agent { chunks, streaming } => CanonicalTranscriptBody::Agent {
-                    chunks: chunks.clone(),
-                    streaming: *streaming,
-                },
-                TranscriptBody::Thought { chunks, streaming } => CanonicalTranscriptBody::Thought {
-                    chunks: chunks.clone(),
-                    streaming: *streaming,
-                },
+            // Another holder of the same item (a live connection's view)
+            // keeps it alive; only then is the body copied.
+            let item = Arc::try_unwrap(item).unwrap_or_else(|shared| (*shared).clone());
+            let TranscriptItem {
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body,
+            } = item;
+            let body = match body {
+                TranscriptBody::User { content } => CanonicalTranscriptBody::User { content },
+                TranscriptBody::Message { event } => CanonicalTranscriptBody::Message { event },
+                TranscriptBody::Agent { chunks, streaming } => {
+                    CanonicalTranscriptBody::Agent { chunks, streaming }
+                }
+                TranscriptBody::Thought { chunks, streaming } => {
+                    CanonicalTranscriptBody::Thought { chunks, streaming }
+                }
                 TranscriptBody::Tool {
                     call,
                     terminal_outputs,
@@ -340,33 +369,26 @@ pub fn canonical_session_from_materialized(
                         .iter()
                         .map(canonical_terminal_output)
                         .collect(),
-                    terminal_refs: terminal_refs.clone(),
-                    presentation: presentation.as_deref().cloned(),
+                    terminal_refs,
+                    presentation: presentation.map(|boxed| *boxed),
                 },
                 TranscriptBody::TerminalOutput { record } => {
                     CanonicalTranscriptBody::TerminalOutput {
-                        record: canonical_terminal_output(record),
+                        record: canonical_terminal_output(&record),
                     }
                 }
-                TranscriptBody::Plan { plan } => {
-                    CanonicalTranscriptBody::Plan { plan: plan.clone() }
-                }
+                TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan },
                 TranscriptBody::PlanProposal { proposal_id, plan } => {
-                    CanonicalTranscriptBody::PlanProposal {
-                        proposal_id: proposal_id.clone(),
-                        plan: plan.clone(),
-                    }
+                    CanonicalTranscriptBody::PlanProposal { proposal_id, plan }
                 }
-                TranscriptBody::System { text } => {
-                    CanonicalTranscriptBody::System { text: text.clone() }
-                }
+                TranscriptBody::System { text } => CanonicalTranscriptBody::System { text },
             };
             Ok(CanonicalTranscriptItem {
-                stable_id: item.stable_id.clone(),
-                position: item.position,
-                latest_content_event_ordinal: item.latest_content_event_ordinal,
-                created_at_ms: item.created_at_ms,
-                last_changed_at_ms: item.last_changed_at_ms,
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
                 body,
             })
         })
@@ -375,10 +397,10 @@ pub fn canonical_session_from_materialized(
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
-        event_frontier: materialized.applied_event_ordinal,
-        event_frontier_digest: materialized.applied_event_digest.clone(),
+        event_frontier: applied_event_ordinal,
+        event_frontier_digest: applied_event_digest,
         session: CanonicalSessionState {
-            execution: match materialized.execution {
+            execution: match execution {
                 MaterializedExecutionState::Idle => CanonicalExecutionState::Idle,
                 MaterializedExecutionState::Running { started_at_ms } => {
                     CanonicalExecutionState::Running { started_at_ms }
@@ -386,26 +408,22 @@ pub fn canonical_session_from_materialized(
                 MaterializedExecutionState::Closing => CanonicalExecutionState::Closing,
                 MaterializedExecutionState::Closed => CanonicalExecutionState::Closed,
             },
-            last_activity_at_ms: materialized.last_activity_at_ms,
-            session_title: materialized.session_title.clone(),
-            configuration: materialized.configuration.clone(),
+            last_activity_at_ms,
+            session_title,
+            configuration,
         },
         transcript,
-        queued_prompts: materialized
-            .queued_prompts
-            .iter()
+        queued_prompts: queued_prompts
+            .into_iter()
             .map(|prompt| CanonicalQueuedPrompt {
-                command_id: prompt.command_id.clone(),
-                kind: match &prompt.kind {
+                command_id: prompt.command_id,
+                kind: match prompt.kind {
                     QueuedCommandKind::Prompt => CanonicalQueuedCommandKind::Prompt,
                     QueuedCommandKind::SetConfig { key, value } => {
-                        CanonicalQueuedCommandKind::SetConfig {
-                            key: key.clone(),
-                            value: value.clone(),
-                        }
+                        CanonicalQueuedCommandKind::SetConfig { key, value }
                     }
                 },
-                content: prompt.content.clone(),
+                content: prompt.content,
                 queued_at_ms: prompt.queued_at_ms,
             })
             .collect(),

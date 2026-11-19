@@ -187,7 +187,7 @@ fn checkpoint_failure_summary(stderr: &str) -> String {
 /// spec, its `mj` is replaced with the controller's binary once and the command
 /// is retried. `worker_binary` names that binary; `None` resolves the one this
 /// controller would install.
-pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
+pub(super) fn run_checkpoint_staging_command<T: serde::Serialize + Sync>(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -196,7 +196,6 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
     operation: &str,
     worker_binary: Option<&Path>,
 ) -> Result<CommandOutput> {
-    let body = serde_json::to_vec(spec).with_context(|| format!("serialize {operation} spec"))?;
     // The archive's size is known only once the worker has captured it.
     crate::target_storage::ensure_room(
         locator,
@@ -207,7 +206,7 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
     let mut replaced_worker = false;
     loop {
         let command = command(locator, session_id)?;
-        let output = executor.execute_with_stdin(&command, &mut body.as_slice())?;
+        let output = send_spec_streamed(executor, &command, spec, operation)?;
         if output.status == 0 {
             return Ok(output);
         }
@@ -241,6 +240,116 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
             )));
         }
         return Err(error);
+    }
+}
+
+/// Bytes of spec JSON handed to the command at a time.
+const SPEC_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+/// Chunks the serializer may run ahead of the command. A full queue blocks the
+/// serializer until the command reads, so the spec is never buffered whole.
+const SPEC_STREAM_QUEUE_CHUNKS: usize = 4;
+
+/// Run `command` with `spec` as its JSON stdin, serializing while the command
+/// reads. The spec carries the whole conversation, and a `Vec<u8>` of it would
+/// sit beside the snapshot it came from.
+fn send_spec_streamed<T: serde::Serialize + Sync>(
+    executor: &impl CommandExecutor,
+    command: &CommandSpec,
+    spec: &T,
+    operation: &str,
+) -> Result<CommandOutput> {
+    let (output, serialized) = std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(SPEC_STREAM_QUEUE_CHUNKS);
+        let serializer = scope.spawn(move || {
+            let mut writer = ChunkWriter {
+                chunk: Vec::with_capacity(SPEC_STREAM_CHUNK_BYTES),
+                sender,
+            };
+            let result = serde_json::to_writer(&mut writer, spec);
+            match result {
+                // The command stopped reading, so its own result says why.
+                Err(error) if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) => {
+                    Ok(())
+                }
+                Err(error) => {
+                    // The command must not see a truncated spec as a whole one.
+                    let _ = writer
+                        .sender
+                        .send(Err(std::io::Error::other(error.to_string())));
+                    Err(error)
+                }
+                Ok(()) => {
+                    let _ = writer.send_chunk();
+                    Ok(())
+                }
+            }
+        });
+        let mut reader = ChunkReader {
+            current: std::io::Cursor::new(Vec::new()),
+            receiver,
+        };
+        let output = executor.execute_with_stdin(command, &mut reader);
+        // The serializer blocks on a full queue until this side is gone.
+        drop(reader);
+        let serialized = match serializer.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        (output, serialized)
+    });
+    serialized.with_context(|| format!("serialize {operation} spec"))?;
+    output
+}
+
+struct ChunkWriter {
+    chunk: Vec<u8>,
+    sender: std::sync::mpsc::SyncSender<std::io::Result<Vec<u8>>>,
+}
+
+impl ChunkWriter {
+    fn send_chunk(&mut self) -> std::io::Result<()> {
+        if self.chunk.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::replace(&mut self.chunk, Vec::with_capacity(SPEC_STREAM_CHUNK_BYTES));
+        self.sender
+            .send(Ok(chunk))
+            .map_err(|_| std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+impl std::io::Write for ChunkWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.chunk.extend_from_slice(data);
+        if self.chunk.len() >= SPEC_STREAM_CHUNK_BYTES {
+            self.send_chunk()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ChunkReader {
+    current: std::io::Cursor<Vec<u8>>,
+    receiver: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+}
+
+impl std::io::Read for ChunkReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let read = self.current.read(buffer)?;
+            if read > 0 || buffer.is_empty() {
+                return Ok(read);
+            }
+            match self.receiver.recv() {
+                Ok(chunk) => self.current = std::io::Cursor::new(chunk?),
+                // The serializer finished and dropped its sender.
+                Err(_) => return Ok(0),
+            }
+        }
     }
 }
 
