@@ -119,66 +119,198 @@ def line_count(repo, revision, path):
     return blob.count(b"\n") + bool(blob and not blob.endswith(b"\n"))
 
 
-def vocabulary(grammar_repo):
+def vocabulary():
+    """Load spellings and row signatures from the pinned documentation extract."""
+    forms = {}
     reference = (CENSUS / "rql-documented-steps.md").read_text()
-    steps = {name for forms in re.findall(r"^\| `[\w-]+` \| ([^|]+)\|", reference, re.M)
-             for name in re.findall(r"`([\w-]+)`", forms)}
-    revision = re.search(r"^Pin: .*?([a-f0-9]{40})", reference, re.M)[1]
-    kinds = git(grammar_repo, "show", f"{revision}:crates/bifrost-core/src/analyzer/structural/kinds.rs").decode()
-    schema = git(grammar_repo, "show", f"{revision}:crates/bifrost-rql/src/query/schema.rs").decode()
-    structural = set(re.findall(r'^\s*\w+ => "([\w-]+)":', kinds, re.M))
-    nonsteps = set()
-    for aliases, body in re.findall(r"labels: \[([^\]]+)\],(.*?)^    }", schema, re.M | re.S):
-        if not re.search(r"^\s*step:", body, re.M):
-            nonsteps.update(re.findall(r'"([\w/-]+)"', aliases))
-    if not steps or not structural or not nonsteps:
-        raise ValueError("Could not read the documented steps and pinned RQL grammar")
-    return steps | nonsteps | structural
+    for line in reference.splitlines():
+        if not line.startswith("| `"):
+            continue
+        first, second, signature, *_ = (cell.strip() for cell in line.split("|")[1:])
+        if second.startswith("`"):
+            names, use = second, "step"
+        else:
+            names, use = first, second
+        inputs, separator, output = signature.partition(" -> ")
+        if not separator and signature != "n/a":
+            raise ValueError(f"Malformed documented signature for {names}: {signature}")
+        for name in re.findall(r"`([\w/-]+)`", names):
+            if name in forms:
+                raise ValueError(f"Duplicate documented form {name}")
+            forms[name] = use, inputs, output
+    if not forms:
+        raise ValueError("No documented RQL forms")
+    return forms
 
 
-QUERY_OPTIONS = {":code", ":configuration", ":sources", ":sinks"}
 TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|;[^\n]*|[()\[\]]|[^\s"();\[\]]+')
 
 
-def query_errors(query, allowed):
-    # Row predicate and projection options may have lists headed by field
-    # names. Only query-valued options introduce additional pipeline steps.
+def parse_query(query):
     stack, roots = [], []
     end = 0
     for match in TOKEN.finditer(query):
         if query[end:match.start()].strip():
-            return ["malformed RQL"]
+            raise ValueError("malformed RQL")
         end = match.end()
         token = match[0]
         if token.startswith(";"):
             continue
+        items = stack[-1][1] if stack else roots
         if token in ("(", "["):
-            child = []
-            (stack[-1][1] if stack else roots).append(child)
-            stack.append((token, child))
+            stack.append((token, []))
         elif token in (")", "]"):
-            if not stack or (stack.pop()[0], token) not in {("(", ")"), ("[", "]")}:
-                return ["unbalanced RQL delimiters"]
+            if not stack or (stack[-1][0], token) not in {("(", ")"), ("[", "]")}:
+                raise ValueError("unbalanced RQL delimiters")
+            opener, child = stack.pop()
+            parent = stack[-1][1] if stack else roots
+            parent.append(child if opener == "(" else tuple(child))
         else:
-            (stack[-1][1] if stack else roots).append(token)
+            items.append(token)
     if stack or query[end:].strip() or len(roots) != 1 or not isinstance(roots[0], list):
-        return ["expected one RQL form"]
-    forms, unknown = roots, set()
-    while forms:
-        form = forms.pop()
-        if not form or not isinstance(form[0], str):
-            return ["RQL form needs a head symbol"]
-        if form[0] not in allowed:
-            unknown.add(form[0])
+        raise ValueError("expected one RQL form")
+    return roots[0]
+
+
+def row_kinds(signature):
+    return set(re.findall(r"`(\w+)`", signature))
+
+
+def check_query(query, allowed):
+    """Check documented form names and propagate their known terminal row kinds."""
+    errors = []
+    untyped = False
+
+    def form_signature(form):
+        if (not isinstance(form, list) or not form or not isinstance(form[0], str)
+                or not re.fullmatch(r"[\w/-]+", form[0])):
+            raise ValueError("RQL form needs a head symbol")
+        name = form[0]
+        if name not in allowed:
+            errors.append(f"undocumented RQL form {name!r}")
+            return "unknown", "", ""
+        return allowed[name]
+
+    def arguments(form):
+        positional, options = [], {}
         args = iter(form[1:])
         for arg in args:
             if isinstance(arg, str) and arg.startswith(":"):
                 value = next(args, None)
-                if arg in QUERY_OPTIONS and isinstance(value, list):
-                    forms.append(value)
-            elif isinstance(arg, list):
-                forms.append(arg)
-    return [f"undocumented RQL form {name!r}" for name in sorted(unknown)]
+                if value is None or (isinstance(value, str) and value.startswith(":")):
+                    raise ValueError(f"{form[0]}: {arg} needs a value")
+                options[arg] = value
+            else:
+                positional.append(arg)
+        return positional, options
+
+    def embedded(value):
+        if isinstance(value, list):
+            pattern(value, nested=True)
+        elif isinstance(value, tuple):
+            for item in value:
+                embedded(item)
+
+    def pattern(form, *, nested=False):
+        use, _, _ = form_signature(form)
+        if use not in ("pattern", "unknown") and not (nested and use == "operand"):
+            errors.append(f"{form[0]}: expected a structural pattern")
+            return
+        args = iter(form[1:])
+        for arg in args:
+            if arg == ":kwargs":
+                entries = next(args, None)
+                if isinstance(entries, tuple):
+                    for entry in entries:
+                        if isinstance(entry, list) and len(entry) == 2:
+                            embedded(entry[1])
+            else:
+                embedded(arg)
+
+    def compatible(context, actual, expected):
+        kinds = row_kinds(expected)
+        if kinds and len(actual) > 1:
+            errors.append(f"{context}: input needs one row kind, got {', '.join(sorted(actual))}")
+        elif actual and kinds and actual - kinds:
+            readable = expected.replace("`", "")
+            errors.append(f"{context}: expected {readable}, got {', '.join(sorted(actual))}")
+
+    def infer(form):
+        nonlocal untyped
+        use, inputs, output = form_signature(form)
+        name = form[0]
+        if use == "unknown":
+            return set()
+        if use == "pattern":
+            pattern(form)
+            return row_kinds(output)
+        if use not in ("step", "source", "set", "ancestor", "compound"):
+            errors.append(f"{name}: expected a query form")
+            return set()
+        args, options = arguments(form)
+        input_kinds = set()
+        if use in ("step", "ancestor"):
+            if use == "ancestor":
+                if len(args) != 2:
+                    raise ValueError(f"{name}: expected an ancestor pattern and a nested query")
+                pattern(args[0])
+            elif len([arg for arg in args if isinstance(arg, list)]) != 1:
+                raise ValueError(f"{name}: expected one nested query")
+            nested = next((arg for arg in reversed(args) if isinstance(arg, list)), None)
+            input_kinds = infer(nested)
+            compatible(name, input_kinds, inputs)
+        elif use == "set":
+            if len(args) < 2:
+                raise ValueError(f"{name}: expected at least two query operands")
+            for arg in args:
+                input_kinds.update(infer(arg))
+            if name != "union" and len(input_kinds) > 1:
+                errors.append(f"{name}: operands need the same row kind, got "
+                              f"{', '.join(sorted(input_kinds))}")
+        elif use == "compound":
+            expected = dict(part.strip().split(" = ") for part in inputs.split(";"))
+            if name == "correlate":
+                relation = options.get(":relation")
+                relation_use, relation_inputs, _ = form_signature(relation)
+                if relation_use == "relation":
+                    key, signature = relation_inputs.split(" = ")
+                    expected[key] = signature
+                    if relation[0] in ("configuration-code", "configuration_code"):
+                        _, relation_options = arguments(relation)
+                        if relation_options.get(":match") != "same-project":
+                            expected[key] = "`declaration`"
+                elif relation_use != "unknown":
+                    errors.append(f"{name}: expected a correlation relation")
+            for option, signature in expected.items():
+                actual = infer(options.get(option))
+                compatible(f"{name} {option}", actual, signature)
+                if signature == "any code row" and actual & {
+                        "configuration_fact", "dependency_evidence", "cross_domain"}:
+                    errors.append(f"{name} {option}: expected a programming-code query")
+        for option in (":route", ":routes"):
+            if option in options:
+                embedded(options[option])
+        if output == "unknown":
+            untyped = True
+            return set()
+        if output == "same row":
+            return input_kinds
+        if name == "witness":
+            # The catalogue gives the outputs in the same order as the inputs.
+            return {kind for source, kind in zip(re.findall(r"`(\w+)`", inputs),
+                                                re.findall(r"`(\w+)`", output))
+                    if source in input_kinds}
+        if output == "projected row":
+            return {"projected_row"}
+        return row_kinds(output)
+
+    try:
+        infer(parse_query(query))
+    except ValueError as error:
+        errors.append(str(error))
+    except RecursionError:
+        errors.append("RQL nesting exceeds validator capacity")
+    return list(dict.fromkeys(errors)), "untyped" if untyped else "typed"
 
 
 def string(value):
@@ -196,10 +328,10 @@ def fields(value, required, where, errors):
 
 
 def validate(label, item, role, repo, allowed):
-    errors = []
+    errors, query_checks = [], []
     if not fields(label, "id repo labeller defect_check defect_check_reason decisive_sets relation_bug notes",
                   "label", errors):
-        return errors
+        return errors, query_checks
     if (label["id"], label["repo"], label["labeller"]) != (item["id"], item["repo"], role):
         errors.append("id, repo and labeller must match the batch")
     check, reason = label["defect_check"], label["defect_check_reason"]
@@ -209,7 +341,8 @@ def validate(label, item, role, repo, allowed):
         errors.append("notes must be a string")
     sets = label["decisive_sets"]
     if not isinstance(sets, list) or not sets or (item["census"] == "development" and len(sets) != 1):
-        return errors + ["decisive_sets must contain one set for development, or one or more for test"]
+        errors.append("decisive_sets must contain one set for development, or one or more for test")
+        return errors, query_checks
     has_relation = False
     for number, decisive in enumerate(sets, 1):
         if not isinstance(decisive, dict) or not isinstance(decisive.get("facts"), list) or not decisive["facts"]:
@@ -235,13 +368,13 @@ def validate(label, item, role, repo, allowed):
             if type(fact["relation"]) is not bool or type(fact["in_diff"]) is not bool:
                 errors.append(f"{where}: relation and in_diff must be booleans")
             has_relation |= fact["relation"] is True
-            validate_fact(fact, item["census"], where, errors, allowed)
+            validate_fact(fact, item["census"], where, errors, query_checks, allowed)
     if label["relation_bug"] is not has_relation:
         errors.append("relation_bug must equal whether any decisive fact has relation=true")
-    return errors
+    return errors, query_checks
 
 
-def validate_fact(fact, split, where, errors, allowed):
+def validate_fact(fact, split, where, errors, query_checks, allowed):
     kind, rql, anchoring = fact["kind"], fact["rql"], fact["anchoring"]
     if fact["in_diff"] is True:
         if any(value is not None for value in (kind, rql, anchoring)):
@@ -269,7 +402,10 @@ def validate_fact(fact, split, where, errors, allowed):
         if step is not None:
             errors.append(f"{where}: documented requires null missing_step")
         if string(query):
-            errors.extend(f"{where}: {error}" for error in query_errors(query, allowed))
+            problems, status = check_query(query, allowed)
+            errors.extend(f"{where}: {problem}" for problem in problems)
+            if not problems:
+                query_checks.append({"fact": where, "status": status})
     elif fields(step, "name input output semantics", f"{where} missing_step", errors):
         if any(not string(step[key]) for key in ("name", "input", "output", "semantics")):
             errors.append(f"{where}: missing_step fields must be nonempty strings")
@@ -320,11 +456,11 @@ def collect(output, expected, role, repo, allowed):
         if len(submitted) != 1:
             errors[bug].append(f"expected one row for {bug}, got {len(submitted)}")
             continue
-        problems = validate(submitted[0], item, role, repo, allowed)
+        problems, query_checks = validate(submitted[0], item, role, repo, allowed)
         if problems:
             errors[bug].extend(problems)
         else:
-            valid[bug] = submitted[0]
+            valid[bug] = dict(submitted[0], validation={"rql": query_checks})
     return valid, dict(errors)
 
 
@@ -373,7 +509,10 @@ def run_turn(sid, prompt, phase, title):
                          "--prompt-file", prompt)
     waited = driver.mj("wait", "--session", sid, "--turn", response["turn_id"],
                        "--return-on-input", "--timeout", 1200, timeout=1230)
-    if waited["outcome"] != "finished" or waited.get("turn_id") != response["turn_id"]:
+    requested_turn = waited.get("requested_turn_id")
+    if requested_turn is None:
+        requested_turn = waited.get("turn_id")
+    if waited["outcome"] != "finished" or requested_turn != response["turn_id"]:
         raise RuntimeError(f"{title}: {waited}")
     return waited
 
@@ -418,64 +557,72 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
                     "--no-github-credentials", "--subagents", "none", "--title", title,
                     timeout=900)["session_id"]
     log(args.labels_dir, "launched", title=title, session=sid)
-    driver.wait_idle(sid)
-    for key, value in (("model", model), ("effort", "high")):
-        while True:
-            try:
-                driver.mj("set-config", "--session", sid, "--key", key, "--value", value)
+    # Every exit after launch suspends the session, so a failed batch leaves no worker running
+    # a turn while a rerun starts another one for the same items.
+    try:
+        driver.wait_idle(sid)
+        for key, value in (("model", model), ("effort", "high")):
+            while True:
+                try:
+                    driver.mj("set-config", "--session", sid, "--key", key, "--value", value)
+                    break
+                except RuntimeError as error:
+                    if "initialization is still running" not in str(error):
+                        raise
+                    time.sleep(10)
+        state = driver.session(sid)
+        selected = {field["key"]: field.get("current") for field in state["config_options"]}
+        if state["profile_id"] != profile or selected.get("model") != model or selected.get("effort") != "high":
+            raise RuntimeError(f"{title}: requested {profile}/{model}/high, got {state['profile_id']}/{selected}")
+        log(args.labels_dir, "configured", title=title, profile=profile, model=model, effort="high")
+        for source in inputs.iterdir():
+            driver.mj("put-file", "--session", sid, "--path", f".rql-census/{source.name}", source)
+        expected = indexed(batch, "census batch")
+        destination = args.labels_dir / f"{split}-{role}.jsonl"
+        errors = {}
+        for attempt, filename in enumerate(("labels.jsonl", "repaired.jsonl"), 1):
+            turn = run_turn(sid, prompt, attempt, title)
+            log(args.labels_dir, "turn-finished", title=title, attempt=attempt,
+                turn=turn.get("turn_id"), outcome=turn.get("outcome"))
+            fetch = subprocess.run([str(driver.MJX), "fetch", "--session", sid, "--path",
+                                    f".rql-census/{filename}", "--stdout"],
+                                   capture_output=True, timeout=300)
+            raw = fetch.stdout.decode(errors="replace")
+            if fetch.returncode:
+                problem = fetch.stderr.decode(errors="replace").strip()
+                log(args.labels_dir, "fetch-failed", title=title, attempt=attempt, error=problem)
+                if not any(word in problem.lower() for word in ("not found", "no such file", "does not exist")):
+                    raise RuntimeError(problem)
+            (unit / f"attempt-{attempt}.jsonl").write_text(raw)
+            valid, errors = collect(raw, expected, role, work, allowed)
+            if valid:
+                append_rows(destination, valid.values())
+            log(args.labels_dir, "validated", title=title, attempt=attempt, ids=list(valid), errors=errors)
+            if not errors:
                 break
-            except RuntimeError as error:
-                if "initialization is still running" not in str(error):
-                    raise
-                time.sleep(10)
-    state = driver.session(sid)
-    selected = {field["key"]: field.get("current") for field in state["config_options"]}
-    if state["profile_id"] != profile or selected.get("model") != model or selected.get("effort") != "high":
-        raise RuntimeError(f"{title}: requested {profile}/{model}/high, got {state['profile_id']}/{selected}")
-    log(args.labels_dir, "configured", title=title, profile=profile, model=model, effort="high")
-    for source in inputs.iterdir():
-        driver.mj("put-file", "--session", sid, "--path", f".rql-census/{source.name}", source)
-    expected = indexed(batch, "census batch")
-    destination = args.labels_dir / f"{split}-{role}.jsonl"
-    errors = {}
-    for attempt, filename in enumerate(("labels.jsonl", "repaired.jsonl"), 1):
-        turn = run_turn(sid, prompt, attempt, title)
-        log(args.labels_dir, "turn-finished", title=title, attempt=attempt,
-            turn=turn.get("turn_id"), outcome=turn.get("outcome"))
-        fetch = subprocess.run([str(driver.MJX), "fetch", "--session", sid, "--path",
-                                f".rql-census/{filename}", "--stdout"],
-                               capture_output=True, timeout=300)
-        raw = fetch.stdout.decode(errors="replace")
-        if fetch.returncode:
-            problem = fetch.stderr.decode(errors="replace").strip()
-            log(args.labels_dir, "fetch-failed", title=title, attempt=attempt, error=problem)
-            if not any(word in problem.lower() for word in ("not found", "no such file", "does not exist")):
-                raise RuntimeError(problem)
-        (unit / f"attempt-{attempt}.jsonl").write_text(raw)
-        valid, errors = collect(raw, expected, role, work, allowed)
-        if valid:
-            append_rows(destination, valid.values())
-        log(args.labels_dir, "validated", title=title, attempt=attempt, ids=list(valid), errors=errors)
-        if not errors:
-            break
-        if attempt == 1:
-            expected = {bug: item for bug, item in expected.items() if bug not in valid}
-            prompt = unit / "repair.txt"
-            prompt.write_text(
-                "Correct the census output once. Write only rows for these requested IDs to "
-                ".rql-census/repaired.jsonl. Omit every other row. "
-                "If there are no requested IDs, write an empty file to acknowledge the rejected lines.\n"
-                f"Requested IDs: {json.dumps(list(expected))}\nValidation errors:\n"
-                f"{json.dumps(errors, indent=2)}\n"
-            )
-    if errors:
-        append_rows(args.labels_dir / "invalid.jsonl", [
-            {"id": bug, "repo": repo, "census": split, "labeller": role, "errors": problems,
-             "raw_output": str(unit / "attempt-2.jsonl")}
-            for bug, problems in errors.items()
-        ])
-    # The host unit retains the input and output evidence after suspension.
-    driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+            if attempt == 1:
+                expected = {bug: item for bug, item in expected.items() if bug not in valid}
+                prompt = unit / "repair.txt"
+                prompt.write_text(
+                    "Correct the census output once. Write only rows for these requested IDs to "
+                    ".rql-census/repaired.jsonl. Omit every other row. "
+                    "If there are no requested IDs, write an empty file to acknowledge the rejected lines.\n"
+                    f"Requested IDs: {json.dumps(list(expected))}\nValidation errors:\n"
+                    f"{json.dumps(errors, indent=2)}\n"
+                )
+        if errors:
+            append_rows(args.labels_dir / "invalid.jsonl", [
+                {"id": bug, "repo": repo, "census": split, "labeller": role, "errors": problems,
+                 "raw_output": str(unit / "attempt-2.jsonl")}
+                for bug, problems in errors.items()
+            ])
+    finally:
+        # The host unit retains the input and output evidence after suspension.
+        try:
+            driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+        except Exception as error:  # report it without hiding a failure from the batch itself
+            log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
+            raise
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
@@ -494,7 +641,6 @@ def main():
     parser.add_argument("--check-clones", type=Path, default=RUST / "check-clones")
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=RUST / "bifrost-src")
-    parser.add_argument("--grammar-clone", type=Path, default=RUST / "bifrost-docs/bifrost-dev")
     args = parser.parse_args()
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
@@ -503,7 +649,11 @@ def main():
     items, pins, unconfirmed_dev = item_sets()
     excluded = exclude_families(items, args.check_clones)
     counts = {split: dict(Counter(item["repo"] for item in rows)) for split, rows in items.items()}
-    summary = {"counts": counts, "totals": {split: sum(count.values()) for split, count in counts.items()},
+    allowed = vocabulary()
+    query_forms = [output for use, _, output in allowed.values() if use not in ("operand", "relation")]
+    summary = {"rql_vocabulary": {"documented_forms": len(allowed), "query_forms": len(query_forms),
+                                  "typed_query_forms": sum(output != "unknown" for output in query_forms)},
+               "counts": counts, "totals": {split: sum(count.values()) for split, count in counts.items()},
                "excluded": excluded, "rust_development_not_confirmed": unconfirmed_dev}
     if args.inspect:
         print(json.dumps(summary, indent=2))
@@ -524,7 +674,6 @@ def main():
         for item in selected:
             if (item["repo"], item["id"]) not in done:
                 by_repo[item["repo"]].append(item)
-        allowed = vocabulary(args.grammar_clone) if by_repo else set()
         for repo, subset in by_repo.items():
             indexed(subset, f"{args.split}/{repo}")
             for batch in batches(subset, args.batch_size):
