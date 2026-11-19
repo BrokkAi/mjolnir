@@ -562,7 +562,11 @@ pub(super) fn record_subagent_handback_to(
         )
         .optional()?
         .flatten();
-    if recorded_for.as_deref() == Some(handback.command_id.as_str()) {
+    // The first report for a turn wins, including when a restart continuation
+    // of that turn reports again under its own command ID.
+    if recorded_for.is_some_and(|recorded| {
+        mj_core::subagent::report_answers(&recorded, &handback.command_id)
+    }) {
         return Ok(false);
     }
     tx.execute(

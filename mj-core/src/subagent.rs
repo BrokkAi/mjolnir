@@ -1289,9 +1289,16 @@ impl SubagentHandback {
     /// an earlier or later task of the same child answers none of the others.
     #[must_use]
     pub fn answers(&self, command_id: &str) -> bool {
-        crate::continuation::carried_command(&self.command_id)
-            == crate::continuation::carried_command(command_id)
+        report_answers(&self.command_id, command_id)
     }
+}
+
+/// Whether a report recorded for `report_command_id` answers the turn
+/// `command_id` names; a restart continuation is the turn it carries out.
+#[must_use]
+pub fn report_answers(report_command_id: &str, command_id: &str) -> bool {
+    crate::continuation::carried_command(report_command_id)
+        == crate::continuation::carried_command(command_id)
 }
 
 /// The reminder Mjolnir sent after the turn `for_command_id` ended without a
