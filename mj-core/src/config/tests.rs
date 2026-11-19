@@ -884,7 +884,7 @@ fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
         let home = Path::new("/private/session").join(kind.id());
-        kind.configure_home_environment(&home, &mut environment);
+        kind.configure_staged_home_environment(&home, &mut environment);
         assert!(environment.contains_key(kind.home_env()), "{kind:?}");
         assert_eq!(
             kind.home_from_environment(&environment[kind.home_env()]),
@@ -913,12 +913,14 @@ fn only_claude_on_macos_keeps_its_own_home_for_profile_commands() {
     assert_eq!(linux["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
 
     for kind in HarnessKind::ALL {
-        let mut environment = BTreeMap::new();
+        let mut environment =
+            BTreeMap::from([("OPENCODE_CONFIG_DIR".into(), "/host/provider-config".into())]);
         kind.configure_profile_home_environment(
             Path::new("/home/me/muse"),
             HarnessHost::MacOs,
             &mut environment,
         );
+        assert_eq!(environment["OPENCODE_CONFIG_DIR"], "/host/provider-config");
         assert_eq!(
             environment.contains_key(kind.home_env()),
             kind != HarnessKind::Claude,

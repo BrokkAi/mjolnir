@@ -1230,6 +1230,17 @@ pub struct MailboxHookSteering {
     pub queued_prompt_id: String,
 }
 
+// Protocol 71 peers hash the pre-systemPrompt AgentInitialized wire shape.
+// Negotiation uses the original capabilities; only this journal view omits it.
+fn serialize_initialized_capabilities<S: serde::Serializer>(
+    capabilities: &AgentCapabilities,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let mut compatible = capabilities.clone();
+    compatible.session_capabilities.system_prompt = None;
+    compatible.serialize(serializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
@@ -1264,6 +1275,7 @@ pub enum RelayObservation {
     },
     AgentInitialized {
         protocol_version: AcpProtocolVersion,
+        #[serde(serialize_with = "serialize_initialized_capabilities")]
         capabilities: Box<AgentCapabilities>,
         agent_info: Option<Implementation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

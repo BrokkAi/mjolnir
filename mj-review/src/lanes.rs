@@ -40,7 +40,7 @@ pub struct ReviewJob {
 
 // Adapted from Codex commit 1b1835f751, codex-rs/prompts/templates/review/rubric.md;
 // the output contract below is Mjolnir's plain-text handback format.
-const CODEX_REVIEW_RUBRIC: &str = include_str!("../templates/review_rubric.md");
+pub use mj_core::session_instructions::CODEX_REVIEW_RUBRIC;
 
 /// The findings the author declined to fix, with the reasons they gave.
 #[must_use]
@@ -162,8 +162,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
         .map(|context| format!("\n\n{context}"))
         .unwrap_or_default();
     format!(
-        "{CODEX_REVIEW_RUBRIC}\n\n\
-         ## Task\n\
+        "## Task\n\
          Review the code changes made since the last review and provide prioritized findings.\n\n\
          For each repository, inspect the captured tree-to-tree diff using the command below.\n\
          Inspect the code with git and read-only commands. Do not build, run tests, or modify files.\n\
@@ -179,18 +178,18 @@ pub fn review_prompt(job: &ReviewJob) -> String {
     )
 }
 
-const BRIEF_WRITER_TEMPLATE: &str = include_str!("../templates/brief_writer.md");
+pub use mj_core::session_instructions::BRIEF_WRITER_INSTRUCTIONS;
 
 /// The prompt of the session that writes the relation brief. It sees the same
 /// diff commands and the same user request as the reviewers, and no findings.
 #[must_use]
 pub fn brief_writer_prompt(job: &ReviewJob) -> String {
-    BRIEF_WRITER_TEMPLATE
-        .replace("{diff_commands}", &repositories_section(job))
-        .replace(
-            "{task}",
-            &bound_review_section(&job.task, USER_MESSAGES_LIMIT, "task"),
-        )
+    format!(
+        "{}\n\n## The change\n\nRead each repository's captured change with its exact command:\n\n{}\n\n<user_task>\n{}\n</user_task>",
+        mj_core::subagent::READ_ONLY_TASK_SCOPE,
+        repositories_section(job),
+        bound_review_section(&job.task, USER_MESSAGES_LIMIT, "task"),
+    )
 }
 
 /// Quote a path for the shell only when it needs it, so the common case
@@ -243,12 +242,11 @@ mod tests {
     }
 
     #[test]
-
-    fn review_prompt_contains_the_codex_rubric_tree_ids_and_diff_command_without_a_diff() {
+    fn review_prompt_contains_tree_ids_and_diff_command_without_standing_rubric() {
         let prompt = review_prompt(&job());
-        assert!(prompt.starts_with(CODEX_REVIEW_RUBRIC));
+        assert!(prompt.starts_with("## Task"));
         assert!(prompt.contains("Inspect the code with git and read-only commands. Do not build, run tests, or modify files."));
-        assert!(prompt.contains("You are acting as a reviewer for a proposed code change"));
+        assert!(!prompt.contains("You are acting as a reviewer for a proposed code change"));
         assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none baseline123 capture456"));
         assert!(prompt.contains("Repository: /workspace/app -- 1 file changed"));
         assert!(prompt.contains("Keep the public API stable"));

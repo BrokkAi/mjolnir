@@ -1659,6 +1659,8 @@ pub fn save_startup_cleanup_outcome(session: &SessionRecord, archive: bool) -> R
                 "UPDATE sessions SET archived=1 WHERE session_id=?1",
                 [&session.id],
             )?;
+            // Only the non-retry cleanup outcome owns final startup failure.
+            super::mailbox::settle_failed_parent_messages_with(&tx, &session)?;
         }
         tx.commit()?;
         Ok(())
