@@ -71,6 +71,7 @@ pub(crate) async fn wait_for_notification_change(
     observation: NotificationObservation,
     revisions: &mut tokio::sync::watch::Receiver<u64>,
     cancellation: &tokio_util::sync::CancellationToken,
+    retry_after: Duration,
 ) -> Result<bool> {
     if observation == NotificationObservation::Deferred {
         tokio::select! {
@@ -79,6 +80,13 @@ pub(crate) async fn wait_for_notification_change(
                 if resumed { Ok(true) } else { cancellation.cancelled().await; Ok(false) }
             }
         }
+    } else if observation == NotificationObservation::Failed {
+        // A failed write retries on the backoff or the next revision, whichever is first.
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(false),
+            changed = revisions.changed() => { changed.context("notification runtime feed closed")?; Ok(true) },
+            _ = tokio::time::sleep(retry_after) => Ok(true),
+        }
     } else {
         tokio::select! {
             _ = cancellation.cancelled() => Ok(false),
@@ -86,6 +94,12 @@ pub(crate) async fn wait_for_notification_change(
         }
     }
 }
+
+/// Latency choices for retrying a transient storage failure, not limits: the
+/// first retry comes after about a second, doubling to a minute, and a
+/// success resets it. A new runtime revision always retries at once.
+const ALERT_RETRY_FIRST: Duration = Duration::from_secs(1);
+const ALERT_RETRY_LONGEST: Duration = Duration::from_secs(60);
 
 /// Durable notify decisions belong to the daemon, independently of phone delivery.
 pub(crate) async fn run_alerts(
@@ -98,6 +112,7 @@ pub(crate) async fn run_alerts(
     }
     let mut revisions = state.revisions();
     let mut observer = NotificationReconciler::default();
+    let mut backoff = ALERT_RETRY_FIRST;
     loop {
         revisions.borrow_and_update();
         let runtime = state.runtime_publication()?;
@@ -106,13 +121,25 @@ pub(crate) async fn run_alerts(
             _ = cancellation.cancelled() => return Ok(()),
             result = observer.reconcile(runtime) => result?,
         };
+        if changed == NotificationObservation::Failed {
+            let waited = backoff;
+            backoff = (backoff * 2).min(ALERT_RETRY_LONGEST);
+            if !wait_for_notification_change(changed, &mut revisions, &cancellation, waited).await?
+            {
+                return Ok(());
+            }
+            continue;
+        }
+        backoff = ALERT_RETRY_FIRST;
         if let NotificationObservation::Observed(changed) = changed {
             if changed {
                 state.publish_revision();
             }
             wake();
         }
-        if !wait_for_notification_change(changed, &mut revisions, &cancellation).await? {
+        if !wait_for_notification_change(changed, &mut revisions, &cancellation, ALERT_RETRY_FIRST)
+            .await?
+        {
             return Ok(());
         }
     }

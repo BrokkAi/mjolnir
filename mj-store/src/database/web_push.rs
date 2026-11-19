@@ -900,7 +900,7 @@ mod tests {
         card.holder = Some("child".into());
         card.form = Some(CardForm {
             source: mj_client::runtime_feed::CardFormSource::Elicitation,
-            raised_at_ms: 0,
+            raised_at_ms: 1,
             request_id: "form:1".into(),
             message: "Accept changes?".into(),
         });
@@ -964,7 +964,7 @@ mod tests {
         assert!(
             db.query_row(
                 "SELECT visible FROM push_entries WHERE identity=?1",
-                [r#"["form","child","form:1",0]"#],
+                [r#"["form","child","form:1",1]"#],
                 |row| row.get::<_, bool>(0)
             )
             .unwrap(),
@@ -973,7 +973,7 @@ mod tests {
         runtime.metadata.session_attention.remove("child");
         let form = claim(&mut db, &runtime, 10);
         assert_eq!(form.len(), 1);
-        assert_eq!(form[0].identity, r#"["form","child","form:1",0]"#);
+        assert_eq!(form[0].identity, r#"["form","child","form:1",1]"#);
         let notice: Notice = serde_json::from_str(&form[0].payload).unwrap();
         assert_eq!(notice.body, "Accept changes?");
         assert_eq!(notice.url, "/#conversation/child");

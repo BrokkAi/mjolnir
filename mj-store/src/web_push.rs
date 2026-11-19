@@ -272,10 +272,9 @@ pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, Push
                 .records
                 .get(holder)
                 .is_some_and(|record| record.notifications_ignored)
+            // A form with an unknown raise time has no identity: it is not pushable here.
+            && let Some(identity) = card.item_identity(session, card.entries.len())
         {
-            let identity = card
-                .item_identity(session, card.entries.len())
-                .expect("form identity");
             entries.insert(
                 identity,
                 PushEntry {

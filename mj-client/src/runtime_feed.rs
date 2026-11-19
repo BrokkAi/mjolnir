@@ -361,6 +361,11 @@ impl NotificationCard {
             }
         } else if item == self.entries.len() {
             let form = self.form.as_ref()?;
+            // An unknown raise time is not an identity: keying it with 0 would
+            // make a just-answered form look like a new one and alert again.
+            if form.raised_at_ms == 0 {
+                return None;
+            }
             serde_json::json!([
                 "form",
                 self.item_destination(session, item),
@@ -1118,6 +1123,15 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&card).unwrap()).unwrap();
         assert_eq!(wire.item_destination("parent", 0), "parent");
         assert_eq!(wire.item_destination("parent", 1), "child");
+        assert!(wire.item_identity("parent", 1).is_some());
+        let mut unknown = wire.clone();
+        unknown.form.as_mut().unwrap().raised_at_ms = 0;
+        assert_eq!(
+            unknown.item_identity("parent", 1),
+            None,
+            "a form with an unknown raise time has no notify identity"
+        );
+        assert!(unknown.item_identity("parent", 0).is_some());
     }
 
     fn cursor(incarnation: &str, sequence: u64) -> RuntimeCursor {

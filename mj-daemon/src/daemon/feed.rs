@@ -812,6 +812,74 @@ mod tests {
                 break;
             }
         }
+        // A failed write retries on the backoff even when no revision follows.
+        let high_before_failure =
+            mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
+                .await
+                .unwrap()
+                .0;
+        mj_controller::web_push::blocking(|| {
+            rusqlite::Connection::open(mj_controller::database::database_path())?.execute_batch(
+                "CREATE TRIGGER fail_retry_write BEFORE INSERT ON alert_events \
+                 BEGIN SELECT RAISE(ABORT, 'retry write failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut retried_view = state.owner().sessions.get("hidden").unwrap().clone();
+        let mut retried_worker = (**retried_view.operational.as_ref().unwrap()).clone();
+        let mut retried_stack = (*retried_worker.notification_stack).clone();
+        retried_stack.revision = 13;
+        retried_stack
+            .entries
+            .push(mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 2,
+                completed_ordinal: 13,
+                kind: mj_core::attention::NotificationKind::Important,
+                message: mj_core::attention::EntryMessage::None,
+            });
+        retried_worker.notification_stack = retried_stack.into();
+        retried_view.operational = Some(retried_worker.into());
+        state.owner().sessions.insert("hidden".into(), retried_view);
+        revisions.borrow_and_update();
+        state.publish_revision();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !log
+                .at(tracing::Level::WARN)
+                .iter()
+                .any(|line| line.contains("retry write failure"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the failed write is logged");
+        mj_controller::web_push::blocking(|| {
+            rusqlite::Connection::open(mj_controller::database::database_path())?
+                .execute_batch("DROP TRIGGER fail_retry_write;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // No further revision: only the backoff can commit the alert.
+        let committed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (_, events) = mj_controller::web_push::blocking(move || {
+                    mj_controller::database::alert_events_since(Some(high_before_failure))
+                })
+                .await
+                .unwrap();
+                if !events.is_empty() {
+                    break events;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the backoff retry commits without a new revision");
+        assert_eq!(committed.len(), 1);
+        assert!(!observer.is_finished());
         cancellation.cancel();
         observer.await.unwrap().unwrap();
         let mut observer_inputs = crate::daemon::push_delivery::NotificationReconciler::default();
@@ -842,6 +910,7 @@ mod tests {
             deferred_observation,
             &mut revisions,
             &cancellation,
+            Duration::from_secs(1),
         ));
         assert!(futures::poll!(&mut resuming).is_pending());
         mj_controller::upgrade::gate().expire_drain_for_test();
