@@ -1453,7 +1453,8 @@ impl DashboardState {
         let rows = crate::render::quota_pools::selectable_rows(&pools, &self.quota_expanded);
         // A profile's row can change type between refreshes (a status row
         // becomes a pool or lane after its first reading, and back on a
-        // failure), so follow the profile before falling back to its pool.
+        // failure), so follow the profile to its row or the pool it joined
+        // before falling back to its previous pool.
         let profile_row = |id: &str| {
             rows.iter()
                 .find(|row| match row {
@@ -1466,9 +1467,7 @@ impl DashboardState {
                             .iter()
                             .flat_map(|provider| &provider.pools)
                             .find(|pool| pool.key == *key)
-                            .is_some_and(|pool| {
-                                pool.members.len() == 1 && pool.members[0].id == id
-                            }),
+                            .is_some_and(|pool| pool.members.iter().any(|member| member.id == id)),
                         _ => false,
                     })
                 })
