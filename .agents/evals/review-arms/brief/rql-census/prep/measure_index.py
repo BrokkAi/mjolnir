@@ -332,6 +332,8 @@ def phase(binary, root, cache, log):
         # The ranking's CPU: the whole scope's CPU up to the ready reply, read from its cgroup,
         # so it covers every descendant and excludes shutdown and the driver's own commands.
         d = server._cgroup_dir()
+        if d:
+            server.cgroup = d
         try:
             rec["cpu_to_ready_usec"] = int(dict(l.split() for l in open(f"{d}/cpu.stat"))["usage_usec"]) if d else None
         except (OSError, ValueError, KeyError):
@@ -357,6 +359,9 @@ def phase(binary, root, cache, log):
         rec["ready"] = False
         rec["error"] = f"unclean shutdown after ready (exit {rec['exit']})"
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
+    # Bifrost actually started inside its scope (the sampler or the readiness read saw the
+    # scope's cgroup). A systemd-run or exec failure never gets that far: not a measurement.
+    rec["launched"] = server.cgroup is not None
     if rec.get("scope_result") in ("oom-kill", "unknown") or rec.get("oom_kill"):
         # Hitting the cap at any point, even after a ready reply, invalidates the phase.
         rec["ready"] = False
@@ -588,10 +593,11 @@ def main():
     # timeout) is a result; a repo that never got there (clone, fetch or setup failed) isn't.
     final = latest_records(results)
     def reached_measurement(r):
-        # A result for both phases: either phase ran (ready or a measured failure), or the warm
-        # phase was deliberately skipped because the cold phase failed. A cold result with no
-        # warm one (checkout to the pinned head failed in between) is incomplete.
-        return "cold" in r and ("warm_restart" in r)
+        # A result for both phases: the cold server actually launched (ready, or a measured
+        # failure such as OOM or a readiness timeout), and the warm phase ran or was deliberately
+        # skipped after a failed cold one. A cold result with no warm one (checkout to the pinned
+        # head failed in between), or a cold server that never started, is incomplete.
+        return (r.get("cold") or {}).get("launched") is True and "warm_restart" in r
     unmeasured = [repo for repo in repos if not reached_measurement(final.get(repo) or {})]
     usable = [repo for repo in repos if not (final.get(repo) or {}).get("error")
               and all((final[repo].get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
