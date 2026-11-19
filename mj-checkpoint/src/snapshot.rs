@@ -1903,6 +1903,22 @@ fn unset_config(runner: &dyn GitCommandRunner, checkout: &Path, key: &str) -> Re
     );
     Ok(())
 }
+// Choose once per cut: primary first, then nested checkout discovery order.
+fn branch_owners(cut: &PinnedWorkspaceCut) -> BTreeMap<&str, (&str, &Path)> {
+    let mut owners = BTreeMap::new();
+    for (head, path) in std::iter::once((&cut.head, Path::new(""))).chain(
+        cut.worktrees
+            .iter()
+            .map(|tree| (&tree.head, tree.relative_path.as_path())),
+    ) {
+        if let SnapshotHead::Branch { name, commit } = head {
+            owners
+                .entry(name.as_str())
+                .or_insert((commit.as_str(), path));
+        }
+    }
+    owners
+}
 struct SelectedRefs {
     refs: BTreeMap<String, String>,
     complete: bool,
@@ -1912,6 +1928,7 @@ fn selected_refs(
     checkout: &Path,
     cut: &PinnedWorkspaceCut,
     ownership: &CheckoutOwnership,
+    owners: &BTreeMap<&str, (&str, &Path)>,
 ) -> Result<SelectedRefs> {
     let legacy = matches!(ownership, CheckoutOwnership::Managed)
         && !owns_git_directory(runner, checkout, ownership)?;
@@ -1934,17 +1951,8 @@ fn selected_refs(
         })
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect();
-    // The primary saved position owns its branch; conflicting nested positions
-    // are captured detached below, while both commits remain pack tips.
-    for head in cut
-        .worktrees
-        .iter()
-        .map(|tree| &tree.head)
-        .chain(std::iter::once(&cut.head))
-    {
-        if let SnapshotHead::Branch { name, commit } = head {
-            refs.insert(name.clone(), commit.clone());
-        }
+    for (name, (commit, _)) in owners {
+        refs.insert((*name).to_owned(), (*commit).to_owned());
     }
     Ok(SelectedRefs { refs, complete })
 }
@@ -2084,7 +2092,8 @@ fn estimate_delta_with_source(
     )?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
-    let refs = selected_refs(runner, checkout, &cut, ownership)?.refs;
+    let owners = branch_owners(&cut);
+    let refs = selected_refs(runner, checkout, &cut, ownership, &owners)?.refs;
     let mut committed: Vec<_> = refs.values().cloned().collect();
     committed.push(cut.head.commit().to_owned());
     committed.extend(
@@ -2474,6 +2483,7 @@ fn capture_prepared_workspace(
         let inventory = prepare_capture(runner, repository, consent)?;
         let skipped = inventory.raw && inventory.operation.is_some();
         let cut = pin_workspace_cut(runner, checkout, ownership)?;
+        let owners = branch_owners(&cut);
         let pinned = &cut.refs;
         let head = &cut.head;
         let original_stash = selected_stash(runner, checkout, ownership)?;
@@ -2521,18 +2531,21 @@ fn capture_prepared_workspace(
                     .iter()
                     .find(|(path, _)| path == &tree.relative_path)
                     .is_some_and(|(_, inventory)| submodule_positions_differ(inventory));
-            let saved_head = match (&cut.head, &tree.head) {
-                (
-                    SnapshotHead::Branch {
-                        name: primary,
-                        commit: primary_commit,
-                    },
-                    SnapshotHead::Branch { name, commit },
-                ) if name == primary && commit != primary_commit => {
-                    notices.push(format!("worktree {} saved detached at {commit}: branch {name} belongs to the primary checkout at {primary_commit}", tree.relative_path.display()));
+            let saved_head = if let SnapshotHead::Branch { name, commit } = &tree.head {
+                let (owner_commit, owner_path) = owners[name.as_str()];
+                if commit != owner_commit {
+                    let owner = if owner_path.as_os_str().is_empty() {
+                        "primary checkout".to_owned()
+                    } else {
+                        format!("worktree {}", owner_path.display())
+                    };
+                    notices.push(format!("worktree {} saved detached at {commit}: branch {name} belongs to {owner} at {owner_commit}", tree.relative_path.display()));
                     SnapshotHead::Detached(commit.clone())
+                } else {
+                    tree.head.clone()
                 }
-                _ => tree.head.clone(),
+            } else {
+                tree.head.clone()
             };
             worktrees.push(SnapshotWorktree {
                 push_evidence: capture_push_evidence(
@@ -2584,7 +2597,7 @@ fn capture_prepared_workspace(
                 "workspace refs, HEAD or submodules kept changing during snapshot capture; retry after the checkout is idle"
             );
         }
-        let selected = selected_refs(runner, checkout, &cut, ownership)?;
+        let selected = selected_refs(runner, checkout, &cut, ownership, &owners)?;
         let refs = selected.refs;
         let stash = original_stash
             .iter()
@@ -3235,6 +3248,26 @@ fn restore_submodules(
             submodule.commit = position.commit;
         }
         crate::archive::ensure_no_symlink_ancestors(checkout, &submodule.path)?;
+        let saved_index = runner.run(
+            &owner,
+            &GitCommand {
+                arguments: vec![
+                    "--literal-pathspecs".into(),
+                    "ls-files".into(),
+                    "--stage".into(),
+                    "-z".into(),
+                    "--".into(),
+                    relative.as_os_str().to_owned(),
+                ],
+                ..Default::default()
+            },
+        )?;
+        ensure!(
+            saved_index.status == 0,
+            "{}",
+            git_failure("save submodule overlay index entry", &saved_index)
+        );
+        let index_entry = saved_index.stdout;
         let directory = checkout.join(&submodule.path);
         // The saved index may contain a regular-file replacement while the
         // saved working checkout is still an initialized module directory.
@@ -3242,12 +3275,16 @@ fn restore_submodules(
             fs::remove_file(&directory)
                 .context("restore initialized module over its index overlay")?;
         }
-        if directory.is_dir() && !directory.join(".git").try_exists()? {
-            // Parent-index directory replacements may have populated this path;
-            // the saved working state here is the initialized module itself.
-            fs::remove_dir_all(&directory)
-                .context("restore initialized module over directory index overlay")?;
-        }
+        let overlay = if directory.is_dir() && !directory.join(".git").try_exists()? {
+            // Keep parent-tracked working files apart from the module checkout
+            // until its own HEAD and Git directory have been restored.
+            let temporary =
+                tempfile::tempdir_in(directory.parent().context("module has no parent")?)?;
+            fs::rename(&directory, temporary.path().join("working"))?;
+            Some(temporary)
+        } else {
+            None
+        };
         let admin = if directory.join(".git").try_exists()? {
             crate::archive::git::git_directories(runner, &directory)?.0
         } else {
@@ -3391,26 +3428,6 @@ fn restore_submodules(
                 &submodule.url,
             ],
         )?;
-        let saved_index = runner.run(
-            &owner,
-            &GitCommand {
-                arguments: vec![
-                    "--literal-pathspecs".into(),
-                    "ls-files".into(),
-                    "--stage".into(),
-                    "-z".into(),
-                    "--".into(),
-                    relative.as_os_str().to_owned(),
-                ],
-                ..Default::default()
-            },
-        )?;
-        ensure!(
-            saved_index.status == 0,
-            "{}",
-            git_failure("save submodule overlay index entry", &saved_index)
-        );
-        let index_entry = saved_index.stdout;
         // absorbgitdirs resolves its path through the index, even when the
         // saved index intentionally deletes this still-initialized checkout.
         if !crate::checkpoint::snapshot_index_gitlinks(runner, &owner)?
@@ -3486,6 +3503,42 @@ fn restore_submodules(
                 "restore submodule overlay index entry",
             )?;
         }
+        if let Some(overlay) = &overlay {
+            for entry in index_entry
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+            {
+                let tab = entry
+                    .iter()
+                    .position(|byte| *byte == b'\t')
+                    .context("invalid saved index entry")?;
+                let path = mj_core::path_input::from_git_bytes(&entry[tab + 1..])?;
+                let suffix = path
+                    .strip_prefix(relative)
+                    .context("overlay is outside module")?;
+                if suffix.as_os_str().is_empty() {
+                    continue;
+                }
+                let from = overlay.path().join("working").join(suffix);
+                let metadata = match fs::symlink_metadata(&from) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error).context("inspect module working overlay"),
+                };
+                if metadata.is_dir() {
+                    continue;
+                }
+                crate::archive::ensure_no_symlink_ancestors(&directory, suffix)?;
+                let to = directory.join(suffix);
+                fs::create_dir_all(to.parent().context("overlay file has no parent")?)?;
+                match fs::symlink_metadata(&to) {
+                    Ok(_) => fs::remove_file(&to)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("replace module working overlay"),
+                }
+                fs::rename(from, to).context("restore module working overlay")?;
+            }
+        }
         apply_index(&submodule.path)?;
     }
     Ok(())
@@ -3498,6 +3551,16 @@ pub enum RestoreBase {
     },
     /// The caller has already verified this workspace's history boundary.
     Provisioned { allow_origin_fetch: bool },
+}
+fn install_snapshot_pack(reader: &mut impl Read, path: &Path) -> Result<()> {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().context("pack has no parent")?)?;
+    std::io::copy(reader, temporary.as_file_mut()).context("copy snapshot pack into clone")?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .context("publish snapshot pack into clone")?;
+    Ok(())
 }
 fn fetch_missing_object(
     runner: &dyn GitCommandRunner,
@@ -3798,7 +3861,8 @@ pub fn restore_workspace_snapshot(
         // index-pack makes installed packs read-only. A provisioned retry can
         // reuse this content-addressed file; index-pack still verifies it below.
         if !path.try_exists()? {
-            fs::copy(pack, &path).context("copy snapshot pack into clone")?;
+            file.seek(SeekFrom::Start(0))?;
+            install_snapshot_pack(&mut file, &path)?;
         }
         let output = runner.run(
             destination,
@@ -8191,6 +8255,56 @@ mod tests {
         );
     }
 
+    // Hard-won: 811fb3d48: partial copy left a final pack name that poisoned provisioned retries.
+    #[test]
+    fn interrupted_snapshot_pack_copy_publishes_nothing_and_can_retry() {
+        struct Interrupted {
+            file: fs::File,
+            remaining: usize,
+        }
+        impl Read for Interrupted {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(std::io::Error::other("injected interrupted copy"));
+                }
+                let length = buffer.len().min(self.remaining);
+                let read = self.file.read(&mut buffer[..length])?;
+                self.remaining -= read;
+                Ok(read)
+            }
+        }
+        let root = Repo::new();
+        let mut state = 0x2cab_93de_1942_3344_u64;
+        let bytes = (0..200_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        fs::write(root.checkout.join("file"), bytes).unwrap();
+        git(&root.checkout, &["commit", "-am", "incompressible pack"]);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let pack = snapshot.pack.as_ref().unwrap();
+        let directory = root.temp.path().join("publication");
+        fs::create_dir(&directory).unwrap();
+        let final_path = directory.join("snapshot.pack");
+        let mut interrupted = Interrupted {
+            file: fs::File::open(pack).unwrap(),
+            remaining: 65_537,
+        };
+        assert!(install_snapshot_pack(&mut interrupted, &final_path).is_err());
+        assert!(!final_path.exists());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+        install_snapshot_pack(&mut fs::File::open(pack).unwrap(), &final_path).unwrap();
+        git(
+            &root.checkout,
+            &["index-pack", final_path.to_str().unwrap()],
+        );
+        assert_eq!(fs::read(final_path).unwrap(), fs::read(pack).unwrap());
+    }
+
     // Hard-won: 0984f61a3: indexed descendants blocked initialized module restoration.
     #[test]
     fn staged_directory_replacing_initialized_gitlink_restores_all_index_entries() {
@@ -8210,6 +8324,19 @@ mod tests {
         git(&root.checkout, &["add", "sub"]);
         fs::remove_dir_all(root.checkout.join("sub")).unwrap();
         fs::rename(held, root.checkout.join("sub")).unwrap();
+        fs::write(
+            root.checkout.join("sub/one"),
+            "first unstaged replacement\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.checkout.join("sub/deeper")).unwrap();
+        fs::write(
+            root.checkout.join("sub/deeper/two"),
+            "second unstaged replacement\n",
+        )
+        .unwrap();
+        let working = git(&root.checkout, &["diff"]);
+        let module_status = git(&root.checkout.join("sub"), &["status", "--porcelain"]);
         let staged = git(&root.checkout, &["ls-files", "--stage", "sub"]);
         let snapshot = root.capture(&CheckoutOwnership::Managed);
         let restored = root.restore(&snapshot, None);
@@ -8218,81 +8345,126 @@ mod tests {
             git(&restored.join("sub"), &["rev-parse", "HEAD"]),
             snapshot.initialized_submodules[0].commit
         );
-        assert_eq!(git(&restored.join("sub"), &["status", "--porcelain"]), "");
+        assert_eq!(git(&restored, &["diff"]), working);
+        assert_eq!(
+            git(&restored.join("sub"), &["status", "--porcelain"]),
+            module_status
+        );
+        assert_eq!(
+            fs::read_to_string(restored.join("sub/one")).unwrap(),
+            "first unstaged replacement\n"
+        );
     }
 
     // Hard-won: 0984f61a3: raw sequencer HEADs at different commits collapsed a shared branch.
     #[test]
     fn raw_sequencer_primary_owns_branch_and_conflicting_nested_head_restores_detached() {
-        let root = Repo::new();
-        git(&root.checkout, &["switch", "-c", "topic"]);
-        fs::write(root.checkout.join("extra"), "first pick\n").unwrap();
-        git(&root.checkout, &["add", "extra"]);
-        git(&root.checkout, &["commit", "-m", "first pick"]);
-        let first = git(&root.checkout, &["rev-parse", "HEAD"]);
-        root.commit("topic conflict\n");
-        let second = git(&root.checkout, &["rev-parse", "HEAD"]);
-        git(&root.checkout, &["switch", "main"]);
-        root.commit("main conflict\n");
-        let start = git(&root.checkout, &["rev-parse", "HEAD"]);
-        let nested = root.checkout.join("nested");
-        git(
-            &root.checkout,
-            &[
-                "worktree",
-                "add",
-                "--force",
-                nested.to_str().unwrap(),
-                "main",
-            ],
-        );
-        let picked = run_git(
-            &FileGit,
-            &root.checkout,
-            ["cherry-pick", &first, &second],
-            &[],
-        )
-        .unwrap();
-        assert_ne!(picked.status, 0);
-        let current = git(&nested, &["rev-parse", "HEAD"]);
-        assert_ne!(start, current);
-        let nested_index = git(&nested, &["write-tree"]);
-        let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
-        assert_eq!(snapshot.refs["refs/heads/main"], start);
-        assert_eq!(
-            snapshot.worktrees[0].head,
-            SnapshotHead::Detached(current.clone())
-        );
-        assert!(
-            snapshot
-                .notices
-                .iter()
-                .any(|notice| notice.contains("nested")
-                    && notice.contains("refs/heads/main")
-                    && notice.contains(&start)
-                    && notice.contains(&current))
-        );
-        assert_eq!(git(&root.checkout, &["rev-parse", "HEAD"]), current);
-        let restored = root.restore(&snapshot, None);
-        assert_eq!(git(&restored, &["rev-parse", "HEAD"]), start);
-        assert_eq!(git(&restored, &["symbolic-ref", "HEAD"]), "refs/heads/main");
-        assert_eq!(
-            git(&restored.join("nested"), &["rev-parse", "HEAD"]),
-            current
-        );
-        assert_ne!(
-            run_git(
-                &FileGit,
-                &restored.join("nested"),
-                ["symbolic-ref", "--quiet", "HEAD"],
-                &[]
-            )
-            .unwrap()
-            .status,
-            0
-        );
-        assert_eq!(git(&restored.join("nested"), &["write-tree"]), nested_index);
-        assert!(!restored.join("extra").exists());
+        for primary_owns in [true, false] {
+            let root = Repo::new();
+            git(&root.checkout, &["switch", "-c", "topic"]);
+            fs::write(root.checkout.join("extra"), "first pick\n").unwrap();
+            git(&root.checkout, &["add", "extra"]);
+            git(&root.checkout, &["commit", "-m", "first pick"]);
+            let first = git(&root.checkout, &["rev-parse", "HEAD"]);
+            root.commit("topic conflict\n");
+            let second = git(&root.checkout, &["rev-parse", "HEAD"]);
+            git(&root.checkout, &["switch", "main"]);
+            root.commit("main conflict\n");
+            let start = git(&root.checkout, &["rev-parse", "HEAD"]);
+            let active = if primary_owns {
+                root.checkout.clone()
+            } else {
+                git(&root.checkout, &["switch", "-c", "primary"]);
+                let active = root.checkout.join("a-owner");
+                git(
+                    &root.checkout,
+                    &["worktree", "add", active.to_str().unwrap(), "main"],
+                );
+                active
+            };
+            let nested = root.checkout.join("z-other");
+            git(
+                &root.checkout,
+                &[
+                    "worktree",
+                    "add",
+                    "--force",
+                    nested.to_str().unwrap(),
+                    "main",
+                ],
+            );
+            let picked = run_git(&FileGit, &active, ["cherry-pick", &first, &second], &[]).unwrap();
+            assert_ne!(picked.status, 0);
+            let current = git(&nested, &["rev-parse", "HEAD"]);
+            assert_ne!(start, current);
+            let nested_index = git(&nested, &["write-tree"]);
+            let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+            assert_eq!(snapshot.refs["refs/heads/main"], start);
+            assert_eq!(
+                snapshot
+                    .worktrees
+                    .iter()
+                    .find(|tree| tree.relative_path == Path::new("z-other"))
+                    .unwrap()
+                    .head,
+                SnapshotHead::Detached(current.clone())
+            );
+            assert!(
+                snapshot
+                    .notices
+                    .iter()
+                    .any(|notice| notice.contains("z-other")
+                        && notice.contains(if primary_owns {
+                            "primary checkout"
+                        } else {
+                            "a-owner"
+                        })
+                        && notice.contains("refs/heads/main")
+                        && notice.contains(&start)
+                        && notice.contains(&current))
+            );
+            assert_eq!(git(&active, &["rev-parse", "HEAD"]), current);
+            let restored = root.restore(&snapshot, None);
+            assert_eq!(git(&restored, &["rev-parse", "HEAD"]), start);
+            assert_eq!(
+                git(&restored, &["symbolic-ref", "HEAD"]),
+                if primary_owns {
+                    "refs/heads/main"
+                } else {
+                    "refs/heads/primary"
+                }
+            );
+            let restored_owner = if primary_owns {
+                restored.clone()
+            } else {
+                restored.join("a-owner")
+            };
+            assert_eq!(git(&restored_owner, &["rev-parse", "HEAD"]), start);
+            assert_eq!(
+                git(&restored_owner, &["symbolic-ref", "HEAD"]),
+                "refs/heads/main"
+            );
+            assert_eq!(
+                git(&restored.join("z-other"), &["rev-parse", "HEAD"]),
+                current
+            );
+            assert_ne!(
+                run_git(
+                    &FileGit,
+                    &restored.join("z-other"),
+                    ["symbolic-ref", "--quiet", "HEAD"],
+                    &[]
+                )
+                .unwrap()
+                .status,
+                0
+            );
+            assert_eq!(
+                git(&restored.join("z-other"), &["write-tree"]),
+                nested_index
+            );
+            assert!(!restored.join("extra").exists());
+        }
     }
 
     // Hard-won: daa70eca2: no-origin relative module evidence ignored the restore origin override.
