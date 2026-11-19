@@ -336,9 +336,26 @@ pub(crate) struct QuotaPool {
 }
 
 impl QuotaPool {
+    pub(super) fn reported_members(&self) -> impl Iterator<Item = &PoolMember> {
+        self.members
+            .iter()
+            .filter(|member| !member.awaiting_reading)
+    }
+
+    pub(super) fn reported_weight(&self) -> f64 {
+        self.reported_members().map(|member| member.weight).sum()
+    }
+
+    // Capacity is measured in weighted percentage points.
+    pub(super) fn available_capacity(&self) -> f64 {
+        self.reported_members()
+            .map(|member| member.weight * f64::from(member.remaining))
+            .sum()
+    }
+
     pub(crate) fn percentage(&self) -> String {
         // With every reading past its reset, nothing is known to remain.
-        let known = self.members.iter().any(|member| !member.awaiting_reading);
+        let known = self.reported_members().next().is_some();
         format!(
             "{}{}%{}",
             if self.unweighted { "avg " } else { "" },
@@ -663,27 +680,37 @@ pub(crate) fn provider_pools(
                     member.weight = 1.0;
                 }
             }
-            let total: f64 = pool
-                .members
-                .iter()
-                .filter(|member| !member.awaiting_reading)
-                .map(|member| member.weight)
-                .sum();
+            let total = pool.reported_weight();
             pool.remaining = if total > 0.0 {
-                (pool
-                    .members
-                    .iter()
-                    .filter(|member| !member.awaiting_reading)
-                    .map(|member| member.weight * f64::from(member.remaining))
-                    .sum::<f64>()
-                    / total)
-                    .round() as u8
+                (pool.available_capacity() / total).round() as u8
             } else {
                 0
             };
         }
     }
     grouped.into_values().collect()
+}
+
+/// Largest-remainder apportionment for the available quota and refill chunks.
+/// Tiny shares may round to zero; the caller can still show their labels.
+pub(super) fn refill_widths(
+    capacities: impl Iterator<Item = f64>,
+    total: f64,
+    cells: usize,
+) -> Vec<usize> {
+    let mut widths = Vec::new();
+    let mut fractions = Vec::new();
+    for (index, capacity) in capacities.enumerate() {
+        let exact = cells as f64 * capacity / total;
+        widths.push(exact.floor() as usize);
+        fractions.push((index, exact.fract()));
+    }
+    fractions.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let leftover = cells - widths.iter().sum::<usize>();
+    for (index, _) in fractions.into_iter().take(leftover) {
+        widths[index] += 1;
+    }
+    widths
 }
 
 /// Largest-remainder apportionment, with one cell per member whenever they fit.

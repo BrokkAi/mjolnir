@@ -384,7 +384,9 @@ pub(crate) fn render_quotas_at(
     render_session_scrollbar(frame, area, lines.len(), offset, viewport);
 }
 
-use super::quota_pools::{PoolMember, PoolPeriod, QuotaPool, QuotaRow, segment_widths};
+use super::quota_pools::{
+    PoolMember, PoolPeriod, QuotaPool, QuotaRow, refill_widths, segment_widths,
+};
 use mj_core::config::QuotaProvider;
 
 #[allow(
@@ -499,6 +501,95 @@ fn pool_bar(
     width: usize,
     now: u64,
     accent: Color,
+) -> (Vec<Span<'static>>, Vec<String>) {
+    let weight = pool.reported_weight();
+    if weight == 0.0 {
+        return (vec![Span::raw(" ".repeat(width))], Vec::new());
+    }
+    let refills: Vec<_> = pool
+        .reported_members()
+        .filter(|member| member.remaining < 100)
+        .map(|member| (member, member.weight * f64::from(100 - member.remaining)))
+        .collect();
+    let capacities = std::iter::once(pool.available_capacity())
+        .chain(refills.iter().map(|&(_, capacity)| capacity));
+    let widths = refill_widths(capacities, weight * 100.0, width);
+    let ascii = theme::ascii();
+    let use_glyphs =
+        ascii || theme::current() == theme::UiTheme::Mono || !matches!(accent, Color::Rgb(..));
+    let fill_glyph = if ascii {
+        "#"
+    } else if use_glyphs {
+        "█"
+    } else {
+        " "
+    };
+    let mut spans = vec![Span::styled(
+        fill_glyph.repeat(widths[0]),
+        Style::default()
+            .fg(readable_on(accent))
+            .bg(accent)
+            .add_modifier(if use_glyphs {
+                Modifier::REVERSED
+            } else {
+                Modifier::empty()
+            }),
+    )];
+    let mut fallback = Vec::new();
+    let mut alternate = false;
+    for ((member, capacity), cells) in refills.into_iter().zip(widths.into_iter().skip(1)) {
+        let reset = format!(
+            "{}{}",
+            theme::glyphs().resuming,
+            reset_label(member.reset, member.reset_text.as_deref(), now)
+        );
+        let banked = member
+            .banked
+            .filter(|&count| count > 0)
+            .map(|count| format!(" {}{count}", if ascii { "B" } else { "⟲" }))
+            .unwrap_or_default();
+        let full_label = format!("{reset}{banked}");
+        // Leave a glyph visible where the tint alone cannot mark the boundary.
+        let label_budget = cells.saturating_sub(usize::from(use_glyphs));
+        let label_width = |label: &str| Span::raw(label).width();
+        let label = if label_width(&full_label) <= label_budget {
+            full_label.as_str()
+        } else if label_width(&reset) <= label_budget {
+            reset.as_str()
+        } else {
+            let share = capacity / weight;
+            let amount = if share < 0.5 {
+                "<1".to_string()
+            } else {
+                format!("{share:.0}")
+            };
+            fallback.push(format!("{} +{amount}% {full_label}", member.id));
+            ""
+        };
+        if cells == 0 {
+            continue;
+        }
+        let tint_strength = if alternate { 0.52 } else { 0.24 };
+        let glyph = if use_glyphs {
+            if alternate { "-" } else { "=" }
+        } else {
+            " "
+        };
+        let background = tint(accent, tint_strength);
+        spans.push(Span::styled(
+            format!("{}{label}", glyph.repeat(cells - label_width(label))),
+            Style::default().fg(readable_on(background)).bg(background),
+        ));
+        alternate = !alternate;
+    }
+    (spans, fallback)
+}
+
+fn expanded_pool_bar(
+    pool: &QuotaPool,
+    width: usize,
+    now: u64,
+    accent: Color,
     refreshing: &std::collections::BTreeSet<String>,
 ) -> Vec<Span<'static>> {
     let gaps = pool
@@ -542,10 +633,8 @@ fn pool_bar(
         {
             text.push_str(&format!(" {banked}"));
         }
-        // A label that does not fit is left out; the expanded pool's lanes
-        // show every member's reading, so a collapsed pool never lists some
-        // members by name and not others. An unknown or refreshing reading
-        // keeps a one-cell marker so it does not read as spent quota.
+        // The lanes show the full labels. Keep a one-cell marker for an
+        // unknown or refreshing reading so it does not read as spent quota.
         let mut text: Vec<_> = text.chars().collect();
         if text.len() > cells {
             text = if member.awaiting_reading {
@@ -780,6 +869,36 @@ fn wrap_note(text: &str, width: usize) -> Vec<String> {
     .collect()
 }
 
+fn refill_lines(labels: Vec<String>, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut row = String::new();
+    let separator = theme::glyphs().footer_separator;
+    let width = width.saturating_sub(2);
+    for label in labels {
+        if !row.is_empty() {
+            let joined = format!("{row}{separator}{label}");
+            if Span::raw(joined.as_str()).width() <= width {
+                row = joined;
+                continue;
+            }
+            lines.push(Line::styled(format!("  {row}"), theme::muted()));
+        }
+        row = label;
+        if Span::raw(row.as_str()).width() > width {
+            lines.extend(
+                wrap_note(&row, width)
+                    .into_iter()
+                    .map(|text| Line::styled(format!("  {text}"), theme::muted())),
+            );
+            row.clear();
+        }
+    }
+    if !row.is_empty() {
+        lines.push(Line::styled(format!("  {row}"), theme::muted()));
+    }
+    lines
+}
+
 type QuotaLines = (
     Vec<Line<'static>>,
     Vec<(QuotaRow, usize)>,
@@ -838,7 +957,14 @@ fn quota_lines(
                     Style::default()
                 },
             )];
-            let bar = pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
+            let (bar, refill_labels) = if expanded {
+                (
+                    expanded_pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing),
+                    Vec::new(),
+                )
+            } else {
+                pool_bar(&pool, bar_width, now, accent)
+            };
             spans.extend(bar);
             spans.push(Span::styled(
                 percentage,
@@ -858,6 +984,7 @@ fn quota_lines(
                     theme::muted(),
                 ));
             }
+            lines.extend(refill_lines(refill_labels, width));
             // Warnings (a refused check, unknown windows) stay visible while
             // collapsed; each line names one member and opens its menu.
             for member in &pool.members {
@@ -1100,11 +1227,11 @@ mod tests {
                 pool.members[0].awaiting_reading = false;
                 let accent = theme::palette().muted;
                 assert!(!matches!(accent, Color::Rgb(..)));
-                let spans = pool_bar(&pool, 10, now, accent, &Default::default());
-                let style_at = |cell: usize| spans[cell].style;
+                let (spans, _) = pool_bar(&pool, 10, now, accent);
+                let style_at = |segment: usize| spans[segment].style;
                 assert_ne!(
                     (style_at(0).bg, style_at(0).add_modifier),
-                    (style_at(9).bg, style_at(9).add_modifier)
+                    (style_at(1).bg, style_at(1).add_modifier)
                 );
             })
         });
