@@ -224,18 +224,21 @@ impl ExpectedOutput<'_> {
 /// Do what the fixture terminal does whenever it is polled: take the
 /// program's output and answer the queries it has asked.
 fn answer_terminal(master: &mut File, output: &mut PtyOutput) {
+    output.timeline.polled();
     drain(master, output);
     if output.background_query_needs_answer(BACKGROUND_QUERY) {
         master
             .write_all(BACKGROUND_RESPONSE)
             .expect("answer terminal background query");
         output.mark_background_query_answered();
+        output.timeline.note("answered the background query");
     }
     if output.device_query_needs_answer(DEVICE_ATTRIBUTES_QUERY) {
         master
             .write_all(DEVICE_ATTRIBUTES_RESPONSE)
             .expect("answer terminal device attributes query");
         output.mark_device_query_answered();
+        output.timeline.note("answered the device attributes query");
     }
 }
 
@@ -674,6 +677,9 @@ image = "ubuntu:24.04"
     // These tests assert the bytes the real dashboard paints, so a host-wide
     // NO_COLOR setting must not turn every frame monochrome.
     command.env_remove("NO_COLOR");
+    // A failing fixture prints its logs; this adds how long the dashboard
+    // waited for the terminal's background and what it received.
+    command.env("RUST_LOG", "info,mj::terminal_background=debug");
     command.env("PATH", tools);
     command.args(["--instance", "terminal-regression"]);
     command.args(args);
@@ -733,6 +739,7 @@ image = "ubuntu:24.04"
         }),
         "daemon never took the fixture store"
     );
+    output.timeline.note("the daemon took the store");
     DashboardPty {
         _storage: storage,
         master,
@@ -794,7 +801,8 @@ fn auto_theme_paints_light_on_a_terminal_that_reports_a_white_background() {
     };
     assert!(
         painted(b"48;2;251;250;247m"),
-        "Light's panel surface was never painted; output: {:?}",
+        "Light's panel surface was never painted; the terminal {}; output: {:?}",
+        output.timeline,
         String::from_utf8_lossy(&output)
     );
     assert!(

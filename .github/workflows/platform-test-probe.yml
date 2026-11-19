@@ -21,6 +21,10 @@ on:
         description: Cargo package whose tests to run
         required: true
         default: brokk-mj-core
+      target:
+        description: Cargo target selection, such as `--test termination_pty` (empty runs every target of the package)
+        required: false
+        default: ''
       filter:
         description: Test name filter, as passed to the test binary (empty runs every test)
         required: false
@@ -69,6 +73,7 @@ jobs:
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
+        TARGET: ${{ inputs.target }}
         FILTER: ${{ inputs.filter }}
         SKIP: ${{ inputs.skip }}
         HANG_SECONDS: ${{ inputs.hang_seconds }}
@@ -77,9 +82,10 @@ jobs:
       run: |
         arguments=("$FILTER" --nocapture)
         if [ -n "$SKIP" ]; then arguments+=(--skip "$SKIP"); fi
+        read -r -a target <<< "$TARGET"
         for attempt in $(seq "$REPEAT"); do
           echo "probe attempt $attempt of $REPEAT"
-          cargo test --locked --no-fail-fast -p "$PACKAGE" -- "${arguments[@]}" &
+          cargo test --locked --no-fail-fast -p "$PACKAGE" "${target[@]}" -- "${arguments[@]}" &
           tests=$!
           finished=
           for _ in $(seq "$HANG_SECONDS"); do
