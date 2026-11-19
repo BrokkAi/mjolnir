@@ -82,6 +82,7 @@ const fn queries_through_cli() -> bool {
 /// otherwise only with a stored login that has a refresh token (the one
 /// renewal that needs the CLI; without one, `query_with_runtime` and
 /// `refresh_grant_if_due` finish without it). Reads the login file.
+#[cfg(unix)]
 pub(crate) fn runs_cli(home: &std::path::Path) -> bool {
     queries_through_cli()
         || std::fs::read(home.join(".credentials.json"))

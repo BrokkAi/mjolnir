@@ -121,9 +121,9 @@ async fn managed_installation(
 }
 
 /// Install, ahead of the first quota check, the pinned harness each request
-/// would otherwise install inline. `requests` are those that run a host
-/// harness ([`QuotaRefreshRequest::runs_host_harness`], which may read the
-/// profile's login file, so call it on a blocking thread); they are prepared
+/// would otherwise install inline. The caller passes only requests that run a
+/// host harness, filtered with [`QuotaRefreshRequest::runs_host_harness`] on a
+/// blocking thread, because it may read the profile's login file; they are prepared
 /// only on a host that does not provide the harness. The installer
 /// caches per `XDG_CACHE_HOME`/`HOME`, so work is grouped by (harness, cache
 /// root): groups run concurrently, and within a group the profiles are tried
@@ -144,10 +144,7 @@ pub async fn prepare_managed(
     let mut failures = Vec::new();
     let mut groups: BTreeMap<(HarnessKind, PathBuf), Vec<HashMap<String, String>>> =
         BTreeMap::new();
-    for request in requests
-        .iter()
-        .filter(|request| request.runs_host_harness())
-    {
+    for request in requests {
         let environment: HashMap<String, String> =
             request.environment.clone().into_iter().collect();
         let search = search_environment(&environment);
