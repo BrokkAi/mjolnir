@@ -169,7 +169,11 @@ impl DurableRelay {
                     }
                     // This publication precedes any following Submit on the connection.
                     // A stale upgrade reconciliation becomes a no-op after this point.
-                    next.legacy_command_retention = false;
+                    // Operation pin updates do not own the upgrade hold: a
+                    // different pending Move may still need reconciliation.
+                    if *reconcile_legacy {
+                        next.legacy_command_retention = false;
+                    }
                     self.commit_snapshot(next)?;
                 }
                 RelayResponsePayload::CommandRetentionUpdated

@@ -65,13 +65,19 @@ fn test_name(short: &str) -> String {
 /// Install a tiny executable there so this test exercises the real
 /// `StandaloneSession` protocol and `DurableRelay`, including process EOF.
 #[cfg(unix)]
-fn install_move_queue_relay_worker(root: &Path, marker: &Path, marker_exists: bool) {
+fn install_move_queue_relay_worker(
+    root: &Path,
+    marker: &Path,
+    marker_exists: bool,
+) -> TestProxyGroupGuard {
     fs::create_dir_all(root).unwrap();
     if marker_exists {
         fs::write(marker, b"already served").unwrap();
     }
+    let guard = TestProxyGroupGuard::new(root);
     let script = format!(
-        "#!/bin/sh\nexport {root_var}={root}\nexport {marker_var}={marker}\n{binary} --exact {child} --nocapture | grep --line-buffered '^{{'\n",
+        "#!/bin/sh\n{registration}export {root_var}={root}\nexport {marker_var}={marker}\n{binary} --exact {child} --nocapture | grep --line-buffered '^{{'\n",
+        registration = guard.registration_script(),
         root_var = MOVE_QUEUE_RELAY_ROOT,
         marker_var = MOVE_QUEUE_RELAY_MARKER,
         root = shell_literal(root),
@@ -80,6 +86,7 @@ fn install_move_queue_relay_worker(root: &Path, marker: &Path, marker_exists: bo
         child = test_name("move_queue_relay_child"),
     );
     install_fake_command(root, "hel", &script);
+    guard
 }
 
 /// Serve one durable relay connection. The first queue submission is ACKed
@@ -117,6 +124,9 @@ fn move_queue_relay_child() {
         {
             fs::write(root.join("install-status-reached"), b"waiting").unwrap();
             while !root.join("release-install-status").exists() {
+                if !root.join("block-install-status").exists() {
+                    return;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
@@ -1016,12 +1026,13 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     let directory = tempfile::tempdir().unwrap();
     let worker_root = directory.path().join(MOVE_QUEUE_SESSION_ID);
     let marker = directory.path().join("first-relay.marker");
-    install_move_queue_relay_worker(&worker_root, &marker, false);
+    let _source_proxy_guard = install_move_queue_relay_worker(&worker_root, &marker, false);
 
     let replacement_directory = tempfile::tempdir().unwrap();
     let replacement_root = replacement_directory.path().join(MOVE_QUEUE_SESSION_ID);
     let replacement_marker = replacement_directory.path().join("replacement.marker");
-    install_move_queue_relay_worker(&replacement_root, &replacement_marker, true);
+    let _replacement_proxy_guard =
+        install_move_queue_relay_worker(&replacement_root, &replacement_marker, true);
 
     let home = tempfile::tempdir().unwrap();
     let mut config = resume_compatibility_config();
@@ -1143,6 +1154,12 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
     saved.legacy_command_retention = true;
     saved.command_retention.clear();
+    // Hard-won: f30ad64: cleaning a completed Move's pins cannot reconcile
+    // the unrelated pending Move whose archive is unavailable.
+    saved.command_retention.insert(
+        "completed-move-before-crash".into(),
+        [retry_id.clone()].into(),
+    );
     fs::write(&snapshot_path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let archive_path = operation.restore_artifact().unwrap().archive_path.clone();
     let archive = fs::read(&archive_path).unwrap();
@@ -1165,6 +1182,14 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
                 Some(destination_store_id.as_str())
             );
         });
+        let saved: mj_core::relay::RelaySnapshot =
+            serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+        assert!(saved.legacy_command_retention);
+        assert!(
+            !saved
+                .command_retention
+                .contains_key("completed-move-before-crash")
+        );
     }
     fs::write(&archive_path, archive).unwrap();
 
@@ -6346,7 +6371,8 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
-    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let _proxy_guard =
+        install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
     let mut image_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
     image_bytes.extend(vec![0; 70 * 1024]);
     let image =
@@ -6712,7 +6738,8 @@ fn adoption_reattaches_from_genesis_before_requiring_a_live_baseline() {
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
-    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let _proxy_guard =
+        install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
     fs::write(root.join("protocol-version"), "71").unwrap();
     fs::write(
         root.join("test-native-ready"),
@@ -6897,7 +6924,8 @@ fn adoption_refusal_keeps_a_foreign_orphan_scannable_and_destroyable() {
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("worker");
-        install_move_queue_relay_worker(&root, &directory.path().join("served"), true);
+        let _proxy_guard =
+            install_move_queue_relay_worker(&root, &directory.path().join("served"), true);
         fs::write(root.join("protocol-version"), "71").unwrap();
         let listing = serde_json::to_string(&serde_json::json!([{"Labels":{
             "dev.mj.managed":"true", "dev.mj.session":MOVE_QUEUE_SESSION_ID,
@@ -7150,7 +7178,8 @@ fn adoption_surfaces_corruption_without_installing_or_acknowledging_a_cut() {
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
-    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let _proxy_guard =
+        install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "current").unwrap();
     for index in 0..80 {
         relay
@@ -7234,7 +7263,8 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
-    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let _proxy_guard =
+        install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
     if trimmed {
         use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
@@ -7435,4 +7465,53 @@ fn adoption_install_keeps_both_owners_through_publication_until_the_reply() {
         AdoptionProbe::Install,
         "adoption_install_keeps_both_owners_through_publication_until_the_reply",
     );
+}
+
+#[cfg(unix)]
+// Hard-won: f30ad64: a failed adoption assertion left a proxy, relay child and grep running.
+#[test]
+fn proxy_fixture_reaps_its_pipeline_when_an_assertion_unwinds() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("blocked-worker");
+    let group = std::cell::Cell::new(None);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let guard = install_move_queue_relay_worker(&root, &root.join("served"), true);
+        fs::write(root.join("block-install-status"), b"1").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let spec = CommandSpec::new(
+                root.join("hel").to_string_lossy(),
+                std::iter::empty::<String>(),
+            );
+            let mut client =
+                crate::worker_client::RelayClient::connect(&spec, MOVE_QUEUE_SESSION_ID)
+                    .await
+                    .unwrap();
+            group.set(Some(guard.registered_group()));
+            let status = client.status();
+            tokio::pin!(status);
+            tokio::select! {
+                response = &mut status => panic!("status did not block: {response:?}"),
+                () = async {
+                    while !root.join("install-status-reached").exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                } => {}
+            }
+            assert!(
+                group.get().is_none(),
+                "forced assertion while the proxy pipeline is blocked"
+            );
+        });
+    }));
+    assert!(result.is_err());
+    assert!(
+        !TestProxyGroupGuard::group_exists(group.get().unwrap()).unwrap(),
+        "guard returned before the pipeline was reaped"
+    );
+    // Failed spawn/handshake may never write a launch marker.
+    drop(TestProxyGroupGuard::new(&root.join("never-spawned")));
 }

@@ -9072,6 +9072,7 @@ fn an_autonomous_harness_turn_settling_records_work_facts_and_liveness() {
 }
 
 // Pinning is a durable operation boundary, independent of the journal and bounded retry tail.
+// Hard-won: f30ad64: completed pin release also dropped an unrelated legacy Move hold.
 #[test]
 fn interrupted_move_receipts_survive_ack_pruning_and_worker_restart() {
     let temp = tempfile::tempdir().unwrap();
@@ -9103,6 +9104,37 @@ fn interrupted_move_receipts_survive_ack_pruning_and_worker_restart() {
     fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
     assert!(relay.snapshot.legacy_command_retention);
+    // Failed archive reconciliation cannot prevent releasing an unrelated
+    // finished operation, but that release must keep the upgrade hold.
+    for (request_id, ids) in [
+        ("pin-finished-move", ["later-command-0".into()].into()),
+        ("release-finished-move", std::collections::BTreeSet::new()),
+    ] {
+        assert!(matches!(
+            relay
+                .handle(relay_request(
+                    request_id,
+                    RelayRequest::UpdateCommandRetention {
+                        operation_id: Some("finished-move-operation".into()),
+                        command_ids: ids,
+                        reconcile_legacy: false,
+                    }
+                ))
+                .body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::CommandRetentionUpdated
+            }
+        ));
+        assert!(relay.snapshot.legacy_command_retention);
+    }
+    relay.garbage_collect_relay_history().unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "still-unreconciled").unwrap();
+    assert!(relay.snapshot.legacy_command_retention);
+    assert_eq!(
+        submit_relay(&mut relay, "move-queued-config", command.clone()),
+        accepted
+    );
     let update = |ids: std::collections::BTreeSet<String>, reconcile_legacy| {
         RelayRequest::UpdateCommandRetention {
             operation_id: Some("move-operation-1".into()),
