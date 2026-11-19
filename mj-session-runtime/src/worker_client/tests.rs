@@ -4,9 +4,11 @@ use super::*;
 use crate::test_log::CapturedLog;
 use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Whether the result installed AWS credentials on the session.
+#[cfg(unix)]
 fn aws_pushed(result: &CredentialSyncResult, session_id: &str) -> bool {
     result.outcomes.iter().any(|outcome| {
         outcome.session_id == session_id
@@ -18,6 +20,7 @@ fn aws_pushed(result: &CredentialSyncResult, session_id: &str) -> bool {
 }
 
 /// What a direct (no actor) reconciliation of one session borrows.
+#[cfg(unix)]
 macro_rules! access {
     () => {
         credential_sync::SessionAccess {
