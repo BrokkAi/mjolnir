@@ -974,6 +974,9 @@ pub enum RelayResponsePayload {
         ordinal: u64,
     },
     Status(RelayOperationalState),
+    LiveBaselineWaiting {
+        blockers: Vec<String>,
+    },
     LiveBaselineStarted {
         total_bytes: u64,
     },

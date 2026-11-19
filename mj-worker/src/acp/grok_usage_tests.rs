@@ -36,6 +36,7 @@ pub(super) fn spec(
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,

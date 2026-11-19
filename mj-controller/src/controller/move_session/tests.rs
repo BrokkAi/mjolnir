@@ -111,6 +111,15 @@ fn move_queue_relay_child() {
     let mut output = stdout.lock();
     while let Some(request) = read_relay_frame(&mut input).expect("read relay request") {
         use mj_core::relay::{RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload};
+        if matches!(request.request, RelayRequest::Status)
+            && root.join("block-install-status").exists()
+            && (!root.join("block-after-cut").exists() || root.join("baseline-frontier").exists())
+        {
+            fs::write(root.join("install-status-reached"), b"waiting").unwrap();
+            while !root.join("release-install-status").exists() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
         let payload = match &request.request {
             RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
                 negotiated: wire_protocol,
@@ -6407,6 +6416,14 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
     drop(relay);
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "reopened").unwrap();
     relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+    assert_eq!(
+        relay.live_session_baseline().unwrap().unavailable_questions,
+        0
+    );
+    relay
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "surviving-native".into(),
             resumed: true,
@@ -6451,6 +6468,7 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             prompt: vec![ContentBlock::from("active work")],
         },
     );
+    relay.claim_pending_commands(true).unwrap();
     submit(
         &mut relay,
         "steered-before-cut",
@@ -6458,25 +6476,19 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             prompt: vec![ContentBlock::from("old steer")],
         },
     );
-    let steer = RelayCommand::Steer {
-        active_prompt_id: "active-prompt".into(),
-        queued_prompt_id: "steered-before-cut".into(),
-    };
+    // Keep an uncertain steering delivery queued across the idle cut.
+    submit(
+        &mut relay,
+        "old-steer-control",
+        RelayCommand::Steer {
+            active_prompt_id: "active-prompt".into(),
+            queued_prompt_id: "steered-before-cut".into(),
+        },
+    );
     relay
-        .record_observation(RelayObservation::CommandQueued {
+        .record_observation(RelayObservation::SteeringUnconfirmed {
             command_id: "old-steer-control".into(),
-            command: steer.clone(),
-            created_at_ms: 1,
-        })
-        .unwrap();
-    relay
-        .record_observation(RelayObservation::CommandCompleted {
-            command_id: "old-steer-control".into(),
-            command: Some(steer.kind()),
-            barrier_command_id: None,
-            outcome: mj_core::relay::RelayCommandOutcome::Steered {
-                queued_command_id: "steered-before-cut".into(),
-            },
+            message: "delivery unknown".into(),
         })
         .unwrap();
     submit(
@@ -6541,10 +6553,6 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             ),
         })
         .unwrap();
-    assert_eq!(
-        relay.live_session_baseline().unwrap().state.config["mode"],
-        "old"
-    );
     relay
         .record_session_update(
             serde_json::from_value(
@@ -6568,6 +6576,17 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
                 capabilities: NativeAgentCapabilities::default(),
             },
         })
+        .unwrap();
+    relay
+        .record_command_completed(
+            "active-prompt",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
         .unwrap();
     let cut = relay.live_session_baseline().unwrap();
     assert!(cut.native_use_evidence.is_some());
@@ -6623,7 +6642,7 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             .unwrap();
         assert_eq!(queued.content[0]["text"], "queued payload".repeat(6000));
         assert_eq!(queued.content.len(), 2);
-        assert_eq!(projection.queued_prompts.len(), 3);
+        assert_eq!(projection.queued_prompts.len(), 4);
         assert!(
             projection
                 .queued_prompts
@@ -6679,253 +6698,6 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             .unwrap()
             .contains("child after recovery cut")
     );
-    // Later events for the unknown pre-cut turn must advance ordinary replay
-    // without attributing them to the original prompt or inventing a tool row.
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "continued").unwrap();
-    let steer = RelayCommand::Steer {
-        active_prompt_id: "active-prompt".into(),
-        queued_prompt_id: "queued-prompt".into(),
-    };
-    relay
-        .record_observation(RelayObservation::CommandQueued {
-            command_id: "new-steer-control".into(),
-            command: steer.clone(),
-            created_at_ms: 2,
-        })
-        .unwrap();
-    relay
-        .record_observation(RelayObservation::CommandCompleted {
-            command_id: "new-steer-control".into(),
-            command: Some(steer.kind()),
-            barrier_command_id: None,
-            outcome: mj_core::relay::RelayCommandOutcome::Steered {
-                queued_command_id: "queued-prompt".into(),
-            },
-        })
-        .unwrap();
-    relay.record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"pre-cut-tool", "status":"completed"})).unwrap()).unwrap();
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"reply before interruption"}
-    })).unwrap()).unwrap();
-    relay
-        .record_observation(RelayObservation::CommandInterrupted {
-            command_id: "active-prompt".into(),
-            command: mj_core::relay::RelayCommandKind::Prompt,
-            reason: Some(mj_core::event_outcome::OutcomeReason::RuntimeFailure),
-            message: "unknown pre-cut prompt interrupted".into(),
-        })
-        .unwrap();
-    let after = relay.latest_ordinal();
-    drop(relay);
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_command(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        let projected = connection.snapshot().materialized;
-        assert!(projected.applied_event_ordinal >= after);
-        assert!(projected.active_turn.is_none());
-        assert!(projected.last_turn_outcome.is_none());
-        assert_eq!(
-            projected.execution,
-            mj_core::state::MaterializedExecutionState::Idle
-        );
-        assert!(!projected.transcript.iter().any(|item| matches!(
-            item.body,
-            mj_core::state::TranscriptBody::Agent {
-                streaming: true,
-                ..
-            }
-        )));
-        assert!(
-            projected
-                .transcript
-                .iter()
-                .any(|item| item.stable_id == "user:queued-prompt")
-        );
-        assert!(
-            !projected
-                .transcript
-                .iter()
-                .any(|item| item.stable_id == "tool:pre-cut-tool")
-        );
-    });
-    // A stale steering operation belongs to the old prompt, not the next one.
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "later").unwrap();
-    let remaining = relay
-        .operational_state()
-        .queued_prompts
-        .iter()
-        .map(|entry| entry.command_id.clone())
-        .collect::<Vec<_>>();
-    relay
-        .record_observation(RelayObservation::CommandQueued {
-            command_id: "clear-remaining-queue".into(),
-            command: RelayCommand::ClearQueuedPrompts,
-            created_at_ms: 3,
-        })
-        .unwrap();
-    relay
-        .record_observation(RelayObservation::CommandCompleted {
-            command_id: "clear-remaining-queue".into(),
-            command: Some(mj_core::relay::RelayCommandKind::ClearQueuedPrompts),
-            barrier_command_id: None,
-            outcome: mj_core::relay::RelayCommandOutcome::QueueChanged {
-                removed_command_ids: remaining,
-            },
-        })
-        .unwrap();
-    relay
-        .record_observation(RelayObservation::CommandQueued {
-            command_id: "later-known-prompt".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::from("next task")],
-            },
-            created_at_ms: 4,
-        })
-        .unwrap();
-    relay
-        .record_observation(RelayObservation::CommandStarted {
-            command_id: "later-known-prompt".into(),
-            started_at_ms: 5,
-        })
-        .unwrap();
-    let cut = relay.live_session_baseline().unwrap();
-    assert_eq!(
-        cut.active_turn.as_ref().unwrap().command_id,
-        "later-known-prompt"
-    );
-    relay.handle(RelayRequestEnvelope {
-        request_id: "prune-later-cut".into(),
-        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Acknowledge {
-            through_ordinal: cut.state.latest_ordinal,
-            through_digest: cut.state.latest_digest.clone(),
-        },
-    });
-    drop(relay);
-    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
-        MOVE_QUEUE_SESSION_ID,
-    ))
-    .unwrap();
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_adopting(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            connection
-                .snapshot()
-                .materialized
-                .active_turn
-                .as_ref()
-                .unwrap()
-                .command_id,
-            "later-known-prompt"
-        );
-    });
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "interrupted").unwrap();
-    relay
-        .record_observation(RelayObservation::CommandInterrupted {
-            command_id: "later-known-prompt".into(),
-            command: mj_core::relay::RelayCommandKind::Prompt,
-            reason: Some(mj_core::event_outcome::OutcomeReason::RuntimeFailure),
-            message: "runtime stopped after cut".into(),
-        })
-        .unwrap();
-    drop(relay);
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_command(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        let projection = connection.snapshot().materialized;
-        assert_eq!(
-            projection.execution,
-            mj_core::state::MaterializedExecutionState::Idle
-        );
-        assert!(projection.active_turn.is_none());
-        assert!(
-            projection
-                .last_turn_outcome
-                .as_ref()
-                .unwrap()
-                .accepted_ordinal
-                .is_some()
-        );
-        let canonical =
-            mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
-        canonical.validate().unwrap();
-    });
-    // Autonomous work has a clock and execution state even without a prompt ID.
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "autonomous").unwrap();
-    let autonomous_start = relay
-        .record_observation(RelayObservation::HarnessTurnStarted {
-            started_at_ms: 123456,
-        })
-        .unwrap();
-    let cut = relay.live_session_baseline().unwrap();
-    assert!(cut.active_turn.is_none());
-    relay.handle(RelayRequestEnvelope {
-        request_id: "prune-autonomous-cut".into(),
-        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Acknowledge {
-            through_ordinal: cut.state.latest_ordinal,
-            through_digest: cut.state.latest_digest.clone(),
-        },
-    });
-    drop(relay);
-    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
-        MOVE_QUEUE_SESSION_ID,
-    ))
-    .unwrap();
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_adopting(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        let projection = connection.snapshot().materialized;
-        assert!(projection.active_turn.is_none());
-        assert_eq!(
-            projection.execution,
-            mj_core::state::MaterializedExecutionState::Running {
-                started_at_ms: 123456
-            }
-        );
-    });
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "autonomous-settled").unwrap();
-    relay
-        .record_observation(RelayObservation::HarnessTurnSettled {
-            autonomous: Some(mj_core::relay::SettledHarnessTurn {
-                start_ordinal: autonomous_start,
-                stop_reason: "end_turn".into(),
-                work_facts: None,
-            }),
-            origin: Some("agent".into()),
-            prompt_in_flight: false,
-        })
-        .unwrap();
-    drop(relay);
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_command(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            connection.snapshot().materialized.execution,
-            mj_core::state::MaterializedExecutionState::Idle
-        );
-    });
 }
 
 #[cfg(unix)]
@@ -7422,5 +7194,245 @@ fn adoption_surfaces_corruption_without_installing_or_acknowledging_a_cut() {
         crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
             .unwrap()
             .is_none_or(|(ordinal, _)| ordinal == 0)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_draining_cancels_the_live_cut_existence_probe_and_releases_ownership() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::Drain,
+        "adoption_draining_cancels_the_live_cut_existence_probe_and_releases_ownership",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_draining_cancels_the_genesis_existence_probe_and_releases_ownership() {
+    adoption_interrupted_probe(
+        false,
+        AdoptionProbe::Drain,
+        "adoption_draining_cancels_the_genesis_existence_probe_and_releases_ownership",
+    );
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum AdoptionProbe {
+    Drain,
+    Disconnect,
+    Install,
+}
+
+#[cfg(unix)]
+fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: &str) {
+    let name = test_name(short);
+    if !isolated_test_child(&name, "MJ_ADOPT_DRAINING_PROBE_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
+    if trimmed {
+        use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
+        relay
+            .record_observation(mj_core::relay::RelayObservation::NativeAgent {
+                event: NativeAgentEvent::ReplayBegin,
+            })
+            .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::NativeAgent {
+                event: NativeAgentEvent::Spawned {
+                    session_id: "staged-child".into(),
+                    parent_session_id: None,
+                    name: "child".into(),
+                    task: "work".into(),
+                    capabilities: NativeAgentCapabilities::default(),
+                },
+            })
+            .unwrap();
+        let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "collect-before-adoption".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Acknowledge {
+                through_ordinal: relay.latest_ordinal(),
+                through_digest: relay.latest_digest().into(),
+            },
+        });
+        assert!(matches!(
+            response.body,
+            mj_core::relay::RelayResponseBody::Ok { .. }
+        ));
+        fs::write(root.join("block-after-cut"), b"1").unwrap();
+    }
+    drop(relay);
+    if !matches!(disposition, AdoptionProbe::Install) {
+        fs::write(root.join("block-install-status"), b"1").unwrap();
+    }
+    let mut record = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    record.state = SessionState::Disconnected;
+    record.native_session_id = None;
+    record.target_template_id = "local-bare".into();
+    record.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    }));
+    crate::database::save_session(&record).unwrap();
+    let mut config = Config::default();
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut controller = Controller {
+        config,
+        state: crate::database::load_state().unwrap(),
+    };
+    let gate = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let owner_gate = gate.clone();
+    let request = mj_client::daemon::RecoveryAdoptionRequest {
+        session_id: MOVE_QUEUE_SESSION_ID.into(),
+        target_id: "local-bare".into(),
+        profile: None,
+        bundle: None,
+        all_instances: false,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let stopped = cancellation.clone();
+    runtime.block_on(async {
+        let work = tokio::spawn(async move {
+            controller
+                .adopt_orphan_worker_controlled(
+                    &request,
+                    &ProcessExecutor,
+                    crate::controller::AdoptionControl {
+                        cancelled: stopped,
+                        progress: None,
+                        lifecycle_gate: owner_gate,
+                    },
+                )
+                .await
+        });
+        if matches!(disposition, AdoptionProbe::Install) {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+                .await
+                .unwrap()
+                .unwrap();
+            outcome.result.unwrap();
+            let admission = outcome.admission.unwrap();
+            let refused = gate
+                .try_start(
+                    MOVE_QUEUE_SESSION_ID,
+                    crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                )
+                .err()
+                .expect("install must retain session ownership until reply");
+            assert!(refused.holders.contains(&"adoption install"));
+            let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.state, SessionState::Running);
+            assert!(
+                current.native_session_id.is_none(),
+                "adoption must not wait for native readiness"
+            );
+            assert!(
+                crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    > 0
+            );
+            drop(admission);
+            drop(
+                gate.try_start(
+                    MOVE_QUEUE_SESSION_ID,
+                    crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                )
+                .expect("reply releases session ownership"),
+            );
+            return;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.join("install-status-reached").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label.contains("adoption"))
+        );
+        if matches!(disposition, AdoptionProbe::Disconnect) {
+            cancellation.cancel();
+        } else {
+            crate::upgrade::gate().begin_draining();
+        }
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), work)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(format!("{:#}", outcome.result.unwrap_err()).contains(
+            if matches!(disposition, AdoptionProbe::Disconnect) {
+                "cancelled"
+            } else {
+                "handoff"
+            }
+        ));
+        assert!(outcome.admission.is_none());
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let destroy_owner = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            gate.enter_foreground(
+                MOVE_QUEUE_SESSION_ID,
+                "destroy recovered environment",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &cancelled,
+                &ProcessExecutor,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap(),
+            record
+        );
+        assert!(
+            crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .is_none_or(|(ordinal, _)| ordinal == 0)
+        );
+        drop(destroy_owner);
+        fs::write(root.join("release-install-status"), b"1").unwrap();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_disconnecting_cancels_the_existence_probe_and_releases_ownership() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::Disconnect,
+        "adoption_disconnecting_cancels_the_existence_probe_and_releases_ownership",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_install_keeps_both_owners_through_publication_until_the_reply() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::Install,
+        "adoption_install_keeps_both_owners_through_publication_until_the_reply",
     );
 }

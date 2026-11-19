@@ -8699,8 +8699,6 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
     let mut state = RelaySnapshot::new("session-1".into()).operational_state();
     state.latest_ordinal = 7;
     state.latest_digest = event_digest(7);
-    state.execution = mj_core::relay::RelayExecutionState::Running;
-    state.activity_turn_started_at_ms = Some(1234);
     let child = NativeAgent {
         owner_session_id: "session-1".into(),
         session_id: "child".into(),
@@ -8725,18 +8723,12 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
         queue: Vec::new(),
         questions: vec![question.clone()],
         unavailable_questions: 0,
-        active_turn: None,
         native_agent_replay: Some(vec![wrong_owner]),
         native_use_evidence: None,
     };
     let projection =
         mj_transcript::projection::materialized_session_from_live_baseline(&baseline).unwrap();
-    assert_eq!(
-        projection.execution,
-        MaterializedExecutionState::Running {
-            started_at_ms: 1234
-        }
-    );
+    assert_eq!(projection.execution, MaterializedExecutionState::Idle);
     // Fail after published identities were written but before the cut commits.
     assert!(
         materialized::install_live_session_baseline_to(&database, &projection, &baseline).is_err()
@@ -8781,4 +8773,61 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
             .unwrap(),
         projection
     );
+}
+
+// Dropping an unaccepted enqueue must not leave a blocked sender behind.
+#[tokio::test]
+async fn cancelled_writer_enqueue_cannot_commit_after_queue_space_returns() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let owner = start_database_writer_at(&database, false).unwrap();
+    let writer = owner.writer.clone();
+    let (entered, waiting) = sync_channel(1);
+    let (release, blocked) = sync_channel(1);
+    writer
+        .sender
+        .send(writer::DatabaseWriterMessage::Run {
+            label: "block writer",
+            job: Box::new(move |_| {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+            }),
+        })
+        .unwrap();
+    waiting.recv().unwrap();
+    for _ in 0..writer::DATABASE_WRITE_QUEUE_CAPACITY {
+        writer
+            .sender
+            .try_send(writer::DatabaseWriterMessage::Run {
+                label: "fill writer",
+                job: Box::new(|_| {}),
+            })
+            .map_err(|_| "queue unexpectedly full")
+            .unwrap();
+    }
+    let ran = Arc::new(AtomicBool::new(false));
+    let operation_ran = ran.clone();
+    {
+        let guard = Arc::new(());
+        let enqueue = writer.enqueue("cancelled adoption", guard.clone(), move |_| {
+            operation_ran.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        tokio::pin!(enqueue);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                std::future::Future::poll(enqueue.as_mut(), cx).is_pending()
+            ))
+            .await
+        );
+        // Cancel without spawning a blocked sender which might later accept it.
+        // The pinned future is dropped at this scope's end, before queue release.
+        drop(guard);
+    }
+    release.send(()).unwrap();
+    let finish = writer.enqueue("barrier", (), |_| Ok(())).await.unwrap();
+    finish.finish().await.unwrap().0.unwrap();
+    assert!(!ran.load(Ordering::SeqCst));
+    owner.shutdown().unwrap();
 }

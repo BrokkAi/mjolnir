@@ -226,6 +226,7 @@ impl RelayClient {
             input: Some(input),
             output: BufReader::new(output),
             request_timeout,
+            adoption_wait_progress: None,
             abandoned: None,
             cancellation: None,
             next_request: 1,

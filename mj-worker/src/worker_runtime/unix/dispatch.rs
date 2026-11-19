@@ -1235,7 +1235,6 @@ pub(crate) fn record_runtime_event_with_facts(
             exit_code,
             signal,
         } => {
-            relay.agent_terminal_closed(&terminal_id)?;
             // Cap here rather than letting `clamp_observation` fire: that
             // keeps the head of a string, and a terminal's tail is what
             // says how the command ended.
@@ -1244,26 +1243,24 @@ pub(crate) fn record_runtime_event_with_facts(
                 mj_core::relay::TERMINAL_JOURNAL_OUTPUT_BYTES,
             );
             relay.record_observation(RelayObservation::TerminalOutput {
-                terminal_id,
+                terminal_id: terminal_id.clone(),
                 output,
                 truncated,
                 exit_code,
                 signal,
             })?;
+            relay.agent_terminal_closed(&terminal_id)?;
         }
         RuntimeEvent::TerminalStarted {
             terminal_id,
             command,
             started_at_ms,
         } => {
-            relay.agent_terminal_started(mj_core::relay::ActiveAgentTerminal {
-                terminal_id: terminal_id.clone(),
-                command: command.clone(),
+            relay.admit_agent_terminal(mj_core::relay::ActiveAgentTerminal {
+                terminal_id,
+                command,
                 started_at_ms,
             })?;
-            relay.record_session_update(SessionUpdate::ToolCall(
-                crate::acp::fallback_terminal_tool_call(&terminal_id, command),
-            ))?;
         }
         RuntimeEvent::UserShellOutput {
             request_id,

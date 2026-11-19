@@ -37,30 +37,25 @@ fn project_steered_prompt(
         .iter()
         .position(|queued| queued.command_id == queued_prompt_id)
     else {
-        tracing::warn!(session_id = %current.session_id, command_id = queued_prompt_id,
-            "ignored steering delivery for a prompt absent from the projection");
-        return Ok(());
+        bail!("steered prompt is missing from the materialized queue");
     };
     let entry = queue.remove(queue_index);
     if !entry.kind.is_prompt() {
         bail!("steered queue entry is not a prompt");
     }
-    if current.active_turn.is_some() {
-        // The running turn becomes the steered prompt's turn, while the original
-        // harness turn remains the one whose completion closes it.
-        mutation.active_turn = Some(Some(MaterializedTurn {
-            command_id: queued_prompt_id.to_owned(),
-            accepted_ordinal: entry.accepted_ordinal,
-            turn_start_position: event.ordinal,
-            started_at_ms: event.recorded_at_ms,
-            steered_into: current.active_turn.as_ref().map(|turn| {
-                turn.steered_into
-                    .clone()
-                    .unwrap_or_else(|| turn.command_id.clone())
-            }),
-        }));
-    }
-    // Delivery and its body are known even when the pre-cut turn identity is not.
+    // The running turn becomes the steered prompt's turn, while the original
+    // harness turn remains the one whose completion closes it.
+    mutation.active_turn = Some(Some(MaterializedTurn {
+        command_id: queued_prompt_id.to_owned(),
+        accepted_ordinal: entry.accepted_ordinal,
+        turn_start_position: event.ordinal,
+        started_at_ms: event.recorded_at_ms,
+        steered_into: current.active_turn.as_ref().map(|turn| {
+            turn.steered_into
+                .clone()
+                .unwrap_or_else(|| turn.command_id.clone())
+        }),
+    }));
     close_streams(index, mutation, event.recorded_at_ms);
     upsert(
         mutation,
@@ -425,54 +420,46 @@ pub(super) fn project_observation(
                     diagnostic,
                     work_facts,
                 } => {
+                    let native_running =
+                        current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
+                    if !native_running {
+                        close_streams(index, mutation, event.recorded_at_ms);
+                        mutation.execution = Some(MaterializedExecutionState::Idle);
+                    }
+                    // A cancelled turn's reply stops mid-sentence; mark where
+                    // it ended so it does not read as a finished reply.
+                    if mj_core::state::classify_prompt_completion(stop_reason)
+                        == mj_core::state::PromptCompletion::Cancelled
+                    {
+                        push_system_with_id(
+                            mutation,
+                            event,
+                            format!(
+                                "{}{command_id}",
+                                mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX
+                            ),
+                            mj_core::transcript::TURN_INTERRUPTED_TEXT,
+                        );
+                    }
                     let active = current
                         .active_turn
                         .as_ref()
                         .filter(|turn| turn.belongs_to(command_id));
-                    let native_running = current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
-                    if active.is_none() {
-                        tracing::warn!(session_id = %current.session_id, command_id,
-                            "ignored completion attribution for an unknown turn");
-                        if current.active_turn.is_none() && !native_running {
-                            close_streams(index, mutation, event.recorded_at_ms);
-                            mutation.execution = Some(MaterializedExecutionState::Idle);
-                        }
-                    } else {
-                        if !native_running {
-                            close_streams(index, mutation, event.recorded_at_ms);
-                            mutation.execution = Some(MaterializedExecutionState::Idle);
-                        }
-                        // A cancelled turn's reply stops mid-sentence; mark where
-                        // it ended so it does not read as a finished reply.
-                        if mj_core::state::classify_prompt_completion(stop_reason)
-                            == mj_core::state::PromptCompletion::Cancelled
-                        {
-                            push_system_with_id(
-                                mutation,
-                                event,
-                                format!(
-                                    "{}{command_id}",
-                                    mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX
-                                ),
-                                mj_core::transcript::TURN_INTERRUPTED_TEXT,
-                            );
-                        }
-                        mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
-                            answered_through: None,
-                            diagnostic: diagnostic.clone(),
-                            usage: usage.clone(),
-                            command_id: command_id.clone(),
-                            accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
-                            turn_start_position: active.map(|turn| turn.turn_start_position),
-                            completed_ordinal: event.ordinal,
-                            completed_at_ms: event.recorded_at_ms,
-                            outcome: TurnOutcomeKind::Completed {
-                                stop_reason: stop_reason.clone(),
-                            },
-                            work_facts: work_facts.as_deref().cloned(),
-                        });
-                        mutation.active_turn = Some(None);
-                    }
+                    mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        answered_through: None,
+                        diagnostic: diagnostic.clone(),
+                        usage: usage.clone(),
+                        command_id: command_id.clone(),
+                        accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
+                        turn_start_position: active.map(|turn| turn.turn_start_position),
+                        completed_ordinal: event.ordinal,
+                        completed_at_ms: event.recorded_at_ms,
+                        outcome: TurnOutcomeKind::Completed {
+                            stop_reason: stop_reason.clone(),
+                        },
+                        work_facts: work_facts.as_deref().cloned(),
+                    });
+                    mutation.active_turn = Some(None);
                 }
                 mj_core::relay::RelayCommandOutcome::UserShell { result } => {
                     if let Some(existing) = index.get(&user_shell_item_id(command_id)) {
@@ -546,11 +533,7 @@ pub(super) fn project_observation(
                     .config_results
                     .push((command_id.clone(), Some(message.clone())));
             }
-            let prompt_was_started = current
-                .active_turn
-                .as_ref()
-                .is_some_and(|turn| turn.belongs_to(command_id))
-                || index.get(&format!("user:{command_id}")).is_some();
+            let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
             let queued_entry = current
                 .queued_prompts
                 .iter()
@@ -561,10 +544,7 @@ pub(super) fn project_observation(
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }
-            let unknown_running_prompt = *command == RelayCommandKind::Prompt
-                && current.active_turn.is_none()
-                && queued_entry.is_none();
-            if (prompt_was_started || unknown_running_prompt)
+            if prompt_was_started
                 && !current
                     .configuration
                     .goal
@@ -582,39 +562,35 @@ pub(super) fn project_observation(
                     .as_ref()
                     .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
-                if active.is_some() || queued_entry.is_some() || prompt_was_started {
-                    mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
-                        work_facts: None,
-                        answered_through: None,
-                        diagnostic: None,
-                        usage: None,
-                        command_id: command_id.clone(),
-                        accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(
-                            || {
-                                queued_entry
-                                    .as_ref()
-                                    .and_then(|entry| entry.accepted_ordinal)
-                            },
-                        ),
-                        turn_start_position: active.map(|turn| turn.turn_start_position),
-                        completed_ordinal: event.ordinal,
-                        completed_at_ms: event.recorded_at_ms,
-                        outcome: if matches!(
-                            event.observation,
-                            RelayObservation::CommandRejected { .. }
-                        ) {
-                            TurnOutcomeKind::Rejected {
-                                reason: *reason,
-                                message: outcome_text,
-                            }
-                        } else {
-                            TurnOutcomeKind::Interrupted {
-                                reason: *reason,
-                                message: outcome_text,
-                            }
-                        },
-                    });
-                }
+                mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    work_facts: None,
+                    answered_through: None,
+                    diagnostic: None,
+                    usage: None,
+                    command_id: command_id.clone(),
+                    accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
+                        queued_entry
+                            .as_ref()
+                            .and_then(|entry| entry.accepted_ordinal)
+                    }),
+                    turn_start_position: active.map(|turn| turn.turn_start_position),
+                    completed_ordinal: event.ordinal,
+                    completed_at_ms: event.recorded_at_ms,
+                    outcome: if matches!(
+                        event.observation,
+                        RelayObservation::CommandRejected { .. }
+                    ) {
+                        TurnOutcomeKind::Rejected {
+                            reason: *reason,
+                            message: outcome_text,
+                        }
+                    } else {
+                        TurnOutcomeKind::Interrupted {
+                            reason: *reason,
+                            message: outcome_text,
+                        }
+                    },
+                });
                 if active.is_some() {
                     mutation.active_turn = Some(None);
                 }
@@ -800,6 +776,7 @@ pub(super) fn project_observation(
             push_system(mutation, event, format!("warning: {message}"));
         }
         RelayObservation::SessionRestarted => {
+            mutation.pending_elicitations = Some(Vec::new());
             let mut configuration = current.configuration.clone();
             if let Some(goal) = configuration.goal.as_mut() {
                 goal.restart();

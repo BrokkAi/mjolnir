@@ -397,6 +397,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         acp_activity,
         step_clock,
         tools_in_flight,
+        terminal_owner: Some(Arc::downgrade(&relay)),
         turn_context,
         verdict: None,
         stall_policy: None,
@@ -1180,6 +1181,9 @@ pub async fn run_daemon_owned(
         .context("install worker shutdown signal handler")?;
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    // The adoption regression loses only its controller before this worker
+    // accepts any ACK, so the ordinary genesis path is exercised end to end.
+    mj_core::test_hooks::reach_test_hook("adoption_orphan_before_serving")?;
     // The relay is recovered; accept immediately while harness work runs
     // under its own supervisor.
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
@@ -2508,7 +2512,48 @@ pub(super) async fn serve_client_with_memory(
             }
             if matches!(&envelope.request, RelayRequest::BeginLiveBaseline | RelayRequest::ReadLiveBaselinePage { .. } | RelayRequest::AbortLiveBaseline) {
                 let cut = if matches!(envelope.request, RelayRequest::BeginLiveBaseline) {
-                    Some(relay.lock().expect("relay state lock poisoned").live_session_baseline()?)
+                    let mut releases = relay.releases();
+                    let mut receiver = relay.lock().expect("relay state lock poisoned").reserve_live_baseline();
+                    let operation = async {
+                        let mut previous = None;
+                        loop {
+                            releases.borrow_and_update();
+                            let blockers = relay.observe().expect("relay state lock poisoned").adoption_blockers();
+                            if previous.as_ref() != Some(&blockers) {
+                                if !blockers.is_empty() {
+                                    write_logged_response(&mut writer, &RelayResponseEnvelope {
+                                        request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version,
+                                        body: RelayResponseBody::Ok { payload: RelayResponsePayload::LiveBaselineWaiting { blockers: blockers.clone() } },
+                                    }, &session_id, "live_baseline_waiting").await?;
+                                }
+                                previous = Some(blockers);
+                            }
+                            tokio::select! {
+                                biased;
+                                cut = &mut receiver => break cut.context("worker dropped its adoption cut")?.map_err(anyhow::Error::msg),
+                                changed = releases.changed() => changed.context("worker adoption observation stopped")?,
+                            }
+                        }
+                    };
+                    let result: Result<Option<mj_core::relay::LiveSessionBaseline>> = tokio::select! {
+                        biased;
+                        disconnected = reader.fill_buf() => disconnected.map(|_| None).map_err(anyhow::Error::from),
+                        result = operation => result.map(Some),
+                    };
+                    drop(receiver);
+                    relay.lock().expect("relay state lock poisoned").resume_after_adoption_wait()?;
+                    let _ = dispatch_wake.try_send(());
+                    match result {
+                        Ok(Some(cut)) => Some(cut),
+                        Ok(None) => return Ok(()),
+                        Err(error) => {
+                            write_logged_response(&mut writer, &RelayResponseEnvelope {
+                                request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version,
+                                body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
+                            }, &session_id, "live_baseline_refused").await?;
+                            continue;
+                        }
+                    }
                 } else { None };
                 let request_id = envelope.request_id.clone();
                 let protocol_version = envelope.protocol_version;
@@ -3036,6 +3081,230 @@ mod preparation_tests {
             .unwrap()
             .unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn adoption_wait_captures_between_turns_and_disconnect_releases_queued_work() {
+        use base64::Engine as _;
+        use mj_core::relay::{LiveSessionBaseline, RelayCommandOutcome};
+        for mode in ["served", "disconnect", "another-waiter"] {
+            let temp = tempfile::tempdir().unwrap();
+            let relay = test_relay(temp.path());
+            let (wake, _wakes) = mpsc::channel(1);
+            let (_status, preparation) = watch::channel(PreparationSnapshot::default());
+            let (accept, mut reader, mut writer) = start_control_server(
+                temp.path(),
+                relay.clone(),
+                wake,
+                preparation,
+                CancellationToken::new(),
+            )
+            .await;
+            request(
+                &mut reader,
+                &mut writer,
+                "hello",
+                RelayRequest::Hello {
+                    controller_version: "test".into(),
+                    supported: RelayVersionRange::CURRENT,
+                },
+            )
+            .await;
+            for (id, command) in [
+                (
+                    "running-prompt",
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from("first")],
+                    },
+                ),
+                (
+                    "next-prompt",
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from("second")],
+                    },
+                ),
+                (
+                    "queued-shell",
+                    RelayCommand::RunUserShell {
+                        command: "printf next".into(),
+                    },
+                ),
+            ] {
+                let response = request(
+                    &mut reader,
+                    &mut writer,
+                    id,
+                    RelayRequest::Submit {
+                        command_id: id.into(),
+                        command,
+                    },
+                )
+                .await;
+                assert!(
+                    matches!(response.body, RelayResponseBody::Ok { .. }),
+                    "{response:?}"
+                );
+            }
+            relay.lock().unwrap().claim_pending_commands(true).unwrap();
+            let response = request(
+                &mut reader,
+                &mut writer,
+                "cut",
+                RelayRequest::BeginLiveBaseline,
+            )
+            .await;
+            assert!(matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::LiveBaselineWaiting { .. }
+                }
+            ));
+            assert!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .claim_pending_user_shell_commands_up_to(1)
+                    .unwrap()
+                    .is_empty()
+            );
+            if mode == "another-waiter" {
+                let peer = UnixStream::connect(temp.path().join("control.sock"))
+                    .await
+                    .unwrap();
+                let (read, write) = peer.into_split();
+                let mut other_reader = BufReader::new(read);
+                let mut other_writer = write;
+                request(
+                    &mut other_reader,
+                    &mut other_writer,
+                    "hello-other",
+                    RelayRequest::Hello {
+                        controller_version: "other".into(),
+                        supported: RelayVersionRange::CURRENT,
+                    },
+                )
+                .await;
+                let other = request(
+                    &mut other_reader,
+                    &mut other_writer,
+                    "cut-other",
+                    RelayRequest::BeginLiveBaseline,
+                )
+                .await;
+                assert!(matches!(
+                    other.body,
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::LiveBaselineWaiting { .. }
+                    }
+                ));
+                drop(reader);
+                drop(writer);
+                reader = other_reader;
+                writer = other_writer;
+                assert!(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .claim_pending_user_shell_commands_up_to(1)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            if mode == "disconnect" {
+                drop(writer);
+                drop(reader);
+                // The current turn still runs: EOF alone must remove the hold.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if !relay
+                            .lock()
+                            .unwrap()
+                            .claim_pending_user_shell_commands_up_to(1)
+                            .unwrap()
+                            .is_empty()
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                relay
+                    .lock()
+                    .unwrap()
+                    .record_command_completed(
+                        "running-prompt",
+                        RelayCommandOutcome::Prompt {
+                            stop_reason: "end_turn".into(),
+                            diagnostic: None,
+                            usage: None,
+                            work_facts: None,
+                        },
+                    )
+                    .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+                assert!(matches!(
+                    response.body,
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::LiveBaselineStarted { .. }
+                    }
+                ));
+                let mut bytes = Vec::new();
+                let mut offset = 0;
+                loop {
+                    let response = request(
+                        &mut reader,
+                        &mut writer,
+                        "page",
+                        RelayRequest::ReadLiveBaselinePage { offset },
+                    )
+                    .await;
+                    let RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::LiveBaselinePage { page },
+                    } = response.body
+                    else {
+                        panic!("{response:?}")
+                    };
+                    bytes.extend(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&page.chunk)
+                            .unwrap(),
+                    );
+                    offset = page.next_offset;
+                    if page.complete {
+                        break;
+                    }
+                }
+                let cut: LiveSessionBaseline = serde_json::from_slice(&bytes).unwrap();
+                assert!(cut.state.active_prompt.is_none());
+                assert_eq!(cut.queue[0].command_id, "next-prompt");
+                assert_eq!(cut.state.active_user_shells[0].command_id, "queued-shell");
+                assert!(cut.state.active_user_shells[0].started_at_ms.is_none());
+                relay.lock().unwrap().claim_pending_commands(true).unwrap();
+                assert_eq!(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .operational_state()
+                        .active_prompt
+                        .unwrap()
+                        .command_id,
+                    "next-prompt"
+                );
+                assert!(relay.lock().unwrap().latest_ordinal() > cut.state.latest_ordinal);
+                drop(writer);
+                drop(reader);
+            }
+            accept.abort();
+            let _ = accept.await;
+        }
     }
 
     #[tokio::test]

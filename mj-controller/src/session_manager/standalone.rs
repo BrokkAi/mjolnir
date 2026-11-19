@@ -30,13 +30,13 @@ impl StandaloneSession {
     }
 
     pub async fn connect(target: &RelaySessionTarget) -> Result<Self> {
-        Self::connect_inner(target, false, None).await
+        Self::connect_inner(target, None, None).await
     }
 
     async fn connect_inner(
         target: &RelaySessionTarget,
-        adopting: bool,
         prepared: Option<RelayClient>,
+        baseline: Option<mj_core::relay::LiveSessionBaseline>,
     ) -> Result<Self> {
         // Reach the worker before reading the projection. A stored session can
         // be tens of megabytes, and the reconnect loop would otherwise pay that
@@ -132,58 +132,55 @@ impl StandaloneSession {
             operator_presence_revision: None,
             history_active: Default::default(),
         };
-        if adopting && connection.materialized.applied_event_ordinal == 0 {
-            match connection
-                .client
-                .attach(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
-                .await
-            {
-                Ok(_) => {} // Ordinary reattachment retains the complete history.
-                Err(error) if relay_desynchronized(&error) => {
-                    // A desynchronization can also mean a corrupt span. Only
-                    // the worker's actual retention boundary authorizes a cut.
-                    if connection.operational.retained_event_ordinal() == 0 {
-                        return Err(error);
-                    }
-                    let baseline = connection.client.live_session_baseline().await?;
-                    ensure!(
-                        baseline.state.session_id == target.session_id,
-                        "live recovery baseline belongs to another session"
-                    );
-                    for queued in baseline
-                        .queue
-                        .iter()
-                        .chain(&baseline.delivered_initial_prompts)
-                    {
-                        if let Some(prompt) = queued.command.prompt_blocks() {
-                            connection.cache_prompt_attachments(&prompt).await?;
-                        }
-                    }
-                    let projection =
-                        mj_transcript::projection::materialized_session_from_live_baseline(
-                            &baseline,
-                        )?;
-                    crate::database::install_live_session_baseline(&projection, baseline)?;
-                    // A concurrent installer may own the cursor already. Load its
-                    // durable result, then use ordinary reattachment.
-                    (connection.materialized, connection.window) =
-                        load_projection(&target.session_id).await?;
-                }
-                Err(error) => return Err(error),
-            }
+        if let Some(baseline) = baseline {
+            ensure!(
+                baseline.state.session_id == target.session_id,
+                "live recovery cut belongs to another session"
+            );
+            Self::cache_baseline_attachments(&mut connection.client, &baseline).await?;
+            let projection =
+                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
+            crate::database::install_live_session_baseline(&projection, baseline)?;
+            (connection.materialized, connection.window) =
+                load_projection(&target.session_id).await?;
         }
         connection.sync_in_place().await?;
         Ok(connection)
+    }
+
+    pub(crate) async fn cache_baseline_attachments(
+        client: &mut RelayClient,
+        baseline: &mj_core::relay::LiveSessionBaseline,
+    ) -> Result<()> {
+        for queued in baseline
+            .queue
+            .iter()
+            .chain(&baseline.delivered_initial_prompts)
+        {
+            if let Some(prompt) = queued.command.prompt_blocks() {
+                Self::cache_prompt_attachments_with(client, &baseline.state.session_id, &prompt)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn cache_prompt_attachments(
         &mut self,
         prompt: &[agent_client_protocol::v1::schema::ContentBlock],
     ) -> Result<()> {
+        Self::cache_prompt_attachments_with(&mut self.client, &self.materialized.session_id, prompt)
+            .await
+    }
+
+    async fn cache_prompt_attachments_with(
+        client: &mut RelayClient,
+        session_id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) -> Result<()> {
         for reference in mj_core::attachment::references(prompt)? {
-            if let Err(error) = self.client.cache_attachment(&reference).await {
-                tracing::warn!(session_id = %self.materialized.session_id, attachment = %reference.sha256, %error,
-                    "could not cache image attachment during recovery");
+            if let Err(error) = client.cache_attachment(&reference).await {
+                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
             }
         }
         Ok(())
@@ -204,45 +201,68 @@ impl StandaloneSession {
         Ok(())
     }
 
-    /// Keep the control connection across admission and record installation, so
-    /// unsupported orphan workers remain unclaimed and can still be destroyed.
     pub(crate) async fn prepare_adoption(
         spec: &CommandSpec,
         session_id: &str,
     ) -> Result<RelayClient> {
-        let mut client = RelayClient::connect(spec, session_id).await?;
-        if client.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL
-            && client.status().await?.retained_event_ordinal() > 0
-        {
-            let session = session_id.to_owned();
-            let cursor = tokio::task::spawn_blocking(move || {
-                crate::database::materialized_event_frontier(&session)
-            })
-            .await
-            .context("read adoption retry cursor")??;
-            let retained = client.status().await?.retained_event_ordinal();
-            let Some((ordinal, digest)) =
-                cursor.filter(|(ordinal, _)| *ordinal > 0 && *ordinal >= retained)
-            else {
-                return Err(crate::worker_client::LiveBaselineUnsupported.into());
-            };
-            // A previous adoption may have committed and ACKed its projection
-            // before losing the connected-state update. Prove that durable
-            // cursor still attaches before deciding a live cut is necessary.
-            client.attach(ordinal, &digest).await?;
+        RelayClient::connect(spec, session_id).await
+    }
+
+    /// Probe only durable cursors; no history is acknowledged during preparation.
+    pub(crate) async fn adoption_needs_cut(
+        client: &mut RelayClient,
+        session_id: &str,
+    ) -> Result<bool> {
+        let session = session_id.to_owned();
+        let cursor = tokio::task::spawn_blocking(move || {
+            crate::database::materialized_event_frontier(&session)
+        })
+        .await
+        .context("read adoption cursor")??
+        .unwrap_or((0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into()));
+        match client.attach(cursor.0, &cursor.1).await {
+            Ok(_) => return Ok(false),
+            Err(error) if relay_desynchronized(&error) => {
+                // A competing adopter may have committed and ACKed since our read.
+                let session = session_id.to_owned();
+                let current = tokio::task::spawn_blocking(move || {
+                    crate::database::materialized_event_frontier(&session)
+                })
+                .await
+                .context("reload adoption cursor")??;
+                if let Some(current) = current.filter(|current| current.0 > 0) {
+                    client.attach(current.0, &current.1).await?;
+                    return Ok(false);
+                }
+                if client.status().await?.retained_event_ordinal() == 0 {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
         }
-        Ok(client)
+        if client.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL {
+            return Err(crate::worker_client::LiveBaselineUnsupported.into());
+        }
+        Ok(true)
     }
 
     #[cfg(test)]
     pub(crate) async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {
-        Self::connect_prepared_adopting(spec, session_id, None).await
+        let mut client = Self::prepare_adoption(spec, session_id).await?;
+        let cut = if Self::adoption_needs_cut(&mut client, session_id).await? {
+            Some(client.live_session_baseline().await?)
+        } else {
+            None
+        };
+        Self::connect_prepared_adopting(spec, session_id, client, cut).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn connect_prepared_adopting(
         spec: &CommandSpec,
         session_id: &str,
-        prepared: Option<RelayClient>,
+        client: RelayClient,
+        baseline: Option<mj_core::relay::LiveSessionBaseline>,
     ) -> Result<Self> {
         Self::connect_inner(
             &RelaySessionTarget {
@@ -251,8 +271,8 @@ impl StandaloneSession {
                 worker_recovery: None,
                 project_memory: None,
             },
-            true,
-            prepared,
+            Some(client),
+            baseline,
         )
         .await
     }

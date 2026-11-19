@@ -2364,7 +2364,6 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         ("removed", false),
         ("interrupted", true),
         ("completed", true),
-        ("active", true),
     ] {
         use mj_core::relay::{
             RelayCommand, RelayCommandOutcome, RelayRequest, RelayRequestEnvelope,

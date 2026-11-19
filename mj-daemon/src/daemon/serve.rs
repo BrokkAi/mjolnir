@@ -390,6 +390,106 @@ pub(super) async fn serve_client(
                 )
                 .await;
             }
+            if let DaemonAction::AdoptRecovery(adoption) = request.action {
+                let wait_cancel = cancellation.child_token();
+                let _cancel_on_drop = wait_cancel.clone().drop_guard();
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let _cancel_processes =
+                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
+                let (progress, mut waiting) = tokio::sync::watch::channel(None);
+                let destroy_command = mj_controller::controller::recovery_destroy_command(
+                    &adoption.session_id,
+                    &adoption.target_id,
+                    adoption.all_instances,
+                );
+                let mut work = Box::pin(async {
+                    let mut controller = blocking(Controller::load).await?;
+                    let executor = CancellableProcessExecutor::new(cancelled.clone());
+                    let outcome = controller
+                        .adopt_orphan_worker_controlled(
+                            &adoption,
+                            &executor,
+                            mj_controller::controller::AdoptionControl {
+                                cancelled: wait_cancel.clone(),
+                                progress: Some(progress),
+                                lifecycle_gate: state.session_gate.clone(),
+                            },
+                        )
+                        .await;
+                    if outcome.result.is_ok() {
+                        refresh_runtime_controller(&state).await;
+                    }
+                    Ok::<_, anyhow::Error>(outcome)
+                });
+                let mut disconnected = false;
+                let mut progress_open = true;
+                let mut previous_blockers = None;
+                let mut byte = [0u8; 1];
+                use tokio::io::AsyncReadExt;
+                let outcome = loop {
+                    tokio::select! {
+                        biased;
+                        closed = stream.read(&mut byte), if !disconnected => {
+                            if let Err(error) = closed { tracing::debug!(%error, "adoption connection closed"); }
+                            disconnected = true;
+                            cancelled.store(true, Ordering::Release);
+                            wait_cancel.cancel();
+                        }
+
+                        result = &mut work => break result,
+                        changed = waiting.changed(), if progress_open => {
+                            if changed.is_ok() {
+                                let blockers = waiting.borrow_and_update().clone();
+                                if blockers != previous_blockers {
+                                    previous_blockers = blockers.clone();
+                                    if let Some(blockers) = blockers && !disconnected
+                                        && let Err(error) = write_response(&mut stream, ResponseEnvelope {
+                                            protocol_version: request.protocol_version, request_id,
+                                            result: Ok(DaemonReply::AdoptionWaiting { blockers, destroy_command: Some(destroy_command.clone()) }),
+                                        }).await {
+                                            tracing::debug!(%error, "adoption progress connection closed");
+                                            disconnected = true;
+                                            cancelled.store(true, Ordering::Release);
+                                            wait_cancel.cancel();
+                                    }
+                                }
+                            } else { progress_open = false; }
+                        }
+                    }
+                };
+                let (result, admission) = match outcome {
+                    Ok(outcome) => (
+                        outcome.result.map(|()| DaemonReply::Done),
+                        outcome.admission,
+                    ),
+                    Err(error) => (Err(error), None),
+                };
+                if disconnected {
+                    tracing::info!(
+                        session_id = adoption.session_id,
+                        "adoption connection closed; pending recovery cut was cancelled"
+                    );
+                    if let Err(error) = &result {
+                        tracing::debug!(%error, "disconnected adoption finished");
+                    }
+                    if admission.is_none() {
+                        return Ok(());
+                    }
+                }
+                write_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id,
+                        result: result.map_err(|error| format!("{error:#}")),
+                    },
+                )
+                .await?;
+                // The install guard spans final response delivery, as other
+                // admitted requests do; no worker wait or catch-up owns it.
+                drop(admission);
+                return Ok(());
+            }
             if request.action.is_cancellable_machine_action() {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let guard =

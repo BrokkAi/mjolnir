@@ -113,6 +113,7 @@ where
     let permission_implementation_slot = plan_implementation_slot.clone();
     let terminals = TerminalRegistry::new()?;
     let create_terminals = terminals.clone();
+    let create_terminal_owner = spec.terminal_owner.clone();
     let output_terminals = terminals.clone();
     let wait_terminals = terminals.clone();
     let kill_terminals = terminals.clone();
@@ -826,20 +827,37 @@ where
                         .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTES),
                 };
                 let command = spawn.display_command();
-                match create_terminals.create(spawn, create_events.clone()) {
+                let terminal_id = create_terminals.allocate_id();
+                let owner = create_terminal_owner.as_ref().map(|owner| owner.upgrade().ok_or_else(|| anyhow::anyhow!("the relay owner is gone; refusing to spawn an unregistered terminal"))).transpose();
+                let mut registered = false;
+                let spawned = (|| -> Result<String> {
+                    if let Some(owner) = owner.as_ref().map_err(|error| anyhow::anyhow!("{error:#}"))? {
+                        registered = true;
+                        owner.lock().expect("relay state lock poisoned").admit_agent_terminal(mj_core::relay::ActiveAgentTerminal {
+                            terminal_id: terminal_id.clone(), command: command.clone(), started_at_ms,
+                        })?;
+                        mj_core::test_hooks::reach_test_hook("adoption_terminal_admitted_before_spawn")?;
+                    }
+                    create_terminals.create_with_id(terminal_id.clone(), spawn, create_events.clone())
+                })();
+                match spawned {
                     Ok(terminal_id) => {
-                        create_events
-                            .send(RuntimeEvent::TerminalStarted {
-                                terminal_id: terminal_id.clone(),
-                                command,
-                                started_at_ms,
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
+                        if !registered {
+                            create_events.send(RuntimeEvent::TerminalStarted {
+                                terminal_id: terminal_id.clone(), command, started_at_ms,
+                            }).await.map_err(|_| relay_event_channel_error())?;
+                        }
                         responder
                             .respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
                     }
                     Err(error) => {
+                        let error = if registered && let Ok(Some(owner)) = &owner {
+                            match owner.lock().expect("relay state lock poisoned").agent_terminal_start_failed(&terminal_id) {
+                                Ok(()) => error,
+                                Err(cleanup) => error.context(format!("could not withdraw failed terminal admission: {cleanup:#}")),
+                            }
+                        } else { error };
+
                         create_events
                             .send(RuntimeEvent::Warning {
                                 message: format!("a client terminal failed to start: {error:#}"),

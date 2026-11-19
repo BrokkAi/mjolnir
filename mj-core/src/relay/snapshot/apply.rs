@@ -1709,6 +1709,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         // harness had started on its own no longer exists. Both callers record
         // this with no prompt in flight.
         RelayObservation::SessionRestarted => {
+            snapshot.assessment_questions.clear();
+            snapshot.pending_elicitations.clear();
             snapshot.goal.restart();
             if snapshot.harness_turn.take().is_some()
                 && snapshot.active_prompt.is_none()

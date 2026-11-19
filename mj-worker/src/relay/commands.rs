@@ -1320,6 +1320,10 @@ impl DurableRelay {
     /// asked. It goes through admission like an Escape steer, so the journal
     /// and every client see the same steering operation.
     fn submit_automatic_steer(&mut self) -> Result<()> {
+        if self.live_baseline_pending() {
+            return Ok(());
+        }
+
         let Some((active_prompt_id, queued_prompt_id)) = self.automatic_steer_target() else {
             return Ok(());
         };
@@ -1475,6 +1479,11 @@ impl DurableRelay {
         &mut self,
         maximum_runs: usize,
     ) -> Result<Vec<ClaimedRelayCommand>> {
+        let maximum_runs = if self.live_baseline_pending() {
+            0
+        } else {
+            maximum_runs
+        };
         if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
             return Ok(Vec::new());
         }
@@ -2094,6 +2103,9 @@ impl DurableRelay {
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run strictly one at a time, in the order they were accepted.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
+        if self.live_baseline_pending() {
+            return Ok(None);
+        }
         // Keep turn-starting entries and configuration queue entries in this
         // durable FIFO during a live turn. Claude's adapter queues mid-cycle
         // prompts internally and cancel may discard them; ACP rejects
@@ -2108,7 +2120,7 @@ impl DurableRelay {
                 .steering
                 .as_ref()
                 .is_some_and(|s| s.holds_queue())
-            || self.promoted_config_in_progress()
+            || self.configuration_dispatch_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
             || matches!(
                 self.snapshot.execution,
@@ -2159,7 +2171,7 @@ impl DurableRelay {
             && !self.turn_cancellation_pending()
     }
 
-    fn turn_cancellation_pending(&self) -> bool {
+    pub(super) fn turn_cancellation_pending(&self) -> bool {
         self.snapshot.cancelling_prompt_id.is_some()
             || self.snapshot.dispatches.values().any(|dispatch| {
                 matches!(
@@ -2434,13 +2446,17 @@ impl DurableRelay {
         })
     }
 
-    fn promoted_config_in_progress(&self) -> bool {
+    pub(super) fn configuration_dispatch_in_progress(&self) -> bool {
         self.snapshot.dispatches.values().any(|dispatch| {
-            matches!(dispatch.command, RelayCommand::SetConfig { .. })
-                && matches!(
-                    dispatch.state,
-                    RelayDispatchState::Pending | RelayDispatchState::InFlight
-                )
+            matches!(
+                dispatch.command,
+                RelayCommand::SetConfig { .. }
+                    | RelayCommand::SetSessionMode { .. }
+                    | RelayCommand::RestoreExecutionMode
+            ) && matches!(
+                dispatch.state,
+                RelayDispatchState::Pending | RelayDispatchState::InFlight
+            )
         })
     }
 

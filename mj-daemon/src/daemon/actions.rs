@@ -613,27 +613,8 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::RecoveryScan(scan))
         }
-        DaemonAction::AdoptRecovery {
-            session_id,
-            target_id,
-            profile,
-            bundle,
-            all_instances,
-        } => {
-            ensure_no_active_lifecycle(state)?;
-            let mut controller = blocking(Controller::load).await?;
-            controller
-                .adopt_orphan_worker(
-                    &session_id,
-                    &target_id,
-                    profile.as_deref(),
-                    bundle.as_deref(),
-                    all_instances,
-                    &ProcessExecutor,
-                )
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
+        DaemonAction::AdoptRecovery(_) => {
+            bail!("adoption requires its dedicated cancellable connection")
         }
         DaemonAction::DestroyRecovery {
             session_id,
@@ -1337,6 +1318,7 @@ pub(super) fn upgrade_request_activity(
             // Answered from durable state, so it holds no daemon work and a
             // handoff does not wait for it; the client asks again.
             | DaemonAction::WaitCreateSession { .. }
+            | DaemonAction::AdoptRecovery(_)
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

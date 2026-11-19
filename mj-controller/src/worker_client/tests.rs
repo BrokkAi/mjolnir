@@ -5421,28 +5421,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
     for outcome in ["complete", "cancel", "drop", "disconnect", "legacy_drop"] {
         let legacy = outcome == "legacy_drop";
         let (controller, worker) = tokio::io::duplex(4096);
-        let (output, input) = tokio::io::split(controller);
-        let mut client = RelayClient {
-            child: None,
-            input: Some(Box::new(input)),
-            output: BufReader::new(Box::new(output)),
-            request_timeout: RELAY_RPC_TIMEOUT,
-            abandoned: None,
-            cancellation: None,
-            next_request: 1,
-            connection_nonce: 1,
-            protocol_version: RELAY_PROTOCOL_VERSION,
-            session_id: SESSION_ID.into(),
-            relay_version: "queued-memory-peer".into(),
-            worker_build: None,
-            latest_ordinal: 0,
-            latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
-            subagent_acknowledged: None,
-            subagent_queue: BTreeMap::new(),
-            subagent_publication: None,
-            known_state: None,
-            ssh_session: None,
-        };
+        let mut client = duplex_relay_client(controller);
         if legacy {
             client.protocol_version = mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL - 1;
         }
@@ -5846,4 +5825,91 @@ fn access_denied_reply(directory: &std::path::Path) -> std::path::PathBuf {
     let path = directory.join("access-denied.txt");
     std::fs::write(&path, crate::aws_assume_role::test_fixtures::ACCESS_DENIED).unwrap();
     path
+}
+
+fn duplex_relay_client(controller: tokio::io::DuplexStream) -> RelayClient {
+    let (output, input) = tokio::io::split(controller);
+    RelayClient {
+        child: None,
+        input: Some(Box::new(input)),
+        output: BufReader::new(Box::new(output)),
+        request_timeout: RELAY_RPC_TIMEOUT,
+        abandoned: None,
+        cancellation: None,
+        next_request: 1,
+        connection_nonce: 1,
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        session_id: SESSION_ID.into(),
+        relay_version: "queued-memory-peer".into(),
+        worker_build: None,
+        latest_ordinal: 0,
+        latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        subagent_acknowledged: None,
+        subagent_queue: BTreeMap::new(),
+        subagent_publication: None,
+        known_state: None,
+        ssh_session: None,
+        adoption_wait_progress: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn adoption_wait_reports_blockers_without_a_deadline_and_is_cancellable() {
+    for cancel in [false, true] {
+        let (controller, worker) = tokio::io::duplex(4096);
+        let mut client = duplex_relay_client(controller);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        client.set_cancellation(Some(cancelled.clone()));
+        let (progress, mut messages) = tokio::sync::watch::channel(None);
+        client.set_adoption_wait_progress(Some(progress));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let released = release.clone();
+        let peer = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let envelope: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            for payload in [
+                RelayResponsePayload::LiveBaselineWaiting {
+                    blockers: vec!["a running turn".into()],
+                },
+                RelayResponsePayload::LiveBaselineStarted { total_bytes: 0 },
+            ] {
+                if matches!(payload, RelayResponsePayload::LiveBaselineStarted { .. }) {
+                    let _permit = released.acquire().await.unwrap();
+                }
+                let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                    request_id: envelope.request_id.clone(),
+                    protocol_version: envelope.protocol_version,
+                    body: RelayResponseBody::Ok { payload },
+                })
+                .unwrap();
+                bytes.push(b'\n');
+                if writer.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let work = tokio::spawn(async move { client.call(RelayRequest::BeginLiveBaseline).await });
+        messages.changed().await.unwrap();
+        assert_eq!(
+            messages.borrow_and_update().as_deref(),
+            Some(["a running turn".to_owned()].as_slice())
+        );
+        tokio::time::advance(RELAY_RPC_TIMEOUT * 4).await;
+        assert!(!work.is_finished());
+        if cancel {
+            cancelled.store(true, Ordering::Release);
+            assert!(work.await.unwrap().is_err());
+        } else {
+            release.add_permits(1);
+            assert!(matches!(
+                work.await.unwrap().unwrap(),
+                RelayResponsePayload::LiveBaselineStarted { .. }
+            ));
+        }
+        peer.abort();
+        let _ = peer.await;
+    }
 }

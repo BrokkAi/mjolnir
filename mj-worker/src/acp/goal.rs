@@ -2,6 +2,20 @@
 use super::*;
 use mj_core::goal::{GoalSnapshot, RECOVERY_ID};
 
+fn resume_admission(
+    spec: &LaunchSpec,
+    resume: bool,
+) -> Result<Option<crate::relay::NativeGoalResume>> {
+    if resume {
+        spec.terminal_owner
+            .as_ref()
+            .map(crate::relay::NativeGoalResume::begin)
+            .transpose()
+    } else {
+        Ok(None)
+    }
+}
+
 type PendingControl = Pin<Box<dyn Future<Output = RuntimeEvent> + Send>>;
 
 /// Polled by both command loops. Dropping the session drops all request waits;
@@ -16,21 +30,42 @@ impl PendingControls {
 
     pub(super) fn start(
         &mut self,
+        spec: &LaunchSpec,
         connection: &ConnectionTo<Agent>,
         session: &SessionId,
         request_id: String,
         action: mj_core::goal::GoalControlAction,
         expected: Option<GoalSnapshot>,
     ) {
+        let owner = spec.terminal_owner.clone();
         let connection = connection.clone();
         let session = session.clone();
         self.0.push(Box::pin(async move {
             // Explicit native resume may answer only when its turn finishes.
             // Do not impose recovery's short acknowledgement timeout here.
-            let response = connection
-                .send_request(control_request(&session, action, expected.as_ref()))
-                .block_task()
-                .await;
+            let admission = if action == mj_core::goal::GoalControlAction::Resume {
+                owner
+                    .as_ref()
+                    .map(crate::relay::NativeGoalResume::begin)
+                    .transpose()
+            } else {
+                Ok(None)
+            };
+            let response = match admission {
+                Ok(admission) => {
+                    let result = connection
+                        .send_request(control_request(&session, action, expected.as_ref()))
+                        .block_task()
+                        .await;
+                    if result.is_ok()
+                        && let Some(admission) = admission
+                    {
+                        admission.accepted();
+                    }
+                    result.map_err(|error| anyhow::anyhow!("{error}"))
+                }
+                Err(error) => Err(error),
+            };
             match response {
                 Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
                 Err(error) => RuntimeEvent::CommandRejected {
@@ -220,6 +255,7 @@ pub(super) struct Question {
 }
 
 async fn control(
+    spec: &LaunchSpec,
     connection: &ConnectionTo<Agent>,
     session: &SessionId,
     goal: &GoalSnapshot,
@@ -235,8 +271,12 @@ async fn control(
     } else {
         mj_core::goal::GoalControlAction::Pause
     };
+    let admission = resume_admission(spec, resume)?;
     tokio::time::timeout(Duration::from_secs(30), connection.send_request(control_request(session, action, Some(goal))).block_task())
         .await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")??;
+    if let Some(admission) = admission {
+        admission.accepted();
+    }
     Ok(())
 }
 
@@ -280,7 +320,7 @@ pub(super) async fn recover(
         if context.state.snapshot.as_ref().is_some_and(|g| {
             g.same_goal(&decision.goal) && matches!(g.status.as_str(), "active" | "paused")
         }) {
-            control(connection, session, &decision.goal, decision.resume).await?;
+            control(spec, connection, session, &decision.goal, decision.resume).await?;
         }
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
         return Ok(None);
@@ -303,14 +343,14 @@ pub(super) async fn recover(
         return Ok(None);
     };
     if model_question && goal.active() {
-        control(connection, session, &goal, false).await?;
+        control(spec, connection, session, &goal, false).await?;
     }
     let mut explanation = None;
     if !context.asking() && !model_question {
         if !goal.active() || context.state.running() {
             return Ok(None);
         }
-        match control(connection, session, &goal, true).await {
+        match control(spec, connection, session, &goal, true).await {
             Ok(()) => return Ok(None),
             Err(error) => {
                 let message = format!("Goal recovery needs attention: {error:#}");
@@ -415,7 +455,7 @@ pub(super) async fn resolve(
     }
     decision_update(spec, events, meta).await?;
     if current {
-        if let Err(error) = control(connection, session, &question.goal, resume).await {
+        if let Err(error) = control(spec, connection, session, &question.goal, resume).await {
             return Ok(Some(Err(format!("{error:#}"))));
         }
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
@@ -455,7 +495,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let script = root.path().join("goal.py");
             std::fs::write(&script, r#"
-import json, os, sys
+import json, os, sys, time
 asking = os.environ['ASKING'] == 'true'
 running = os.environ['RUNNING'] == 'true'
 def emit(x): print(json.dumps(x), flush=True)
@@ -477,6 +517,8 @@ for line in sys.stdin:
         if p['action']=='resume':
             assert p['expectedGoal']=={'objective':'finish campaign','createdAt':123}
             with open('resumes','a') as f: f.write('resume\n')
+            if os.environ.get('WAIT_FOR_CUT') == 'true':
+                while not os.path.exists('release-resume'): time.sleep(0.01)
             goal['status']='active'; update({'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'running','turnId':'resumed'}})
         else:
             goal['status']='paused'; update({'jetbrains':{'air':{'goal':goal}}})
@@ -494,6 +536,15 @@ for line in sys.stdin:
                 },
                 ..Default::default()
             }));
+            let track_cut = !asking && !running && status == "active";
+            let mut durable = crate::relay::DurableRelay::open(
+                root.path().join("relay"),
+                crate::relay::test_support::SESSION,
+                "test",
+            )
+            .unwrap();
+            durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::CodexAdapter);
+            let relay = Arc::new(crate::relay::RelayCell::new(durable));
             let spec = LaunchSpec {
                 operator_away: Default::default(),
                 imported_logins: None,
@@ -509,6 +560,7 @@ for line in sys.stdin:
                 args: vec![script.to_string_lossy().into_owned()],
                 environment: BTreeMap::from([
                     ("ASKING".into(), asking.to_string()),
+                    ("WAIT_FOR_CUT".into(), track_cut.to_string()),
                     ("RUNNING".into(), running.to_string()),
                     ("GOAL_STATUS".into(), status.into()),
                 ]),
@@ -527,6 +579,7 @@ for line in sys.stdin:
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
+                terminal_owner: track_cut.then(|| Arc::downgrade(&relay)),
                 turn_context: Default::default(),
                 verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
@@ -534,6 +587,50 @@ for line in sys.stdin:
             let (tx, rx) = mpsc::channel(8);
             let (events, mut receive) = mpsc::channel(8);
             let task = tokio::spawn(run(spec, rx, events));
+            if track_cut {
+                let mut in_flight = BTreeMap::new();
+                // Reopen's automatic resume is not a relay command. Drain the
+                // real ACP setup while its resume request is held by the peer.
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !root.path().join("resumes").exists() {
+                        tokio::select! {
+                            event = receive.recv() => { crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap(); }
+                            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        }
+                    }
+                }).await.unwrap();
+                let mut cut = relay.lock().unwrap().reserve_live_baseline();
+                assert!(cut.try_recv().is_err());
+                assert!(
+                    relay
+                        .observe()
+                        .unwrap()
+                        .adoption_blockers()
+                        .iter()
+                        .any(|blocker| blocker.contains("goal resume"))
+                );
+                std::fs::write(root.path().join("release-resume"), "").unwrap();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !relay.observe().unwrap().turn_in_progress() {
+                        let event = receive.recv().await.unwrap();
+                        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
+                            .unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(cut.try_recv().is_err());
+                relay
+                    .lock()
+                    .unwrap()
+                    .record_observation(mj_core::relay::RelayObservation::HarnessTurnSettled {
+                        autonomous: None,
+                        origin: None,
+                        prompt_in_flight: false,
+                    })
+                    .unwrap();
+                assert!(cut.try_recv().unwrap().is_ok());
+            }
             let mut bytes = 0;
             if let Some(accept) = answer {
                 loop {
@@ -702,6 +799,7 @@ for line in sys.stdin:
                     acp_activity: Default::default(),
                     step_clock: Default::default(),
                     tools_in_flight: Default::default(),
+                    terminal_owner: None,
                     turn_context: Default::default(),
                     verdict: Some(crate::acp::VerdictSource::Disabled),
                     stall_policy: None,

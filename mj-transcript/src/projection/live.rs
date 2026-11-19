@@ -85,20 +85,7 @@ pub fn materialized_session_from_live_baseline(
     projection.configuration.goal = state.goal.known.then(|| Box::new(state.goal.clone()));
     let now = mj_core::clock::epoch_millis();
     projection.last_activity_at_ms = Some(now);
-    projection.execution = match state.execution {
-        mj_core::relay::RelayExecutionState::Idle => MaterializedExecutionState::Idle,
-        mj_core::relay::RelayExecutionState::Running => MaterializedExecutionState::Running {
-            started_at_ms: state
-                .active_prompt
-                .as_ref()
-                .map(|active| active.started_at_ms)
-                .or(state.activity_turn_started_at_ms)
-                .unwrap_or(now),
-        },
-        mj_core::relay::RelayExecutionState::Closing => MaterializedExecutionState::Closing,
-        mj_core::relay::RelayExecutionState::Closed => MaterializedExecutionState::Closed,
-    };
-    projection.active_turn = baseline.active_turn.clone();
+    projection.execution = MaterializedExecutionState::Idle;
     projection.pending_elicitations = baseline.questions.clone();
     projection.queued_prompts = baseline
         .queue
@@ -129,6 +116,22 @@ pub fn materialized_session_from_live_baseline(
             last_changed_at_ms: initial.created_at_ms,
             body: TranscriptBody::User {
                 content: queued_command_content(&initial.command)?,
+            },
+        }));
+    }
+    for shell in state
+        .active_user_shells
+        .iter()
+        .filter(|shell| shell.started_at_ms.is_none())
+    {
+        projection.transcript.push(Arc::new(TranscriptItem {
+            stable_id: user_shell_item_id(&shell.command_id),
+            position: state.latest_ordinal.saturating_sub(1).max(1),
+            latest_content_event_ordinal: None,
+            created_at_ms: shell.created_at_ms,
+            last_changed_at_ms: shell.created_at_ms,
+            body: TranscriptBody::System {
+                text: user_shell_text(&shell.command, "queued", "", "", false, false),
             },
         }));
     }

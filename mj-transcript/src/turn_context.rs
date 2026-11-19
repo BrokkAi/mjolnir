@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 struct TurnContextState {
     generation: u64,
+    delivered_prompt_observed: bool,
     parent_activity: Option<std::time::Instant>,
     decision_log: Option<mj_core::jev::DecisionLog>,
     authorization: Option<mj_core::assessment::ContextHistory>,
@@ -95,6 +96,7 @@ impl TurnContext {
         let generation = state.generation.wrapping_add(1);
         *state = TurnContextState {
             generation,
+            delivered_prompt_observed: true,
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
@@ -219,6 +221,11 @@ impl TurnContext {
     /// durable authorization history after the journal prefix was collected.
     pub fn restore_text_tails(&self, history: &mj_core::assessment::ContextHistory) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
+        // Replay already owns any delivered turn it observed, including a
+        // generated continuation that deliberately has no human prompt tail.
+        if state.delivered_prompt_observed {
+            return;
+        }
         state.user_prompt_tail = history
             .messages
             .iter()

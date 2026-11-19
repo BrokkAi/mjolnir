@@ -690,12 +690,51 @@ impl DurableRelay {
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) -> Result<()> {
-        if self.closed_agent_terminals.remove(&terminal.terminal_id) {
-            return Ok(());
+        self.register_agent_terminal(terminal)?;
+        Ok(())
+    }
+
+    fn register_agent_terminal(&mut self, terminal: ActiveAgentTerminal) -> Result<bool> {
+        if self.closed_agent_terminals.contains(&terminal.terminal_id) {
+            return Ok(false);
         }
         self.active_agent_terminals
             .insert(terminal.terminal_id.clone(), terminal);
-        self.persist_activity_transition()
+        self.persist_activity_transition()?;
+        Ok(true)
+    }
+
+    /// Inventory and the fallback card have one lifecycle, before any process exists.
+    pub(crate) fn admit_agent_terminal(&mut self, terminal: ActiveAgentTerminal) -> Result<()> {
+        let id = terminal.terminal_id.clone();
+        let command = terminal.command.clone();
+        if self.register_agent_terminal(terminal)? {
+            self.record_session_update(SessionUpdate::ToolCall(
+                crate::acp::fallback_terminal_tool_call(&id, command),
+            ))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn agent_terminal_start_failed(&mut self, id: &str) -> Result<()> {
+        use agent_client_protocol::v1::schema::{
+            ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        };
+        let settled =
+            self.record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                crate::acp::fallback_terminal_tool_call_id(id),
+                ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
+            )));
+        // A failed journal write must not retain a process that never existed.
+        let released = self.agent_terminal_closed(id);
+        self.service_live_baselines();
+        match (settled, released) {
+            (Err(error), Err(release)) => {
+                Err(error.context(format!("withdrawing failed terminal: {release:#}")))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(_), Ok(())) => Ok(()),
+        }
     }
 
     pub fn agent_terminal_closed(&mut self, terminal_id: &str) -> Result<()> {
@@ -718,6 +757,7 @@ impl DurableRelay {
     /// piece of in-memory process state a harness reports is cleared here, so
     /// a restart and a closed terminal set cannot disagree about it.
     pub(super) fn forget_harness_processes(&mut self) {
+        self.pending_native_resumes.clear();
         self.air_tasks.clear();
         self.claude_pending_stops.clear();
         self.task_settled_at_ms = None;

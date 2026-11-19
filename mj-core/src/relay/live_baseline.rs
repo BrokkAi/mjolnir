@@ -20,7 +20,6 @@ pub struct LiveSessionBaseline {
     pub delivered_initial_prompts: Vec<LiveQueuedCommand>,
     pub questions: Vec<crate::elicitation::ElicitationRequest>,
     pub unavailable_questions: usize,
-    pub active_turn: Option<crate::state::MaterializedTurn>,
     pub native_agent_replay: Option<Vec<crate::native_agent::NativeAgent>>,
     pub native_use_evidence: Option<NativeSessionUseEvidence>,
 }

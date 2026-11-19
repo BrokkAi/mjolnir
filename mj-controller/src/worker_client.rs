@@ -139,6 +139,7 @@ pub struct RelayClient {
     input: Option<proxy::ProxyWriter>,
     output: BufReader<proxy::ProxyReader>,
     request_timeout: Duration,
+    adoption_wait_progress: Option<tokio::sync::watch::Sender<Option<Vec<String>>>>,
     /// Why this connection can no longer be used, once a call gave up on a
     /// reply that is still in flight. See [`RelayClient::exchange`].
     abandoned: Option<String>,

@@ -2631,9 +2631,16 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             bundle,
             all_instances,
         } => {
-            daemon
-                .adopt_recovery(session.clone(), target, profile, bundle, all_instances)
-                .await?;
+            tokio::select! {
+                result = daemon.adopt_recovery(mj_client::daemon::RecoveryAdoptionRequest { session_id: session.clone(), target_id: target, profile, bundle, all_instances }, |blockers, destroy_command| {
+                    eprintln!("Waiting for {}.", blockers.join("; "));
+                    if let Some(command) = destroy_command { eprintln!("If the worker never becomes idle, the only way forward is to destroy it: {command}"); }
+                }) => result?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    anyhow::bail!("adoption cancelled; the worker continues running; rerun recover adopt when ready");
+                }
+            }
             println!("adopted worker {session}");
             Ok(())
         }

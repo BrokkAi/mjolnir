@@ -119,6 +119,61 @@ pub enum BackgroundWorkPolicy {
     KimiTasks,
 }
 
+pub(crate) struct PendingLiveBaseline {
+    reply: Option<
+        tokio::sync::oneshot::Sender<
+            std::result::Result<mj_core::relay::LiveSessionBaseline, String>,
+        >,
+    >,
+}
+
+/// A native resume is admitted before its ACP request is sent. Success keeps
+/// the token until the relay observes the turn; failure or cancellation removes it.
+pub(crate) struct NativeGoalResume {
+    owner: std::sync::Weak<RelayCell>,
+    token: Option<std::sync::Arc<()>>,
+}
+
+impl NativeGoalResume {
+    pub(crate) fn begin(owner: &std::sync::Weak<RelayCell>) -> Result<Self> {
+        let relay = owner
+            .upgrade()
+            .context("native resume relay owner disappeared")?;
+        let token = std::sync::Arc::new(());
+        relay
+            .lock()
+            .expect("relay lock poisoned")
+            .pending_native_resumes
+            .push(token.clone());
+        Ok(Self {
+            owner: owner.clone(),
+            token: Some(token),
+        })
+    }
+
+    pub(crate) fn accepted(mut self) {
+        if let Some(owner) = self.owner.upgrade() {
+            let relay = owner.observe().expect("relay lock poisoned");
+            if !relay.turn_in_progress() {
+                self.token = None;
+            }
+        }
+        // If a turn has already opened, Drop removes any remaining token.
+    }
+}
+
+impl Drop for NativeGoalResume {
+    fn drop(&mut self) {
+        if let (Some(token), Some(owner)) = (self.token.take(), self.owner.upgrade()) {
+            let mut relay = owner.lock().expect("relay lock poisoned");
+            relay
+                .pending_native_resumes
+                .retain(|pending| !std::sync::Arc::ptr_eq(pending, &token));
+            relay.service_live_baselines();
+        }
+    }
+}
+
 /// The relay behind its lock. Every change to the relay takes this lock
 /// through [`Self::lock`], so each such release is counted as a possible
 /// change: a connection waiting for one (see
@@ -193,8 +248,8 @@ impl Drop for RelayGuard<'_> {
 /// Durable, session-side ACP store-and-forward relay.
 ///
 /// `RelaySnapshot` is the canonical operational state. Journal spans retain
-/// observations newer than the last frontier covered by both a durable
-/// controller acknowledgement and a verified checkpoint.
+/// observations newer than the durable controller acknowledgement. Operation-owned
+/// command receipts survive separately until their consumers finish.
 pub struct DurableRelay {
     /// Immutable input supplied when this worker was created; execution and
     /// completion live exclusively in the ordinary durable command queue.
@@ -266,6 +321,8 @@ pub struct DurableRelay {
     journal_generation: u64,
     /// Retry physical prefix cleanup once after reopen, or after a failed GC.
     journal_cleanup_pending: bool,
+    pending_live_baselines: Vec<PendingLiveBaseline>,
+    pending_native_resumes: Vec<std::sync::Arc<()>>,
     acp_activity: AcpActivityClock,
     step_clock: crate::acp::StepClock,
     /// Whether harness announcements or output with no prompt open a turn.
@@ -350,10 +407,131 @@ pub struct DurableRelay {
 }
 
 impl DurableRelay {
-    /// Capture all live recovery facts in the same serialized relay decision.
+    /// The connection owns this queue hold until its cut or disconnection.
+    pub(crate) fn reserve_live_baseline(
+        &mut self,
+    ) -> tokio::sync::oneshot::Receiver<
+        std::result::Result<mj_core::relay::LiveSessionBaseline, String>,
+    > {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.pending_live_baselines
+            .push(PendingLiveBaseline { reply: Some(reply) });
+        self.service_live_baselines();
+        receiver
+    }
+
+    pub(crate) fn resume_after_adoption_wait(&mut self) -> Result<()> {
+        self.promote_next_queued_command()?;
+        Ok(())
+    }
+
+    fn live_baseline_pending(&mut self) -> bool {
+        self.service_live_baselines();
+        self.pending_live_baselines
+            .iter()
+            .any(|request| request.reply.is_some())
+    }
+
+    fn service_live_baselines(&mut self) {
+        self.pending_live_baselines.retain(|request| {
+            request
+                .reply
+                .as_ref()
+                .is_some_and(|reply| !reply.is_closed())
+        });
+        if !self
+            .pending_live_baselines
+            .iter()
+            .any(|request| request.reply.is_some())
+            || !self.quiescent_for_adoption()
+        {
+            return;
+        }
+        let cut = self
+            .live_session_baseline()
+            .map_err(|error| format!("{error:#}"));
+        for request in &mut self.pending_live_baselines {
+            if let Some(reply) = request.reply.take() {
+                let _ = reply.send(cut.clone());
+            }
+        }
+    }
+
+    pub(crate) fn quiescent_for_adoption(&self) -> bool {
+        self.adoption_blockers().is_empty()
+    }
+
+    pub(crate) fn adoption_blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self.turn_in_progress() || self.has_held_claude_turn() {
+            blockers.push(if self.snapshot.assessment_questions.is_empty() {
+                "the worker's current turn to finish".to_owned()
+            } else {
+                "the worker's current turn, blocked on a pending question or approval, to finish"
+                    .to_owned()
+            });
+        }
+        if self.turn_cancellation_pending() {
+            blockers.push("the pending turn cancellation to finish".into());
+        }
+        if self.snapshot.clear_context_in_progress() {
+            blockers.push("the worker's context reset (/clear) to finish".into());
+        }
+        if !self.pending_native_resumes.is_empty()
+            || self.snapshot.dispatches.values().any(|dispatch| {
+                matches!(
+                    dispatch.command,
+                    RelayCommand::GoalControl {
+                        action: mj_core::goal::GoalControlAction::Resume
+                    }
+                ) && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Pending | RelayDispatchState::InFlight
+                )
+            })
+        {
+            blockers.push("the accepted native goal resume to finish".into());
+        }
+        if self.configuration_dispatch_in_progress() {
+            blockers.push("the in-flight configuration change to finish".into());
+        }
+        blockers.extend(self.foreground_tools.snapshot().iter().map(|tool| {
+            format!(
+                "foreground tool {} to finish",
+                tool.title.as_deref().unwrap_or(&tool.tool_call_id)
+            )
+        }));
+        blockers.extend(
+            self.snapshot
+                .active_user_shells
+                .values()
+                .filter(|shell| shell.started_at_ms.is_some())
+                .map(|shell| format!("running shell {:?} to finish", shell.command)),
+        );
+        blockers.extend(
+            self.active_agent_terminals
+                .values()
+                .map(|terminal| format!("live harness terminal {:?} to exit", terminal.command)),
+        );
+        blockers.sort();
+        blockers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_baseline_wait_message(&self) -> Option<String> {
+        let blockers = self.adoption_blockers();
+        (!blockers.is_empty()).then(|| format!("waiting for {}", blockers.join("; ")))
+    }
+
     pub fn live_session_baseline(&self) -> Result<mj_core::relay::LiveSessionBaseline> {
         use mj_core::relay::{LiveQueuedCommand, LiveSessionBaseline};
-        let state = self.operational_state();
+        let mut state = self.operational_state();
+        anyhow::ensure!(
+            self.quiescent_for_adoption(),
+            "live recovery cut requires a quiescent worker"
+        );
+        state.execution = RelayExecutionState::Idle;
+        state.activity_turn_started_at_ms = None;
         let queue = self
             .snapshot
             .queued_prompts
@@ -380,63 +558,57 @@ impl DurableRelay {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        // Steering can change the user-facing turn without changing the
-        // harness prompt owner. Do not infer a delivered identity from a
-        // possibly replaced steering operation during manual recovery.
-        let active_turn = state
-            .active_prompt
-            .as_ref()
-            .filter(|active| {
-                self.snapshot
-                    .steering
-                    .as_ref()
-                    .is_none_or(|steering| steering.active_prompt_id != active.command_id)
-            })
-            .map(|active| mj_core::state::MaterializedTurn {
-                command_id: active.command_id.clone(),
-                accepted_ordinal: self
-                    .snapshot
-                    .handled_commands
-                    .get(&active.command_id)
-                    .map(|receipt| receipt.accepted_ordinal),
-                turn_start_position: state.latest_ordinal,
-                started_at_ms: active.started_at_ms,
-                steered_into: None,
-            });
-        let delivered_initial_prompts = self.initial_commands.iter().filter_map(|initial| {
-            if !matches!(initial.command, RelayCommand::Prompt { .. })
-                || !self.snapshot.initial_command_ids.contains(&initial.command_id)
-                || self.snapshot.queued_prompts.iter().any(|queued| queued.command_id == initial.command_id)
-            {
-                return None;
-            }
-            let receipt = self.snapshot.handled_commands.get(&initial.command_id);
-            let delivered = match receipt {
-                // Legacy migration pins a previously used startup without its old receipt.
-                None => true,
-                Some(receipt) if receipt.failure.as_deref() == Some("queued command was removed") => false,
-                Some(receipt) => state.active_prompt.as_ref().is_some_and(|active| active.command_id == initial.command_id)
-                    || matches!(receipt.outcome, Some(RelayCommandOutcome::Prompt { .. }))
+        let delivered_initial_prompts = self
+            .initial_commands
+            .iter()
+            .filter_map(|initial| {
+                if !matches!(initial.command, RelayCommand::Prompt { .. })
+                    || !self
+                        .snapshot
+                        .initial_command_ids
+                        .contains(&initial.command_id)
+                    || self
+                        .snapshot
+                        .queued_prompts
+                        .iter()
+                        .any(|queued| queued.command_id == initial.command_id)
+                {
+                    return None;
+                }
+                let receipt = self.snapshot.handled_commands.get(&initial.command_id);
+                let delivered = match receipt {
+                    // Legacy migration pins a previously used startup without its old receipt.
+                    None => true,
+                    Some(receipt)
+                        if receipt.failure.as_deref() == Some("queued command was removed") =>
+                    {
+                        false
+                    }
+                    Some(receipt) => {
+                        matches!(receipt.outcome, Some(RelayCommandOutcome::Prompt { .. }))
                     // Receipts do not distinguish failure before/after start. Preserve
                     // the delivered interpretation for every failure except queue removal.
-                    || receipt.failure.is_some(),
-            };
-            delivered.then(|| LiveQueuedCommand {
-                command_id: initial.command_id.clone(),
-                // Startup owns the original brief even after terminal receipt
-                // compaction. Receipts decide delivery, never display content.
-                command: initial.command.clone(),
-                created_at_ms: state.active_prompt.as_ref()
-                    .filter(|active| active.command_id == initial.command_id)
-                    .map_or(0, |active| active.created_at_ms),
-                accepted_ordinal: receipt.map(|receipt| receipt.accepted_ordinal),
+                    || receipt.failure.is_some()
+                    }
+                };
+                delivered.then(|| LiveQueuedCommand {
+                    command_id: initial.command_id.clone(),
+                    // Startup owns the original brief even after terminal receipt
+                    // compaction. Receipts decide delivery, never display content.
+                    command: initial.command.clone(),
+                    created_at_ms: state
+                        .active_prompt
+                        .as_ref()
+                        .filter(|active| active.command_id == initial.command_id)
+                        .map_or(0, |active| active.created_at_ms),
+                    accepted_ordinal: receipt.map(|receipt| receipt.accepted_ordinal),
+                })
             })
-        }).collect();
+            .collect();
         Ok(LiveSessionBaseline {
             delivered_initial_prompts,
             state,
             queue,
-            active_turn,
             questions: self
                 .snapshot
                 .pending_elicitations
@@ -847,6 +1019,8 @@ impl DurableRelay {
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
             journal_cleanup_pending: true,
+            pending_live_baselines: Vec::new(),
+            pending_native_resumes: Vec::new(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
@@ -933,7 +1107,71 @@ impl DurableRelay {
                     .turn_context
                     .observe_relay(&event.observation, prompt.as_deref());
             }
-            if earlier_history_omitted && let Some(history) = relay.snapshot.authorization_context()
+            let prompt_receipt = |receipt: &mj_core::relay::HandledRelayCommand| {
+                receipt.terminal_ordinal.is_some()
+                    && (receipt
+                        .terminal_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.prompt)
+                        || receipt
+                            .command
+                            .as_ref()
+                            .is_some_and(|command| command.kind() == RelayCommandKind::Prompt))
+            };
+            let terminal_prompt = relay
+                .snapshot
+                .handled_commands
+                .iter()
+                .filter(|(_, receipt)| prompt_receipt(receipt))
+                .max_by_key(|(_, receipt)| receipt.accepted_ordinal);
+            let prompt_owner = relay
+                .snapshot
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.command_id.as_str())
+                .or_else(|| terminal_prompt.map(|(id, _)| id.as_str()));
+            let delivered = prompt_owner.and_then(|owner| {
+                match relay
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .filter(|steering| steering.active_prompt_id == owner)
+                {
+                    Some(steering)
+                        if steering.status == mj_core::relay::SteeringStatus::Applied =>
+                    {
+                        Some(steering.queued_prompt_id.as_str())
+                    }
+                    Some(_) => None, // Delivery is ambiguous; do not resurrect an older reply.
+                    None => Some(owner),
+                }
+            });
+            let last_prompt_terminal = relay
+                .snapshot
+                .handled_commands
+                .values()
+                .filter(|receipt| prompt_receipt(receipt))
+                .filter_map(|receipt| receipt.terminal_ordinal)
+                .max();
+            let later_autonomous_turn = relay.snapshot.autonomous_harness_turn().is_some()
+                || relay.snapshot.active_prompt.is_none()
+                    && relay
+                        .snapshot
+                        .last_harness_turn_started_ordinal
+                        .is_some_and(|started| {
+                            last_prompt_terminal.is_none_or(|terminal| started > terminal)
+                        });
+            if earlier_history_omitted
+                && !later_autonomous_turn
+                && let Some(history) = relay.snapshot.authorization_context()
+                && delivered.is_some_and(|id| {
+                    history
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "user")
+                        .is_some_and(|message| message.id == format!("user:{id}"))
+                })
             {
                 // ACK collection can remove the turn's original observations.
                 // Reuse persisted prompt/reply text; the historical tool-transcript
@@ -1395,6 +1633,7 @@ impl DurableRelay {
             self.persist_snapshot()
                 .context("persist session idle transition")?;
         }
+        self.service_live_baselines();
         Ok(())
     }
 

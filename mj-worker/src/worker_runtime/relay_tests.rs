@@ -4009,6 +4009,7 @@ fn harness_restarting_interrupts_in_flight_commands() {
     assert!(interrupted < restarted);
 }
 
+// Hard-won: de056ae: late TerminalStarted reopened a completed fallback card and blocked recovery.
 #[test]
 fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     let temp = tempfile::tempdir().unwrap();
@@ -4061,6 +4062,8 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     output.push_str("error: the last line is the one that matters\n");
     let produced = output.len();
 
+    let mut cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
@@ -4074,6 +4077,21 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     )
     .unwrap();
 
+    let cut = cut.try_recv().unwrap().unwrap();
+    let completed_frontier = relay.lock().unwrap().latest_ordinal();
+    assert_eq!(cut.state.latest_ordinal, completed_frontier);
+    unix::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::TerminalStarted {
+            terminal_id: "term-1".into(),
+            command: "cargo test".into(),
+            started_at_ms: 1_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(relay.lock().unwrap().latest_ordinal(), completed_frontier);
+    assert!(relay.lock().unwrap().tools_in_flight().is_empty());
     assert!(
         relay
             .lock()

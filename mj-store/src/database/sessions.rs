@@ -839,6 +839,123 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Claim the worker, install its optional quiescent cut, and publish Running
+/// in one writer transaction. Ordinary attachment later owns all post-cut replay.
+pub async fn enqueue_adopted_session<G: Send + 'static>(
+    expected: SessionRecord,
+    cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
+    native_session_id: Option<String>,
+    updated_at: String,
+    guard: G,
+) -> Result<AcceptedDatabaseWrite<SessionRecord, G>> {
+    enqueue_database_write("install adopted session", guard, move |connection| {
+        install_adopted_session_with(connection, expected, cut, native_session_id, updated_at)
+    })
+    .await
+}
+
+fn install_adopted_session_with(
+    connection: &mut Connection,
+    mut expected: SessionRecord,
+    cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
+    native_session_id: Option<String>,
+    updated_at: String,
+) -> Result<SessionRecord> {
+    mj_core::test_hooks::reach_test_hook("adoption_install_write_accepted")?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?1)",
+        [&expected.workspace_id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        expected.workspace_id =
+            super::workspaces::create_or_get_workspace_with(&tx, "Recovered")?.id;
+    }
+    let locator = expected
+        .target
+        .as_deref()
+        .context("adoption has no locator")?;
+    for (id, target) in super::state_io::read_targets(&tx, None)? {
+        ensure!(
+            id == expected.id || !target.same_resource(locator),
+            "worker is already named by session {id}"
+        );
+    }
+    if let Some(current) = super::state_io::load_session_with(&tx, &expected.id)? {
+        ensure!(
+            current.state == SessionState::Disconnected
+                && current.native_session_id.is_none()
+                && current.target == expected.target,
+            "session {} changed before adoption install",
+            expected.id
+        );
+    } else {
+        validate_session_record(&expected)?;
+        insert_session(&tx, &expected)?;
+    }
+    if let Some((projection, baseline)) = &cut {
+        ensure!(
+            projection.session_id == expected.id,
+            "adoption cut belongs to another session"
+        );
+        super::materialized::install_live_session_baseline_with(&tx, projection, baseline)?;
+    }
+    mark_session_worker_connected_with(
+        &tx,
+        &expected.id,
+        native_session_id.as_deref(),
+        &updated_at,
+    )?;
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("adopted session disappeared")?;
+    tx.commit()?;
+    if cut
+        .as_ref()
+        .is_some_and(|(projection, _)| !projection.pending_elicitations.is_empty())
+    {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(current)
+}
+
+/// Record a failed adoption only while its disconnected resource owner is still
+/// current. A successful concurrent adoption must never be demoted by a loser.
+pub fn record_adoption_failure_if_current(
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<Option<SessionRecord>> {
+    let expected = expected.clone();
+    let detail = detail.to_owned();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("record adoption failure", move |_| {
+        record_adoption_failure_if_current_to(&database_path(), &expected, &detail, &updated_at)
+    })
+}
+
+pub(super) fn record_adoption_failure_if_current_to(
+    path: &Path,
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<Option<SessionRecord>> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let Some(mut current) = super::state_io::load_session_with(&tx, &expected.id)? else {
+        return Ok(None);
+    };
+    if current.state == SessionState::Disconnected
+        && current.native_session_id.is_none()
+        && current.target == expected.target
+    {
+        current.last_error = Some(detail.to_owned());
+        current.updated_at = updated_at.to_owned();
+        update_lifecycle_fields(&tx, &current)?;
+    }
+    tx.commit()?;
+    Ok(Some(current))
+}
+
 /// Acceptance of Suspend owns its intent, readiness and Closing publication.
 pub fn save_suspension_intent(
     session: &SessionRecord,
@@ -1522,6 +1639,17 @@ pub(super) fn mark_session_worker_connected_to(
     }
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    mark_session_worker_connected_with(&tx, session_id, native_session_id, updated_at)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn mark_session_worker_connected_with(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    native_session_id: Option<&str>,
+    updated_at: &str,
+) -> Result<()> {
     let changed = tx.execute(
         "UPDATE sessions
          SET state = 'running',
@@ -1535,8 +1663,7 @@ pub(super) fn mark_session_worker_connected_to(
         bail!("unknown session {session_id}");
     }
     // The create commits in this write: nothing is left for a later daemon.
-    super::session_create::settle_create_intent_for_state(&tx, session_id, SessionState::Running)?;
-    tx.commit()?;
+    super::session_create::settle_create_intent_for_state(tx, session_id, SessionState::Running)?;
     Ok(())
 }
 
@@ -1833,6 +1960,40 @@ pub struct SessionResumeOptions {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    // Hard-won: de056ae: a late adoption failure overwrote a successful worker connection.
+    #[test]
+    fn a_stale_adoption_failure_preserves_the_connected_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("adoption.sqlite3");
+        let mut stale = super::super::tests::session("adoption-owner", "project");
+        stale.state = SessionState::Disconnected;
+        stale.native_session_id = None;
+        save_session_to(&path, &stale).unwrap();
+        mark_session_worker_connected_to(
+            &path,
+            &stale.id,
+            Some("surviving-native"),
+            "2030-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let current = record_adoption_failure_if_current_to(
+            &path,
+            &stale,
+            "late failure",
+            "2030-01-01T00:00:01Z",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(current.state, SessionState::Running);
+        assert_eq!(
+            current.native_session_id.as_deref(),
+            Some("surviving-native")
+        );
+        assert!(current.last_error.is_none());
+        let saved = load_state_from(&path).unwrap();
+        assert_eq!(saved.sessions[&stale.id], current);
+    }
 
     // Hard-won: #1538: a resume save overwrote a Container settings edit made while it provisioned
     #[test]

@@ -917,6 +917,13 @@ impl RelayClient {
         }
     }
 
+    pub fn set_adoption_wait_progress(
+        &mut self,
+        progress: Option<tokio::sync::watch::Sender<Option<Vec<String>>>>,
+    ) {
+        self.adoption_wait_progress = progress;
+    }
+
     pub async fn live_session_baseline(&mut self) -> Result<mj_core::relay::LiveSessionBaseline> {
         if self.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL {
             return Err(LiveBaselineUnsupported.into());

@@ -181,6 +181,24 @@ impl TerminalRegistry {
         spawn: TerminalSpawn,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<String> {
+        self.create_with_id(self.allocate_id(), spawn, events)
+    }
+
+    pub(crate) fn allocate_id(&self) -> String {
+        format!(
+            "term-{}-{}",
+            self.connection,
+            self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+        )
+    }
+
+    /// The caller registered this identity with its relay owner before spawn.
+    pub(crate) fn create_with_id(
+        &self,
+        terminal_id: String,
+        spawn: TerminalSpawn,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<String> {
         let line = shell_line(&spawn.command, &spawn.args);
         let mut child = spawn_shell(&line, &spawn)?;
         let pid = child
@@ -197,11 +215,6 @@ impl TerminalRegistry {
             .context("client terminal stderr unavailable")?;
         let buffer = Arc::new(Mutex::new(TerminalBuffer::new(spawn.output_byte_limit)));
         let (exit_tx, exit_rx) = watch::channel(None);
-        let terminal_id = format!(
-            "term-{}-{}",
-            self.connection,
-            self.next_id.fetch_add(1, Ordering::Relaxed) + 1
-        );
         let supervisor = tokio::spawn(supervise(
             terminal_id.clone(),
             child,

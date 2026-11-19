@@ -1878,6 +1878,21 @@ pub(super) fn install_live_session_baseline_to(
     materialized: &MaterializedSession,
     baseline: &mj_core::relay::LiveSessionBaseline,
 ) -> Result<bool> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let installed = install_live_session_baseline_with(&tx, materialized, baseline)?;
+    tx.commit()?;
+    if installed && !materialized.pending_elicitations.is_empty() {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(installed)
+}
+
+pub(super) fn install_live_session_baseline_with(
+    tx: &Transaction<'_>,
+    materialized: &MaterializedSession,
+    baseline: &mj_core::relay::LiveSessionBaseline,
+) -> Result<bool> {
     materialized.validate()?;
     ensure!(
         materialized.session_id == baseline.state.session_id
@@ -1885,9 +1900,7 @@ pub(super) fn install_live_session_baseline_to(
             && materialized.applied_event_digest == baseline.state.latest_digest,
         "live baseline projection does not match its worker cut"
     );
-    let mut connection = open(path)?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if !session_exists(&tx, &materialized.session_id)? {
+    if !session_exists(tx, &materialized.session_id)? {
         bail!("unknown session {}", materialized.session_id);
     }
     let frontier: Option<u64> = tx
@@ -1905,7 +1918,7 @@ pub(super) fn install_live_session_baseline_to(
         digest: baseline.state.latest_digest.clone(),
     };
     native_agents::seed_adopted_native_agents(
-        &tx,
+        tx,
         &materialized.session_id,
         &baseline.state.native_agents,
         &cursor,
@@ -1917,21 +1930,21 @@ pub(super) fn install_live_session_baseline_to(
             [&materialized.session_id],
         )?;
         native_agents::seed_adopted_native_agents(
-            &tx,
+            tx,
             &materialized.session_id,
             staged,
             &cursor,
             1,
         )?;
     }
-    write_materialized_session(&tx, materialized)?;
+    write_materialized_session(tx, materialized)?;
     let turn_id = materialized
         .active_turn
         .as_ref()
         .and_then(|turn| turn.accepted_ordinal);
     for request in &materialized.pending_elicitations {
         events::insert_api_event(
-            &tx,
+            tx,
             &materialized.session_id,
             materialized
                 .last_activity_at_ms
@@ -1941,10 +1954,6 @@ pub(super) fn install_live_session_baseline_to(
                 turn_id,
             },
         )?;
-    }
-    tx.commit()?;
-    if !materialized.pending_elicitations.is_empty() {
-        crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(true)
 }
