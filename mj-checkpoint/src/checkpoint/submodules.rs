@@ -136,7 +136,22 @@ fn inspect_checkout(
     origin_override: Option<&str>,
     managed: bool,
 ) -> Result<()> {
-    if snapshot.is_some() {
+    if let Some(snapshot) = snapshot.as_deref_mut() {
+        // Replacement refs and their otherwise unreachable objects are outside
+        // the snapshot namespaces, for both the root and initialized modules.
+        // Inventory must refuse them before any consented operation is aborted.
+        let replacements = submodule_git(runner, checkout, &["replace", "--list"])?;
+        ensure!(
+            !managed || replacements.is_empty(),
+            "managed checkout {} has Git replacement refs that snapshots do not preserve ({}); back up those refs and objects in an independent repository, remove the replacements, and retry, or suspend with --without-checkpoint",
+            checkout.display(),
+            String::from_utf8_lossy(&replacements)
+                .trim_end_matches('\n')
+                .replace('\n', ", ")
+        );
+        if !replacements.is_empty() {
+            snapshot.notices.push(format!("{}: Git replacement refs and replacement content do not travel with the snapshot; the raw checkout is kept", checkout.display()));
+        }
         crate::snapshot::validate_origin_rewrite_anchoring(runner, checkout, None)?;
     }
     let mut gitlinks = gitlinks(runner, checkout)?;
@@ -330,16 +345,14 @@ fn inspect_checkout(
                 .strip_prefix("submodule.")
                 .and_then(|name| name.strip_suffix(".path"))
                 .context("invalid submodule configuration key")?;
-            let configured = runner.run(
-                checkout,
-                &git_command(&["config", "--get", &format!("submodule.{name}.url")]),
-            )?;
-            if configured.status != 0 {
+            let configured =
+                crate::snapshot::config_values(runner, checkout, &format!("submodule.{name}.url"))?
+                    .pop();
+            let Some(configured) = configured else {
                 inspection.dirty.push(named);
                 continue;
-            }
-            let configured = std::str::from_utf8(&configured.stdout)?.trim();
-            let url = crate::snapshot::stored_remote(runner, checkout, configured)?;
+            };
+            let url = crate::snapshot::stored_remote(runner, checkout, &configured)?;
             let origins = crate::snapshot::config_values(runner, &submodule, "remote.origin.url")?;
             if origins.is_empty() {
                 inspection.dirty.push(named);

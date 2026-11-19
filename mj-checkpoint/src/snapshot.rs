@@ -5028,7 +5028,7 @@ fn restore_submodules(
                         ["config", "--local", "extensions.worktreeConfig", "true"],
                     )?;
                 }
-                restore_worktree_rules(runner, &directory, &submodule.worktree_url_rules)?;
+                restore_worktree_rules(runner, &directory, &submodule.worktree_url_rules, true)?;
                 git_text(
                     runner,
                     &directory,
@@ -5487,27 +5487,25 @@ fn restore_worktree_rules(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     rules: &[SnapshotConfigEntry],
+    replace_origin: bool,
 ) -> Result<()> {
     validate_url_rules(rules)?;
-    // Push URLs are restored in shared config. Clear direct worktree values
+    // Origin and push URLs are restored in shared config. Clear direct worktree values
     // which would otherwise add stale destinations, including on retry.
-    if worktree_config_enabled(runner, checkout)? {
-        let output = run_git(
-            runner,
-            checkout,
-            [
-                "config",
-                "--worktree",
-                "--unset-all",
-                "remote.origin.pushurl",
-            ],
-            &[],
-        )?;
-        ensure!(
-            matches!(output.status, 0 | 5),
-            "{}",
-            git_failure("clear provisioned worktree push URLs", &output)
-        );
+    if replace_origin && worktree_config_enabled(runner, checkout)? {
+        for key in ["remote.origin.url", "remote.origin.pushurl"] {
+            let output = run_git(
+                runner,
+                checkout,
+                ["config", "--worktree", "--unset-all", key],
+                &[],
+            )?;
+            ensure!(
+                matches!(output.status, 0 | 5),
+                "{}",
+                git_failure("clear provisioned worktree origin URLs", &output)
+            );
+        }
     }
     // `worktree add` copies config.worktree from the primary checkout. Replace
     // those inherited URL rules so each restored checkout keeps its own scope.
@@ -5576,7 +5574,7 @@ fn initialize_repository(
             ["config", "extensions.worktreeConfig", "true"],
         )?;
     }
-    restore_worktree_rules(runner, destination, worktree_rules)?;
+    restore_worktree_rules(runner, destination, worktree_rules, true)?;
     git_text(runner, destination, ["remote", "add", "origin", origin])?;
     Ok(())
 }
@@ -5695,6 +5693,16 @@ pub fn restore_workspace_snapshot(
     let destination = destination.as_path();
     if matches!(base, RestoreBase::Provisioned { .. }) {
         validate_restore_worktree_root(runner, destination)?;
+        let root = fs::canonicalize(destination)?;
+        let (private, common) = crate::archive::git::git_directories(runner, destination)?;
+        ensure!(
+            fs::canonicalize(&private)?.starts_with(&root)
+                && fs::canonicalize(&common)?.starts_with(&root),
+            "provisioned restore destination {} shares Git administration outside its checkout ({} and {}); provision an independent clone here and retry",
+            destination.display(),
+            private.display(),
+            common.display()
+        );
         for (tree_path, modules) in
             std::iter::once((Path::new(""), snapshot.initialized_submodules.as_slice())).chain(
                 snapshot.worktrees.iter().map(|tree| {
@@ -5771,7 +5779,12 @@ pub fn restore_workspace_snapshot(
                     ["config", "extensions.worktreeConfig", "true"],
                 )?;
             }
-            restore_worktree_rules(runner, destination, &snapshot.worktree_url_rules)?;
+            restore_worktree_rules(
+                runner,
+                destination,
+                &snapshot.worktree_url_rules,
+                snapshot.source_had_origin,
+            )?;
             if snapshot.source_had_origin
                 && let Some(first) = snapshot.origin_urls.first()
             {
@@ -6160,7 +6173,12 @@ pub fn restore_workspace_snapshot(
             )?;
             git_text(runner, &path, ["stash", "apply", "--index", state])?;
         }
-        restore_worktree_rules(runner, &path, &tree.url_rules)?;
+        restore_worktree_rules(
+            runner,
+            &path,
+            &tree.url_rules,
+            snapshot.source_had_origin || matches!(base, RestoreBase::Clone { .. }),
+        )?;
         clear_worktree_upstreams(runner, &path, &restored_branches)?;
         restore_submodules(
             runner,
@@ -16861,7 +16879,7 @@ mod tests {
         );
         assert!(!restored.join(".gitmodules").exists());
     }
-    // Hard-won: e0cc04156: worktree push URLs survived shared remote replacement on provisioned retry.
+    // Hard-won: e0cc04156/9a8ec9177: direct worktree origin/push URLs survived provisioned replacement.
     #[test]
     fn review_twelfth_provisioned_push_urls_clear_all_direct_worktree_scopes() {
         for explicit in [false, true] {
@@ -16889,6 +16907,15 @@ mod tests {
                     &[
                         "config",
                         "--worktree",
+                        "remote.origin.url",
+                        "obsolete:fetch-and-push",
+                    ],
+                );
+                git(
+                    checkout,
+                    &[
+                        "config",
+                        "--worktree",
                         "remote.origin.pushurl",
                         "obsolete:publish",
                     ],
@@ -16904,6 +16931,10 @@ mod tests {
             )
             .unwrap();
             for checkout in [&destination, &destination.join("lane")] {
+                assert_eq!(
+                    config_values(&FileGit, checkout, "remote.origin.url").unwrap(),
+                    snapshot.origin_urls
+                );
                 let expected = if explicit {
                     "saved:publish"
                 } else {
@@ -17210,5 +17241,171 @@ mod tests {
         let runner = Count(0.into());
         workspace_inventory(&runner, &root.checkout, &CheckoutOwnership::Managed).unwrap();
         assert_eq!(runner.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    // Hard-won: 9a8ec9177: an exact linked root still let restore mutate another checkout's common state.
+    #[test]
+    fn review_thirteenth_provisioned_linked_root_refuses_before_shared_writes() {
+        let saved = Repo::new();
+        let snapshot = saved.capture(&CheckoutOwnership::Managed);
+        let owner = Repo::new();
+        git(&owner.checkout, &["branch", "keep-primary"]);
+        git(&owner.checkout, &["tag", "keep-tag"]);
+        fs::write(owner.checkout.join("file"), "stash owned by primary\n").unwrap();
+        git(&owner.checkout, &["stash", "push", "-m", "keep stash"]);
+        let linked = owner.temp.path().join("provisioned-linked");
+        git(
+            &owner.checkout,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        let config = fs::read(owner.checkout.join(".git/config")).unwrap();
+        let refs = git(&owner.checkout, &["show-ref"]);
+        let stashes = git(&owner.checkout, &["stash", "list"]);
+        let index = fs::read(git_path(&FileGit, &linked, "index").unwrap()).unwrap();
+        let error = restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &linked,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("shares Git administration outside")
+                && format!("{error:#}").contains("independent clone"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read(owner.checkout.join(".git/config")).unwrap(),
+            config
+        );
+        assert_eq!(git(&owner.checkout, &["show-ref"]), refs);
+        assert_eq!(git(&owner.checkout, &["stash", "list"]), stashes);
+        assert_eq!(
+            fs::read(git_path(&FileGit, &linked, "index").unwrap()).unwrap(),
+            index
+        );
+    }
+
+    // Hard-won: 9a8ec9177: excluded replacement refs could change saved content and hold the only copy of objects.
+    #[test]
+    fn review_thirteenth_replacement_refs_refuse_before_a_managed_abort() {
+        let root = Repo::new();
+        root.conflict();
+        root.start_conflict("merge");
+        let original = git(&root.checkout, &["rev-parse", "HEAD"]);
+        let tree = git(&root.checkout, &["rev-parse", "HEAD^{tree}"]);
+        let replacement = git(
+            &root.checkout,
+            &[
+                "commit-tree",
+                &tree,
+                "-m",
+                "replacement only in refs/replace",
+            ],
+        );
+        git(&root.checkout, &["replace", &original, &replacement]);
+        let index = fs::read(root.checkout.join(".git/index")).unwrap();
+        let conflict = fs::read(root.checkout.join("file")).unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("replacement refs")
+                && format!("{error:#}").contains("independent repository"),
+            "{error:#}"
+        );
+        assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+        assert_eq!(fs::read(root.checkout.join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(root.checkout.join("file")).unwrap(), conflict);
+        let raw = workspace_inventory(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+        )
+        .unwrap();
+        assert!(
+            raw.notices
+                .iter()
+                .any(|notice| notice.contains("replacement refs")
+                    && notice.contains("raw checkout is kept"))
+        );
+        git(&root.checkout, &["replace", "-d", &original]);
+        root.capture(&CheckoutOwnership::Managed);
+        assert!(!root.checkout.join(".git/MERGE_HEAD").exists());
+        // The same omission applies inside an initialized module's object store.
+        let module = Repo::new();
+        let directory = add_submodule(&root, &module);
+        let original = git(&directory, &["rev-parse", "HEAD"]);
+        let tree = git(&directory, &["rev-parse", "HEAD^{tree}"]);
+        let replacement = git(
+            &directory,
+            &["commit-tree", &tree, "-m", "module replacement"],
+        );
+        git(&directory, &["replace", &original, &replacement]);
+        let error =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(directory.to_str().unwrap())
+                && format!("{error:#}").contains("replacement refs"),
+            "{error:#}"
+        );
+        let raw = workspace_inventory(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+        )
+        .unwrap();
+        assert!(
+            raw.notices
+                .iter()
+                .any(|notice| notice.contains("replacement refs"))
+        );
+    }
+
+    // Hard-won: 9a8ec9177: trim() corrupted a configured module URL whose literal path ended in whitespace.
+    #[test]
+    fn review_thirteenth_submodule_urls_keep_literal_trailing_whitespace() {
+        let root = Repo::new();
+        let mut module = Repo::new();
+        let spaced = module.temp.path().join("origin with space ");
+        fs::rename(&module.origin, &spaced).unwrap();
+        module.origin = spaced;
+        add_submodule(&root, &module);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert_eq!(
+            snapshot.initialized_submodules[0].url,
+            module.origin.to_str().unwrap()
+        );
+        let restored = root.restore(&snapshot, None);
+        let configured = config_values(&FileGit, &restored, "submodule.sub.url").unwrap();
+        assert_eq!(configured, vec![module.origin.to_str().unwrap()]);
+        git(&restored, &["ls-remote", &configured[0]]);
+        git(&restored, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(restored.join(".git/modules/sub")).unwrap();
+        git(
+            &restored,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        assert_eq!(
+            git(&restored.join("sub"), &["rev-parse", "HEAD"]),
+            snapshot.initialized_submodules[0].commit
+        );
     }
 }
