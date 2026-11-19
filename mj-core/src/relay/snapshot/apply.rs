@@ -577,11 +577,26 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.cancelling_prompt_id = snapshot
                         .active_prompt
                         .as_ref()
-                        .map(|prompt| prompt.command_id.clone());
-                    // With no prompt of ours running, the stop is aimed at the
-                    // harness's own turn. A second stop of the same turn never
+                        .map(|prompt| prompt.command_id.clone())
+                        .or_else(|| {
+                            matches!(command, RelayCommand::CancelTurn)
+                                .then(|| {
+                                    snapshot
+                                        .queued_prompts
+                                        .iter()
+                                        .find(|queued| {
+                                            crate::continuation::is_restart_continuation(
+                                                &queued.command_id,
+                                            )
+                                        })
+                                        .map(|queued| queued.command_id.clone())
+                                })
+                                .flatten()
+                        });
+                    // Without a prompt or queued recovery target, the stop
+                    // is aimed at the harness's own turn. A second stop of the same turn never
                     // downgrades an acknowledged first one.
-                    if snapshot.active_prompt.is_none()
+                    if snapshot.cancelling_prompt_id.is_none()
                         && let Some(turn) = snapshot.autonomous_harness_turn()
                         && snapshot
                             .cancelling_harness_turn
@@ -2053,11 +2068,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
     {
         steering.status = SteeringStatus::Resolved;
     }
-    if snapshot
-        .cancelling_prompt_id
-        .as_ref()
-        .is_some_and(|id| snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id))
-    {
+    if snapshot.cancelling_prompt_id.as_ref().is_some_and(|id| {
+        snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id)
+            && !(crate::continuation::is_restart_continuation(id)
+                && snapshot.dispatches.values().any(|dispatch| {
+                    matches!(dispatch.command, RelayCommand::CancelTurn)
+                        && matches!(
+                            dispatch.state,
+                            RelayDispatchState::Queued
+                                | RelayDispatchState::Pending
+                                | RelayDispatchState::InFlight
+                        )
+                }))
+    }) {
         snapshot.cancelling_prompt_id = None;
     }
     // The stop belongs to the autonomous turn it named; once that turn is gone
@@ -2247,6 +2270,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         _ => {}
     }
     if let Some(id) = delivered
+        && !crate::continuation::is_restart_continuation(id)
         && let Some(RelayCommand::MailboxWake { events }) =
             snapshot.dispatches.get(id).map(|d| &d.command)
     {

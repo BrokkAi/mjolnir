@@ -379,7 +379,7 @@ impl DurableRelay {
             // A journal append can succeed before snapshot persistence reports
             // an error. Retrying the durable command must resume any remaining
             // relay-local transition instead of merely echoing its first ACK.
-            if command.is_relay_local() {
+            if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
                 self.finish_relay_local_command(command_id)?;
             }
             return Ok(Ok(RelayResponsePayload::Accepted {
@@ -919,7 +919,7 @@ impl DurableRelay {
             },
         )?;
 
-        if command.is_relay_local() {
+        if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
             self.finish_relay_local_command(command_id)?;
         }
         self.promote_next_queued_command()?;
@@ -966,6 +966,22 @@ impl DurableRelay {
         Ok(None)
     }
 
+    // The durable target survives until the control completes, including
+    // a restart after the queued prompt was already terminalized.
+    pub(super) fn is_queued_recovery_cancel(&self, command_id: &str) -> bool {
+        self.snapshot.active_prompt.is_none()
+            && self
+                .snapshot
+                .cancelling_prompt_id
+                .as_deref()
+                .is_some_and(is_restart_continuation)
+            && self
+                .snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| matches!(dispatch.command, RelayCommand::CancelTurn))
+    }
+
     /// Finish a relay-local command from its durable dispatch record. This is
     /// deliberately restartable: every intermediate mutation is an event, so
     /// reopening the relay can resume after any append without duplicating or
@@ -982,6 +998,33 @@ impl DurableRelay {
             {
                 self.garbage_collect_relay_history()?;
             }
+            return Ok(());
+        }
+        if self.is_queued_recovery_cancel(command_id) {
+            let target = self
+                .snapshot
+                .cancelling_prompt_id
+                .clone()
+                .expect("cancel target exists");
+            if self.snapshot.handled_commands[&target]
+                .terminal_ordinal
+                .is_none()
+            {
+                self.record_command_interrupted(
+                    &target,
+                    mj_core::event_outcome::OutcomeReason::RequestedCancellation,
+                    "User cancelled queued restart recovery",
+                )?;
+            }
+            self.append_relay_event(
+                Some(command_id),
+                RelayObservation::CommandCompleted {
+                    command_id: command_id.to_owned(),
+                    command: Some(RelayCommandKind::CancelTurn),
+                    barrier_command_id: None,
+                    outcome: RelayCommandOutcome::Cancelled,
+                },
+            )?;
             return Ok(());
         }
         let dispatch = self
@@ -1976,12 +2019,7 @@ impl DurableRelay {
         let ordinal = match self.append_relay_event(Some(command_id), observation.clone()) {
             Ok(ordinal) => ordinal,
             Err(error)
-                if error
-                    .downcast_ref::<RelayBudgetExceeded>()
-                    .is_some_and(|limit| {
-                        limit.description == "relay snapshot"
-                            && limit.budget == RELAY_SNAPSHOT_BYTE_BUDGET
-                    })
+                if error.downcast_ref::<RelayBudgetExceeded>().is_some()
                     && self.snapshot.dispatches.contains_key(command_id)
                     && matches!(
                         &observation,
