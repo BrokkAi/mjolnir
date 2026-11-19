@@ -6,7 +6,7 @@
   "window_extended": true,
   "order_2025_len": 494,
   "pool_size": 625,
-  "stop_index": 416,
+  "stop_index": 421,
   "order": [
     "fa82066ceed07588771a3dbe22202b9e95ecb56b",
     "9cf774bed8919636f437caf0e7ee379fc701cdab",
@@ -1136,5 +1136,5 @@
     "a76d452f75e1a503e1e1369143555d9153004edb",
     "e7b247de0bcabeda554f9d4185067b2141116535"
   ],
-  "dev_stop_index": 473
+  "dev_stop_index": 498
 }

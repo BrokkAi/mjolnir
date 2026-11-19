@@ -33,4 +33,3 @@
 {"order_index": 61, "fix_commit": "3f1f9e1056c86fa04d8b54bdec39fa8a0d25258a", "rule": "attribution", "reason": "Bundles multiple unrelated init-template-dir and directory tweaks across several commits."}
 {"order_index": 63, "fix_commit": "5cd12dc8c4a9fccad0990eb97115527980d9f603", "rule": "pre_flagged", "reason": "Intro fac3516167 had an explicit '// FIXME: /r/n should be kept as is' in fix_end_of_file.rs:34."}
 {"order_index": 64, "fix_commit": "156c0cec12847513ba764d1d87543ab6d0785c64", "rule": "findable_from_diff", "reason": "External Julia Pkg.add vs Pkg.REPLMode.pkgstr specifier syntax difference, not visible from the Rust repo at 0a4be22599."}
-{"order_index": 68, "fix_commit": "56bcab73370eb7e7bde739c1da75f879f9a05170", "rule": "spread", "reason": "Workspace path handling in meta_hooks.rs on intro a5a1b3b2b0 (already admitted via idx 5, 15, 57 on a5a1b3b2b0)."}

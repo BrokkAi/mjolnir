@@ -355,3 +355,7 @@
 {"order_index": 413, "fix_commit": "be96f5d5e296b90c637e79362f14c45f6bca280d", "rule": "real_behavior", "reason": "Error message precedence when both --from and GROUP are invalid (cosmetic/GNU parity)."}
 {"order_index": 414, "fix_commit": "1db2e2356a6745a06f53c3ed4d3867900ae9a6c6", "rule": "window_pre_2024", "reason": "Originates in 2016-05-10 commit ad9bfcef5b (dircolors: implemented), pre-2024."}
 {"order_index": 415, "fix_commit": "c6d0aed35c9323a5b583f8160be37fac7a705bb1", "rule": "real_behavior", "reason": "No production Rust source changes (tests: fix xattr build errors)."}
+{"order_index": 417, "fix_commit": "cf2fa7c556ce2e984104aabe90838d5b5f9ce15e", "rule": "pre_flagged", "reason": "Originates in 2024-03-10 commit d11d595fd, where the existing comment directly above fn stat explicitly documents 'If follow is false or the symlink is broken, the function will return metadata of the symlink itself'."}
+{"order_index": 418, "fix_commit": "4f7dfedaf2de14ff99b2dc4204db11526526a5a4", "rule": "window_pre_2024", "reason": "Originates in 2023-12-11 commit e1032e1f0 (who runlevel last='N' check), pre-2024."}
+{"order_index": 419, "fix_commit": "b5f8931b176088c7d304b0481346b4a4c02f63a8", "rule": "window_pre_2024", "reason": "Originates in 2021-04-10 commit c54b5f2d8 (stdbuf get_many::<String>), pre-2024."}
+{"order_index": 420, "fix_commit": "e2a9e49fa28c790a01c3b0e8e097855dfbc49935", "rule": "real_behavior", "reason": "Test-only change (tests/by-util/test_tail.rs), no production Rust source changes."}
