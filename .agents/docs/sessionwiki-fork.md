@@ -33,6 +33,13 @@ canonical, matching its previous import-backed adapter. The indexer uses
 across both discovery policies. Forward that hook from delegating adapters;
 keep key rewriting and identity adoption in the library.
 
+Version 0.34.27 adds `index::sync_with_progress` and `index::SyncProgress`.
+The callback reports adapter start with an unknown total, then changed-session
+counts and per-session completion for both file and shared-store adapters.
+`sync_with` retains its previous API and terminal output. The index schema
+remains version 9. Mjolnir publishes these callbacks through its generation
+owner; opening a dialog or beginning a filter requests a pass explicitly.
+
 What the fork used to add, and where it is now:
 
 - The embedder hooks (`index::sync_with`, `Adapter::reconcile_scope`,
@@ -51,7 +58,7 @@ What the fork used to add, and where it is now:
   write, with a full pass. Standing aside from an older index too stranded it
   for good, since nothing else would ever bring it forward. Check
   `sessionwiki::index::SCHEMA_VERSION` on every bump. 0.30.1 to 0.33.1 kept
-  version 8; 0.34.0 to 0.34.25 keep version 9. SessionWiki itself refuses to
+  version 8; 0.34.0 to 0.34.27 keep version 9. SessionWiki itself refuses to
   rebuild a newer index from 0.34.1 on, so only a `sessionwiki` command older
   than that rebuilds Mjolnir's index back down.
 - **Full-pass marker.** `<data_dir>/sessionwiki-built` records the cache

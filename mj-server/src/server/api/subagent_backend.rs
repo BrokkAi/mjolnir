@@ -480,15 +480,17 @@ pub trait SubagentBackend: Send + Sync {
     /// A git bundle of the session's committed work.
     fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>>;
 
-    /// Whether the index was synced recently enough that a query need not ask
-    /// for one.
-    fn wiki_sync_is_stale(&self) -> bool {
-        false
+    fn wiki_sync_request(&self) -> anyhow::Result<mj_client::daemon::WikiSyncStatus> {
+        anyhow::bail!("SessionWiki sync is unavailable")
     }
 
-    /// Ask for a background sync. It is never waited for: a query answers from
-    /// what the index holds now.
-    fn wiki_request_sync(&self) {}
+    fn wiki_sync_watch(
+        &self,
+        _epoch: String,
+        _after: u64,
+    ) -> BoxFuture<'_, anyhow::Result<mj_client::daemon::WikiSyncStatus>> {
+        Box::pin(async { anyhow::bail!("SessionWiki sync is unavailable") })
+    }
 
     fn wiki_search(
         &self,
