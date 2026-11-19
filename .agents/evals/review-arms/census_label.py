@@ -32,8 +32,15 @@ MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path",
 ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
 
 
+# The plan reserves codex4 for other sessions (PLAN-rql-census.md, Cost and quota).
+EXCLUDED_PROFILES = {"codex4"}
+
+
 def role_profile(args, role):
-    return getattr(args, "profile", None) or ROLES[role][0]
+    profile = getattr(args, "profile", None) or ROLES[role][0]
+    if profile in EXCLUDED_PROFILES:
+        raise SystemExit(f"--profile {profile} is excluded from the census by the plan")
+    return profile
 INPUTS = ("id", "repo", "intro_commit", "base_commit", "fix_commit", "defect", "trigger", "location")
 
 LABELLER_EFFORT = "high"
