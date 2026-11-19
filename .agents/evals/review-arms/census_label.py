@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 import subprocess
 from tempfile import mkdtemp
 import time
@@ -30,6 +31,11 @@ def rows(path):
                 try:
                     yield json.loads(line)
                 except ValueError as error:
+                    # An interrupted append leaves at most one unterminated final line; skip it so
+                    # the complete rows stay usable and its items are labelled again.
+                    if not line.endswith("\n"):
+                        print(f"{path}:{number}: skipping an incomplete final line", file=sys.stderr)
+                        return
                     raise ValueError(f"{path}:{number}: {error}") from error
 
 
@@ -711,6 +717,15 @@ def main():
                     log(args.labels_dir, "batch-failed", split=args.split, role=args.labeller,
                         repo=repo, ids=[item["id"] for item in batch], error=str(error))
                     raise
+        # A run is complete only when every selected item has a valid label. Items that still
+        # fail after the repair turn are in invalid.jsonl; report them as an unsuccessful run.
+        labelled = {(row["repo"], row["id"]) for row in rows(destination)} if destination.exists() else set()
+        unresolved = [item["id"] for item in selected if (item["repo"], item["id"]) not in labelled]
+        if unresolved:
+            print(f"{len(unresolved)} selected items have no valid label: {', '.join(unresolved[:20])}",
+                  file=sys.stderr)
+            return 1
+        return 0
 
 
 if __name__ == "__main__":
