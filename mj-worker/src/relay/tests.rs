@@ -27,6 +27,190 @@ fn initial_fifo_commands() -> Vec<mj_core::worker_launch::InitialWorkerCommand> 
     .collect()
 }
 
+// Hard-won: 6f0f854: a legacy receipt evicted before /clear allowed startup replay at upgrade.
+#[test]
+fn startup_upgrade_uses_lifetime_prompt_watermark_after_pruning_and_clear() {
+    legacy_startup_with_pruned_receipt(true, false);
+}
+
+// Hard-won: 6f0f854: pre-watermark native use must still prove startup was seeded.
+#[test]
+fn startup_upgrade_preserves_pre_watermark_native_use_without_a_receipt() {
+    legacy_startup_with_pruned_receipt(false, true);
+}
+
+fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = vec![mj_core::worker_launch::InitialWorkerCommand {
+        command_id: "original-brief".into(),
+        command: prompt("original task"),
+        optional: false,
+    }];
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "old", HarnessKind::Codex, &commands)
+            .unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "old-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "original-brief");
+    submit_relay(&mut relay, "later-prompt", prompt("later"));
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "later-prompt");
+    // Emulate legacy retention, before startup owners were registered.
+    relay.snapshot.initial_command_ids.clear();
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("later-command-{index}"),
+            RelayCommand::RecordNotice {
+                text: "later".into(),
+            },
+        );
+    }
+    let acknowledged = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "prune-old-startup", acknowledged);
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("original-brief")
+    );
+    if clear {
+        submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed(
+                "clear-context",
+                RelayCommandOutcome::ContextCleared {
+                    native_session_id: "cleared-thread".into(),
+                    memory: None,
+                },
+            )
+            .unwrap();
+        assert!(!relay.snapshot.native_session_used);
+    } else {
+        assert!(relay.snapshot.native_session_used);
+    }
+    let frontier = relay.latest_ordinal();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["format_version"] = serde_json::json!(27);
+    // Legacy collection pruned only after a checkpoint covered this ACK.
+    saved["recovery_floor_ordinal"] = saved["acknowledged_through"].clone();
+    saved["recovery_floor_digest"] = saved["acknowledged_digest"].clone();
+    saved.as_object_mut().unwrap().remove("initial_command_ids");
+    saved.as_object_mut().unwrap().remove("native_use_evidence");
+    if omit_watermark {
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("latest_prompt_accepted_ordinal");
+    }
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    for _ in 0..2 {
+        let mut relay = DurableRelay::open_for_harness(
+            temp.path(),
+            SESSION,
+            "new",
+            HarnessKind::Codex,
+            &commands,
+        )
+        .unwrap();
+        assert_eq!(relay.latest_ordinal(), frontier);
+        assert!(
+            relay
+                .snapshot
+                .initial_command_ids
+                .contains("original-brief")
+        );
+        assert!(
+            !relay
+                .snapshot
+                .handled_commands
+                .contains_key("original-brief")
+        );
+        let cut = relay.live_session_baseline().unwrap();
+        assert_eq!(cut.delivered_initial_prompts.len(), 1);
+        assert_eq!(
+            cut.delivered_initial_prompts[0].command_id,
+            "original-brief"
+        );
+        assert!(
+            cut.delivered_initial_prompts[0]
+                .command
+                .prompt_blocks()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    }
+}
+
+// Hard-won: 6f0f854: a partially accepted selector prefix must not consume the unsubmitted brief.
+#[test]
+fn startup_upgrade_completes_one_of_two_accepted_commands_exactly_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = vec![
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: "initial-model".into(),
+            command: set_config("model", "chosen"),
+            optional: false,
+        },
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: "initial-brief".into(),
+            command: prompt("owed task"),
+            optional: false,
+        },
+    ];
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let accepted = submit_relay(&mut relay, "initial-model", commands[0].command.clone());
+    assert!(relay.snapshot.latest_prompt_accepted_ordinal.is_none());
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["format_version"] = serde_json::json!(27);
+    saved.as_object_mut().unwrap().remove("initial_command_ids");
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "new", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(
+        relay.snapshot.handled_commands["initial-model"].accepted_ordinal,
+        accepted
+    );
+    assert!(
+        relay
+            .snapshot
+            .handled_commands
+            .contains_key("initial-brief")
+    );
+    let frontier = relay.latest_ordinal();
+    drop(relay);
+    let relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "new", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(relay.latest_ordinal(), frontier);
+    assert_eq!(
+        relay
+            .snapshot
+            .queued_prompts
+            .iter()
+            .filter(|queued| queued.command_id == "initial-brief")
+            .count(),
+        1
+    );
+}
+
 // Hard-won: 92ab7be: clearing context and pruning receipts replayed the original child assignment.
 #[test]
 fn initial_brief_is_not_reseeded_after_clear_and_ack_pruning() {

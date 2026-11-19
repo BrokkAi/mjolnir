@@ -380,22 +380,56 @@ impl DurableRelay {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let active_turn =
-            state
-                .active_prompt
-                .as_ref()
-                .map(|active| mj_core::state::MaterializedTurn {
-                    command_id: active.command_id.clone(),
-                    accepted_ordinal: self
-                        .snapshot
-                        .handled_commands
-                        .get(&active.command_id)
-                        .map(|receipt| receipt.accepted_ordinal),
-                    turn_start_position: state.latest_ordinal,
-                    started_at_ms: active.started_at_ms,
-                    steered_into: None,
-                });
+        // Steering can change the user-facing turn without changing the
+        // harness prompt owner. Do not infer a delivered identity from a
+        // possibly replaced steering operation during manual recovery.
+        let active_turn = state
+            .active_prompt
+            .as_ref()
+            .filter(|_| self.snapshot.steering.is_none())
+            .map(|active| mj_core::state::MaterializedTurn {
+                command_id: active.command_id.clone(),
+                accepted_ordinal: self
+                    .snapshot
+                    .handled_commands
+                    .get(&active.command_id)
+                    .map(|receipt| receipt.accepted_ordinal),
+                turn_start_position: state.latest_ordinal,
+                started_at_ms: active.started_at_ms,
+                steered_into: None,
+            });
+        let delivered_initial_prompts = self.initial_commands.iter().filter_map(|initial| {
+            if !matches!(initial.command, RelayCommand::Prompt { .. })
+                || !self.snapshot.initial_command_ids.contains(&initial.command_id)
+                || self.snapshot.queued_prompts.iter().any(|queued| queued.command_id == initial.command_id)
+            {
+                return None;
+            }
+            let receipt = self.snapshot.handled_commands.get(&initial.command_id);
+            let delivered = match receipt {
+                // Legacy migration pins a previously used startup without its old receipt.
+                None => true,
+                Some(receipt) if receipt.failure.as_deref() == Some("queued command was removed") => false,
+                Some(receipt) => state.active_prompt.as_ref().is_some_and(|active| active.command_id == initial.command_id)
+                    || matches!(receipt.outcome, Some(RelayCommandOutcome::Prompt { .. }))
+                    // Receipts do not distinguish failure before/after start. Preserve
+                    // the delivered interpretation for every failure except queue removal.
+                    || receipt.failure.is_some(),
+            };
+            delivered.then(|| LiveQueuedCommand {
+                command_id: initial.command_id.clone(),
+                command: RelayCommand::Prompt {
+                    prompt: receipt.and_then(|receipt| receipt.command.as_ref())
+                        .and_then(RelayCommand::prompt_blocks).unwrap_or_default().into_owned(),
+                },
+                created_at_ms: state.active_prompt.as_ref()
+                    .filter(|active| active.command_id == initial.command_id)
+                    .map_or(0, |active| active.created_at_ms),
+                accepted_ordinal: receipt.map(|receipt| receipt.accepted_ordinal),
+            })
+        }).collect();
         Ok(LiveSessionBaseline {
+            delivered_initial_prompts,
             state,
             queue,
             active_turn,
@@ -696,15 +730,24 @@ impl DurableRelay {
             snapshot
         };
 
-        // Startup owns these receipts until session destruction: after a context clear,
-        // seed_initial_commands still reads them. Keep that receipt as the single
-        // durable initialization fact, at the cost of a handful of entries per session.
+        // Startup pins live until destroy. Upgrade from the lifetime prompt
+        // watermark, which /clear never resets: startup's final brief is the
+        // first accepted prompt, so that watermark proves the whole prefix.
+        // Pre-watermark states use their legacy native-use proof instead.
+        // Without it, retain only accepted receipt IDs and complete a crashed
+        // selector prefix normally. Missing selectors are idempotent settings.
+        // This also finishes migration first opened without launch arguments.
         let startup_owner_count = snapshot.initial_command_ids.len();
-        snapshot.initial_command_ids.extend(
-            initial_commands
-                .iter()
-                .map(|initial| initial.command_id.clone()),
-        );
+        for initial in initial_commands {
+            if snapshot.latest_prompt_accepted_ordinal.is_some()
+                || snapshot.native_session_used
+                || snapshot.handled_commands.contains_key(&initial.command_id)
+            {
+                snapshot
+                    .initial_command_ids
+                    .insert(initial.command_id.clone());
+            }
+        }
         let registered_startup_owners = snapshot.initial_command_ids.len() != startup_owner_count;
         let compacted_terminal_commands = snapshot.compact_terminal_commands()?;
         let assigned_store_id = snapshot.store_id.is_none();
@@ -926,6 +969,7 @@ impl DurableRelay {
             })?;
         }
         relay.adopt_unqueued_queue_commands()?;
+        relay.ensure_initial_commands_succeeded()?;
         relay.seed_initial_commands()?;
         relay.recover_nonterminal_commands()?;
         relay.ensure_initial_commands_succeeded()?;
@@ -952,16 +996,10 @@ impl DurableRelay {
     /// The final prompt's receipt proves the entire prefix was journaled. Once
     /// a turn has run, receipt compaction must never cause initialization again.
     fn seed_initial_commands(&mut self) -> Result<()> {
-        self.ensure_initial_commands_succeeded()?;
         let Some(last) = self.initial_commands.last() else {
             return Ok(());
         };
-        if self.snapshot.native_session_used
-            || self
-                .snapshot
-                .handled_commands
-                .contains_key(&last.command_id)
-        {
+        if self.snapshot.initial_command_ids.contains(&last.command_id) {
             return Ok(());
         }
         anyhow::ensure!(
@@ -975,6 +1013,13 @@ impl DurableRelay {
                     || matches!(initial.command, RelayCommand::SetConfig { .. }),
                 "initial input before the brief must be configuration"
             );
+            if self
+                .snapshot
+                .initial_command_ids
+                .contains(&initial.command_id)
+            {
+                continue;
+            }
             self.submit_command(&initial.command_id, initial.command.clone())?
                 .map_err(|error| {
                     anyhow!(
@@ -983,7 +1028,13 @@ impl DurableRelay {
                         error.message
                     )
                 })?;
+            self.snapshot
+                .initial_command_ids
+                .insert(initial.command_id.clone());
         }
+        // No endpoint is published during seeding. A crash before this write
+        // recovers the accepted IDs from their ordinary journal receipts.
+        self.persist_snapshot()?;
         Ok(())
     }
 

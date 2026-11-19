@@ -913,6 +913,17 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Interpret the worker-owned journal boundary using its negotiated policy.
+    /// Older workers collected only through both ACK and recovery floor.
+    pub fn retained_event_ordinal(&self) -> u64 {
+        retained_event_ordinal(
+            self.relay_protocol_version
+                .unwrap_or(super::RELAY_PROTOCOL_VERSION),
+            self.acknowledged_through,
+            self.recovery_floor_ordinal,
+        )
+    }
+
     pub fn supports_notification_stack(&self) -> bool {
         self.relay_protocol_version
             .is_some_and(|version| version >= super::RELAY_NOTIFICATION_STACK_PROTOCOL)
@@ -1757,7 +1768,8 @@ pub struct RelaySnapshot {
     /// Accepted command receipts retained until their durable operation finishes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub command_retention: BTreeMap<String, BTreeSet<String>>,
-    /// Launch initialization still consumes these receipts after context clear.
+    /// Accepted startup identities, including migrated pins without receipt bodies.
+    /// Seeding consults this lifetime set even after context clear.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub initial_command_ids: BTreeSet<String>,
     /// Upgrade protection until the daemon reconciles the outstanding Move.
@@ -2132,7 +2144,11 @@ impl RelaySnapshot {
     }
 
     pub fn retained_through(&self) -> u64 {
-        self.acknowledged_through
+        retained_event_ordinal(
+            super::RELAY_PROTOCOL_VERSION,
+            self.acknowledged_through,
+            self.recovery_floor_ordinal,
+        )
     }
 
     pub fn retained_digest(&self) -> &str {
@@ -2148,6 +2164,14 @@ impl RelaySnapshot {
                 usage,
             });
         }
+    }
+}
+
+fn retained_event_ordinal(protocol: u32, acknowledged: u64, recovery_floor: u64) -> u64 {
+    if protocol < super::RELAY_COMMAND_RETENTION_PROTOCOL {
+        acknowledged.min(recovery_floor)
+    } else {
+        acknowledged
     }
 }
 

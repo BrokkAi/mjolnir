@@ -262,6 +262,18 @@ fn move_queue_relay_child() {
             request.request.supported_at(wire_protocol),
             "request exceeds emulated worker protocol"
         );
+        let legacy_floor = match &request.request {
+            RelayRequest::Acknowledge {
+                through_ordinal,
+                through_digest,
+            } if wire_protocol < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL => {
+                Some(mj_core::relay::RelayCursor {
+                    ordinal: *through_ordinal,
+                    digest: through_digest.clone(),
+                })
+            }
+            _ => None,
+        };
         let mut response = if matches!(request.request, RelayRequest::SetOperatorAway { .. }) {
             RelayResponseEnvelope {
                 request_id: request.request_id,
@@ -275,6 +287,17 @@ fn move_queue_relay_child() {
             request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
             relay.handle(request)
         };
+        // The protocol71 fixture models a checkpoint floor alongside its ACK.
+        if let Some(through) = legacy_floor {
+            relay.handle(mj_core::relay::RelayRequestEnvelope {
+                request_id: "legacy-floor".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Submit {
+                    command_id: format!("legacy-floor-{}", through.ordinal),
+                    command: RelayCommand::AdvanceRecoveryFloor { through },
+                },
+            });
+        }
         response.protocol_version = wire_protocol;
         write_relay_frame(&mut output, &response).expect("write relay response");
         if should_crash {
@@ -6307,6 +6330,22 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             replaced_unused_native_session_id: None,
         })
         .unwrap();
+    let stale = mj_core::elicitation::ElicitationRequest::from_acp_params("stale-question", serde_json::json!({
+        "mode":"form", "sessionId":MOVE_QUEUE_SESSION_ID, "message":"Old runtime", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationRequested { request: stale })
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "reopened").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "surviving-native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
     let submit = |relay: &mut DurableRelay, id: &str, command| {
         let response = relay.handle(RelayRequestEnvelope {
             request_id: id.into(),
@@ -6329,6 +6368,34 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             prompt: vec![ContentBlock::from("active work")],
         },
     );
+    submit(
+        &mut relay,
+        "steered-before-cut",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("old steer")],
+        },
+    );
+    let steer = RelayCommand::Steer {
+        active_prompt_id: "active-prompt".into(),
+        queued_prompt_id: "steered-before-cut".into(),
+    };
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "old-steer-control".into(),
+            command: steer.clone(),
+            created_at_ms: 1,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandCompleted {
+            command_id: "old-steer-control".into(),
+            command: Some(steer.kind()),
+            barrier_command_id: None,
+            outcome: mj_core::relay::RelayCommandOutcome::Steered {
+                queued_command_id: "steered-before-cut".into(),
+            },
+        })
+        .unwrap();
     submit(
         &mut relay,
         "queued-prompt",
@@ -6418,77 +6485,80 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
     drop(relay);
     crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
     let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
-    tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async {
-            let mut connection = crate::session_manager::StandaloneSession::connect_adopting(
-                &spec,
-                MOVE_QUEUE_SESSION_ID,
-            )
-            .await
+        .unwrap();
+    runtime.block_on(async {
+        let mut connection = crate::session_manager::StandaloneSession::connect_adopting(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let projection = connection.snapshot().materialized;
+        let notice = projection
+            .transcript
+            .iter()
+            .find(|item| {
+                item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID
+            })
             .unwrap();
-            let projection = connection.snapshot().materialized;
-            let notice = projection
-                .transcript
-                .iter()
-                .find(|item| {
-                    item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID
-                })
-                .unwrap();
-            assert_eq!(notice.position, frontier);
-            assert!(
-                serde_json::to_string(notice)
-                    .unwrap()
-                    .contains("History before recovery unavailable")
-            );
-            assert_eq!(projection.applied_event_ordinal, frontier + 3);
-            assert!(
-                mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID)
-                    .unwrap()
-                    .contains(&image)
-                    .unwrap()
-            );
-            let queued = projection
+        assert_eq!(notice.position, frontier);
+        assert!(
+            serde_json::to_string(notice)
+                .unwrap()
+                .contains("History before recovery unavailable")
+        );
+        assert_eq!(projection.applied_event_ordinal, frontier + 3);
+        assert!(
+            mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .contains(&image)
+                .unwrap()
+        );
+        let queued = projection
+            .queued_prompts
+            .iter()
+            .find(|q| q.command_id == "queued-prompt")
+            .unwrap();
+        assert_eq!(queued.content[0]["text"], "queued payload".repeat(6000));
+        assert_eq!(queued.content.len(), 2);
+        assert_eq!(projection.queued_prompts.len(), 3);
+        assert!(
+            projection
                 .queued_prompts
                 .iter()
-                .find(|q| q.command_id == "queued-prompt")
-                .unwrap();
-            assert_eq!(queued.content[0]["text"], "queued payload".repeat(6000));
-            assert_eq!(queued.content.len(), 2);
-            assert_eq!(projection.queued_prompts.len(), 3);
-            assert!(
-                projection
-                    .queued_prompts
-                    .iter()
-                    .find(|q| q.command_id == "queued-mailbox")
-                    .unwrap()
-                    .content
-                    .is_empty()
-            );
-            assert_eq!(projection.pending_elicitations, vec![question]);
-            assert_eq!(projection.configuration.values["mode"], "new");
-            assert_eq!(projection.active_turn.unwrap().command_id, "active-prompt");
-            assert_eq!(
-                projection
-                    .transcript
-                    .iter()
-                    .filter(|item| matches!(
-                        item.body,
-                        mj_core::transcript::TranscriptBody::Agent { .. }
-                    ))
-                    .count(),
-                1
-            );
-            let before = serde_json::to_string(&projection.transcript).unwrap();
-            assert!(before.contains("after recovery cut"));
-            connection.sync().await.unwrap();
-            assert_eq!(
-                serde_json::to_string(&connection.snapshot().materialized.transcript).unwrap(),
-                before
-            );
-        });
+                .find(|q| q.command_id == "queued-mailbox")
+                .unwrap()
+                .content
+                .is_empty()
+        );
+        assert_eq!(projection.pending_elicitations, vec![question]);
+        assert_eq!(projection.configuration.values["mode"], "new");
+        assert!(
+            projection.active_turn.is_none(),
+            "pre-cut steering identity is intentionally unknown"
+        );
+        assert_eq!(
+            projection
+                .transcript
+                .iter()
+                .filter(|item| matches!(
+                    item.body,
+                    mj_core::transcript::TranscriptBody::Agent { .. }
+                ))
+                .count(),
+            1
+        );
+        let before = serde_json::to_string(&projection.transcript).unwrap();
+        assert!(before.contains("after recovery cut"));
+        connection.sync().await.unwrap();
+        assert_eq!(
+            serde_json::to_string(&connection.snapshot().materialized.transcript).unwrap(),
+            before
+        );
+    });
     let child = crate::database::load_native_agent_view(MOVE_QUEUE_SESSION_ID, "staged-child", 100)
         .unwrap()
         .unwrap();
@@ -6497,6 +6567,64 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             .unwrap()
             .contains("child after recovery cut")
     );
+    // Later events for the unknown pre-cut turn must advance ordinary replay
+    // without attributing them to the original prompt or inventing a tool row.
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "continued").unwrap();
+    let steer = RelayCommand::Steer {
+        active_prompt_id: "active-prompt".into(),
+        queued_prompt_id: "queued-prompt".into(),
+    };
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "new-steer-control".into(),
+            command: steer.clone(),
+            created_at_ms: 2,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandCompleted {
+            command_id: "new-steer-control".into(),
+            command: Some(steer.kind()),
+            barrier_command_id: None,
+            outcome: mj_core::relay::RelayCommandOutcome::Steered {
+                queued_command_id: "queued-prompt".into(),
+            },
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"pre-cut-tool", "status":"completed"})).unwrap()).unwrap();
+    relay
+        .record_observation(RelayObservation::CommandCompleted {
+            command_id: "active-prompt".into(),
+            command: Some(mj_core::relay::RelayCommandKind::Prompt),
+            barrier_command_id: None,
+            outcome: mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        })
+        .unwrap();
+    let after = relay.latest_ordinal();
+    drop(relay);
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let projected = connection.snapshot().materialized;
+        assert!(projected.applied_event_ordinal >= after);
+        assert!(projected.active_turn.is_none());
+        assert!(projected.last_turn_outcome.is_none());
+        assert!(
+            !projected
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == "tool:pre-cut-tool")
+        );
+    });
 }
 
 #[cfg(unix)]
@@ -6603,5 +6731,89 @@ fn adoption_reattaches_from_genesis_before_requiring_a_live_baseline() {
             format!("{error:#}").contains("restart that worker on the current binary, then adopt")
         );
     });
+    let mut record = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    record.state = SessionState::Disconnected;
+    record.native_session_id = None;
+    record.target_template_id = "local-bare".into();
+    record.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    }));
+    crate::database::save_session(&record).unwrap();
+    let mut state = State::default();
+    state.sessions.insert(MOVE_QUEUE_SESSION_ID.into(), record);
+    let mut config = Config::default();
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut controller = Controller { config, state };
+    runtime.block_on(async {
+        let error = controller.adopt_orphan_worker(MOVE_QUEUE_SESSION_ID, "local-bare", None, None, false, &ProcessExecutor).await.unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("history no longer reaches its start"), "{text}");
+        assert!(text.contains("predates live-cut recovery"), "{text}");
+        assert!(text.contains("agent's work continues on the worker"), "{text}");
+        assert!(text.contains("harness session files remain on the target"), "{text}");
+        assert!(text.contains(&format!("mj recover destroy --session '{MOVE_QUEUE_SESSION_ID}' --target 'local-bare' --confirm '{MOVE_QUEUE_SESSION_ID}'")), "{text}");
+        assert!(!text.contains("restart"), "orphan refusal must not offer an unreachable restart: {text}");
+    });
     assert!(!root.join("baseline-frontier").exists());
+}
+
+#[cfg(unix)]
+// Hard-won: 6f0f854: unreadable genesis was mistaken for acknowledgement pruning.
+#[test]
+fn adoption_surfaces_corruption_without_installing_or_acknowledging_a_cut() {
+    let name = test_name("adoption_surfaces_corruption_without_installing_or_acknowledging_a_cut");
+    if !isolated_test_child(&name, "MJ_ADOPT_CORRUPT_GENESIS_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "current").unwrap();
+    for index in 0..80 {
+        relay
+            .record_observation(mj_core::relay::RelayObservation::Warning {
+                message: format!("{index}:{}", "x".repeat(64 * 1024)),
+            })
+            .unwrap();
+    }
+    drop(relay);
+    let mut sealed = fs::read_dir(root.join(mj_core::relay::RELAY_JOURNAL_DIR))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "gz"))
+        .collect::<Vec<_>>();
+    sealed.sort();
+    assert!(sealed.len() >= 3);
+    fs::write(&sealed[1], b"not a gzip stream").unwrap();
+    crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
+    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let error = crate::session_manager::StandaloneSession::connect_adopting(
+                &spec,
+                MOVE_QUEUE_SESSION_ID,
+            )
+            .await
+            .err()
+            .expect("corrupt span cannot authorize a cut");
+            assert!(format!("{error:#}").contains("unreadable"), "{error:#}");
+        });
+    assert!(!root.join("baseline-frontier").exists());
+    let baseline = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "current")
+        .unwrap()
+        .live_session_baseline()
+        .unwrap();
+    assert_eq!(baseline.state.acknowledged_through, 0);
+    assert!(
+        crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .is_none_or(|(ordinal, _)| ordinal == 0)
+    );
 }

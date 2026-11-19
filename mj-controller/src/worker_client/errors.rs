@@ -22,18 +22,6 @@ pub struct RelayRejected(pub RelayProtocolError);
 
 impl std::fmt::Display for RelayRejected {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(mj_core::relay::RelayErrorDetail::Desynchronized {
-            requested_after,
-            earliest_available,
-            ..
-        }) = &self.0.detail
-            && requested_after < earliest_available
-        {
-            write!(
-                formatter,
-                "controller store is behind the worker's retained journal; "
-            )?;
-        }
         write!(
             formatter,
             "relay rejected request ({:?}): {}",
@@ -55,6 +43,17 @@ impl RelayRejected {
         self.0.retryable
     }
 }
+
+/// Capability refusal, contextualized differently for tracked and orphan workers.
+#[derive(Debug)]
+pub struct LiveBaselineUnsupported;
+
+impl std::fmt::Display for LiveBaselineUnsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("this worker cannot provide a live recovery baseline; restart that worker on the current binary, then adopt")
+    }
+}
+impl std::error::Error for LiveBaselineUnsupported {}
 
 /// A relay transport that can no longer carry requests: the proxy exited, one
 /// of its pipes failed, or the handshake never completed.

@@ -37,11 +37,18 @@ fn project_steered_prompt(
         .iter()
         .position(|queued| queued.command_id == queued_prompt_id)
     else {
-        bail!("steered prompt is missing from the materialized queue");
+        tracing::warn!(session_id = %current.session_id, command_id = queued_prompt_id,
+            "ignored steering delivery for a prompt absent from the projection");
+        return Ok(());
     };
     let entry = queue.remove(queue_index);
     if !entry.kind.is_prompt() {
         bail!("steered queue entry is not a prompt");
+    }
+    if current.active_turn.is_none() {
+        tracing::warn!(session_id = %current.session_id, command_id = queued_prompt_id,
+            "ignored turn attribution for steering into an unknown active turn");
+        return Ok(());
     }
     // The running turn becomes the steered prompt's turn, while the original
     // harness turn remains the one whose completion closes it.
@@ -420,46 +427,54 @@ pub(super) fn project_observation(
                     diagnostic,
                     work_facts,
                 } => {
-                    let native_running =
-                        current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
-                    if !native_running {
-                        close_streams(index, mutation, event.recorded_at_ms);
-                        mutation.execution = Some(MaterializedExecutionState::Idle);
-                    }
-                    // A cancelled turn's reply stops mid-sentence; mark where
-                    // it ended so it does not read as a finished reply.
-                    if mj_core::state::classify_prompt_completion(stop_reason)
-                        == mj_core::state::PromptCompletion::Cancelled
-                    {
-                        push_system_with_id(
-                            mutation,
-                            event,
-                            format!(
-                                "{}{command_id}",
-                                mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX
-                            ),
-                            mj_core::transcript::TURN_INTERRUPTED_TEXT,
-                        );
-                    }
                     let active = current
                         .active_turn
                         .as_ref()
                         .filter(|turn| turn.belongs_to(command_id));
-                    mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
-                        answered_through: None,
-                        diagnostic: diagnostic.clone(),
-                        usage: usage.clone(),
-                        command_id: command_id.clone(),
-                        accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
-                        turn_start_position: active.map(|turn| turn.turn_start_position),
-                        completed_ordinal: event.ordinal,
-                        completed_at_ms: event.recorded_at_ms,
-                        outcome: TurnOutcomeKind::Completed {
-                            stop_reason: stop_reason.clone(),
-                        },
-                        work_facts: work_facts.as_deref().cloned(),
-                    });
-                    mutation.active_turn = Some(None);
+                    let native_running = current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
+                    if active.is_none() {
+                        tracing::warn!(session_id = %current.session_id, command_id,
+                            "ignored completion attribution for an unknown turn");
+                        if current.active_turn.is_none() && !native_running {
+                            close_streams(index, mutation, event.recorded_at_ms);
+                            mutation.execution = Some(MaterializedExecutionState::Idle);
+                        }
+                    } else {
+                        if !native_running {
+                            close_streams(index, mutation, event.recorded_at_ms);
+                            mutation.execution = Some(MaterializedExecutionState::Idle);
+                        }
+                        // A cancelled turn's reply stops mid-sentence; mark where
+                        // it ended so it does not read as a finished reply.
+                        if mj_core::state::classify_prompt_completion(stop_reason)
+                            == mj_core::state::PromptCompletion::Cancelled
+                        {
+                            push_system_with_id(
+                                mutation,
+                                event,
+                                format!(
+                                    "{}{command_id}",
+                                    mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX
+                                ),
+                                mj_core::transcript::TURN_INTERRUPTED_TEXT,
+                            );
+                        }
+                        mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                            answered_through: None,
+                            diagnostic: diagnostic.clone(),
+                            usage: usage.clone(),
+                            command_id: command_id.clone(),
+                            accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
+                            turn_start_position: active.map(|turn| turn.turn_start_position),
+                            completed_ordinal: event.ordinal,
+                            completed_at_ms: event.recorded_at_ms,
+                            outcome: TurnOutcomeKind::Completed {
+                                stop_reason: stop_reason.clone(),
+                            },
+                            work_facts: work_facts.as_deref().cloned(),
+                        });
+                        mutation.active_turn = Some(None);
+                    }
                 }
                 mj_core::relay::RelayCommandOutcome::UserShell { result } => {
                     if let Some(existing) = index.get(&user_shell_item_id(command_id)) {

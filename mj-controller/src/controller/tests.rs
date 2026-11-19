@@ -2357,6 +2357,198 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
     // Started: the conversation holds the assignment, so nothing is re-sent.
     let started = snapshot(vec![assignment_item], Vec::new());
     assert!(initial_command_ids(LaunchHistory::Restored(&started)).is_empty());
+    // Hard-won: 6f0f854: live-cut recovery must retain the startup delivery fact across
+    // the archive format and the fresh relay created by a later resume.
+    for (case, delivered) in [
+        ("queued", false),
+        ("removed", false),
+        ("interrupted", true),
+        ("completed", true),
+        ("active", true),
+    ] {
+        use mj_core::relay::{
+            RelayCommand, RelayCommandOutcome, RelayRequest, RelayRequestEnvelope,
+            RelayResponseBody,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let original = controller
+            .session_launch_config(&child_id, &backend, LaunchHistory::Stored)
+            .unwrap()
+            .0;
+        let brief = original.initial_commands.last().unwrap().clone();
+        let mut initial = vec![brief.clone()];
+        if !delivered {
+            // Startup's selector occupies dispatch, keeping its brief queued.
+            initial.insert(
+                0,
+                mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: "test-selector".into(),
+                    command: RelayCommand::SetConfig {
+                        key: "model".into(),
+                        value: "test-model".into(),
+                    },
+                    optional: false,
+                },
+            );
+        }
+        let mut relay = mj_worker::relay::DurableRelay::open_for_harness(
+            directory.path(),
+            &child_id,
+            "test",
+            HarnessKind::Codex,
+            &initial,
+        )
+        .unwrap();
+        if case == "removed" {
+            let response = relay.handle(RelayRequestEnvelope {
+                request_id: "remove-startup-brief".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Submit {
+                    command_id: "remove-startup-brief".into(),
+                    command: RelayCommand::RemoveQueuedPrompt {
+                        queued_command_id: prompt_id.clone(),
+                    },
+                },
+            });
+            assert!(
+                matches!(response.body, RelayResponseBody::Ok { .. }),
+                "{:?}",
+                response.body
+            );
+        } else if delivered {
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert!(
+                claimed
+                    .iter()
+                    .any(|command| command.command_id == prompt_id)
+            );
+            if case == "interrupted" {
+                relay
+                    .record_command_interrupted(
+                        &prompt_id,
+                        mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+                        "interrupted after start",
+                    )
+                    .unwrap();
+            } else if case == "completed" {
+                relay
+                    .record_command_completed(
+                        &prompt_id,
+                        RelayCommandOutcome::Prompt {
+                            stop_reason: "end_turn".into(),
+                            diagnostic: None,
+                            usage: None,
+                            work_facts: None,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        let cut = relay.live_session_baseline().unwrap();
+        let mut projection =
+            mj_transcript::projection::materialized_session_from_live_baseline(&cut).unwrap();
+        assert_eq!(
+            projection
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == format!("user:{prompt_id}")),
+            delivered,
+            "{case}"
+        );
+        if delivered {
+            assert!(projection.transcript[0].position < projection.transcript[1].position);
+        }
+        // Suspend settles the live turn before it writes the canonical archive.
+        projection.execution = mj_core::state::MaterializedExecutionState::Idle;
+        projection.active_turn = None;
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
+        let mut input = super::test_support::checkpoint_archive_input(
+            &child_id,
+            canonical.event_frontier,
+            Vec::new(),
+            Vec::new(),
+        );
+        input.canonical_session = canonical;
+        let archive = super::test_support::write_checkpoint_archive_input(
+            directory.path(),
+            &child_id,
+            &input,
+        );
+        let restored = mj_checkpoint::archive::read_archive_verified(&archive.archive_path)
+            .unwrap()
+            .canonical_session()
+            .unwrap();
+        // A resume that discards the queue must still deliver an unstarted brief.
+        let launch = controller
+            .session_launch_config(&child_id, &backend, LaunchHistory::Restored(&restored))
+            .unwrap()
+            .0;
+        assert_eq!(
+            launch
+                .initial_commands
+                .iter()
+                .any(|command| command.command_id == prompt_id),
+            !delivered,
+            "{case}"
+        );
+        let fresh = directory.path().join("resumed-worker");
+        let mut resumed = mj_worker::relay::DurableRelay::open_for_harness(
+            &fresh,
+            &child_id,
+            "test",
+            HarnessKind::Codex,
+            &launch.initial_commands,
+        )
+        .unwrap();
+        let mut deliveries = 0;
+        // Complete the finite startup prefix, then prove a reopen submits none.
+        loop {
+            let claimed = resumed.claim_pending_commands(true).unwrap();
+            if claimed.is_empty() {
+                break;
+            }
+            for command in claimed {
+                if command.command_id == prompt_id {
+                    deliveries += 1;
+                    resumed
+                        .record_command_completed(
+                            &command.command_id,
+                            RelayCommandOutcome::Prompt {
+                                stop_reason: "end_turn".into(),
+                                diagnostic: None,
+                                usage: None,
+                                work_facts: None,
+                            },
+                        )
+                        .unwrap();
+                } else {
+                    resumed
+                        .record_command_completed(
+                            &command.command_id,
+                            RelayCommandOutcome::Configured,
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        assert_eq!(deliveries, usize::from(!delivered), "{case}");
+        let frontier = resumed.latest_ordinal();
+        drop(resumed);
+        let mut reopened = mj_worker::relay::DurableRelay::open_for_harness(
+            &fresh,
+            &child_id,
+            "test",
+            HarnessKind::Codex,
+            &launch.initial_commands,
+        )
+        .unwrap();
+        assert_eq!(reopened.latest_ordinal(), frontier, "{case}");
+        assert!(
+            reopened.claim_pending_commands(true).unwrap().is_empty(),
+            "{case}"
+        );
+    }
     rusqlite::Connection::open(crate::database::database_path())
         .unwrap()
         .execute_batch(&format!(

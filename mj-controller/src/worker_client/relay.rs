@@ -918,10 +918,9 @@ impl RelayClient {
     }
 
     pub async fn live_session_baseline(&mut self) -> Result<mj_core::relay::LiveSessionBaseline> {
-        anyhow::ensure!(
-            self.protocol_version() >= mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL,
-            "this worker cannot provide a live recovery baseline; restart that worker on the current binary, then adopt"
-        );
+        if self.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL {
+            return Err(LiveBaselineUnsupported.into());
+        }
         let RelayResponsePayload::LiveBaselineStarted { total_bytes } =
             self.call(RelayRequest::BeginLiveBaseline).await?
         else {

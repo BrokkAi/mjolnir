@@ -103,6 +103,18 @@ pub fn materialized_session_from_live_baseline(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    for initial in &baseline.delivered_initial_prompts {
+        projection.transcript.push(Arc::new(TranscriptItem {
+            stable_id: format!("user:{}", initial.command_id),
+            position: state.latest_ordinal.saturating_sub(1).max(1),
+            latest_content_event_ordinal: None,
+            created_at_ms: initial.created_at_ms,
+            last_changed_at_ms: initial.created_at_ms,
+            body: TranscriptBody::User {
+                content: queued_command_content(&initial.command)?,
+            },
+        }));
+    }
     projection.transcript.push(Arc::new(TranscriptItem {
         stable_id: mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID.into(),
         position: state.latest_ordinal, latest_content_event_ordinal: None,

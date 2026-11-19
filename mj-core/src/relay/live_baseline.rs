@@ -16,6 +16,8 @@ pub struct LiveQueuedCommand {
 pub struct LiveSessionBaseline {
     pub state: RelayOperationalState,
     pub queue: Vec<LiveQueuedCommand>,
+    /// Started startup briefs; preserves launch idempotency through a later archive.
+    pub delivered_initial_prompts: Vec<LiveQueuedCommand>,
     pub questions: Vec<crate::elicitation::ElicitationRequest>,
     pub unavailable_questions: usize,
     pub active_turn: Option<crate::state::MaterializedTurn>,

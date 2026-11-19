@@ -133,6 +133,11 @@ impl StandaloneSession {
             {
                 Ok(_) => {} // Ordinary reattachment retains the complete history.
                 Err(error) if relay_desynchronized(&error) => {
+                    // A desynchronization can also mean a corrupt span. Only
+                    // the worker's actual retention boundary authorizes a cut.
+                    if connection.operational.retained_event_ordinal() == 0 {
+                        return Err(error);
+                    }
                     let baseline = connection.client.live_session_baseline().await?;
                     ensure!(
                         baseline.state.session_id == target.session_id,
@@ -348,13 +353,16 @@ impl StandaloneSession {
                         self.window = window;
                         continue;
                     }
+                    let behind_retention =
+                        after_ordinal < self.operational.retained_event_ordinal();
                     self.repair_projection()
                         .await
                         .with_context(|| {
-                            format!(
-                                "controller projection for {} cannot catch up from ordinal {after_ordinal}: {error:#}",
-                                self.materialized.session_id
-                            )
+                            if behind_retention {
+                                format!("controller store is behind the worker's retained journal for {} at ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
+                            } else {
+                                format!("controller projection for {} cannot catch up from ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
+                            }
                         })?;
                     repaired = true;
                     // Repair rebuilds from the same durable checkpoint every

@@ -289,7 +289,15 @@ impl Controller {
     ) -> Result<()> {
         let mut relay = StandaloneSession::connect_adopting(spec, session_id)
             .await
-            .context("orphan relay did not complete the v1 handshake")?;
+            .map_err(|error| {
+                if error.chain().any(|cause| cause.downcast_ref::<crate::worker_client::LiveBaselineUnsupported>().is_some()) {
+                    let target = &self.state.sessions[session_id].target_template_id;
+                    let id = mj_core::targets::posix_quote(session_id);
+                    let target = mj_core::targets::posix_quote(target);
+                    anyhow::anyhow!("the worker's history no longer reaches its start, and it predates live-cut recovery, so it cannot be adopted. The agent's work continues on the worker, and its harness session files remain on the target. When you are done, run: mj recover destroy --session {id} --target {target} --confirm {id}")
+                } else { error }
+            })
+            .context("orphan relay could not attach")?;
         let harness = self
             .state
             .sessions

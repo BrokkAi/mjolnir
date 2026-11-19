@@ -8720,6 +8720,7 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
         "mode":"form", "sessionId":"session-1", "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}
     })).unwrap();
     let mut baseline = LiveSessionBaseline {
+        delivered_initial_prompts: Vec::new(),
         state,
         queue: Vec::new(),
         questions: vec![question.clone()],
