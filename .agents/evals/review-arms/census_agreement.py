@@ -111,6 +111,9 @@ def categories(fact):
     rql = fact["rql"] or {}
     return {
         "rql.class": rql.get("class"),
+        # The menu ranks missing-step kinds, so agreement on them is reported where both
+        # labellers call the fact missing.
+        "rql.missing_kind": (rql.get("missing_step") or {}).get("kind") if rql.get("class") == "missing" else None,
         "rql.locator_present": (rql["locator_query"] is not None) if fact["in_diff"] is False else None,
         "kind": fact["kind"],
         "anchors_on_touched": (fact["anchoring"] or {}).get("anchors_on_touched"),
@@ -127,14 +130,15 @@ def category_comparisons(a, b):
             continue
         if value is None and other is None:
             continue
-        if category == "rql.locator_present" and (value is None or other is None):
+        if category in ("rql.locator_present", "rql.missing_kind") and (value is None or other is None):
             continue
         yield category, value == other
 
 
 def comparison(pairs, split):
     categories_by_fact = {category: {"agree": 0, "n": 0}
-                          for category in ("rql.class", "rql.locator_present", "kind", "anchors_on_touched")}
+                          for category in ("rql.class", "rql.missing_kind", "rql.locator_present", "kind",
+                                           "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
     defects = {"both_confirmed": 0, "both_not_confirmed": 0, "split": 0}
     for first, second in pairs:
