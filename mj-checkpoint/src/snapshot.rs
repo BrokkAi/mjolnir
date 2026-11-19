@@ -527,25 +527,23 @@ impl GitCommandRunner for CaptureGit<'_> {
         }
         // Keep one network observation per effective configuration within this
         // capture. Local refs, indexes, files and consent are still reread.
-        let config = self.inner.run(
-            repository,
-            &GitCommand {
-                arguments: [
-                    "-c",
-                    "gc.auto=0",
-                    "-c",
-                    "maintenance.auto=false",
-                    "config",
-                    "--null",
-                    "--list",
-                    "--includes",
-                ]
-                .map(OsString::from)
-                .to_vec(),
-                env: command.env.clone(),
-                ..Default::default()
-            },
-        )?;
+        let config_command = GitCommand {
+            arguments: [
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "config",
+                "--null",
+                "--list",
+                "--includes",
+            ]
+            .map(OsString::from)
+            .to_vec(),
+            env: command.env.clone(),
+            ..Default::default()
+        };
+        let config = self.inner.run(repository, &config_command)?;
         ensure!(
             config.status == 0,
             "{}",
@@ -577,6 +575,15 @@ impl GitCommandRunner for CaptureGit<'_> {
                 .inner
                 .run(repository, &command)
                 .map_err(|error| format!("{error:#}"));
+            let after = self.inner.run(repository, &config_command)?;
+            ensure!(
+                after.status == 0,
+                "{}",
+                git_failure("verify origin query configuration", &after)
+            );
+            if config.stdout != after.stdout {
+                return observed.map_err(anyhow::Error::msg);
+            }
             self.origin_queries
                 .lock()
                 .map_err(|_| anyhow::anyhow!("origin query cache poisoned"))?
@@ -1771,6 +1778,14 @@ pub struct PinnedWorkspaceCut {
     pub head: SnapshotHead,
     pub worktrees: Vec<PinnedWorktree>,
 }
+#[derive(Debug)]
+struct CaptureCutChanged;
+impl std::fmt::Display for CaptureCutChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("workspace cut changed while reading HEAD")
+    }
+}
+impl std::error::Error for CaptureCutChanged {}
 /// Read refs and HEADs without fetching, aborting operations, creating stashes
 /// or changing anything. Branch commit IDs come from the one ref enumeration.
 pub fn pin_workspace_cut(
@@ -1786,10 +1801,7 @@ pub fn pin_workspace_cut(
             && operation(runner, path)?.is_some();
         let mut head = saved_head(runner, path, raw_operation)?;
         if !raw_operation && let SnapshotHead::Branch { name, commit } = &mut head {
-            *commit = refs
-                .get(name)
-                .with_context(|| format!("HEAD branch {name} moved during snapshot capture"))?
-                .clone();
+            *commit = refs.get(name).ok_or(CaptureCutChanged)?.clone();
         }
         Ok(head)
     };
@@ -2420,21 +2432,15 @@ fn write_snapshot_pack(
         fs::remove_file(path)?;
         Ok(None)
     } else {
-        let mut published =
-            tempfile::TempPath::try_from_path(append_pack_extension(&base, &hash, "pack"))?;
-        let produced = tempfile::NamedTempFile::from_parts(
-            fs::File::open(&path)?,
-            tempfile::TempPath::try_from_path(path)?,
-        );
-        match produced.persist_noclobber(&published) {
-            Ok(file) => drop(file),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // An earlier successful snapshot may own this exact pack.
-                // A failed retry must not remove its already published file.
-                published.disable_cleanup(true);
-            }
-            Err(error) => return Err(error).context("publish snapshot pack"),
-        }
+        // Every in-flight capture owns a distinct path, even for identical
+        // bytes and the same caller-provided base. No other capture can borrow
+        // an artifact whose owner may still roll it back.
+        let published = tempfile::Builder::new()
+            .prefix(base.file_name().context("pack base has no filename")?)
+            .suffix(".pack")
+            .tempfile_in(base.parent().context("pack has no parent")?)?
+            .into_temp_path();
+        fs::rename(path, &published)?;
         Ok(Some(published))
     }
 }
@@ -2894,329 +2900,353 @@ fn capture_prepared_workspace(
     let checkout = repository.checkout.as_path();
     let ownership = &repository.ownership;
     let pack_path = repository.pack_path.as_path();
-    let origin_override = repository.origin_override.clone();
     let source = &repository.exclusions;
-    let inventory = prepare_capture(runner, repository, consent)?;
-    let object_format = git_text(runner, checkout, ["rev-parse", "--show-object-format"])?;
-    let worktree_config_enabled = crate::snapshot::worktree_config_enabled(runner, checkout)?;
-    let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
-    let has_origin = configured.status == 0;
-    let originals = if has_origin {
-        config_values(runner, checkout, "remote.origin.url")?
-    } else {
-        origin_override.into_iter().collect()
-    };
-    let origin_urls = originals
-        .iter()
-        .map(|url| stored_remote(runner, checkout, url))
-        .collect::<Result<Vec<_>>>()?;
-    let captured_rules = local_url_rules(runner, checkout)?;
-    let push_evidence =
-        capture_push_evidence(runner, checkout, has_origin, repository.in_container)?;
-    let url_rules = captured_rules.rules;
-    let captured_worktree_rules = worktree_url_rules(runner, checkout)?;
-    let worktree_url_rules = captured_worktree_rules.rules;
-    let mut notices = captured_rules.notices;
-    notices.extend(captured_worktree_rules.notices);
-    notices.extend(inventory.notices.iter().cloned());
-    if matches!(ownership, CheckoutOwnership::Managed)
-        && !owns_git_directory(runner, checkout, ownership)?
-    {
-        notices.push("legacy linked-worktree snapshot omits durable review refs; resume starts with a fresh review baseline".to_owned());
-    }
-    for (path, nested) in &inventory.worktrees {
-        notices.extend(
-            nested
-                .notices
-                .iter()
-                .map(|notice| format!("{}: {notice}", path.display())),
-        );
-    }
-    ensure!(
-        !origin_urls.is_empty() || matches!(ownership, CheckoutOwnership::Raw { .. }),
-        "managed snapshot requires an origin remote or source override"
-    );
-    if origin_urls.is_empty() {
-        return capture_in_place_metadata(runner, repository);
-    }
-    let remote = if has_origin {
-        "origin"
-    } else {
-        originals.first().context("missing snapshot origin")?
-    };
-    let push_urls = if has_origin {
-        config_values(runner, checkout, "remote.origin.pushurl")?
-            .iter()
-            .map(|url| stored_remote(runner, checkout, url))
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        Vec::new()
-    };
-    let exclusions = snapshot_exclusions(runner, checkout, remote, &BTreeMap::new(), source)?;
-    if let Some(notice) = &exclusions.notice {
-        notices.push(notice.clone());
-    }
-    // Barrier-free exports may race a ref update. Three cuts give a moving
-    // checkout a chance to settle, then report instability to its caller.
+    // Raw checkouts may have live writers. Retry the complete configuration,
+    // remote evidence and ref cut together, using the same stability policy.
     for attempt in 0..3 {
-        let inventory = prepare_capture(runner, repository, consent)?;
-        let skipped = inventory.raw && inventory.operation.is_some();
-        let cut = pin_workspace_cut(runner, checkout, ownership)?;
-        let owners = branch_owners(&cut);
-        let source_refs = &cut.refs;
-        let head = &cut.head;
-        let original_stash = selected_stash(runner, checkout, ownership)?;
-        // This exact list becomes pack tips; a newer stash cannot inherit a
-        // previous inventory's consent just because it stays stable afterward.
-        check_stash_consent(runner, checkout, &original_stash, &consent.untracked, key)?;
-        let working = working_state(runner, checkout, skipped)?;
-        let mut worktrees = Vec::new();
-        let mut tips = vec![cut.head.commit().to_owned()];
-        tips.extend(working.clone());
-        let mut stable = true;
-        let mut verify_state = |path: &Path, state: &Option<String>, oid: &str| -> Result<()> {
-            if let Some(state) = state {
-                stable &= git_text(runner, path, ["rev-parse", &format!("{state}^1")])? == oid;
+        let result = (|| -> Result<Option<WorkspaceSnapshot>> {
+            let origin_configuration = git_bytes(
+                runner,
+                checkout,
+                ["config", "--null", "--list", "--includes"],
+                &[],
+                "read capture origin configuration",
+            )?;
+            let origin_override = repository.origin_override.clone();
+            let inventory = prepare_capture(runner, repository, consent)?;
+            let object_format = git_text(runner, checkout, ["rev-parse", "--show-object-format"])?;
+            let worktree_config_enabled =
+                crate::snapshot::worktree_config_enabled(runner, checkout)?;
+            let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
+            let has_origin = configured.status == 0;
+            let originals = if has_origin {
+                config_values(runner, checkout, "remote.origin.url")?
+            } else {
+                origin_override.into_iter().collect()
+            };
+            let origin_urls = originals
+                .iter()
+                .map(|url| stored_remote(runner, checkout, url))
+                .collect::<Result<Vec<_>>>()?;
+            let captured_rules = local_url_rules(runner, checkout)?;
+            let push_evidence =
+                capture_push_evidence(runner, checkout, has_origin, repository.in_container)?;
+            let url_rules = captured_rules.rules;
+            let captured_worktree_rules = worktree_url_rules(runner, checkout)?;
+            let worktree_url_rules = captured_worktree_rules.rules;
+            let mut notices = captured_rules.notices;
+            notices.extend(captured_worktree_rules.notices);
+            notices.extend(inventory.notices.iter().cloned());
+            if matches!(ownership, CheckoutOwnership::Managed)
+                && !owns_git_directory(runner, checkout, ownership)?
+            {
+                notices.push("legacy linked-worktree snapshot omits durable review refs; resume starts with a fresh review baseline".to_owned());
             }
-            Ok(())
-        };
-        verify_state(checkout, &working, cut.head.commit())?;
-        for tree in &cut.worktrees {
-            let directory = checkout.join(&tree.relative_path);
-            let skipped = inventory.raw
-                && inventory
-                    .worktrees
-                    .iter()
-                    .find(|(path, _)| path == &tree.relative_path)
-                    .is_some_and(|(_, tree)| tree.operation.is_some());
-            let state = working_state(runner, &directory, skipped)?;
-            verify_state(&directory, &state, tree.head.commit())?;
-            tips.push(tree.head.commit().to_owned());
-            tips.extend(state.clone());
-            let own_rules = crate::snapshot::worktree_url_rules(runner, &directory)?;
-            notices.extend(
-                own_rules
-                    .notices
-                    .into_iter()
-                    .map(|notice| format!("{}: {notice}", tree.relative_path.display())),
+            for (path, nested) in &inventory.worktrees {
+                notices.extend(
+                    nested
+                        .notices
+                        .iter()
+                        .map(|notice| format!("{}: {notice}", path.display())),
+                );
+            }
+            ensure!(
+                !origin_urls.is_empty() || matches!(ownership, CheckoutOwnership::Raw { .. }),
+                "managed snapshot requires an origin remote or source override"
             );
-            let has_origin =
-                run_git(runner, &directory, ["remote", "get-url", "origin"], &[])?.status == 0;
-            let has_uncommitted_state = state.is_some()
-                || skipped
-                || staged_gitlink_changes(runner, &directory)?
-                || inventory
-                    .worktrees
+            if origin_urls.is_empty() {
+                return capture_in_place_metadata(runner, repository).map(Some);
+            }
+            let remote = if has_origin {
+                "origin"
+            } else {
+                originals.first().context("missing snapshot origin")?
+            };
+            let push_urls = if has_origin {
+                config_values(runner, checkout, "remote.origin.pushurl")?
                     .iter()
-                    .find(|(path, _)| path == &tree.relative_path)
-                    .map(|(_, inventory)| {
-                        submodule_uncommitted_state(runner, &directory, inventory)
-                    })
-                    .transpose()?
-                    .unwrap_or(false);
-            let saved_head = if let SnapshotHead::Branch { name, commit } = &tree.head {
-                let (owner_commit, owner_path) = owners[name.as_str()];
-                if commit != owner_commit {
-                    let owner = if owner_path.as_os_str().is_empty() {
-                        "primary checkout".to_owned()
+                    .map(|url| stored_remote(runner, checkout, url))
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
+            let exclusions =
+                snapshot_exclusions(runner, checkout, remote, &BTreeMap::new(), source)?;
+            if let Some(notice) = &exclusions.notice {
+                notices.push(notice.clone());
+            }
+            let inventory = prepare_capture(runner, repository, consent)?;
+            let skipped = inventory.raw && inventory.operation.is_some();
+            let cut = pin_workspace_cut(runner, checkout, ownership)?;
+            let owners = branch_owners(&cut);
+            let source_refs = &cut.refs;
+            let head = &cut.head;
+            let original_stash = selected_stash(runner, checkout, ownership)?;
+            // This exact list becomes pack tips; a newer stash cannot inherit a
+            // previous inventory's consent just because it stays stable afterward.
+            check_stash_consent(runner, checkout, &original_stash, &consent.untracked, key)?;
+            let working = working_state(runner, checkout, skipped)?;
+            let mut worktrees = Vec::new();
+            let mut tips = vec![cut.head.commit().to_owned()];
+            tips.extend(working.clone());
+            let mut stable = true;
+            let mut verify_state = |path: &Path, state: &Option<String>, oid: &str| -> Result<()> {
+                if let Some(state) = state {
+                    stable &= git_text(runner, path, ["rev-parse", &format!("{state}^1")])? == oid;
+                }
+                Ok(())
+            };
+            verify_state(checkout, &working, cut.head.commit())?;
+            for tree in &cut.worktrees {
+                let directory = checkout.join(&tree.relative_path);
+                let skipped = inventory.raw
+                    && inventory
+                        .worktrees
+                        .iter()
+                        .find(|(path, _)| path == &tree.relative_path)
+                        .is_some_and(|(_, tree)| tree.operation.is_some());
+                let state = working_state(runner, &directory, skipped)?;
+                verify_state(&directory, &state, tree.head.commit())?;
+                tips.push(tree.head.commit().to_owned());
+                tips.extend(state.clone());
+                let own_rules = crate::snapshot::worktree_url_rules(runner, &directory)?;
+                notices.extend(
+                    own_rules
+                        .notices
+                        .into_iter()
+                        .map(|notice| format!("{}: {notice}", tree.relative_path.display())),
+                );
+                let has_origin =
+                    run_git(runner, &directory, ["remote", "get-url", "origin"], &[])?.status == 0;
+                let has_uncommitted_state = state.is_some()
+                    || skipped
+                    || staged_gitlink_changes(runner, &directory)?
+                    || inventory
+                        .worktrees
+                        .iter()
+                        .find(|(path, _)| path == &tree.relative_path)
+                        .map(|(_, inventory)| {
+                            submodule_uncommitted_state(runner, &directory, inventory)
+                        })
+                        .transpose()?
+                        .unwrap_or(false);
+                let saved_head = if let SnapshotHead::Branch { name, commit } = &tree.head {
+                    let (owner_commit, owner_path) = owners[name.as_str()];
+                    if commit != owner_commit {
+                        let owner = if owner_path.as_os_str().is_empty() {
+                            "primary checkout".to_owned()
+                        } else {
+                            format!("worktree {}", owner_path.display())
+                        };
+                        notices.push(format!("worktree {} saved detached at {commit}: branch {name} belongs to {owner} at {owner_commit}", tree.relative_path.display()));
+                        SnapshotHead::Detached(commit.clone())
                     } else {
-                        format!("worktree {}", owner_path.display())
-                    };
-                    notices.push(format!("worktree {} saved detached at {commit}: branch {name} belongs to {owner} at {owner_commit}", tree.relative_path.display()));
-                    SnapshotHead::Detached(commit.clone())
+                        tree.head.clone()
+                    }
                 } else {
                     tree.head.clone()
-                }
-            } else {
-                tree.head.clone()
-            };
-            worktrees.push(SnapshotWorktree {
-                push_evidence: capture_push_evidence(
-                    runner,
-                    &directory,
-                    has_origin,
-                    repository.in_container,
-                )?,
-                has_uncommitted_state,
-                url_rules: own_rules.rules,
+                };
+                worktrees.push(SnapshotWorktree {
+                    push_evidence: capture_push_evidence(
+                        runner,
+                        &directory,
+                        has_origin,
+                        repository.in_container,
+                    )?,
+                    has_uncommitted_state,
+                    url_rules: own_rules.rules,
 
-                relative_path: tree.relative_path.clone(),
-                head: saved_head,
-                working_state: state,
-                working_state_skipped: skipped,
-                index_gitlinks: inventory
-                    .worktrees
-                    .iter()
-                    .find(|(path, _)| path == &tree.relative_path)
-                    .map(|(_, tree)| {
-                        tree.index_gitlinks
-                            .iter()
-                            .map(|entry| entry.value.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                initialized_submodules: inventory
-                    .worktrees
-                    .iter()
-                    .find(|(path, _)| path == &tree.relative_path)
-                    .map(|(_, tree)| {
-                        tree.initialized_submodules
-                            .iter()
-                            .map(|entry| entry.value.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
-        }
-        stable &= selected_stash(runner, checkout, ownership)? == original_stash;
-        // Compare fresh source values, never the branch-owner-normalized output refs.
-        stable &= pin_workspace_cut(runner, checkout, ownership)? == cut;
-        stable &= same_checkout_cut(&inventory, &repository_inventory(runner, repository)?);
-        if !stable {
-            if attempt < 2 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
+                    relative_path: tree.relative_path.clone(),
+                    head: saved_head,
+                    working_state: state,
+                    working_state_skipped: skipped,
+                    index_gitlinks: inventory
+                        .worktrees
+                        .iter()
+                        .find(|(path, _)| path == &tree.relative_path)
+                        .map(|(_, tree)| {
+                            tree.index_gitlinks
+                                .iter()
+                                .map(|entry| entry.value.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    initialized_submodules: inventory
+                        .worktrees
+                        .iter()
+                        .find(|(path, _)| path == &tree.relative_path)
+                        .map(|(_, tree)| {
+                            tree.initialized_submodules
+                                .iter()
+                                .map(|entry| entry.value.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
             }
-            anyhow::bail!(
-                "workspace refs, HEAD or submodules kept changing during snapshot capture; retry after the checkout is idle"
-            );
-        }
-        for (branch, (owner_commit, _)) in &owners {
-            if let Some(live) = source_refs
-                .get(*branch)
-                .filter(|live| live.as_str() != *owner_commit)
-            {
-                notices.push(format!("branch {branch} saved at {owner_commit}; its live tip {live} is preserved as refs/mj/displaced/{live}"));
-            }
-        }
-        let selected = selected_refs(runner, checkout, &cut, ownership, &owners)?;
-        let snapshot_refs = selected.refs;
-        let stash = original_stash
-            .iter()
-            .map(|entry| tracked_stash(runner, checkout, entry))
-            .collect::<Result<Vec<_>>>()?;
-        tips.extend(snapshot_refs.values().cloned());
-        tips.extend(stash.iter().map(|entry| entry.commit.clone()));
-        tips.sort();
-        tips.dedup();
-        if let Some(keep) = keep_relative(repository)? {
-            let mut tracked = Vec::new();
-            let states = working
-                .iter()
-                .cloned()
-                .chain(stash.iter().map(|entry| entry.commit.clone()))
-                .collect::<Vec<_>>();
-            for state in states
-                .iter()
-                .flat_map(|state| [state.clone(), format!("{state}^2")])
-            {
-                tracked.extend(tracked_keep_paths(
+            stable &= selected_stash(runner, checkout, ownership)? == original_stash;
+            // Compare fresh source values, never the branch-owner-normalized output refs.
+            stable &= pin_workspace_cut(runner, checkout, ownership)? == cut;
+            stable &= same_checkout_cut(&inventory, &repository_inventory(runner, repository)?);
+            stable &= origin_configuration
+                == git_bytes(
                     runner,
                     checkout,
-                    key,
-                    &keep,
-                    Some(&state),
-                )?);
+                    ["config", "--null", "--list", "--includes"],
+                    &[],
+                    "verify capture origin configuration",
+                )?;
+            if !stable {
+                return Ok(None);
             }
-            for tree in &worktrees {
-                if let Some(state) = &tree.working_state {
-                    let nested_key = CheckoutKey {
-                        repository_id: key.repository_id.clone(),
-                        checkout_path: tree.relative_path.clone(),
-                    };
+            for (branch, (owner_commit, _)) in &owners {
+                if let Some(live) = source_refs
+                    .get(*branch)
+                    .filter(|live| live.as_str() != *owner_commit)
+                {
+                    notices.push(format!("branch {branch} saved at {owner_commit}; its live tip {live} is preserved as refs/mj/displaced/{live}"));
+                }
+            }
+            let selected = selected_refs(runner, checkout, &cut, ownership, &owners)?;
+            let snapshot_refs = selected.refs;
+            let stash = original_stash
+                .iter()
+                .map(|entry| tracked_stash(runner, checkout, entry))
+                .collect::<Result<Vec<_>>>()?;
+            tips.extend(snapshot_refs.values().cloned());
+            tips.extend(stash.iter().map(|entry| entry.commit.clone()));
+            tips.sort();
+            tips.dedup();
+            if let Some(keep) = keep_relative(repository)? {
+                let mut tracked = Vec::new();
+                let states = working
+                    .iter()
+                    .cloned()
+                    .chain(stash.iter().map(|entry| entry.commit.clone()))
+                    .collect::<Vec<_>>();
+                for state in states
+                    .iter()
+                    .flat_map(|state| [state.clone(), format!("{state}^2")])
+                {
                     tracked.extend(tracked_keep_paths(
                         runner,
-                        &checkout.join(&tree.relative_path),
-                        &nested_key,
+                        checkout,
+                        key,
                         &keep,
-                        Some(state),
+                        Some(&state),
                     )?);
                 }
-            }
-            if !tracked.is_empty() {
-                return Err(SnapshotRefused::TrackedKeepFiles {
-                    keep_dir: repository.keep_dir.clone().unwrap_or(keep),
-                    paths: tracked,
+                for tree in &worktrees {
+                    if let Some(state) = &tree.working_state {
+                        let nested_key = CheckoutKey {
+                            repository_id: key.repository_id.clone(),
+                            checkout_path: tree.relative_path.clone(),
+                        };
+                        tracked.extend(tracked_keep_paths(
+                            runner,
+                            &checkout.join(&tree.relative_path),
+                            &nested_key,
+                            &keep,
+                            Some(state),
+                        )?);
+                    }
                 }
-                .into());
+                if !tracked.is_empty() {
+                    return Err(SnapshotRefused::TrackedKeepFiles {
+                        keep_dir: repository.keep_dir.clone().unwrap_or(keep),
+                        paths: tracked,
+                    }
+                    .into());
+                }
             }
-        }
-        let owned_pack =
-            write_snapshot_pack(runner, checkout, &tips, &exclusions.objects, pack_path)?;
-        let pack = owned_pack.as_ref().map(|path| path.to_path_buf());
-        pending_packs.extend(owned_pack);
-        check_repository_consent(
-            repository,
-            &repository_inventory(runner, repository)?,
-            consent,
-        )?;
-        let mut tracking = branch_tracking(runner, checkout, &snapshot_refs)?;
-        let dropped = tracking
-            .iter()
-            .filter(|(_, tracking)| tracking.remote.as_deref() != Some("origin"))
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        if !dropped.is_empty() {
-            notices.push(format!(
-                "upstreams for branches {} were omitted because restore recreates only origin",
-                dropped.join(", ")
-            ));
-        }
-        tracking.retain(|_, tracking| tracking.remote.as_deref() == Some("origin"));
-        return Ok(WorkspaceSnapshot {
-            source_had_origin: has_origin,
-            object_format,
-            worktree_config_enabled,
-            origin_urls,
-            push_urls,
-            push_evidence,
-            url_rules,
-            worktree_url_rules,
+            let owned_pack =
+                write_snapshot_pack(runner, checkout, &tips, &exclusions.objects, pack_path)?;
+            let pack = owned_pack.as_ref().map(|path| path.to_path_buf());
+            pending_packs.extend(owned_pack);
+            check_repository_consent(
+                repository,
+                &repository_inventory(runner, repository)?,
+                consent,
+            )?;
+            let mut tracking = branch_tracking(runner, checkout, &snapshot_refs)?;
+            let dropped = tracking
+                .iter()
+                .filter(|(_, tracking)| tracking.remote.as_deref() != Some("origin"))
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            if !dropped.is_empty() {
+                notices.push(format!(
+                    "upstreams for branches {} were omitted because restore recreates only origin",
+                    dropped.join(", ")
+                ));
+            }
+            tracking.retain(|_, tracking| tracking.remote.as_deref() == Some("origin"));
+            Ok(Some(WorkspaceSnapshot {
+                source_had_origin: has_origin,
+                object_format,
+                worktree_config_enabled,
+                origin_urls,
+                push_urls,
+                push_evidence,
+                url_rules,
+                worktree_url_rules,
 
-            notices,
-            head: head.clone(),
-            refs_complete: selected.complete,
-            deleted_refs: match ownership {
-                CheckoutOwnership::Raw {
-                    launch: Some(launch),
-                } => launch
-                    .refs
-                    .keys()
-                    .filter(|name| local_snapshot_ref(name) && !source_refs.contains_key(*name))
-                    .cloned()
+                notices,
+                head: head.clone(),
+                refs_complete: selected.complete,
+                deleted_refs: match ownership {
+                    CheckoutOwnership::Raw {
+                        launch: Some(launch),
+                    } => launch
+                        .refs
+                        .keys()
+                        .filter(|name| local_snapshot_ref(name) && !source_refs.contains_key(*name))
+                        .cloned()
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                branch_tracking: tracking,
+                refs: snapshot_refs,
+                stash,
+                has_uncommitted_state: working.is_some()
+                    || skipped
+                    || staged_gitlink_changes(runner, checkout)?
+                    || submodule_uncommitted_state(runner, checkout, &inventory)?,
+                working_state: working,
+                working_state_skipped: skipped,
+                worktrees,
+                initialized_submodules: inventory
+                    .initialized_submodules
+                    .into_iter()
+                    .map(|entry| entry.value)
                     .collect(),
-                _ => Vec::new(),
-            },
-            branch_tracking: tracking,
-            refs: snapshot_refs,
-            stash,
-            has_uncommitted_state: working.is_some()
-                || skipped
-                || staged_gitlink_changes(runner, checkout)?
-                || submodule_uncommitted_state(runner, checkout, &inventory)?,
-            working_state: working,
-            working_state_skipped: skipped,
-            worktrees,
-            initialized_submodules: inventory
-                .initialized_submodules
-                .into_iter()
-                .map(|entry| entry.value)
-                .collect(),
-            index_gitlinks: inventory
-                .index_gitlinks
-                .into_iter()
-                .map(|entry| entry.value)
-                .collect(),
-            remote_refs_stale: exclusions.stale
-                || inventory.remote_refs_stale
-                || inventory
-                    .worktrees
-                    .iter()
-                    .any(|(_, tree)| tree.remote_refs_stale),
-            pack,
-        });
+                index_gitlinks: inventory
+                    .index_gitlinks
+                    .into_iter()
+                    .map(|entry| entry.value)
+                    .collect(),
+                remote_refs_stale: exclusions.stale
+                    || inventory.remote_refs_stale
+                    || inventory
+                        .worktrees
+                        .iter()
+                        .any(|(_, tree)| tree.remote_refs_stale),
+                pack,
+            }))
+        })();
+        match result {
+            Ok(Some(snapshot)) => return Ok(snapshot),
+            Ok(None) => {}
+            Err(error) if error.downcast_ref::<CaptureCutChanged>().is_some() => {}
+            Err(error) => return Err(error),
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
-    unreachable!("every capture attempt returns or retries")
+    anyhow::bail!(
+        "workspace refs, HEAD, origin configuration or submodules kept changing during snapshot capture; retry after the checkout is idle"
+    )
 }
 
 fn nested_repository_inventory(root: &Path) -> Result<(u64, FileIdentity)> {
@@ -11884,5 +11914,231 @@ mod tests {
             "{error:#}"
         );
         assert_eq!(runner.queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+    // Hard-won: 80921f6c5: an origin switch split recorded URLs from authoritative exclusions.
+    #[test]
+    fn capture_race_origin_switch_retries_metadata_and_exclusions_together() {
+        struct SwitchOrigin {
+            root: PathBuf,
+            destination: PathBuf,
+            switched: std::sync::atomic::AtomicBool,
+        }
+        impl GitCommandRunner for SwitchOrigin {
+            fn run(
+                &self,
+                repository: &Path,
+                command: &GitCommand,
+            ) -> Result<crate::archive::GitOutput> {
+                if repository == self.root
+                    && git_arguments(command).starts_with(&["ls-remote".into(), "origin".into()])
+                    && !self
+                        .switched
+                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    git(
+                        repository,
+                        &[
+                            "remote",
+                            "set-url",
+                            "origin",
+                            self.destination.to_str().unwrap(),
+                        ],
+                    );
+                }
+                FileGit.run(repository, command)
+            }
+        }
+        let root = Repo::new();
+        root.commit("advertised only by new origin\n");
+        let new_origin = root.temp.path().join("new-origin.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                root.checkout.to_str().unwrap(),
+                new_origin.to_str().unwrap(),
+            ],
+        );
+        let runner = SwitchOrigin {
+            root: root.checkout.clone(),
+            destination: new_origin.clone(),
+            switched: false.into(),
+        };
+        let snapshot = capture_workspace_snapshot(
+            &runner,
+            &root.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+            &root.temp.path().join("origin-race"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::None,
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(snapshot.origin_urls, vec![new_origin.to_str().unwrap()]);
+        assert!(snapshot.pack.is_none());
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD"]),
+            git(&root.checkout, &["rev-parse", "HEAD"])
+        );
+    }
+
+    // Hard-won: 80921f6c5: missing newly-created HEAD branches escaped both cut retry sites.
+    #[test]
+    fn capture_race_new_head_branch_retries_initial_and_validation_cuts() {
+        struct SwitchBranch {
+            root: PathBuf,
+            switch_at: usize,
+            enumerations: std::sync::atomic::AtomicUsize,
+        }
+        impl GitCommandRunner for SwitchBranch {
+            fn run(
+                &self,
+                repository: &Path,
+                command: &GitCommand,
+            ) -> Result<crate::archive::GitOutput> {
+                let output = FileGit.run(repository, command)?;
+                let args = git_arguments(command);
+                if repository == self.root
+                    && args.first().is_some_and(|arg| arg == "for-each-ref")
+                    && args.iter().any(|arg| arg == "refs/heads")
+                    && self
+                        .enumerations
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1
+                        == self.switch_at
+                {
+                    git(repository, &["switch", "-c", "created-during-cut"]);
+                }
+                Ok(output)
+            }
+        }
+        for switch_at in [1, 2] {
+            let root = Repo::new();
+            root.commit("local branch work\n");
+            let runner = SwitchBranch {
+                root: root.checkout.clone(),
+                switch_at,
+                enumerations: 0.into(),
+            };
+            let snapshot = capture_workspace_snapshot(
+                &runner,
+                &root.checkout,
+                &CheckoutOwnership::Raw { launch: None },
+                &root.temp.path().join("branch-race"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::None,
+                    operations: OperationConsent::None,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(
+                runner
+                    .enumerations
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    > switch_at
+            );
+            assert!(
+                matches!(&snapshot.head, SnapshotHead::Branch { name, .. } if name == "refs/heads/created-during-cut")
+            );
+            let restored = root.restore(&snapshot, None);
+            assert_eq!(read_head(&FileGit, &restored).unwrap(), snapshot.head);
+        }
+    }
+
+    // Hard-won: 80921f6c5: successful overlapping captures borrowed another capture's rollback-owned pack.
+    #[test]
+    fn capture_race_each_inflight_capture_owns_its_pack_until_success() {
+        struct InterleavedCapture {
+            root: PathBuf,
+            base: PathBuf,
+            after_pack: std::sync::atomic::AtomicBool,
+            successful: std::sync::Mutex<Option<WorkspaceSnapshot>>,
+        }
+        impl GitCommandRunner for InterleavedCapture {
+            fn run(
+                &self,
+                repository: &Path,
+                command: &GitCommand,
+            ) -> Result<crate::archive::GitOutput> {
+                if repository == self.root
+                    && self
+                        .after_pack
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let snapshot = capture_workspace_snapshot(
+                        &FileGit,
+                        &self.root,
+                        &CheckoutOwnership::Raw { launch: None },
+                        &self.base,
+                        &CaptureConsent {
+                            untracked: UntrackedConsent::None,
+                            operations: OperationConsent::None,
+                        },
+                        None,
+                    )?;
+                    *self.successful.lock().unwrap() = Some(snapshot);
+                    fs::write(
+                        self.root.join("late-note"),
+                        "first capture must fail consent",
+                    )?;
+                }
+                let output = FileGit.run(repository, command)?;
+                if repository == self.root
+                    && command.arguments.iter().any(|arg| arg == "pack-objects")
+                {
+                    self.after_pack
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(output)
+            }
+        }
+        let root = Repo::new();
+        root.commit("identical concurrent pack input\n");
+        let runner = InterleavedCapture {
+            root: root.checkout.clone(),
+            base: root.temp.path().join("same-base"),
+            after_pack: false.into(),
+            successful: Default::default(),
+        };
+        let error = capture_workspace_snapshot(
+            &runner,
+            &root.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+            &runner.base,
+            &CaptureConsent {
+                untracked: UntrackedConsent::None,
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
+            "{error:#}"
+        );
+        let successful = runner.successful.lock().unwrap().take().unwrap();
+        assert!(successful.pack.as_ref().unwrap().exists());
+        let packs = fs::read_dir(root.temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(packs, vec![successful.pack.clone().unwrap()]);
+        let restored = root.restore(&successful, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD"]),
+            successful.head.commit()
+        );
     }
 }
