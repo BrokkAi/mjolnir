@@ -349,3 +349,21 @@ Checks outside sandbox, dev profile, inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared
 - `cargo clippy -p brokk-mj-worker-staging --all-targets -- -D warnings`: passed after fixture cleanup portability adjustment (`memory-instructions-staging-review-clippy-final.log`).
 
 No overrides or failing checks. The third finding, concerning earlier mailbox settlement, is confirmed in scope by the parent and follows as a separate ownership fix. No further review request, per parent instruction. Logs remain untracked.
+
+
+## Final mailbox ownership correction
+
+The third review finding is concrete in earlier unpushed lane code, and the parent explicitly includes that code in landing scope. daemon/mailbox_delivery.rs records a worker's Accepted result through a later spawn_blocking database task. Final startup cleanup could commit a synthetic failure first, causing the old accepted_at-IS-NULL guard to discard the genuine receipt forever.
+
+The deterministic store integration regression reproduces that exact archive-before-ack order, and also tests ack-before-archive. With old code it failed: Failed("child startup failed: startup cancelled") instead of Accepted(42). The fix makes both writers serialize on the absence of receipt columns. A genuine receipt atomically clears an inferred failure and records command/ordinal; settlement cannot replace an existing receipt. Later receipts cannot rewrite the first receipt, and explicit /clear discard remains terminal. No delay, retry, extra owner, table/column or persisted value is added.
+
+Checks outside sandbox on dev profile, inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared; store tests use private databases and daemon tests retain their isolated reexec configuration:
+
+- `cargo test -p brokk-mj-store worker_receipt_wins_startup_archive_in_either_transaction_order`: intentionally failed before fix (`memory-instructions-receipt-race-before.log`), then 1 passed covering both write orders (`memory-instructions-receipt-race-after.log`).
+- `cargo test -p brokk-mj-store clear_mailbox_commits_with_projection_and_replay_preserves_newer_events`: 1 passed (`memory-instructions-receipt-clear-test.log`).
+- `cargo test -p brokk-mj-daemon outbox_`: 3 passed (`memory-instructions-receipt-outbox-tests.log`).
+- `cargo test -p brokk-mj-daemon destroying_preserves_worker_mailbox_acceptance`: 1 passed (`memory-instructions-receipt-destroy-test.log`).
+- `cargo test -p brokk-mj-daemon failed_startup_settles_queued_parent_messages_without_attachment`: 1 passed (`memory-instructions-receipt-startup-test.log`).
+- `cargo clippy -p brokk-mj-store --all-targets -- -D warnings`: passed (`memory-instructions-receipt-clippy.log`).
+
+All three findings from the one review round are fixed. No overrides, deferred issues, still-failing checks or running builds. The parent directs final commits and handback without another review request. No default-instance operations, pushes or Milestone 3 acceptance; logs remain untracked.

@@ -329,7 +329,7 @@ pub(super) fn settle_failed_parent_messages_with(
     if let Some(reason) = SessionState::from_stored(&state)
         .and_then(|state| terminal_parent_message_failure(state, error.as_deref(), archived))
     {
-        connection.execute("UPDATE mailbox_outbox SET accepted_at=?2,failure=?3 WHERE target_session_id=?1 AND accepted_at IS NULL AND failure IS NULL AND json_extract(event_json,'$.body.type')='parent_message'", params![session.id,Utc::now().to_rfc3339(),reason])?;
+        connection.execute("UPDATE mailbox_outbox SET accepted_at=?2,failure=?3 WHERE target_session_id=?1 AND accepted_at IS NULL AND failure IS NULL AND accepted_command_id IS NULL AND accepted_ordinal IS NULL AND json_extract(event_json,'$.body.type')='parent_message'", params![session.id,Utc::now().to_rfc3339(),reason])?;
     }
     Ok(())
 }
@@ -364,15 +364,21 @@ fn mark_mailbox_event_accepted_with(
     command_id: &str,
     ordinal: u64,
 ) -> Result<()> {
+    // A relay receipt is evidence of delivery; cleanup/protocol failures are
+    // only an inference while the acknowledgement is in flight. Both writers
+    // serialize on the row's absence of a receipt, so the receipt wins either
+    // ordering. An explicit /clear discard remains terminal.
     connection.execute(
         "UPDATE mailbox_outbox SET accepted_at=?2, accepted_command_id=?3,
-                    accepted_ordinal=?4
-             WHERE event_key=?1 AND accepted_at IS NULL",
+                    accepted_ordinal=?4, failure=NULL
+             WHERE event_key=?1 AND accepted_command_id IS NULL AND accepted_ordinal IS NULL
+               AND (accepted_at IS NULL OR (failure IS NOT NULL AND failure<>?5))",
         params![
             event_key,
             Utc::now().to_rfc3339(),
             command_id,
-            ordinal.min(i64::MAX as u64) as i64
+            ordinal.min(i64::MAX as u64) as i64,
+            MAILBOX_CLEARED_REASON
         ],
     )?;
     Ok(())
@@ -446,6 +452,67 @@ mod tests {
     use mj_core::relay::{
         RelayCommandKind, RelayCommandOutcome, RelayEvent, RelayObservation, relay_event_digest,
     };
+
+    // Hard-won: b0a5dd7c0: final startup cleanup could mask an already accepted worker message while its receipt write waited.
+    #[test]
+    fn worker_receipt_wins_startup_archive_in_either_transaction_order() {
+        for archive_first in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("store.sqlite3");
+            let mut session = super::super::tests::session("child", "project");
+            session.state = SessionState::Provisioning;
+            save_session_to(&path, &session).unwrap();
+            let mut connection = open(&path).unwrap();
+            let event = mj_core::mailbox::MailboxEvent {
+                key: "subagent-message-accepted".into(),
+                source: "parent".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                    text: "consumed by worker before cleanup".into(),
+                },
+            };
+            enqueue_mailbox_event_with(
+                &connection,
+                &event.key,
+                &session.id,
+                &serde_json::to_string(&event).unwrap(),
+                true,
+                true,
+            )
+            .unwrap();
+            // The relay has accepted ordinal 42. Its daemon acknowledgement and
+            // the non-retry cleanup transaction can reach the writer in either order.
+            if !archive_first {
+                mark_mailbox_event_accepted_with(&connection, &event.key, "worker-receipt", 42)
+                    .unwrap();
+            }
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("UPDATE sessions SET state='error',archived=1,last_error='startup cancelled' WHERE session_id=?1", [&session.id]).unwrap();
+            settle_failed_parent_messages_with(&tx, &session).unwrap();
+            tx.commit().unwrap();
+            if archive_first {
+                assert!(matches!(
+                    mailbox_delivery_state_with(&connection, &session.id, &event.key).unwrap(),
+                    MailboxDeliveryState::Failed(_)
+                ));
+                mark_mailbox_event_accepted_with(&connection, &event.key, "worker-receipt", 42)
+                    .unwrap();
+            }
+            assert_eq!(
+                mailbox_delivery_state_with(&connection, &session.id, &event.key).unwrap(),
+                MailboxDeliveryState::Accepted(42),
+                "archive first: {archive_first}"
+            );
+            // Neither repeated cleanup nor a later receipt rewrites a recorded receipt.
+            settle_failed_parent_messages_with(&connection, &session).unwrap();
+            mark_mailbox_event_accepted_with(&connection, &event.key, "later-receipt", 99).unwrap();
+            let receipt: (Option<String>, Option<u64>, Option<String>) = connection.query_row("SELECT accepted_command_id,accepted_ordinal,failure FROM mailbox_outbox WHERE event_key=?1", [&event.key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+            assert_eq!(receipt, (Some("worker-receipt".into()), Some(42), None));
+        }
+    }
 
     fn enqueue(connection: &Connection, session: &str, key: &str) {
         let event = mj_core::mailbox::MailboxEvent {

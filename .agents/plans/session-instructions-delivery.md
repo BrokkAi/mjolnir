@@ -14,7 +14,9 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
-- [ ] (2026-11-19) One-round staging review: make fresh instruction copies owner-writable while keeping source modes unchanged; compose after memory replication from that exact staged snapshot. Parent also requires the concrete earlier mailbox receipt/finality race fixed separately. Staging golden (1) and staging/controller all-target clippy pass; mailbox regression/fix follows in its own commit. No further review request.
+- [x] (2026-11-19) Final mailbox finding reproduced: worker receipt recorded after archived cleanup remained Failed. Make receipt recording authoritative over inferred failures while no receipt exists; settlement uses the same no-receipt condition. Explicit /clear discard remains terminal. Deterministic two-order regression reproduces the old failure and passes after the fix. Existing clear (1), outbox (3), destroy/acceptance (1), failed-startup settlement (1), and store all-target clippy pass.
+
+- [x] (2026-11-19) One-round staging review: make fresh instruction copies owner-writable while keeping source modes unchanged; compose after memory replication from that exact staged snapshot. Parent also requires the concrete earlier mailbox receipt/finality race fixed separately. Staging golden (1) and staging/controller all-target clippy pass; mailbox fix is separately validated below. All three findings fixed; no overrides or further review request.
 
 - [x] (2026-11-19) Simplify native delivery: shared core composer, controller append into fresh stages, no worker native writes or replacement machinery. Parent accepts that worker-only paths keep the last restaged snapshot. Instruction tests (3), three-harness staging golden integration (1), and all five edited-crate clippy checks pass. Submit one review round.
 
@@ -57,6 +59,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Surprises & Discoveries
+
+- Final one-round review also found a concrete earlier-lane race: after the worker accepted a parent message, its daemon receipt write could wait behind final startup archival. Treating the synthetic failure timestamp as a receipt permanently hid that acceptance. The receipt writer and settlement now serialize on absence of receipt columns, and a real receipt clears inferred failure; explicit /clear discard remains terminal. The deterministic regression failed on the old code and passes for either transaction order.
 
 - Simplification prerequisite: stage_worker_files_for builds a fresh tempfile/profile from the source home, but worker-only upgrade, installed restart and some recovery paths do not restage. Parent explicitly accepts retained snapshots and the pre-change/no-composed-section interval rather than changing lifecycle behavior. All native instruction facts (canonical memory contents, durable role and launch-offered servers) are available before harness startup.
 
