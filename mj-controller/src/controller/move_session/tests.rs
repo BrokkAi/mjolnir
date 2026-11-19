@@ -488,6 +488,22 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
     if !isolated_test_child(&name, "MJ_ADOPT_RETAINED_TURN_CHILD") {
         return;
     }
+    adoption_retained_history_scenario(false);
+}
+
+#[cfg(unix)]
+// Hard-won: 98f204d: pre-ACK native spawns and prompt starts prevented complete adoption.
+#[test]
+fn adoption_preserves_pre_ack_child_identity_and_reply_span() {
+    let name = test_name("adoption_preserves_pre_ack_child_identity_and_reply_span");
+    if !isolated_test_child(&name, "MJ_ADOPT_PRE_ACK_CHILD") {
+        return;
+    }
+    adoption_retained_history_scenario(true);
+}
+
+#[cfg(unix)]
+fn adoption_retained_history_scenario(ack_after_start: bool) {
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
@@ -508,6 +524,41 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
             through_digest: digest,
         },
     });
+    // Hard-won: 98f204d: retained completed turns were ACKed without usage rows.
+    for index in 0..2 {
+        let command_id = format!("completed-turn-{index}");
+        relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: command_id.clone(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: command_id.clone(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("metered work")],
+                },
+            },
+        });
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed(
+                &command_id,
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    diagnostic: None,
+                    work_facts: None,
+                    usage: Some(mj_core::usage::TokenUsage {
+                        scope: mj_core::usage::UsageScope::Turn,
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        total_tokens: 15,
+                        thought_tokens: None,
+                        cached_read_tokens: None,
+                        cached_write_tokens: None,
+                        provider_details: None,
+                    }),
+                },
+            )
+            .unwrap();
+    }
     let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
         request_id: "prompt".into(),
         protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
@@ -525,9 +576,6 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
         panic!("prompt refused")
     };
     let started = relay.latest_ordinal();
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"before adoption"}
-    })).unwrap()).unwrap();
     use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
     relay
         .record_observation(mj_core::relay::RelayObservation::NativeAgent {
@@ -543,6 +591,23 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
             },
         })
         .unwrap();
+    let span_start = if ack_after_start {
+        let frontier = relay.latest_ordinal();
+        relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "ack-starts".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Acknowledge {
+                through_ordinal: frontier,
+                through_digest: relay.latest_digest().to_owned(),
+            },
+        });
+        frontier
+    } else {
+        started
+    };
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"before adoption"}
+    })).unwrap()).unwrap();
     relay.record_observation(mj_core::relay::RelayObservation::NativeAgent {
         event: NativeAgentEvent::Update {
             session_id: "retained-child".into(),
@@ -566,9 +631,20 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
         .await
         .unwrap();
         let turn = connection.snapshot().materialized.active_turn.unwrap();
-        assert_eq!(turn.accepted_ordinal, Some(ordinal));
-        assert_eq!(turn.turn_start_position, started);
+        assert_eq!(turn.accepted_ordinal, (!ack_after_start).then_some(ordinal));
+        assert_eq!(turn.turn_start_position, span_start);
     });
+    if !ack_after_start {
+        let usage = crate::database::load_session_usage(MOVE_QUEUE_SESSION_ID, 0, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.turns.len(), 2);
+        assert!(usage.turns.iter().all(|turn| {
+            turn.usage
+                .as_ref()
+                .is_some_and(|usage| usage.total_tokens == 15)
+        }));
+    }
     let child =
         crate::database::load_native_agent_view(MOVE_QUEUE_SESSION_ID, "retained-child", 100)
             .unwrap()
@@ -604,9 +680,18 @@ fn adoption_preserves_a_turn_started_in_retained_history() {
             .materialized
             .last_turn_outcome
             .unwrap();
-        assert_eq!(outcome.accepted_ordinal, Some(ordinal));
-        assert_eq!(outcome.turn_start_position, Some(started));
+        assert_eq!(
+            outcome.accepted_ordinal,
+            (!ack_after_start).then_some(ordinal)
+        );
+        assert_eq!(outcome.turn_start_position, Some(span_start));
     });
+    assert_eq!(
+        crate::database::load_materialized_finished_turn_message(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .as_deref(),
+        Some("before adoption")
+    );
 }
 
 #[test]

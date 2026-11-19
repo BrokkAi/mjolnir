@@ -146,7 +146,7 @@ impl StandaloneSession {
                         .client
                         .attach(snapshot.latest_ordinal, &snapshot.latest_digest)
                         .await?;
-                    let (mut projection, native_events) =
+                    let (mut projection, replay) =
                         connection.read_adoption_transcript(&snapshot).await?;
                     projection.configuration.values = snapshot
                         .config
@@ -222,7 +222,7 @@ impl StandaloneSession {
                         mj_core::state::MaterializedTurn {
                             command_id: active.command_id.clone(),
                             accepted_ordinal: None,
-                            turn_start_position: snapshot.latest_ordinal,
+                            turn_start_position: snapshot.acknowledged_through,
                             started_at_ms: active.started_at_ms,
                             steered_into: None,
                         }
@@ -262,10 +262,7 @@ impl StandaloneSession {
                     });
                     // Persist the exact cursor before ACKing any replacement
                     // history. Native-use proof stays with its owning worker.
-                    if crate::database::seed_adopted_materialized_session(
-                        &projection,
-                        native_events,
-                    )? {
+                    if crate::database::seed_adopted_materialized_session(&projection, replay)? {
                         connection.window = mj_core::state::ProjectionWindow::of(&projection);
                         connection.materialized = projection;
                         connection.window.trim(
@@ -289,8 +286,15 @@ impl StandaloneSession {
     async fn read_adoption_transcript(
         &mut self,
         state: &RelayOperationalState,
-    ) -> Result<(MaterializedSession, Vec<mj_core::relay::RelayEvent>)> {
-        let mut native_events = Vec::new();
+    ) -> Result<(MaterializedSession, crate::database::AdoptionReplay)> {
+        let mut replay = crate::database::AdoptionReplay {
+            after: RelayCursor {
+                ordinal: state.acknowledged_through,
+                digest: state.acknowledged_digest.clone(),
+            },
+            native_agents: state.native_agents.clone(),
+            events: Vec::new(),
+        };
         let mut projection = MaterializedSession::empty(&state.session_id);
         projection.applied_event_ordinal = state.acknowledged_through;
         projection.applied_event_digest = state.acknowledged_digest.clone();
@@ -305,7 +309,7 @@ impl StandaloneSession {
             };
             let page = self.client.next_catch_up_page(&after, &frontier).await?;
             self.cache_event_attachments(&page.events).await?;
-            (projection, native_events) = tokio::task::spawn_blocking(move || -> Result<_> {
+            (projection, replay) = tokio::task::spawn_blocking(move || -> Result<_> {
                 let mut index = ProjectionIndex::new(&projection);
                 for event in page.events {
                     let mutation = mj_transcript::projection::project_retained_relay_event_indexed(
@@ -314,9 +318,7 @@ impl StandaloneSession {
                         &event,
                     )?
                     .mutation;
-                    if let Some(native) = &mutation.native_agent {
-                        native_events.push(native.clone());
-                    }
+                    replay.events.push((event.clone(), mutation.clone()));
                     apply_committed_projection_event_indexed(
                         &mut projection,
                         &mut index,
@@ -324,12 +326,12 @@ impl StandaloneSession {
                         mutation,
                     )?;
                 }
-                Ok((projection, native_events))
+                Ok((projection, replay))
             })
             .await
             .context("project retained adoption transcript")??;
         }
-        Ok((projection, native_events))
+        Ok((projection, replay))
     }
 
     async fn cache_prompt_attachments(

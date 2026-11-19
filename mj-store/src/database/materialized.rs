@@ -1861,22 +1861,30 @@ pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSess
     Ok(())
 }
 
+/// Replay effects recovered after a lost controller store. The normal page
+/// writer remains the owner of usage, native children, and API side effects.
+pub struct AdoptionReplay {
+    pub after: mj_core::relay::RelayCursor,
+    pub native_agents: Vec<mj_core::native_agent::NativeAgent>,
+    pub events: Vec<(mj_core::relay::RelayEvent, MaterializedSessionMutation)>,
+}
+
 /// Install recovered history only while no other attachment has established a cursor.
 /// Native-child effects and the owner frontier commit together before any ACK.
 pub fn seed_adopted_materialized_session(
     materialized: &MaterializedSession,
-    native_events: Vec<mj_core::relay::RelayEvent>,
+    replay: AdoptionReplay,
 ) -> Result<bool> {
     let materialized = materialized.clone();
     submit_database_write("seed_adopted_materialized_session", move |_| {
-        seed_adopted_materialized_session_to(&database_path(), &materialized, &native_events)
+        seed_adopted_materialized_session_to(&database_path(), &materialized, replay)
     })
 }
 
 pub(super) fn seed_adopted_materialized_session_to(
     path: &Path,
     materialized: &MaterializedSession,
-    native_events: &[mj_core::relay::RelayEvent],
+    replay: AdoptionReplay,
 ) -> Result<bool> {
     materialized.validate()?;
     let mut connection = open(path)?;
@@ -1894,11 +1902,30 @@ pub(super) fn seed_adopted_materialized_session_to(
     if frontier.is_some_and(|ordinal| ordinal > 0) {
         return Ok(false);
     }
-    for event in native_events {
-        native_agents::apply_native_agent_event(&tx, &materialized.session_id, event)?;
+    let mut base = MaterializedSession::empty(&materialized.session_id);
+    base.applied_event_ordinal = replay.after.ordinal;
+    base.applied_event_digest = replay.after.digest.clone();
+    write_materialized_session(&tx, &base)?;
+    native_agents::seed_adopted_native_agents(
+        &tx,
+        &materialized.session_id,
+        &replay.native_agents,
+        &replay.after,
+    )?;
+    let mut page = load_projection_page(tx, &materialized.session_id)?;
+    for (event, mutation) in replay.events {
+        page.apply(
+            event.ordinal,
+            &event.previous_digest,
+            &event.digest,
+            &mutation,
+        )?;
     }
-    write_materialized_session(&tx, materialized)?;
-    tx.commit()?;
+    page.flush()?;
+    // Overlay authoritative current owner state only after the ordinary writer
+    // has preserved every retained event's historical side effects.
+    write_materialized_session(&page.transaction, materialized)?;
+    commit_projection_page(page)?;
     Ok(true)
 }
 
@@ -2248,6 +2275,36 @@ pub(super) fn apply_projection_page_with<T>(
 ) -> Result<T> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut page = load_projection_page(transaction, session_id)?;
+    // Dropping the page on failure rolls the whole transaction back, leaving
+    // the projection at the frontier the relay last saw acknowledged.
+    let filled = fill(&mut page)?;
+    page.flush()?;
+    commit_projection_page(page)?;
+    Ok(filled)
+}
+
+fn commit_projection_page(page: ProjectionPage<'_>) -> Result<()> {
+    let questions = page.pending_events.iter().any(|(_, event)| {
+        matches!(
+            event,
+            ApiEventData::InputRequired {
+                request: Some(_),
+                ..
+            } | ApiEventData::InputResolved { .. }
+        )
+    });
+    page.transaction.commit()?;
+    if questions {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
+}
+
+fn load_projection_page<'a>(
+    transaction: Transaction<'a>,
+    session_id: &'a str,
+) -> Result<ProjectionPage<'a>> {
     let (applied_ordinal, applied_digest, input_required_event_frontier, operator_away_event_frontier) = transaction
         .query_row(
             "SELECT applied_event_ordinal, applied_event_digest, input_required_event_frontier, operator_away_event_frontier
@@ -2272,7 +2329,7 @@ pub(super) fn apply_projection_page_with<T>(
     let usage_configuration = read_materialized_session_fields(&transaction, session_id)?
         .context("projection session disappeared")?
         .configuration;
-    let mut page = ProjectionPage {
+    Ok(ProjectionPage {
         session_id,
         transaction,
         applied_ordinal,
@@ -2285,25 +2342,7 @@ pub(super) fn apply_projection_page_with<T>(
         pending_turns: Vec::new(),
         usage_configuration,
         pending_events: Vec::new(),
-    };
-    // Dropping the page on failure rolls the whole transaction back, leaving
-    // the projection at the frontier the relay last saw acknowledged.
-    let filled = fill(&mut page)?;
-    page.flush()?;
-    let questions = page.pending_events.iter().any(|(_, event)| {
-        matches!(
-            event,
-            ApiEventData::InputRequired {
-                request: Some(_),
-                ..
-            } | ApiEventData::InputResolved { .. }
-        )
-    });
-    page.transaction.commit()?;
-    if questions {
-        crate::mailbox_outbox::notify_mailbox_outbox_changed();
-    }
-    Ok(filled)
+    })
 }
 
 /// Apply exactly one relay event, as a page of one.

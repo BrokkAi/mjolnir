@@ -8698,7 +8698,18 @@ fn adoption_seed_cannot_replace_another_attachments_durable_frontier() {
     let mut newer = older.clone();
     newer.applied_event_ordinal += 1;
     newer.applied_event_digest = event_digest(newer.applied_event_ordinal);
-    assert!(materialized::seed_adopted_materialized_session_to(&database, &newer, &[]).unwrap());
+    let empty_replay = || AdoptionReplay {
+        after: mj_core::relay::RelayCursor {
+            ordinal: 0,
+            digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        },
+        native_agents: Vec::new(),
+        events: Vec::new(),
+    };
+    assert!(
+        materialized::seed_adopted_materialized_session_to(&database, &newer, empty_replay())
+            .unwrap()
+    );
     // The older attachment was paused after reading the worker but before its
     // seed write. Even its side effects must not apply after the newer seed.
     let invalid_side_effect = mj_core::relay::RelayEvent {
@@ -8716,7 +8727,10 @@ fn adoption_seed_cannot_replace_another_attachments_durable_frontier() {
         !materialized::seed_adopted_materialized_session_to(
             &database,
             &older,
-            &[invalid_side_effect]
+            AdoptionReplay {
+                events: vec![(invalid_side_effect, MaterializedSessionMutation::default())],
+                ..empty_replay()
+            }
         )
         .unwrap()
     );

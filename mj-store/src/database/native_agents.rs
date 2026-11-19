@@ -90,6 +90,44 @@ fn transcript(
         .collect()
 }
 
+/// The worker owns native identities even when their spawn precedes retained history.
+/// Replayed spawns are idempotent against this base, using the ordinary writer.
+pub(super) fn seed_adopted_native_agents(
+    connection: &Connection,
+    owner: &str,
+    agents: &[NativeAgent],
+    cursor: &mj_core::relay::RelayCursor,
+) -> Result<()> {
+    for agent in agents {
+        ensure!(
+            agent.owner_session_id == owner,
+            "adopted native child belongs to another owner"
+        );
+        let mut projection = MaterializedSession::empty(agent.view_id());
+        projection.applied_event_ordinal = cursor.ordinal;
+        projection.applied_event_digest = cursor.digest.clone();
+        projection.session_title = Some(agent.name.clone());
+        projection.execution = if agent.state == NativeAgentState::Running {
+            MaterializedExecutionState::Running {
+                started_at_ms: mj_core::clock::epoch_millis(),
+            }
+        } else {
+            MaterializedExecutionState::Idle
+        };
+        save(
+            connection,
+            &NativeAgentView {
+                generation_ordinal: cursor.ordinal,
+                agent: agent.clone(),
+                projection,
+                pending_input_times: Default::default(),
+            },
+            0,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn apply_native_agent_event(
     connection: &Connection,
     owner: &str,
