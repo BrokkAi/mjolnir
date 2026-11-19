@@ -587,7 +587,12 @@ def main():
     # Exit 0 only when every pinned repo reached measurement. A measured failure (OOM, readiness
     # timeout) is a result; a repo that never got there (clone, fetch or setup failed) isn't.
     final = latest_records(results)
-    unmeasured = [repo for repo in repos if "cold" not in (final.get(repo) or {})]
+    def reached_measurement(r):
+        # A result for both phases: either phase ran (ready or a measured failure), or the warm
+        # phase was deliberately skipped because the cold phase failed. A cold result with no
+        # warm one (checkout to the pinned head failed in between) is incomplete.
+        return "cold" in r and ("warm_restart" in r)
+    unmeasured = [repo for repo in repos if not reached_measurement(final.get(repo) or {})]
     usable = [repo for repo in repos if not (final.get(repo) or {}).get("error")
               and all((final[repo].get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
     if unmeasured:
@@ -613,9 +618,15 @@ def latest_records(results):
 
 def append_record(results, rec):
     """One write per record, flushed and fsynced, so a crash leaves at most a torn last line."""
-    fd = os.open(results, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(results, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        os.write(fd, (json.dumps(rec) + "\n").encode())
+        # After a torn append the file can end mid-line: start on a fresh line so this record
+        # isn't glued to the fragment (the reader skips only the fragment).
+        size = os.fstat(fd).st_size
+        lead = b""
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            lead = b"\n"
+        os.write(fd, lead + (json.dumps(rec) + "\n").encode())
         os.fsync(fd)
     finally:
         os.close(fd)
