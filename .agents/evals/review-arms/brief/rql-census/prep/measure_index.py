@@ -359,14 +359,12 @@ def phase(binary, root, cache, log):
         rec["ready"] = False
         rec["error"] = f"unclean shutdown after ready (exit {rec['exit']})"
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
-    # Bifrost actually started inside its scope (the sampler or the readiness read saw the
-    # scope's cgroup). A systemd-run or exec failure never gets that far: not a measurement.
-    rec["launched"] = server.cgroup is not None or rec.get("scope_result") == "oom-kill"
-    if rec.get("scope_result") in ("oom-kill", "unknown") or rec.get("oom_kill"):
-        # Hitting the cap at any point, even after a ready reply, invalidates the phase.
+    if rec.get("scope_result") != "success" or rec.get("oom_kill"):
+        # Only a scope that ended in success counts: oom-kill, a stop timeout that killed a
+        # straggler, or an unreadable result all invalidate the phase, even after a ready reply.
         rec["ready"] = False
-        rec.setdefault("error", f"memory cap {MEMORY_MAX} reached or scope result unreadable "
-                                f"(scope_result={rec.get('scope_result')})")
+        rec.setdefault("error", f"scope did not end in success (scope_result={rec.get('scope_result')}, "
+                                f"cap {MEMORY_MAX})")
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     rec.update(cpu_user=after.ru_utime - before.ru_utime, cpu_sys=after.ru_stime - before.ru_stime,
                cache_bytes=du(cache))
@@ -522,12 +520,16 @@ def main():
         "cpu_max": read_cpu_max(),
         "bifrost_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("BIFROST_")},
     }
+    def is_done(repo, r):
+        """The single decision "this repo has a usable measurement under current conditions",
+        used both to skip a repo on resume and for the batch's exit status."""
+        return (r is not None and repo in pins and not r.get("error")
+                and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
+                and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
+                and r.get("environment") == environment and r.get("head") == pins[repo][0])
+
     latest = latest_records(results)  # the record readers use; resume follows it too
-    done = {repo for repo, r in latest.items()
-            if repo in pins and not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
-            and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
-            and r.get("environment") == environment
-            and r.get("head") == pins[repo][0]}
+    done = {repo for repo, r in latest.items() if is_done(repo, r)}
     for repo in repos:
         if cancelled():
             sys.exit("cancelled; the last server's scope was torn down")
@@ -575,7 +577,7 @@ def main():
             rec["cold"] = phase(binary, wt, cache, out / f"{repo}.cold.log")
             if rec["cold"].get("ready"):
                 # The head checkout serves only the warm phase: after a measured cold failure it's
-                # skipped, so a checkout problem can't turn that result into "unmeasured".
+                # skipped, so a checkout problem can't replace that result with a setup error.
                 git("checkout", "-q", "--detach", head, cwd=wt)
                 rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
                 rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
@@ -600,26 +602,13 @@ def main():
             # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
             sys.exit(f"{repo}: server scope not confirmed stopped; batch halted")
 
-    # Exit 0 only when every pinned repo reached measurement. A measured failure (OOM, readiness
-    # timeout) is a result; a repo that never got there (clone, fetch or setup failed) isn't.
+    # Exit 0 only when every pinned repo has a usable measurement under current conditions (the
+    # same decision as resume). Anything else, including a measured OOM, exits nonzero and the
+    # per-repo records say why.
     final = latest_records(results)
-    def reached_measurement(r):
-        # A result for both phases: the cold server actually launched (ready, or a measured
-        # failure such as OOM or a readiness timeout), and the warm phase ran or was deliberately
-        # skipped after a failed cold one. A cold result with no warm one (checkout to the pinned
-        # head failed in between), or a cold server that never started, is incomplete.
-        cold, warm = r.get("cold") or {}, r.get("warm_restart")
-        if cold.get("launched") is not True or warm is None:
-            return False
-        return bool(warm.get("skipped")) or warm.get("launched") is True
-    unmeasured = [repo for repo in repos if not reached_measurement(final.get(repo) or {})]
-    usable = [repo for repo in repos if not (final.get(repo) or {}).get("error")
-              and all((final[repo].get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
-    if unmeasured:
-        sys.exit(f"{len(unmeasured)} pinned repos never reached measurement: {unmeasured[:5]}")
-    if not usable:
-        sys.exit("no repository produced a usable cold/warm pair; see the per-repo records")
-
+    incomplete = [repo for repo in repos if not is_done(repo, final.get(repo))]
+    if incomplete:
+        sys.exit(f"{len(incomplete)} of {len(repos)} pinned repos lack a usable measurement: {incomplete[:5]}")
 
 def read_cpu_max():
     """The driver cgroup's CPU quota ("max" when unlimited); "no cpu controller" when the
@@ -656,7 +645,10 @@ def append_record(results, rec):
         lead = b""
         if size and os.pread(fd, 1, size - 1) != b"\n":
             lead = b"\n"
-        os.write(fd, lead + (json.dumps(rec) + "\n").encode())
+        data = lead + (json.dumps(rec) + "\n").encode()
+        written = os.write(fd, data)
+        if written != len(data):  # a full volume: the record wasn't saved
+            raise OSError(f"short write to {results}: {written} of {len(data)} bytes")
         os.fsync(fd)
     finally:
         os.close(fd)

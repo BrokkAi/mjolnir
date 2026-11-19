@@ -23,7 +23,7 @@ A positive result shows that the information helps when it's delivered this way.
 **Bugs.**
 - Candidates come from each selected repo's full git history: fix commits that change non-test code and add or change a test. Each repo's eligible fixes are traced in a seeded random order (seed 20261118), stopping when the repo reaches 25 distinct admitted relation diffs (introducing changes) or the pool runs out. Local defects admitted along the way are kept for the non-relation controls but don't count toward the stop. This is the same unit as the screen's capped yield. The order and the stopping point are recorded. The brokkbench SFT lists only seeded the screen, and they are a model-screened subset capped at 1,000 commits per repo.
 - The corpus SPEC rules (`corpus/SPEC.md`) apply, adapted: the regression test in the fix commit replaces the Hard-won marker, and the cutoff rule becomes the window below. The ordinary-commit rule uses each repo's default branch (the clone's HEAD branch, `main` or otherwise) in place of `master`. Attribution, findable-from-the-diff, real behavior, not pre-flagged, size and spread all apply unchanged.
-- Each candidate is admitted by a blind Sol/high tracer with a second-family check of the attribution, as in `PLAN-bifrost-bugs.md`.
+- Each candidate is admitted by a tracer helper with a second-family check of the attribution and of the relation call, as in `PLAN-bifrost-bugs.md`. The tracer is Gemini neon/high, the user's current helper model; the check is a sub-agent of another family. A disagreement isn't admitted. Tracing is git-history work only, with no indexing, and the brief is `.agents/scratch/rql-census/tracer-brief.md`, committed with the corpus.
 - Target about 25 admitted bugs per repo.
 
 **Window.**
