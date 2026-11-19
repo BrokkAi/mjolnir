@@ -322,6 +322,11 @@ fn push_claim_in(
                 // owner hides its ledger row. Its reconciliation wakes us.
                 continue;
             };
+            if entry.paused {
+                // Availability can change before the observer hides the ledger
+                // row. The consumer must not admit that stale decision.
+                continue;
+            }
             if let Some(payload) = notices.get(&identity) {
                 String::clone(payload)
             } else {
@@ -834,6 +839,7 @@ mod tests {
         );
     }
 
+    // Hard-won: c21e3b62b: delivery admitted a paused holder before observer reconciliation.
     #[test]
     fn push_orders_one_device_tag_across_retry_and_worker_unavailability() {
         let dir = tempfile::tempdir().unwrap();
@@ -917,6 +923,29 @@ mod tests {
             "Second reply"
         );
         result(&db, &second[0], Some(413), i64::MAX); // Permanently retires only this intent.
+        runtime
+            .metadata
+            .session_attention
+            .insert("child".into(), SessionAttention::Unreachable);
+        let (paused, next) = push_reconcile_with(&mut db, &runtime, 10, false).unwrap();
+        assert!(
+            paused.is_empty(),
+            "a paused holder cannot consume a still-visible ledger entry"
+        );
+        assert!(
+            next.is_none(),
+            "availability recovery wakes deferred delivery"
+        );
+        assert!(
+            db.query_row(
+                "SELECT visible FROM push_entries WHERE identity=?1",
+                [r#"["form","child","form:1",0]"#],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "the regression must exercise visibility ahead of reconciliation"
+        );
+        runtime.metadata.session_attention.remove("child");
         let form = claim(&mut db, &runtime, 10);
         assert_eq!(form.len(), 1);
         assert_eq!(form[0].identity, r#"["form","child","form:1",0]"#);

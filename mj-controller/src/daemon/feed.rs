@@ -414,7 +414,7 @@ impl RuntimeState {
         let mut may_wait = wait;
         loop {
             self.capture_runtime()?;
-            let (mut frame, same_runtime) = {
+            let (mut frame, same_runtime, metadata) = {
                 let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
                 let current = history.cursor();
                 let same_runtime = cursor.as_ref().is_some_and(|cursor| {
@@ -438,10 +438,7 @@ impl RuntimeState {
                         projection: Box::new(projection),
                     };
                 }
-                if let RuntimeFrame::Delta { changes, .. } = &mut frame {
-                    changes.metadata.get_or_insert(metadata);
-                }
-                (frame, same_runtime)
+                (frame, same_runtime, metadata)
             };
             // A frozen frame can receive a newer alert frontier, never an older
             // frontier paired with a newer runtime cursor. Subscribe before both.
@@ -464,9 +461,11 @@ impl RuntimeState {
                     cursor, changes, ..
                 } => {
                     cursor.alert_sequence = high;
-                    let metadata = changes.metadata.as_mut().expect("frame metadata");
-                    metadata.alert_high_sequence = high;
-                    metadata.alert_events = events;
+                    if changes.metadata.is_some() || after != Some(high) {
+                        let metadata = changes.metadata.get_or_insert(metadata);
+                        metadata.alert_high_sequence = high;
+                        metadata.alert_events = events;
+                    }
                 }
                 RuntimeFrame::ResetRequired => {}
             }
@@ -888,6 +887,7 @@ mod tests {
         assert_eq!(*replica.projection.metadata.config, Config::default());
     }
 
+    // Hard-won: c21e3b62b: transcript deltas unnecessarily resent all runtime metadata.
     #[tokio::test]
     async fn attaching_and_then_changing_owner_state_yields_an_incremental_frame() {
         if super::super::tests::isolate_runtime_feed_test(
@@ -931,6 +931,70 @@ mod tests {
             replica.projection.sessions["new"].attention,
             mj_core::attention::SessionAttention::Unreachable
         );
+        let mut streamed = mj_core::state::MaterializedSession::empty("new");
+        streamed.applied_event_ordinal = 1;
+        state.owner().transcripts.insert(
+            "new".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &streamed,
+                &mj_core::state::ProjectionWindow::default(),
+                1024,
+            ),
+        );
+        state.publish_revision();
+        replica
+            .apply(
+                state
+                    .runtime_changes(replica.cursor.clone(), false)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        streamed.applied_event_ordinal = 2;
+        streamed
+            .transcript
+            .push(Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: "agent:stream".into(),
+                position: 1,
+                latest_content_event_ordinal: Some(2),
+                created_at_ms: 0,
+                last_changed_at_ms: 1,
+                body: mj_core::transcript::TranscriptBody::Agent {
+                    chunks: vec![
+                        serde_json::json!({"content":{"type":"text","text":"streaming reply"}}),
+                    ],
+                    streaming: true,
+                },
+            }));
+        state.owner().transcripts.insert(
+            "new".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &streamed,
+                &mj_core::state::ProjectionWindow::default(),
+                1024,
+            ),
+        );
+        state.publish_revision();
+        let frame = state
+            .runtime_changes(replica.cursor.clone(), false)
+            .await
+            .unwrap();
+        let RuntimeFrame::Delta {
+            changes, cursor, ..
+        } = &frame
+        else {
+            panic!("expected streaming delta");
+        };
+        assert!(!changes.transcripts.is_empty());
+        assert!(
+            changes.metadata.is_none(),
+            "transcript-only deltas must not resend unchanged metadata"
+        );
+        assert_eq!(
+            cursor.alert_sequence,
+            replica.cursor.as_ref().unwrap().alert_sequence
+        );
+        replica.apply(frame).unwrap();
         let cursor = replica.cursor.clone();
         let mut config = (*replica.projection.metadata.config).clone();
         config.profiles.remove("codex");
