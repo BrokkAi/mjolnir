@@ -263,19 +263,16 @@ impl DashboardContext {
         if let Some(title) = self.dashboard.terminal_title() {
             self.terminal.set_title(&title)?;
         }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_millis() as u64);
-        let due = self.dashboard.notification_events(now_ms);
+        let due = self.dashboard.notification_events();
         if due.is_empty() {
             return Ok(());
         }
         let notify = self.dashboard.notify_config().clone();
-        if notify.bell {
-            self.terminal.ring_bell()?;
-        }
-        if notify.mode == mj_core::config::NotifyMode::System {
-            for notification in due {
+        for notification in due {
+            if notify.bell {
+                self.terminal.ring_bell()?;
+            }
+            if notify.mode == mj_core::config::NotifyMode::System {
                 tokio::task::spawn_blocking(move || {
                     if let Err(error) = post_system_notification(&notification) {
                         tracing::warn!(%error, session = %notification.session_id, "desktop notification failed");

@@ -36,20 +36,6 @@ fn every_staged_gh_approval_file_is_copied_by_profile_staging() {
 }
 
 #[test]
-fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
-    for current in [
-        ExecutionPolicy::ConfiguredApprovals,
-        ExecutionPolicy::Unconstrained,
-    ] {
-        assert_eq!(
-            effective_execution_policy(current, true),
-            ExecutionPolicy::ConfiguredApprovals
-        );
-        assert_eq!(effective_execution_policy(current, false), current);
-    }
-}
-
-#[test]
 fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     let mut session = crate::database::test_fixtures::checkpoint_test_session("primary");
     let mut choices = mj_core::config::SubagentConfig::default();

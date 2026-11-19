@@ -77,7 +77,6 @@ for line in sys.stdin:
                 harness: HarnessKind::Claude,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
                 claude_permission_mode: Default::default(),
-                observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
@@ -205,7 +204,6 @@ for line in sys.stdin:
                 harness,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
                 claude_permission_mode: Default::default(),
-                observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
@@ -358,7 +356,6 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1311,7 +1308,6 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1415,7 +1411,6 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1517,7 +1512,6 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1667,7 +1661,6 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock,
         };
@@ -1815,554 +1808,6 @@ fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
         )],
     );
     assert!(allow_permission_response(&rejected_only).is_none());
-}
-
-struct ObserveRound {
-    action: &'static str,
-    timeout: bool,
-    timeout_ms: u64,
-    fail_closed: bool,
-    execution_policy: ExecutionPolicy,
-    choice: Option<&'static str>,
-}
-
-async fn run_observe_permission_round(
-    round: ObserveRound,
-) -> (
-    serde_json::Value,
-    Vec<String>,
-    Option<ElicitationRequest>,
-    Vec<(String, serde_json::Value)>,
-) {
-    use serde_json::{Value, json};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let action = round.action.to_owned();
-    let timeout_reply = round.timeout;
-    let acknowledgements = usize::from(action != "allow" && !timeout_reply);
-    let policy_server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for index in 0..=acknowledgements {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                .await
-                .expect("policy client did not make its request")
-                .unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut chunk).await.unwrap();
-                request.extend_from_slice(&chunk[..read]);
-                let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .unwrap();
-                if request.len() < end + 4 + length {
-                    continue;
-                }
-                let path = headers
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap()
-                    .to_owned();
-                let body: Value =
-                    serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
-                requests.push((path, body));
-                if timeout_reply {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    return requests;
-                }
-                let response = if index == 0 {
-                    json!({
-                        "decision": action,
-                        "policy_id": 1,
-                        "policy_name": "Observe test policy",
-                        "message": format!("Observe asks for {action}")
-                    })
-                } else {
-                    json!({"acknowledged": true})
-                }
-                .to_string();
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
-                            response.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                break;
-            }
-        }
-        requests
-    });
-
-    let (client, agent) = tokio::io::duplex(64 * 1024);
-    let (client_read, client_write) = tokio::io::split(client);
-    let (agent_read, mut agent_write) = tokio::io::split(agent);
-    let (commands, mut requests) = mpsc::channel(16);
-    let (event_tx, mut events) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Dsh);
-    spec.resume_session = None;
-    spec.execution_policy = round.execution_policy;
-    spec.observe_policy = Some(
-        crate::observe::PolicyClient::new(
-            mj_core::observe::ObserveEnforcementConfig {
-                url: format!("http://{address}"),
-                token: "token".into(),
-                timeout_ms: round.timeout_ms,
-                fail_closed: round.fail_closed,
-            },
-            "logical-session",
-        )
-        .unwrap(),
-    );
-    let driver = tokio::spawn(async move {
-        drive(
-            ByteStreams::new(client_write.compat_write(), client_read.compat()),
-            spec,
-            &mut requests,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    let mut input = BufReader::new(agent_read).lines();
-    let mut send = async |message: Value| {
-        agent_write
-            .write_all(format!("{message}\n").as_bytes())
-            .await
-            .unwrap();
-    };
-
-    commands
-        .send(CommandRequest::Prompt {
-            request_id: "observe-round".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("run it"))],
-        })
-        .await
-        .unwrap();
-    loop {
-        let line = tokio::time::timeout(Duration::from_secs(5), input.next_line())
-            .await
-            .expect("ACP request timed out")
-            .unwrap()
-            .expect("ACP closed unexpectedly");
-        let message: Value = serde_json::from_str(&line).unwrap();
-        let result = match message["method"].as_str() {
-            Some("initialize") => json!({"protocolVersion": 1}),
-            Some("session/new") => json!({
-                "sessionId": "dsh-session",
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/set_config_option") => json!({
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/prompt") => break,
-            _ => json!({}),
-        };
-        if !message["id"].is_null() {
-            send(json!({"jsonrpc": "2.0", "id": message["id"], "result": result})).await;
-        }
-    }
-    send(json!({
-        "jsonrpc": "2.0",
-        "id": "permission-1",
-        "method": "session/request_permission",
-        "params": {
-            "sessionId": "dsh-session",
-            "toolCall": {
-                "toolCallId": "call-1",
-                "title": "Run command",
-                "kind": "execute",
-                "rawInput": {"command": "git push --force origin main"}
-            },
-            "options": [
-                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
-                {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
-            ]
-        }
-    }))
-    .await;
-
-    let mut response = None;
-    let mut warnings = Vec::new();
-    let mut form = None;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while response.is_none() {
-            tokio::select! {
-                line = input.next_line() => {
-                    let line = line.unwrap().expect("ACP closed before the permission response");
-                    let message: Value = serde_json::from_str(&line).unwrap();
-                    if message["id"] == "permission-1" {
-                        response = Some(message);
-                    }
-                }
-                event = events.recv() => {
-                    match event.expect("runtime event channel closed") {
-                        RuntimeEvent::Warning { message } => warnings.push(message),
-                        RuntimeEvent::ElicitationRequested { request } => {
-                            form = Some(request.clone());
-                            let choice = round.choice.expect("the policy form needs an answer");
-                            let (resolved_tx, resolved_rx) = oneshot::channel();
-                            commands
-                                .send(CommandRequest::ResolveElicitation {
-                                    elicitation_id: request.id,
-                                    response: ElicitationResponse::Accept {
-                                        content: BTreeMap::from([(
-                                            "choice".into(),
-                                            ElicitationValue::String(choice.into()),
-                                        )]),
-                                    },
-                                    resolved: resolved_tx,
-                                })
-                                .await
-                                .unwrap();
-                            resolved_rx.await.unwrap().unwrap();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .expect("permission round timed out");
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
-    {
-        if let RuntimeEvent::Warning { message } = event {
-            warnings.push(message);
-        }
-    }
-
-    let policy_requests = policy_server.await.unwrap();
-    driver.abort();
-    (response.unwrap(), warnings, form, policy_requests)
-}
-
-#[tokio::test]
-async fn observe_ask_uses_one_form_and_acknowledges_the_selected_outcome() {
-    for (choice, expected_option, expected_outcome) in [
-        ("allow_once", "allow_once", "approved"),
-        ("reject_once", "reject_once", "rejected"),
-    ] {
-        let (response, _, form, requests) = run_observe_permission_round(ObserveRound {
-            action: "ask",
-            timeout: false,
-            timeout_ms: 3_000,
-            fail_closed: true,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            choice: Some(choice),
-        })
-        .await;
-        assert_eq!(response["result"]["outcome"]["optionId"], expected_option);
-        let form = form.expect("an ask policy must present a form");
-        assert!(form.message.contains("Brokk Observe requires approval"));
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].0, "/api/v1/policy/evaluate");
-        assert_eq!(requests[1].0, "/api/v1/policy/acknowledge");
-        assert_eq!(requests[1].1["decision"], "ask");
-        assert_eq!(requests[1].1["outcome"], expected_outcome);
-    }
-}
-
-#[tokio::test]
-async fn observe_warn_and_timeout_follow_their_declared_behavior() {
-    let (response, warnings, form, requests) = run_observe_permission_round(ObserveRound {
-        action: "warn",
-        timeout: false,
-        timeout_ms: 3_000,
-        fail_closed: true,
-        execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        choice: Some("allow_once"),
-    })
-    .await;
-    assert_eq!(response["result"]["outcome"]["optionId"], "allow_once");
-    assert!(
-        form.is_some(),
-        "warn preserves configured approval behavior"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("Observe asks for warn"))
-    );
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].0, "/api/v1/policy/acknowledge");
-    assert_eq!(requests[1].1["decision"], "warn");
-    assert_eq!(requests[1].1["outcome"], "warned");
-
-    for (fail_closed, expected, warning) in [
-        (
-            false,
-            "allow_once",
-            "allowing the call because fail-closed is disabled",
-        ),
-        (
-            true,
-            "reject_once",
-            "policy unavailable and fail-closed is enabled",
-        ),
-    ] {
-        let (response, warnings, form, requests) = run_observe_permission_round(ObserveRound {
-            action: "deny",
-            timeout: true,
-            timeout_ms: 100,
-            fail_closed,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            choice: None,
-        })
-        .await;
-        assert_eq!(response["result"]["outcome"]["optionId"], expected);
-        assert!(form.is_none());
-        assert!(warnings.iter().any(|message| message.contains(warning)));
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].0, "/api/v1/policy/evaluate");
-    }
-}
-
-#[tokio::test]
-async fn observe_denial_precedes_automatic_approval_and_rejects_once() {
-    use serde_json::{Value, json};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let policy_server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for _ in 0..2 {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                .await
-                .expect("policy client did not make both requests")
-                .unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut chunk).await.unwrap();
-                request.extend_from_slice(&chunk[..read]);
-                let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .unwrap();
-                if request.len() < end + 4 + length {
-                    continue;
-                }
-                let path = headers
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap()
-                    .to_owned();
-                let body: Value =
-                    serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
-                requests.push((path, body));
-                let response = if requests.len() == 1 {
-                    json!({
-                        "decision": "deny",
-                        "policy_id": 1,
-                        "policy_name": "Protected branch",
-                        "message": "Force-push denied"
-                    })
-                } else {
-                    json!({"acknowledged": true})
-                }
-                .to_string();
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
-                            response.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                break;
-            }
-        }
-        requests
-    });
-
-    let (client, agent) = tokio::io::duplex(64 * 1024);
-    let (client_read, client_write) = tokio::io::split(client);
-    let (agent_read, mut agent_write) = tokio::io::split(agent);
-    let (commands, mut requests) = mpsc::channel(16);
-    let (event_tx, _events) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Dsh);
-    spec.resume_session = None;
-    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    spec.observe_policy = Some(
-        crate::observe::PolicyClient::new(
-            mj_core::observe::ObserveEnforcementConfig {
-                url: format!("http://{address}"),
-                token: "token".into(),
-                timeout_ms: 3_000,
-                fail_closed: true,
-            },
-            "logical-session",
-        )
-        .unwrap(),
-    );
-    let driver = tokio::spawn(async move {
-        drive(
-            ByteStreams::new(client_write.compat_write(), client_read.compat()),
-            spec,
-            &mut requests,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    let mut input = BufReader::new(agent_read).lines();
-    let mut next_message = async || -> Value {
-        let line = tokio::time::timeout(Duration::from_secs(5), input.next_line())
-            .await
-            .expect("ACP message timed out")
-            .unwrap()
-            .expect("ACP closed unexpectedly");
-        serde_json::from_str(&line).unwrap()
-    };
-    let mut send = async |message: Value| {
-        agent_write
-            .write_all(format!("{message}\n").as_bytes())
-            .await
-            .unwrap();
-    };
-
-    commands
-        .send(CommandRequest::Prompt {
-            request_id: "observe-deny".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("push it"))],
-        })
-        .await
-        .unwrap();
-    loop {
-        let message = next_message().await;
-        let result = match message["method"].as_str() {
-            Some("initialize") => json!({"protocolVersion": 1}),
-            Some("session/new") => json!({
-                "sessionId": "dsh-session",
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/set_config_option") => json!({
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/prompt") => break,
-            _ => json!({}),
-        };
-        if !message["id"].is_null() {
-            send(json!({"jsonrpc": "2.0", "id": message["id"], "result": result})).await;
-        }
-    }
-    send(json!({
-        "jsonrpc": "2.0",
-        "id": "permission-1",
-        "method": "session/request_permission",
-        "params": {
-            "sessionId": "dsh-session",
-            "toolCall": {
-                "toolCallId": "call-1",
-                "title": "Run command",
-                "kind": "execute",
-                "rawInput": {"command": "git push --force origin main"}
-            },
-            "options": [
-                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
-                {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
-            ]
-        }
-    }))
-    .await;
-
-    let response = loop {
-        let message = next_message().await;
-        if message["id"] == "permission-1" {
-            break message;
-        }
-    };
-    assert_eq!(response["result"]["outcome"]["outcome"], "selected");
-    assert_eq!(response["result"]["outcome"]["optionId"], "reject_once");
-    let policy_requests = policy_server.await.unwrap();
-    let policy_request = &policy_requests[0].1;
-    assert_eq!(policy_requests[0].0, "/api/v1/policy/evaluate");
-    assert_eq!(policy_request["tool_name"], "Bash");
-    assert_eq!(
-        policy_request["tool_input"]["command"],
-        "git push --force origin main"
-    );
-    assert_eq!(policy_request["harness"], "dsh");
-    assert_eq!(policy_request["session_id"], "logical-session");
-    assert_eq!(policy_request["native_session_id"], "dsh-session");
-    let acknowledgement = &policy_requests[1].1;
-    assert_eq!(policy_requests[1].0, "/api/v1/policy/acknowledge");
-    assert_eq!(acknowledgement["session_id"], "logical-session");
-    assert_eq!(acknowledgement["event_id"], policy_request["event_id"]);
-    assert_eq!(acknowledgement["decision"], "deny");
-    assert_eq!(acknowledgement["outcome"], "rejected");
-    driver.abort();
 }
 
 #[tokio::test]
@@ -2718,7 +2163,6 @@ async fn answer_to_ext_request(
         harness: HarnessKind::Grok,
         execution_policy,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -2925,7 +2369,6 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -3447,7 +2890,6 @@ async fn policy_is_enforced_before_session_is_reported(
         harness,
         execution_policy,
         claude_permission_mode,
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -3732,7 +3174,6 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -3802,7 +3243,6 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -4089,7 +3529,6 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -4510,7 +3949,6 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5098,7 +4536,6 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5434,7 +4871,6 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5578,7 +5014,6 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5676,7 +5111,6 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -6016,7 +5450,6 @@ mod terminals {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -6458,7 +5891,6 @@ for line in sys.stdin:
             harness: HarnessKind::Codex,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -6655,7 +6087,6 @@ for line in sys.stdin:
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -6820,7 +6251,6 @@ while True:
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -6965,7 +6395,6 @@ while True:
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -7080,7 +6509,6 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -7162,7 +6590,6 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::Unconstrained,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -7412,7 +6839,6 @@ pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -7499,7 +6925,6 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -7658,7 +7083,6 @@ fn missing_native_session_spec(
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -8048,7 +7472,6 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock,
         };
@@ -8503,7 +7926,6 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -8913,7 +8335,6 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),

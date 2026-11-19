@@ -8629,7 +8629,13 @@ async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
             .iter()
             .map(|p| p.command_id.as_str())
             .collect::<Vec<_>>(),
-        ["queued-prompt", "queued-model"]
+        // The interrupted turn is carried as a restart continuation ahead of
+        // the work queued behind it.
+        [
+            "auto-continue-restart-1-interrupted-turn",
+            "queued-prompt",
+            "queued-model"
+        ]
     );
     assert!(matches!(
         request(
@@ -8726,7 +8732,7 @@ async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
         reopened.operational_state().execution,
         RelayExecutionState::Closed
     );
-    assert_eq!(reopened.operational_state().queued_prompts.len(), 2);
+    assert_eq!(reopened.operational_state().queued_prompts.len(), 3);
 }
 
 #[test]

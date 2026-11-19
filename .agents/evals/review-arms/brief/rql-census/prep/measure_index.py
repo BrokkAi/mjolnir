@@ -1,0 +1,751 @@
+#!/usr/bin/env python3
+"""Cold index and warm-restart re-index cost of Bifrost on candidate Rust repos (EC2 only).
+
+Usage: measure_index.py PINS.txt CLONES_DIR BIFROST_BIN OUT_DIR
+
+PINS.txt lines are `owner__repo <sha> <origin url>`. For each repo: clone it from its origin
+into CLONES_DIR, add a detached worktree at <sha>~50 (first parent), and start a resident
+`bifrost --mcp` in its own memory-capped systemd scope with a fresh cache root. Poll
+get_active_workspace until analyzer, usage index and semantic packs are ready and the workspace
+build has completed (the incremental-acceptance bench's readiness rule). Then stop it, move the
+worktree to <sha>, start again on the same cache, and time readiness again. Per phase it records
+wall time, the scope's CPU up to the ready reply (cpu_to_ready_usec, used for ranking), the
+scope's whole-tree peak memory, the scope's result (oom-kill) and cache size: one JSON line per
+repo, resuming past matching records.
+"""
+import json
+import os
+import pathlib
+import resource
+import queue
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+ENV = {"BIFROST_OPEN_PACKS_DISABLE": "1", "BIFROST_SEMANTIC_PACK_DOWNLOAD": "off",
+       "GIT_NO_LAZY_FETCH": "1", "GIT_LFS_SKIP_SMUDGE": "1"}  # mjolnir-warm-tools.json
+
+
+# Deadlines from the incremental-acceptance bench this mirrors (bifrost-dev
+# .agents/scripts/incremental-acceptance: mjolnir-warm-tools.json sets readiness_timeout_seconds
+# 3600 and request_watchdog_seconds 600; bench.py stop() waits 120 s, then terminates). A
+# wedged server then fails its repo visibly instead of stalling the shortlist.
+READINESS_SECONDS = 3600
+# Per-server memory cap (the scope's MemoryMax): 48 GiB on the 64 GiB measurement host, leaving
+# room for the OS and this driver; an index that exceeds it is a recorded failure.
+MEMORY_MAX = os.environ.get("RQL_INDEX_MEMORY_MAX", "48G")
+REQUEST_SECONDS = 600
+STOP_SECONDS = 120
+
+
+# SIGTERM/SIGINT never raise into the driver: they set a cancellation flag, which the request and readiness
+# waits poll, so cancellation always runs through the ordinary teardown path (one owner, no
+# window between launching a server and protecting it).
+# The tree lock's descriptor, passed to every systemd-run launch (server and git). flock locks
+# belong to the open file description, so the lock stays held while any process from this
+# batch still has it - including a launch still registering its scope after the driver died.
+# A replacement driver reaps those scopes before it can take the tree lock (see main()).
+HOST_LOCK_FDS = ()
+
+_CANCELLED = [False]  # written only by the signal handler; a plain flag takes no lock
+
+
+def cancelled():
+    return _CANCELLED[0]
+
+
+def cancellable_sleep(seconds):
+    """Sleep in short slices; True if the batch was cancelled meanwhile."""
+    end = time.monotonic() + seconds
+    while not cancelled():
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.2, remaining))
+    return cancelled()
+
+
+class Cancelled(RuntimeError):
+    """The operator cancelled the batch; the current server is torn down normally."""
+
+
+class IncompatibleServer(RuntimeError):
+    """The server's readiness reply lacks the fields this driver needs: every repo would fail
+    the same way, so the batch halts instead of timing out once per repo."""
+
+
+class TeardownUnconfirmed(RuntimeError):
+    """A server tree may still be alive. The batch must halt without touching its files."""
+
+
+class Server:
+    def __init__(self, binary, root, cache, log):
+        env = dict(os.environ, **ENV, BIFROST_CACHE_ROOT=str(cache))
+        env.pop("BIFROST_CACHE_DIR", None)  # it would take precedence over the fresh cache root
+        self.log = open(log, "ab")
+        # Each server runs in its own transient systemd scope: the scope's cgroup holds Bifrost
+        # and every process it starts, enforces the memory cap on that whole tree, and its
+        # memory.peak is the tree's peak, not just the parent's VmHWM.
+        self.unit = f"rql-bifrost-{os.getpid()}-{time.monotonic_ns()}"
+        self.peak_lock = threading.Lock()
+        self.proc = subprocess.Popen(
+            ["systemd-run", "--user", "--scope", "--quiet", f"--unit={self.unit}",
+             "-p", f"MemoryMax={MEMORY_MAX}", "-p", "MemorySwapMax=0",
+             binary, "--root", str(root), "--mcp", "extended|workspace"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env, cwd=root,
+            pass_fds=HOST_LOCK_FDS)
+        try:
+            self._start()
+        except BaseException:
+            # Setup failed (or SIGTERM arrived) after the scope launched: tear it down before
+            # propagating, so the batch never advances past a live scope.
+            self.sample = getattr(self, "sample", {})
+            self.cgroup = getattr(self, "cgroup", None)
+            self.stop()
+            raise
+
+    def _start(self):
+        self.seq = 0
+        # A reader thread owns stdout, so a deadline can bound each wait even when several
+        # replies arrive in one read (select on a buffered pipe would miss buffered lines).
+        self.lines = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+        # The scope's cgroup vanishes when the tree exits, so sample it while it lives: the
+        # last memory.peak, OOM kills and tree CPU survive a timeout or an OOM kill.
+        # The sampler reads once a second, so a peak in the last second before exit can be
+        # missed; the record says so (sample_interval_s). An OOM kill is still caught through
+        # systemd's Result. Ranking uses cpu_to_ready_usec, read from cpu.stat at readiness.
+        self.sample = {"peak_tree_kib": None, "oom_kill": 0, "tree_cpu_usec": None, "sample_interval_s": 1}
+        self.cgroup = None
+        self.sampling = True
+        threading.Thread(target=self._sample, daemon=True).start()
+
+    def note_peak(self, kib):
+        with self.peak_lock:  # sampler thread and driver both report; the maximum must win
+            self.sample["peak_tree_kib"] = max(kib, self.sample.get("peak_tree_kib") or 0)
+
+    def _cgroup_dir(self):
+        """The server's own scope cgroup, or None until systemd-run has moved the process into it
+        (an earlier read would see the driver's cgroup and its unrelated counters)."""
+        try:
+            path = open(f"/proc/{self.proc.pid}/cgroup").read().split("::", 1)[1].strip()
+        except (OSError, IndexError):
+            return None
+        return "/sys/fs/cgroup" + path if path.endswith(f"/{self.unit}.scope") else None
+
+    def _sample(self):
+        # Keep sampling while the scope's cgroup exists: descendants can outlive the parent.
+        while self.sampling and (self.proc.poll() is None or (self.cgroup and os.path.isdir(self.cgroup))):
+            d = self._cgroup_dir() or (self.cgroup if self.cgroup and os.path.isdir(self.cgroup) else None)
+            if d:
+                self.cgroup = d
+            if d:  # each file on its own, so one unreadable file can't hide the others
+                try:
+                    self.note_peak(int(open(f"{d}/memory.peak").read()) // 1024)
+                except (OSError, ValueError):
+                    pass
+                try:
+                    events = dict(l.split() for l in open(f"{d}/memory.events"))
+                    self.sample["oom_kill"] = int(events.get("oom_kill", 0))
+                except (OSError, ValueError):
+                    pass
+                try:
+                    cpu = dict(l.split() for l in open(f"{d}/cpu.stat"))
+                    self.sample["tree_cpu_usec"] = int(cpu["usage_usec"])
+                except (OSError, ValueError, KeyError):
+                    pass
+            time.sleep(1)
+
+    def _read(self):
+        # Keep only replies (messages with an id); notifications and unparsable lines are dropped
+        # here. The driver has one request outstanding at a time, so the queue stays bounded
+        # however much Bifrost writes, and nothing piles up in this process outside the cap.
+        for line in self.proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and "id" in msg:
+                self.lines.put(msg)
+        self.lines.put(None)  # EOF
+
+    def request(self, method, params, deadline=None):
+        self.seq += 1
+        self.proc.stdin.write((json.dumps(dict(jsonrpc="2.0", id=self.seq, method=method, params=params)) + "\n").encode())
+        self.proc.stdin.flush()
+        deadline = min(time.monotonic() + REQUEST_SECONDS, deadline or float("inf"))
+        while True:
+            if cancelled():
+                raise Cancelled("cancelled while waiting for a reply")
+            if time.monotonic() >= deadline:  # also while notifications keep arriving
+                raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
+                                   f"readiness {READINESS_SECONDS} s)")
+            try:
+                line = self.lines.get(timeout=max(0, min(1.0, deadline - time.monotonic())))
+            except queue.Empty:
+                if time.monotonic() < deadline:
+                    continue
+                raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
+                                   f"readiness {READINESS_SECONDS} s)")
+            if line is None:  # EOF from the reader
+                raise RuntimeError(f"server exited with {self.proc.poll()}")
+            msg = line  # the reader already parsed it and kept only replies
+            if msg.get("id") == self.seq:
+                return msg
+
+    def initialize(self):
+        self.request("initialize", dict(protocolVersion="2025-11-25", capabilities={},
+                                        clientInfo=dict(name="rql-census-measure", version="1")))
+        self.proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+        self.proc.stdin.flush()
+
+    def wait_ready(self):
+        polls = 0
+        deadline = time.monotonic() + READINESS_SECONDS
+        while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"workspace not ready within {READINESS_SECONDS} s")
+            polls += 1
+            msg = self.request("tools/call", dict(name="get_active_workspace", arguments={}), deadline=deadline)
+            err = msg.get("error")
+            if err:
+                incomplete = (err.get("data") or {}).get("io.bifrost/workspace-incomplete") or {}
+                if incomplete.get("reason") == "busy":
+                    if cancellable_sleep(1):
+                        raise Cancelled("cancelled while waiting for readiness")
+                    continue
+                raise RuntimeError(f"readiness error: {json.dumps(err)[:1000]}")
+            result = msg["result"]
+            payload = result.get("structuredContent")
+            if payload is None:
+                payload = json.loads((result.get("content") or [{}])[0].get("text", "null"))
+            needed = ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")
+            missing = [k for k in needed if not isinstance(payload, dict) or k not in payload]
+            if missing:  # e.g. a Bifrost from before these readiness fields existed
+                raise IncompatibleServer(f"get_active_workspace reply lacks {missing}")
+            status = (payload.get("workspace_build") or {}).get("status")
+            if status == "failed":
+                raise RuntimeError(f"workspace build failed: {json.dumps(payload)[:1000]}")
+            if all(payload.get(k) is True for k in ("analyzer_ready", "usage_index_ready", "semantic_packs_ready")) \
+                    and status in ("ready", "complete", "completed"):
+                return payload, polls
+            if cancellable_sleep(1):
+                raise Cancelled("cancelled while waiting for readiness")
+
+
+    def stop(self):
+        try:
+            return self._stop()
+        except TeardownUnconfirmed:
+            raise
+        except BaseException as e:  # any failure before the proof leaves the tree unaccounted for
+            raise TeardownUnconfirmed(f"{self.unit}.scope: teardown failed before confirmation: {e!r}") from e
+
+    def _stop(self):
+        if self.cgroup:  # one more peak reading while the scope certainly still exists
+            try:
+                self.note_peak(int(open(f"{self.cgroup}/memory.peak").read()) // 1024)
+            except (OSError, ValueError):
+                pass
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            rc = self.proc.wait(timeout=STOP_SECONDS)
+        except subprocess.TimeoutExpired:
+            rc = None
+        scope = f"{self.unit}.scope"
+        # Stop the scope in every case: it kills the whole process tree (Bifrost and anything it
+        # started). Then verify the tree is gone before the caller touches the worktree or cache.
+        stopped = run_bounded(["systemctl", "--user", "stop", scope], capture_output=True, text=True)
+        if rc is None:
+            try:
+                rc = self.proc.wait(timeout=STOP_SECONDS)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                try:
+                    rc = self.proc.wait(timeout=STOP_SECONDS)
+                except subprocess.TimeoutExpired as e:
+                    raise TeardownUnconfirmed(f"{scope}: server survived SIGKILL") from e
+        # Proof the tree is gone: systemd reports the scope inactive or failed (a bus error gives
+        # neither), and its cgroup holds no process. Anything else stops the batch for this repo.
+        deadline = time.monotonic() + STOP_SECONDS
+        while True:
+            gone, detail = scope_tree_gone(scope, self.cgroup)
+            if gone:
+                # Read the Result only now, after every process in the scope has exited, so an
+                # OOM kill of a child during shutdown is caught too (the uncollected failed
+                # scope keeps it until reset-failed). An unreadable Result is "unknown", which
+                # fails the phase: it may be the only evidence of an OOM.
+                # systemd unloads a scope that exits cleanly (LoadState=not-found), but keeps a
+                # failed one loaded with its Result (oom-kill) until reset-failed, since these
+                # scopes aren't --collect'ed. Verified on the EC2 host: a clean scope reads
+                # not-found/inactive, an OOM-killed one loaded/failed/oom-kill.
+                shown = run_bounded(["systemctl", "--user", "show", scope, "-p", "LoadState", "-p", "Result"],
+                                    capture_output=True, text=True)
+                props = dict(l.split("=", 1) for l in shown.stdout.splitlines() if "=" in l)
+                if shown.returncode:
+                    self.sample["scope_result"] = "unknown"
+                elif props.get("LoadState") == "not-found":
+                    self.sample["scope_result"] = "success"  # unloaded after a clean exit
+                else:
+                    self.sample["scope_result"] = props.get("Result") or "unknown"
+                break
+            if time.monotonic() > deadline:
+                raise TeardownUnconfirmed(f"{scope} not confirmed stopped ({detail}; stop exit "
+                                          f"{stopped.returncode}: {stopped.stderr.strip()[-200:]}); "
+                                          "refusing to touch its worktree")
+            time.sleep(1)
+        run_bounded(["systemctl", "--user", "reset-failed", scope], capture_output=True)
+        self.sampling = False
+        self.log.close()
+        return rc
+
+
+def scope_tree_gone(unit, known_cgroup=None):
+    """(gone, detail): positive proof that a scope's process tree has exited. systemd must answer
+    (a failed lookup proves nothing), report the unit inactive or failed, and its cgroup - from
+    systemd, plus any path the sampler recorded - must be absent or hold no process."""
+    shown = run_bounded(["systemctl", "--user", "show", unit, "-p", "ActiveState", "-p", "ControlGroup"],
+                        capture_output=True, text=True)
+    if shown.returncode:
+        return False, f"systemctl show failed: {shown.stderr.strip()[-200:]}"
+    props = dict(l.split("=", 1) for l in shown.stdout.splitlines() if "=" in l)
+    state = props.get("ActiveState", "")
+    for cg in {props.get("ControlGroup", ""), (known_cgroup or "").removeprefix("/sys/fs/cgroup")} - {""}:
+        try:
+            if open(f"/sys/fs/cgroup{cg}/cgroup.procs").read().strip():
+                return False, f"state={state} with processes in {cg}"
+        except FileNotFoundError:
+            pass
+    if state not in ("inactive", "failed"):
+        return False, f"state={state}"
+    return True, f"state={state}"
+
+
+def run_bounded(cmd, **kw):
+    """A systemctl call that can't stall teardown: it raises TimeoutExpired after STOP_SECONDS,
+    which teardown turns into TeardownUnconfirmed and the reaper into an exit."""
+    return subprocess.run(cmd, timeout=STOP_SECONDS, **kw)
+
+
+def du(path):
+    return sum(f.stat().st_size for f in pathlib.Path(path).rglob("*") if f.is_file())
+
+
+def phase(binary, root, cache, log):
+    if cancelled():  # never launch a server after cancellation (e.g. during a checkout)
+        raise Cancelled("cancelled before launching a server")
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    t0 = time.monotonic()
+    server = Server(binary, root, cache, log)
+    rec = {}
+    try:
+        server.initialize()
+        payload, polls = server.wait_ready()
+        # The ranking's CPU: the whole scope's CPU up to the ready reply, read from its cgroup,
+        # so it covers every descendant and excludes shutdown and the driver's own commands.
+        d = server._cgroup_dir()
+        if d:
+            server.cgroup = d
+        try:
+            rec["cpu_to_ready_usec"] = int(dict(l.split() for l in open(f"{d}/cpu.stat"))["usage_usec"]) if d else None
+        except (OSError, ValueError, KeyError):
+            rec["cpu_to_ready_usec"] = None
+        if rec["cpu_to_ready_usec"] is None:
+            raise RuntimeError("cpu.stat unreadable at readiness: the ranking's CPU is missing")
+        try:  # the whole-tree peak is required too, read directly rather than from the sampler
+            server.note_peak(int(open(f"{d}/memory.peak").read()) // 1024)
+        except (OSError, ValueError):
+            raise RuntimeError("memory.peak unreadable at readiness: the whole-tree peak is missing")
+        rec.update(wall=time.monotonic() - t0, polls=polls,
+                   ready=True, readiness={k: payload.get(k) for k in
+                                          ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
+    except Exception as e:
+        rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000],
+                   incompatible=isinstance(e, IncompatibleServer))
+    rec["exit"] = server.stop()
+    if cancelled():
+        # Torn down. Keep what was measured (the peak and OOM result are why an operator stops
+        # a growing index); the caller stops the batch before any checkout or another launch.
+        rec.update(server.sample)
+        rec.update(ready=False, cancelled=True)
+        rec.setdefault("error", "cancelled by the operator; the server was torn down")
+        return rec
+    if rec.get("ready") and rec["exit"] != 0:
+        # A crash or kill after the ready reply can leave the cache half-persisted: the pair
+        # isn't a valid cold/warm measurement.
+        rec["ready"] = False
+        rec["error"] = f"unclean shutdown after ready (exit {rec['exit']})"
+    rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
+    if rec.get("scope_result") != "success" or rec.get("oom_kill"):
+        # Only a scope that ended in success counts: oom-kill, a stop timeout that killed a
+        # straggler, or an unreadable result all invalidate the phase, even after a ready reply.
+        rec["ready"] = False
+        rec.setdefault("error", f"scope did not end in success (scope_result={rec.get('scope_result')}, "
+                                f"cap {MEMORY_MAX})")
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    rec.update(cpu_user=after.ru_utime - before.ru_utime, cpu_sys=after.ru_stime - before.ru_stime,
+               cache_bytes=du(cache))
+    return rec
+
+
+def _end_git_scope(unit, proc, what):
+    """Stop a git call's scope and prove its tree gone (the same check as a server's
+    teardown). Runs on every path out of git(); anything unproven is TeardownUnconfirmed."""
+    try:
+        stopped = run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True, text=True)
+        if proc.poll() is None:
+            # The scope may not exist yet if systemd-run is still registering it: kill the
+            # launcher too. With --scope it execs in place, so this pid is the launcher before
+            # exec and git after it; either way nothing starts later.
+            proc.kill()
+            proc.communicate(timeout=STOP_SECONDS)
+        deadline = time.monotonic() + STOP_SECONDS
+        while True:
+            gone, detail = scope_tree_gone(f"{unit}.scope")
+            if gone:
+                return
+            if time.monotonic() > deadline:
+                raise TeardownUnconfirmed(f"{unit}.scope not confirmed empty after git {what} "
+                                          f"({detail}; stop exit {stopped.returncode})")
+            time.sleep(1)
+    except TeardownUnconfirmed:
+        raise
+    except BaseException as e:  # a timeout or bus error leaves the scope unaccounted for: halt
+        raise TeardownUnconfirmed(f"{unit}.scope: teardown failed after git {what}: {e!r}") from e
+
+
+def git(*args, cwd=None):
+    """Run git in its own systemd scope, like a server: cancelling stops git and its transport
+    and index-pack children, every exit path proves the scope empty before anything else runs,
+    and a git left by a killed driver is reaped by the next run before it touches files."""
+    if cancelled():  # no further git mutation (worktree add, checkout) once cancelled
+        raise Cancelled(f"cancelled before git {args[0]}")
+    unit = f"rql-git-{os.getpid()}-{time.monotonic_ns()}"
+    proc = subprocess.Popen(["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
+                             # No automatic gc or maintenance: a detached repack could outlive
+                             # this call and run outside any memory cap during a measurement.
+                             # No hooks either: a post-checkout hook could leave a job behind.
+                             # A transfer whose remote stops sending without closing would
+                             # otherwise hang forever: git's own low-speed abort reacts to that
+                             # condition (under 1 KB/s for 10 minutes), not to a guessed total
+                             # duration, so a slow but live clone of a large repo still finishes.
+                             "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                             "-c", "core.hooksPath=/dev/null",
+                             "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=600", *args],
+                            cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", pass_fds=HOST_LOCK_FDS)
+    out = err = ""
+    failure = None
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                if cancelled():
+                    failure = Cancelled(f"cancelled during git {args[0]}")
+                    break
+    except BaseException as e:  # any failure reading git still tears its scope down first
+        failure = e
+    _end_git_scope(unit, proc, args[0])
+    if failure is not None:
+        raise failure
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
+    return out.strip()
+
+
+def require_ec2():
+    """Refuse to index anywhere but an EC2 instance: an unbounded index crashed the user's
+    workstation twice (bifrost-dev #14480). The per-server scope cap applies on EC2 too."""
+    try:
+        vendor = open("/sys/devices/virtual/dmi/id/sys_vendor").read().strip()
+    except OSError:
+        vendor = ""
+    if vendor != "Amazon EC2":
+        sys.exit(f"refusing to run Bifrost indexing on a non-EC2 host (sys_vendor={vendor!r})")
+    # The cap must fit the host with room to spare, and the user manager must enforce it: prove
+    # it by running a scope capped at 64M that tries to allocate 256M and must be OOM-killed.
+    mem_total_kib = int(next(l for l in open("/proc/meminfo") if l.startswith("MemTotal:")).split()[1])
+    units = {"K": 1, "M": 2**10, "G": 2**20, "T": 2**30}
+    cap_kib = int(MEMORY_MAX[:-1]) * units[MEMORY_MAX[-1].upper()] if MEMORY_MAX[-1].isalpha() else int(MEMORY_MAX) // 1024
+    if cap_kib > 0.8 * mem_total_kib:
+        sys.exit(f"memory cap {MEMORY_MAX} exceeds 80% of this host's {mem_total_kib // 2**20} GiB")
+    probe = f"rql-cap-probe-{os.getpid()}"
+    run_bounded(["systemd-run", "--user", "--scope", "--quiet", f"--unit={probe}", "-p", "MemoryMax=64M",
+                    "-p", "MemorySwapMax=0", sys.executable, "-c", "x = bytearray(256 * 2**20)"], capture_output=True)
+    result = run_bounded(["systemctl", "--user", "show", f"{probe}.scope", "-p", "Result", "--value"],
+                            capture_output=True, text=True).stdout.strip()
+    run_bounded(["systemctl", "--user", "reset-failed", f"{probe}.scope"], capture_output=True)
+    if result != "oom-kill":
+        sys.exit(f"the user manager doesn't enforce MemoryMax (probe result {result!r}); refusing to index")
+
+
+def reap_leftover_scopes():
+    """Before any cleanup, stop every scope a previous run left behind and prove it's gone.
+    The driver runs one server or git at a time, so any live rql-bifrost or rql-git scope at
+    startup belongs to an
+    earlier invocation whose stop couldn't be confirmed. If one survives, exit without touching
+    any worktree or cache."""
+    units = run_bounded(["systemctl", "--user", "list-units", "--all", "--type=scope", "--no-legend", "--plain"],
+                           capture_output=True, text=True, check=True).stdout.split("\n")
+    for unit in [u.split()[0] for u in units if u.strip().startswith(("rql-bifrost-", "rql-git-"))]:
+        run_bounded(["systemctl", "--user", "stop", unit], capture_output=True)
+        deadline = time.monotonic() + STOP_SECONDS
+        while True:
+            gone, detail = scope_tree_gone(unit)
+            if gone:
+                run_bounded(["systemctl", "--user", "reset-failed", unit], capture_output=True)
+                break
+            if time.monotonic() > deadline:
+                sys.exit(f"leftover {unit} not confirmed stopped ({detail}); refusing to clean up any worktree")
+            time.sleep(1)
+
+
+def main():
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: _CANCELLED.__setitem__(0, True))
+    require_ec2()
+    # One driver per host: a second invocation would reap the first's live scopes and race on
+    # its worktrees. The lock is held for the process lifetime.
+    import fcntl
+    # Two host-wide locks (not per HOME or account; a file another account owns refuses too):
+    # - the driver lock, held only by this process, says a driver is alive;
+    # - the tree lock, inherited by every launch, says some process of a batch is alive.
+    # A replacement driver takes the driver lock, reaps and proves gone any scopes an earlier
+    # (dead) driver left, and only then can take the tree lock.
+    try:
+        driver_lock = open("/var/tmp/rql-index-measure.driver.lock", "a")
+        fcntl.flock(driver_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, PermissionError) as e:
+        sys.exit(f"another measure_index.py driver is running on this host ({e!r})")
+    reap_leftover_scopes()
+    tree_lock = open("/var/tmp/rql-index-measure.tree.lock", "a")
+    deadline = time.monotonic() + STOP_SECONDS
+    while True:
+        try:
+            fcntl.flock(tree_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                sys.exit("a process outside any rql scope still holds the batch tree lock; refusing to start")
+            time.sleep(1)
+            reap_leftover_scopes()  # a dead driver's launch may have registered its scope since
+    global HOST_LOCK_FDS
+    HOST_LOCK_FDS = (tree_lock.fileno(),)
+    # Each line is `owner__repo <pinned sha> <origin url>`: the repo is cloned from its origin
+    # and measured at that commit, so a reused record always matches its revision.
+    entries = [l.split() for l in open(sys.argv[1]) if l.strip()]
+    if not entries:  # an empty or truncated shortlist is an error, not a finished batch
+        sys.exit(f"{sys.argv[1]} lists no repos")
+    bad = [e for e in entries if len(e) < 3]
+    if bad:
+        sys.exit(f"every line needs `owner__repo <pinned sha> <origin url>`; unpinned: {bad[:3]}")
+    pins = {e[0]: (e[1], e[2]) for e in entries}
+    repos = [e[0] for e in entries]
+    clones, binary, out = pathlib.Path(sys.argv[2]).resolve(), str(pathlib.Path(sys.argv[3]).resolve()), pathlib.Path(sys.argv[4]).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    results = out / "index-cost.jsonl"
+    # A repo is done only once a record shows both phases ready with no error; failed or
+    # unready measurements are retried on the next run (the latest record wins downstream).
+    import hashlib
+    with open(binary, "rb") as f:
+        binary_sha = hashlib.file_digest(f, "sha256").hexdigest()
+    # A record is reusable only for the same repo, pinned revision and Bifrost binary.
+    # Measurement conditions beyond revision, binary and cap: the instance type, CPU count and
+    # any Bifrost thread setting. A record measured under different conditions isn't reused.
+    environment = {
+        "instance_type": open("/sys/devices/virtual/dmi/id/product_name").read().strip(),
+        "nproc": os.cpu_count(),
+        # What Bifrost actually gets: CPU affinity and the driver's cgroup CPU quota.
+        "cpu_affinity": len(os.sched_getaffinity(0)),
+        "scope_cpu_max": read_scope_cpu_max(),
+        # Thread-pool settings Bifrost inherits (BIFROST_*, RAYON_NUM_THREADS and similar).
+        # The measurement procedure itself: a change to this driver (readiness rule, server options)
+        # makes earlier records unreusable, so one ranking never mixes procedures.
+        "driver_sha256": hashlib.file_digest(open(__file__, "rb"), "sha256").hexdigest(),
+        "thread_env": {k: v for k, v in sorted(os.environ.items())
+                       if k.startswith("BIFROST_") or k.startswith("RAYON_") or k.endswith("_THREADS")},
+    }
+    def is_done(repo, r):
+        """The single decision "this repo has a usable measurement under current conditions",
+        used both to skip a repo on resume and for the batch's exit status."""
+        return (r is not None and repo in pins and not r.get("error")
+                and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
+                and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
+                and r.get("environment") == environment and r.get("head") == pins[repo][0])
+
+    latest = latest_records(results)  # the record readers use; resume follows it too
+    done = {repo for repo, r in latest.items() if is_done(repo, r)}
+    def remove_repo_files(repo):
+        """Remove a repo's worktree and cache (sizes are in its record). Only called when no
+        server of that repo can still be using them."""
+        wt_dir, cache_dir = out / "wt" / repo, out / "cache" / repo
+        try:
+            if wt_dir.exists() and (clones / repo).exists():
+                git("worktree", "remove", "--force", "--force", str(wt_dir), cwd=clones / repo)
+        except (subprocess.CalledProcessError, Cancelled):
+            pass
+        except TeardownUnconfirmed as e:  # leave the files and halt
+            sys.exit(f"{repo}: cleanup git not confirmed stopped ({e}); batch halted")
+        shutil.rmtree(wt_dir, ignore_errors=True)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    for repo in repos:
+        if cancelled():
+            sys.exit("cancelled; the last server's scope was torn down")
+        if repo in done:
+            # Its record is saved; reclaim files an interrupted earlier run left (its servers
+            # were already proven gone by reap_leftover_scopes()).
+            remove_repo_files(repo)
+            continue
+        rec = {"repo": repo}
+        try:
+            clone = clones / repo
+            sha, url = pins[repo]
+            url = url.replace("git@github.com:", "https://github.com/")
+            if not clone.exists():
+                # Clone beside it, then rename: an interrupted clone never looks reusable.
+                partial = clone.with_name(clone.name + ".partial")
+                shutil.rmtree(partial, ignore_errors=True)
+                git("clone", "-q", "--no-checkout", url, str(partial))
+                partial.rename(clone)
+            try:
+                head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
+            except subprocess.CalledProcessError:
+                # A revised pin can name a commit newer than this clone: fetch it, then retry.
+                git("fetch", "-q", "origin", sha, cwd=clone)
+                head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
+            base = git("rev-parse", f"{head}~50", cwd=clone)  # first parent
+            wt = out / "wt" / repo
+            # A previous run may have left this worktree (registered or not). Its server scope is
+            # already proven gone by reap_leftover_scopes(), so removing the files is safe.
+            # A git killed during `worktree add` can leave the registration locked; unlock it,
+            # and remove with --force twice (git's way to remove a locked worktree).
+            for args in (("worktree", "unlock", str(wt)), ("worktree", "remove", "--force", "--force", str(wt))):
+                try:  # supervised like every git call: scoped and holding the tree lock
+                    git(*args, cwd=clone)
+                except subprocess.CalledProcessError:
+                    pass  # not registered or not locked; the directory is removed below
+            shutil.rmtree(wt, ignore_errors=True)
+            git("worktree", "prune", cwd=clone)
+            git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
+            rec.update(head=head, base=base, binary_sha256=binary_sha, memory_max=MEMORY_MAX,
+                       environment=environment,
+                       rust_files=len([p for p in subprocess.run(
+                           ["git", "-C", str(wt), "ls-files", "-z", "*.rs"], check=True,
+                           capture_output=True).stdout.split(b"\0") if p]))
+            cache = out / "cache" / repo
+            shutil.rmtree(cache, ignore_errors=True)
+            cache.mkdir(parents=True)
+            rec["cold"] = phase(binary, wt, cache, out / f"{repo}.cold.log")
+            if rec["cold"].get("cancelled"):
+                raise Cancelled("cancelled during the cold index")
+            if rec["cold"].get("ready"):
+                # The head checkout serves only the warm phase: after a measured cold failure it's
+                # skipped, so a checkout problem can't replace that result with a setup error.
+                # Restore the disposable worktree to exactly the pinned tree: a plain checkout keeps
+                # tracked edits and untracked files the cold build may have left (a regenerated
+                # lockfile, generated sources). The Bifrost cache lives outside the worktree, under
+                # its own BIFROST_CACHE_ROOT, so the warm phase still starts warm.
+                git("checkout", "-q", "--force", "--detach", head, cwd=wt)
+                git("clean", "-q", "-ffdx", cwd=wt)
+                rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
+                rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
+                if rec["warm_restart"].get("cancelled"):
+                    raise Cancelled("cancelled during the warm index")
+            else:  # a warm restart on a failed cold cache measures nothing usable
+                rec["warm_restart"] = {"ready": False, "skipped": "cold index failed"}
+        except Exception as e:
+            import traceback
+            rec["error"] = repr(e)[:1000]
+            rec["traceback"] = traceback.format_exc()[-2000:]
+            rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
+            rec["cancelled"] = isinstance(e, Cancelled)
+            rec["incompatible"] = isinstance(e, IncompatibleServer)
+        append_record(results, rec)  # saved before cleanup, so an interrupted cleanup loses nothing
+        # Keep disk bounded after success and recoverable failures alike (sizes are recorded).
+        # After an unconfirmed teardown a server may still use these files: leave them for the
+        # next run's reaper. After cancellation, no further git runs; the reaper handles it too.
+        if not rec.get("teardown_unconfirmed") and not rec.get("cancelled"):
+            remove_repo_files(repo)
+        print(json.dumps({"repo": repo, "error": rec.get("error"), **{
+            ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
+            for ph in ("cold", "warm_restart")}}), flush=True)
+        if rec.get("incompatible") or (rec.get("cold") or {}).get("incompatible"):
+            sys.exit(f"{repo}: the Bifrost binary's readiness reply is incompatible; batch halted")
+        if rec.get("cancelled"):
+            sys.exit(f"{repo}: cancelled; its server was torn down and the batch stopped")
+        if rec.get("teardown_unconfirmed"):
+            # A server tree may still be alive: stop the batch here, leaving its worktree and
+            # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
+            sys.exit(f"{repo}: server scope not confirmed stopped; batch halted")
+
+    # Exit 0 only when every pinned repo has a usable measurement under current conditions (the
+    # same decision as resume). Anything else, including a measured OOM, exits nonzero and the
+    # per-repo records say why.
+    final = latest_records(results)
+    incomplete = [repo for repo in repos if not is_done(repo, final.get(repo))]
+    if incomplete:
+        sys.exit(f"{len(incomplete)} of {len(repos)} pinned repos lack a usable measurement: {incomplete[:5]}")
+
+def read_scope_cpu_max():
+    """CPU quotas on the path a server scope inherits: transient --user scopes go under the
+    user manager's app.slice, so record cpu.max from app.slice up to the root (absent where the
+    cpu controller isn't enabled). A quota change on that path changes the reuse key."""
+    uid = os.getuid()
+    path = pathlib.Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice")
+    quotas = {}
+    while path != pathlib.Path("/sys/fs/cgroup").parent:
+        try:
+            quotas[str(path)] = (path / "cpu.max").read_text().strip()
+        except FileNotFoundError:
+            pass
+        if path == pathlib.Path("/sys/fs/cgroup"):
+            break
+        path = path.parent
+    return quotas
+
+
+def latest_records(results):
+    """Latest record per repo. A line that doesn't parse (a torn append from an interrupted run
+    or a full volume) is skipped with a warning: that repo simply isn't done and is retried."""
+    latest = {}
+    if results.exists():
+        for n, l in enumerate(open(results, errors="replace"), 1):
+            try:
+                r = json.loads(l)
+            except ValueError:
+                print(f"skipping unreadable record line {n} in {results}", file=sys.stderr, flush=True)
+                continue
+            latest[r["repo"]] = r
+    return latest
+
+
+def append_record(results, rec):
+    """One write per record, flushed and fsynced, so a crash leaves at most a torn last line."""
+    fd = os.open(results, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        # After a torn append the file can end mid-line: start on a fresh line so this record
+        # isn't glued to the fragment (the reader skips only the fragment).
+        size = os.fstat(fd).st_size
+        lead = b""
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            lead = b"\n"
+        data = lead + (json.dumps(rec) + "\n").encode()
+        written = os.write(fd, data)
+        if written != len(data):  # a full volume: the record wasn't saved
+            raise OSError(f"short write to {results}: {written} of {len(data)} bytes")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    main()

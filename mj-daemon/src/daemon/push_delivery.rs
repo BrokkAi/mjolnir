@@ -4,8 +4,164 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 
 use crate::daemon::RuntimeState;
+use mj_client::runtime_feed::RuntimeProjection;
 use mj_controller::database as db;
 use mj_controller::web_push::*;
+use std::collections::BTreeMap;
+
+type NotificationInputs = Option<BTreeMap<String, PushEntry<String>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationObservation {
+    Unchanged,
+    Deferred,
+    /// The write failed; the inputs stay unrecorded so the next revision retries.
+    Failed,
+    /// Readable items committed but at least one item's text could not be read;
+    /// the inputs stay unrecorded and the observer retries on the failure backoff.
+    Incomplete(bool),
+    Observed(bool),
+}
+
+/// Remembers only notification inputs, never transcript history or delivery state.
+#[derive(Default)]
+pub(crate) struct NotificationReconciler {
+    previous: Option<NotificationInputs>,
+}
+
+impl NotificationReconciler {
+    pub(crate) async fn reconcile(
+        &mut self,
+        runtime: RuntimeProjection,
+    ) -> Result<NotificationObservation> {
+        let inputs = card_entries(&runtime).map(|entries| {
+            entries
+                .into_iter()
+                .map(|(identity, entry)| (identity, entry.owned()))
+                .collect()
+        });
+        if self.previous.as_ref() == Some(&inputs) {
+            return Ok(NotificationObservation::Unchanged);
+        }
+        // Only a panicked storage task is fatal; a failed write is retried.
+        let result = blocking(move || Ok(db::notification_reconcile(runtime))).await?;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "notification reconciliation failed; the next runtime revision retries"
+                );
+                return Ok(NotificationObservation::Failed);
+            }
+        };
+        // Refused observations were not accepted: retain the previous inputs so
+        // a lapsed handoff can reobserve them, as a fresh daemon would.
+        match result {
+            Some(result) => {
+                // Partial observations commit successful items, but the next
+                // runtime revision must retry any unreadable items.
+                self.previous = result.complete.then_some(inputs);
+                Ok(if result.complete {
+                    NotificationObservation::Observed(result.alerts_changed)
+                } else {
+                    NotificationObservation::Incomplete(result.alerts_changed)
+                })
+            }
+            None => Ok(NotificationObservation::Deferred),
+        }
+    }
+}
+
+/// A refused observation waits on the admission owner, not an unrelated runtime event.
+pub(crate) async fn wait_for_notification_change(
+    observation: NotificationObservation,
+    revisions: &mut tokio::sync::watch::Receiver<u64>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    retry_after: Duration,
+) -> Result<bool> {
+    if observation == NotificationObservation::Deferred {
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(false),
+            resumed = mj_controller::upgrade::gate().wait_after_draining() => {
+                if resumed { Ok(true) } else { cancellation.cancelled().await; Ok(false) }
+            }
+        }
+    } else if matches!(
+        observation,
+        NotificationObservation::Failed | NotificationObservation::Incomplete(_)
+    ) {
+        // A failed write or unreadable item retries on the backoff or the next
+        // revision, whichever is first: an idle daemon may publish no revision.
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(false),
+            changed = revisions.changed() => { changed.context("notification runtime feed closed")?; Ok(true) },
+            _ = tokio::time::sleep(retry_after) => Ok(true),
+        }
+    } else {
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(false),
+            changed = revisions.changed() => { changed.context("notification runtime feed closed")?; Ok(true) },
+        }
+    }
+}
+
+/// Latency choices for retrying a transient storage failure, not limits: the
+/// first retry comes after about a second, doubling to a minute, and a
+/// success resets it. A new runtime revision always retries at once.
+const ALERT_RETRY_FIRST: Duration = Duration::from_secs(1);
+const ALERT_RETRY_LONGEST: Duration = Duration::from_secs(60);
+
+/// Durable notify decisions belong to the daemon, independently of phone delivery.
+pub(crate) async fn run_alerts(
+    state: Arc<RuntimeState>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        _ = cancellation.cancelled() => return Ok(()),
+        _ = mj_controller::upgrade::wait_for_startup_recovery() => {},
+    }
+    let mut revisions = state.revisions();
+    let mut observer = NotificationReconciler::default();
+    let mut backoff = ALERT_RETRY_FIRST;
+    loop {
+        revisions.borrow_and_update();
+        let runtime = state.runtime_publication()?;
+        let changed = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(()),
+            result = observer.reconcile(runtime) => result?,
+        };
+        if let NotificationObservation::Incomplete(true) = changed {
+            state.publish_revision();
+            wake();
+        }
+        if matches!(
+            changed,
+            NotificationObservation::Failed | NotificationObservation::Incomplete(_)
+        ) {
+            let waited = backoff;
+            backoff = (backoff * 2).min(ALERT_RETRY_LONGEST);
+            if !wait_for_notification_change(changed, &mut revisions, &cancellation, waited).await?
+            {
+                return Ok(());
+            }
+            continue;
+        }
+        backoff = ALERT_RETRY_FIRST;
+        if let NotificationObservation::Observed(changed) = changed {
+            if changed {
+                state.publish_revision();
+            }
+            wake();
+        }
+        if !wait_for_notification_change(changed, &mut revisions, &cancellation, ALERT_RETRY_FIRST)
+            .await?
+        {
+            return Ok(());
+        }
+    }
+}
 
 pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     // Let the startup owner settle before the first map can consume cutover.
@@ -19,7 +175,7 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     blocking(db::push_recover).await?;
     loop {
         let runtime = state.runtime_publication()?;
-        let (due, next) = blocking(move || db::push_reconcile(runtime)).await?;
+        let (due, next) = blocking(move || db::push_ready(runtime)).await?;
         for delivery in due {
             let client = client.clone();
             let vapid = vapid.clone();

@@ -1072,6 +1072,11 @@ pub struct DashboardState {
     pub(crate) sessions_scroll: Cell<usize>,
     pub(crate) targets_scroll: Cell<usize>,
     pub(crate) quota_scroll: Cell<usize>,
+    /// Height of the quota viewport at the previous render, in lines.
+    pub(crate) quota_viewport: Cell<usize>,
+    /// Selection and line range from the previous quota render, before refresh reordering.
+    pub(crate) quota_rendered_selection:
+        RefCell<Option<(render::quota_pools::QuotaRow, usize, usize)>>,
     /// The next render keeps one row beyond the selection visible in the
     /// direction of the latest keyboard or wheel navigation, when it fits.
     /// This is consumed by that pane's renderer after the movement.
@@ -1084,10 +1089,13 @@ pub struct DashboardState {
     /// Last rendered Disks button bounds, indexed like `capacity_details`.
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
-    pub(crate) quota_index: usize,
+    pub(crate) quota_selection: Option<render::quota_pools::QuotaRow>,
+    pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
+    pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,
     /// Last rendered Quota row bounds, by profile id, for the row's
     /// right-click menu.
     pub(crate) quota_row_areas: RefCell<Vec<(String, Rect)>>,
+    pub(crate) quota_pool_areas: RefCell<Vec<(crate::render::quota_pools::QuotaRow, Rect)>>,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
@@ -1169,9 +1177,8 @@ pub struct DashboardState {
     /// means expanded, so a project that appears later starts expanded without
     /// any extra bookkeeping.
     pub(crate) collapsed_project_keys: Tracked<BTreeSet<String>>,
-    /// The sessions currently needing a person and whether each has been
-    /// reported, for [`DashboardState::notification_events`].
-    pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
+    pub(crate) alert_sequence: Option<u64>,
+    pub(crate) pending_alerts: Vec<crate::notify::PendingAlert>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
     pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
@@ -1275,7 +1282,7 @@ struct WorkspaceViewState {
     targets_scroll: usize,
     quota_scroll: usize,
     capacity_index: usize,
-    quota_index: usize,
+    quota_selection: Option<render::quota_pools::QuotaRow>,
     pane_sizes: PaneSizes,
     conversation_layout: mj_core::workspace::ConversationLayout,
     collapsed_project_keys: BTreeSet<String>,
@@ -1290,7 +1297,7 @@ impl WorkspaceViewState {
             targets_scroll: dashboard.targets_scroll.get(),
             quota_scroll: dashboard.quota_scroll.get(),
             capacity_index: dashboard.capacity_index,
-            quota_index: dashboard.quota_index,
+            quota_selection: dashboard.quota_selection.clone(),
             pane_sizes: dashboard.pane_sizes,
             conversation_layout: dashboard.export_conversation_layout(),
             collapsed_project_keys: dashboard.collapsed_project_keys.clone(),
@@ -1346,6 +1353,7 @@ impl DashboardState {
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             profile_hydration_sent: None,
+            quota_providers: render::quota_pools::ProviderDiscovery::start(&config),
             config: config.into(),
             state: state.into(),
             quotas,
@@ -1384,6 +1392,7 @@ impl DashboardState {
             target_storage: Vec::new(),
             capacity_disks_areas: RefCell::new(Vec::new()),
             quota_row_areas: RefCell::new(Vec::new()),
+            quota_pool_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {
@@ -1401,10 +1410,13 @@ impl DashboardState {
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
+            quota_viewport: Cell::new(0),
+            quota_rendered_selection: RefCell::new(None),
             recenter_on_selection: Cell::new(None),
             sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,
-            quota_index: 0,
+            quota_selection: None,
+            quota_expanded: Default::default(),
             focus: Focus::Sessions,
             pane_sizes: PaneSizes {
                 sessions: sidebar_size,
@@ -1441,7 +1453,8 @@ impl DashboardState {
             pane_size_control_areas: Vec::new(),
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: Default::default(),
-            attention_episodes: BTreeMap::new(),
+            alert_sequence: None,
+            pending_alerts: Vec::new(),
             attention_navigation: None,
             rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,

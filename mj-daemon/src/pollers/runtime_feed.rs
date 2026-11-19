@@ -3,6 +3,8 @@ use mj_client::runtime_feed::RuntimeProjection;
 use mj_core::snapshot_map::SnapshotMap;
 
 pub struct RemoteDashboardWorkerPoller {
+    pub alerts:
+        tokio::sync::mpsc::UnboundedReceiver<(u64, Vec<mj_client::runtime_feed::AlertEvent>)>,
     pub updates: SessionManagerUpdates,
     pub control: SessionManagerControl,
     pub shutdown: SessionManagerShutdown,
