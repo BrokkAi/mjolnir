@@ -14,6 +14,25 @@ impl ActiveChat {
     /// Applies one terminal event, reporting whether the conversation consumed
     /// it and whatever action it asks the host to take.
     pub fn handle_event_result(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
+        self.select_elicitation_surface(super::super::ElicitationSurface::Conversation);
+        self.handle_surface_event(event)
+    }
+
+    /// The host routes notification input through the same action dispatcher.
+    pub fn handle_elicitation_event(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
+        // Geometry belongs to this dialog instance, so a newly arrived form
+        // cannot consume keys against the previous form's card rectangle.
+        if !self.elicitation_input_available_in(super::super::ElicitationSurface::Notification) {
+            return EventResult {
+                consumed: false,
+                action: None,
+            };
+        }
+        self.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+        self.handle_surface_event(event)
+    }
+
+    fn handle_surface_event(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
         let action = match &event {
             Event::Key(key) => self.state.handle_key(*key),
             Event::Paste(pasted) => self.state.handle_terminal_paste(pasted),
@@ -72,10 +91,10 @@ impl ActiveChat {
         let generation = reader.generation;
         let session = self.session.clone();
         let updates = self.chat_io_tx.clone();
-        self.earlier_task = Some(tokio::spawn(async move {
+        self.earlier_task = Some(mj_core::runtime::spawn(async move {
             let result = async {
                 let page = session.transcript_history(before).await?;
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     let mut lines = Vec::new();
                     for entry in mj_client::transcript::history_entries(&page) {
                         lines.push(Line::styled(entry.role.to_owned(), theme::title(true)));
@@ -305,11 +324,14 @@ impl ActiveChat {
             }
             ChatAction::StartTurnReview => self.request_turn_review(),
             ChatAction::TurnReview(intent) => self.run_turn_review(intent),
-            ChatAction::RespondReviewerElicitation {
-                role,
-                elicitation_id,
-                response,
-            } => self.answer_reviewer(role, elicitation_id, response),
+            ChatAction::RespondReviewerElicitation { draft, response } => {
+                self.answer_reviewer(
+                    draft.reviewer_role.clone(),
+                    draft.request().id.clone(),
+                    response,
+                    Some(draft),
+                );
+            }
             ChatAction::RespondElicitation { request, response } => {
                 let plan_followup = self.state.plan_review_followup(&request, &response);
 

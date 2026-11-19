@@ -79,11 +79,77 @@ fn push_unsubscribe_with(db: &Connection, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a consistent durable frontier and only the events this client needs.
+/// No retention cap: a cursor may resume after any length of disconnection.
+pub fn alert_events_since(
+    after: Option<u64>,
+) -> Result<(u64, Vec<mj_client::runtime_feed::AlertEvent>)> {
+    let db = open_reader(&database_path())?;
+    alert_events_since_with(&db, after)
+}
+fn alert_events_since_with(
+    db: &Connection,
+    after: Option<u64>,
+) -> Result<(u64, Vec<mj_client::runtime_feed::AlertEvent>)> {
+    let tx = db.unchecked_transaction()?;
+    let high = tx.query_row(
+        "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='alert_events'),0)",
+        [],
+        |r| r.get::<_, u64>(0),
+    )?;
+    let events = tx.prepare("SELECT sequence,destination,session_title,text,kind,identity FROM alert_events WHERE sequence>?1 AND sequence<=?2 ORDER BY sequence")?
+        .query_map(params![after.unwrap_or(high), high], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get::<_,String>(4)?,r.get(5)?)))?
+        .map(|row| { let (sequence,destination,session_title,text,kind,identity) = row?; Ok(mj_client::runtime_feed::AlertEvent { sequence,destination,session_title,text,identity,kind: serde_json::from_str(&kind)? }) })
+        .collect::<Result<Vec<_>>>()?;
+    tx.commit()?;
+    Ok((high, events))
+}
+
+/// The daemon notification service is the sole observer of published items.
+pub struct NotificationReconcile {
+    pub alerts_changed: bool,
+    pub complete: bool,
+}
+
+pub fn notification_reconcile(runtime: RuntimeProjection) -> Result<Option<NotificationReconcile>> {
+    // The blocking owner holds admission from queueing through commit. A drain
+    // refuses this disposable observation; the next daemon rebuilds it.
+    let Ok(_work) = crate::upgrade::activity_unless_draining("notification reconciliation") else {
+        return Ok(None);
+    };
+    submit_database_write("observe notification entries", move |db| {
+        let before = alert_events_since_with(db, None)?.0;
+        let tx = db.transaction()?;
+        let complete = if let Some(entries) = card_entries(&runtime) {
+            push_observe_in(&tx, &runtime, &entries, Utc::now().timestamp())?
+        } else {
+            true
+        };
+        tx.commit()?;
+        Ok(Some(NotificationReconcile {
+            alerts_changed: alert_events_since_with(db, None)?.0 != before,
+            complete,
+        }))
+    })
+}
+
+pub fn push_ready(runtime: RuntimeProjection) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+    submit_database_write("claim Web Push deliveries", move |db| {
+        push_reconcile_with(db, &runtime, Utc::now().timestamp(), false)
+    })
+}
+
 /// Reconcile the authoritative card snapshot and admit its sends in one
 /// transaction. Presence controls delivery and never changes entry identity.
-pub fn push_reconcile(runtime: RuntimeProjection) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn push_reconcile(
+    runtime: RuntimeProjection,
+) -> Result<(Vec<PushDelivery>, Option<i64>, bool)> {
     submit_database_write("reconcile Web Push entries", move |db| {
-        push_reconcile_with(db, &runtime, Utc::now().timestamp())
+        let before = alert_events_since_with(db, None)?.0;
+        let (due, next) = push_reconcile_with(db, &runtime, Utc::now().timestamp(), true)?;
+        let changed = alert_events_since_with(db, None)?.0 != before;
+        Ok((due, next, changed))
     })
 }
 
@@ -91,17 +157,22 @@ fn push_reconcile_with(
     db: &mut Connection,
     runtime: &RuntimeProjection,
     now: i64,
+    observe: bool,
 ) -> Result<(Vec<PushDelivery>, Option<i64>)> {
     let entries = card_entries(runtime);
     let automatic = runtime.metadata.operator_presence.away && entries.is_some();
     let tx = db.transaction()?;
-    if let Some(entries) = &entries {
-        push_observe_in(&tx, entries, automatic, now)?;
+    if let Some(entries) = &entries
+        && observe
+    {
+        push_observe_in(&tx, runtime, entries, now)?;
     }
     let due = push_claim_in(&tx, runtime, entries.as_ref(), automatic, now)?;
     let next = tx.query_row(
-        &format!("{READY_PUSH} SELECT min(due) FROM ranked WHERE rank=1"),
-        [automatic],
+        // Ready entries absent from this snapshot await the observer's wake,
+        // rather than spinning on an already-expired delivery deadline.
+        &format!("{READY_PUSH} SELECT min(due) FROM ranked WHERE rank=1 AND due>?2"),
+        params![automatic, now],
         |r| r.get(0),
     )?;
     tx.commit()?;
@@ -110,10 +181,11 @@ fn push_reconcile_with(
 
 fn push_observe_in(
     tx: &Transaction<'_>,
-    entries: &BTreeMap<String, PushEntry<'_>>,
-    away: bool,
+    runtime: &RuntimeProjection,
+    entries: &BTreeMap<String, PushEntry<&str>>,
     now: i64,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut complete = true;
     // The cutover baseline applies even to devices enrolled later. An absent
     // card map cannot consume it, and a locator still in flight has no identity.
     let baseline = tx.execute("INSERT OR IGNORE INTO push_entry_cutover VALUES(1)", [])? == 1;
@@ -145,15 +217,35 @@ fn push_observe_in(
             now.saturating_mul(1_000),
         ])?;
     }
-    if away {
+    // The same identity reservation owns both terminal alerts and push delivery.
+    // Presence and device enrollment do not participate in this decision.
+    for (identity, entry) in entries {
+        if entry.paused {
+            continue;
+        }
+        let eligible: bool = tx.query_row(
+            "SELECT baseline=0 AND NOT EXISTS(SELECT 1 FROM alert_baseline WHERE identity=?1) AND NOT EXISTS(SELECT 1 FROM alert_events WHERE identity=?1) FROM push_entries WHERE identity=?1",
+            [identity],
+            |r| r.get(0),
+        )?;
+        if !eligible {
+            continue;
+        }
+        let message = match push_entry_text(tx, runtime, entry) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(session = entry.session, %identity, error = format!("{error:#}"), "could not read notification text; leaving item pending");
+                complete = false;
+                continue;
+            }
+        };
+        let notice = entry.notice(runtime, identity.clone(), message.as_deref());
         tx.execute(
-            "INSERT OR IGNORE INTO push_entry_deliveries(endpoint,identity)
-             SELECT d.endpoint,e.identity FROM push_entries e CROSS JOIN push_devices d
-             WHERE e.visible=1 AND e.session IS NOT NULL AND e.baseline=0",
-            [],
+            "INSERT INTO alert_events(identity,destination,session_title,text,kind) VALUES(?1,?2,?3,?4,?5)",
+            params![identity, entry.holder, notice.title, notice.body, serde_json::to_string(&entry.kind)?],
         )?;
     }
-    Ok(())
+    Ok(complete)
 }
 
 pub fn push_test(endpoint: String) -> Result<()> {
@@ -216,10 +308,18 @@ const READY_PUSH: &str = "WITH ranked AS (
 fn push_claim_in(
     tx: &Transaction<'_>,
     runtime: &RuntimeProjection,
-    entries: Option<&BTreeMap<String, PushEntry<'_>>>,
+    entries: Option<&BTreeMap<String, PushEntry<&str>>>,
     automatic: bool,
     now: i64,
 ) -> Result<Vec<PushDelivery>> {
+    if automatic {
+        tx.execute(
+            "INSERT OR IGNORE INTO push_entry_deliveries(endpoint,identity)
+             SELECT d.endpoint,e.identity FROM push_entries e CROSS JOIN push_devices d
+             WHERE e.visible=1 AND e.session IS NOT NULL AND e.baseline=0",
+            [],
+        )?;
+    }
     let due = tx
         .prepare(&format!(
             "{READY_PUSH} SELECT subscription,enrollment,identity,failures,session
@@ -239,10 +339,17 @@ fn push_claim_in(
     let mut notices = BTreeMap::new();
     for (subscription, enrollment, identity, failures, session) in due {
         let subscription: Subscription = serde_json::from_str(&subscription)?;
-        let payload = if let Some(session) = &session {
-            let entry = entries
-                .and_then(|entries| entries.get(&identity))
-                .with_context(|| format!("missing current Web Push entry for session {session}"))?;
+        let payload = if session.is_some() {
+            let Some(entry) = entries.and_then(|entries| entries.get(&identity)) else {
+                // The delivery snapshot can advance before the notification
+                // owner hides its ledger row. Its reconciliation wakes us.
+                continue;
+            };
+            if entry.paused {
+                // Availability can change before the observer hides the ledger
+                // row. The consumer must not admit that stale decision.
+                continue;
+            }
             if let Some(payload) = notices.get(&identity) {
                 String::clone(payload)
             } else {
@@ -284,7 +391,7 @@ fn push_claim_in(
 fn push_entry_text(
     db: &Connection,
     runtime: &RuntimeProjection,
-    entry: &PushEntry<'_>,
+    entry: &PushEntry<&str>,
 ) -> Result<Option<String>> {
     use mj_core::transcript::materialized_agent_message_text;
     if let Some(text) = entry.text {
@@ -503,7 +610,7 @@ mod tests {
     }
 
     fn claim(db: &mut Connection, runtime: &RuntimeProjection, now: i64) -> Vec<PushDelivery> {
-        push_reconcile_with(db, runtime, now).unwrap().0
+        push_reconcile_with(db, runtime, now, true).unwrap().0
     }
 
     fn add_message(transcript: &mut MaterializedSession, id: &str, ordinal: u64, text: &str) {
@@ -617,6 +724,11 @@ mod tests {
         assert_eq!(due.len(), 1);
         let notice: Notice = serde_json::from_str(&due[0].payload).unwrap();
         assert_eq!(notice.body, "Keep the old format?");
+        let (high, events) = alert_events_since_with(&db, Some(0)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].destination, "s");
+        assert_eq!(events[0].text, notice.body);
+        assert_eq!(events[0].sequence, high);
         assert_eq!(notice.episode.as_deref(), Some(due[0].identity.as_str()));
         assert_eq!(notice.observed_revision, 40);
         result(&db, &due[0], Some(201), 0);
@@ -640,8 +752,118 @@ mod tests {
         entry.kind = NotificationKind::Important;
         show(&mut runtime, "s", vec![entry]);
         assert!(claim(&mut db, &runtime, 0).is_empty());
+        assert_eq!(alert_events_since_with(&db, Some(0)).unwrap().1.len(), 1);
+        assert!(alert_events_since_with(&db, None).unwrap().1.is_empty());
+        assert!(
+            alert_events_since_with(&db, Some(high))
+                .unwrap()
+                .1
+                .is_empty()
+        );
     }
 
+    #[test]
+    fn alert_decision_is_independent_of_presence_devices_and_reused_form_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.sqlite3");
+        let mut db = open(&path).unwrap();
+        let mut runtime = runtime(false);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        let mut parent = crate::database::tests::session("parent", "project");
+        parent.session_title_override = Some("Branch review".into());
+        runtime.records.insert("parent".into(), parent);
+        show(&mut runtime, "parent", vec![]);
+        let card = runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("parent")
+            .unwrap();
+        card.holder = Some("child".into());
+        card.form = Some(mj_client::runtime_feed::CardForm {
+            source: mj_client::runtime_feed::CardFormSource::Elicitation,
+            raised_at_ms: 1,
+            request_id: "elicitation-1".into(),
+            message: "Which branch?".into(),
+        });
+        let mut holder = crate::database::tests::session("child", "project");
+        holder.notifications_ignored = true;
+        runtime.records.insert("child".into(), holder);
+        assert!(claim(&mut db, &runtime, 1).is_empty());
+        assert!(
+            alert_events_since_with(&db, Some(0)).unwrap().1.is_empty(),
+            "a muted holder cannot notify through its parent's card"
+        );
+        runtime
+            .records
+            .get_mut("child")
+            .unwrap()
+            .notifications_ignored = false;
+        assert!(claim(&mut db, &runtime, 1).is_empty());
+        let (high, events) = alert_events_since_with(&db, Some(0)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].destination, "child");
+        assert_eq!(events[0].text, "Which branch?");
+        assert_eq!(events[0].session_title, "Branch review");
+        let card = runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .remove("parent")
+            .unwrap();
+        claim(&mut db, &runtime, 2);
+        drop(db);
+        let mut db = open(&path).unwrap();
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .insert("parent".into(), card);
+        claim(&mut db, &runtime, 3);
+        assert_eq!(
+            alert_events_since_with(&db, Some(0)).unwrap().0,
+            high,
+            "one live form remains one identity across a restart"
+        );
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("parent")
+            .unwrap()
+            .form
+            .as_mut()
+            .unwrap()
+            .raised_at_ms = 4;
+        claim(&mut db, &runtime, 4);
+        claim(&mut db, &runtime, 5);
+        let (new_high, events) = alert_events_since_with(&db, Some(high)).unwrap();
+        assert!(new_high > high);
+        assert_eq!(
+            events.len(),
+            1,
+            "a new incarnation of elicitation-1 alerts exactly once"
+        );
+        sessions::save_session_to(&path, &crate::database::tests::session("parent", "project"))
+            .unwrap();
+        db.execute("DELETE FROM sessions WHERE session_id='parent'", [])
+            .unwrap();
+        let (after_destroy, remaining) = alert_events_since_with(&db, Some(0)).unwrap();
+        assert_eq!(
+            after_destroy, new_high,
+            "sqlite_sequence preserves the durable frontier after deleting the last event"
+        );
+        assert!(
+            remaining.is_empty(),
+            "destroyed session titles and text cannot replay"
+        );
+    }
+
+    // Hard-won: c21e3b62b: delivery admitted a paused holder before observer reconciliation.
     #[test]
     fn push_orders_one_device_tag_across_retry_and_worker_unavailability() {
         let dir = tempfile::tempdir().unwrap();
@@ -677,12 +899,21 @@ mod tests {
             .unwrap();
         card.holder = Some("child".into());
         card.form = Some(CardForm {
-            raised_at_ms: 0,
+            source: mj_client::runtime_feed::CardFormSource::Elicitation,
+            raised_at_ms: 1,
             request_id: "form:1".into(),
             message: "Accept changes?".into(),
         });
         assert!(claim(&mut db, &runtime, 0).is_empty()); // Presence.
         runtime.metadata.operator_presence.away = true;
+        let mut ahead = runtime.clone();
+        ahead.metadata.notification_cards.as_mut().unwrap().clear();
+        let (deferred, next) = push_reconcile_with(&mut db, &ahead, 0, false).unwrap();
+        assert!(deferred.is_empty());
+        assert!(
+            next.is_none(),
+            "a delivery snapshot ahead of the observer waits for reconciliation, not an expired timer"
+        );
         let first = claim(&mut db, &runtime, 0);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].identity, r#"["completion","s",3]"#);
@@ -698,11 +929,13 @@ mod tests {
             .metadata
             .session_attention
             .insert("child".into(), SessionAttention::Unreachable);
-        assert!(claim(&mut db, &runtime, 10).is_empty());
+        let retry = claim(&mut db, &runtime, 10);
+        assert_eq!(
+            retry[0].identity, first[0].identity,
+            "stack entry delivery is independent of the form holder"
+        );
         runtime.metadata.session_attention.remove("child");
         assert!(claim(&mut db, &runtime, 9).is_empty());
-        let retry = claim(&mut db, &runtime, 10);
-        assert_eq!(retry[0].identity, first[0].identity);
         result(&db, &retry[0], Some(201), 10);
 
         let second = claim(&mut db, &runtime, 10);
@@ -715,9 +948,32 @@ mod tests {
             "Second reply"
         );
         result(&db, &second[0], Some(413), i64::MAX); // Permanently retires only this intent.
+        runtime
+            .metadata
+            .session_attention
+            .insert("child".into(), SessionAttention::Unreachable);
+        let (paused, next) = push_reconcile_with(&mut db, &runtime, 10, false).unwrap();
+        assert!(
+            paused.is_empty(),
+            "a paused holder cannot consume a still-visible ledger entry"
+        );
+        assert!(
+            next.is_none(),
+            "availability recovery wakes deferred delivery"
+        );
+        assert!(
+            db.query_row(
+                "SELECT visible FROM push_entries WHERE identity=?1",
+                [r#"["form","child","form:1",1]"#],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "the regression must exercise visibility ahead of reconciliation"
+        );
+        runtime.metadata.session_attention.remove("child");
         let form = claim(&mut db, &runtime, 10);
         assert_eq!(form.len(), 1);
-        assert_eq!(form[0].identity, r#"["form","child","form:1"]"#);
+        assert_eq!(form[0].identity, r#"["form","child","form:1",1]"#);
         let notice: Notice = serde_json::from_str(&form[0].payload).unwrap();
         assert_eq!(notice.body, "Accept changes?");
         assert_eq!(notice.url, "/#conversation/child");
@@ -750,7 +1006,8 @@ mod tests {
             "DROP TABLE push_entry_deliveries;
              DROP TABLE push_entries;
              DROP TABLE push_entry_cutover;
-             DELETE FROM schema_migrations WHERE version=138;
+             DROP TABLE alert_events;
+             DELETE FROM schema_migrations WHERE version>=138;
              PRAGMA user_version=137;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
         )
@@ -761,7 +1018,7 @@ mod tests {
         ).unwrap();
         schema::migrate_schema(&db).unwrap();
         let schema = schema::read_schema_state(&db).unwrap();
-        assert_eq!(schema.revision, 138);
+        assert_eq!(schema.revision, super::super::SCHEMA_VERSION);
         schema.ensure_supported_by(137).unwrap();
 
         let mut runtime = runtime(true);

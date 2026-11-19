@@ -243,6 +243,7 @@ pub(super) async fn start_session(
         no_project_memory: request.no_project_memory,
         no_github_events: request.no_github_events,
         no_github_credentials: request.no_github_credentials,
+        notifications_ignored: request.notifications_ignored,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,
@@ -563,16 +564,50 @@ const MAX_BRIEF_CHARS: usize = 400_000;
 const MAX_HIT_CONTEXT: usize = 20;
 const DEFAULT_HIT_CHARS: usize = 2_000;
 
+pub(super) async fn wiki_sync_request(
+    State(state): State<ServerState>,
+) -> Result<Json<mj_client::daemon::WikiSyncStatus>, ApiFailure> {
+    let _work = state
+        .upgrade_gate
+        .enter_unless_draining("wiki sync request (HTTP)")
+        .map_err(|_| ApiFailure::handoff())?;
+    backend(&state)?
+        .wiki_sync_request()
+        .map(Json)
+        .map_err(|error| {
+            ApiFailure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SessionWiki sync failed: {error:#}"),
+            )
+        })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WikiSyncWatchQuery {
+    epoch: String,
+    after: u64,
+}
+
+pub(super) async fn wiki_sync_watch(
+    State(state): State<ServerState>,
+    Query(query): Query<WikiSyncWatchQuery>,
+) -> Result<Json<mj_client::daemon::WikiSyncStatus>, ApiFailure> {
+    let backend = backend(&state)?;
+    // This read holds no admission and cannot delay daemon replacement.
+    tokio::select! {
+        biased;
+        () = state.shutdown.cancelled() => Err(ApiFailure::shutdown(&state)),
+        result = backend.wiki_sync_watch(query.epoch, query.after) => result.map(Json)
+            .map_err(|error| ApiFailure::new(StatusCode::INTERNAL_SERVER_ERROR, format!("SessionWiki sync watch failed: {error:#}"))),
+    }
+}
+
 pub(super) async fn wiki_search(
     State(state): State<ServerState>,
     Query(query): Query<WikiSearchQuery>,
 ) -> Result<Json<mj_client::daemon::WikiSearchPage>, ApiFailure> {
     let backend = backend(&state)?.clone();
-    // The index is answered from as it stands; a stale one is refreshed in the
-    // background so the next query is better without this one waiting.
-    if backend.wiki_sync_is_stale() {
-        backend.wiki_request_sync();
-    }
     let limit = query
         .limit
         .unwrap_or(mj_controller::sessionwiki::DEFAULT_WIKI_LIMIT)
@@ -581,7 +616,10 @@ pub(super) async fn wiki_search(
         .wiki_search(query.q.unwrap_or_default(), limit)
         .await
         .map_err(|error| {
-            ApiFailure::unavailable(format!("SessionWiki search failed: {error:#}"))
+            ApiFailure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SessionWiki search failed: {error:#}"),
+            )
         })?;
     Ok(Json(page))
 }

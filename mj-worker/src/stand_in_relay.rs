@@ -11,9 +11,12 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use mj_core::config::HarnessKind;
-use mj_core::relay::{RelayCommand, RelayCommandOutcome};
+use mj_core::relay::RelayCommand;
+#[cfg(unix)]
+use mj_core::relay::RelayCommandOutcome;
 
 use mj_core::test_hooks::latch_relay::*;
 use mj_core::test_hooks::leased_relay::*;

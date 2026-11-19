@@ -246,8 +246,40 @@ pub enum WikiIndexState {
 #[serde(deny_unknown_fields)]
 pub struct WikiStatus {
     pub state: WikiIndexState,
-    /// A sync is running now, so repeating the query may return more.
-    pub topping_up: bool,
+}
+
+/// Progress within one adapter of the current sync phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSyncProgress {
+    pub phase: String,
+    pub tool: String,
+    pub adapter: usize,
+    pub adapters: usize,
+    pub done: usize,
+    pub total: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WikiSyncOutcome {
+    Succeeded,
+    Failed(String),
+}
+
+/// One ordered snapshot from the indexer's generation owner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSyncStatus {
+    pub epoch: String,
+    pub version: u64,
+    pub requested: u64,
+    pub started: u64,
+    pub finished: u64,
+    pub successful: u64,
+    pub outcome: Option<WikiSyncOutcome>,
+    pub running: Option<WikiSyncProgress>,
+    pub target: Option<u64>,
 }
 
 /// Where in a session's conversation a text search matched. A match in a
@@ -266,6 +298,12 @@ pub enum SessionTextMatchKind {
 pub struct SessionTextMatch {
     pub session_id: String,
     pub kind: SessionTextMatchKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTextSearchPage {
+    pub matches: Vec<SessionTextMatch>,
 }
 
 /// One page of search results with the state of the index behind them.
@@ -645,6 +683,9 @@ pub struct CreateSessionRequest {
     /// Withhold GitHub credentials; inherited by children.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_credentials: bool,
+    /// Start with notifications ignored; see `SessionRecord::notifications_ignored`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_ignored: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -976,6 +1017,11 @@ pub enum DaemonAction {
     },
     RemoveProject {
         bundle_id: String,
+    },
+    WikiSyncRequest,
+    WikiSyncWatch {
+        epoch: String,
+        after: u64,
     },
     WikiSearch {
         query: String,
@@ -1428,9 +1474,10 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    WikiSyncStatus(WikiSyncStatus),
     ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
     ProjectCreated(mj_core::project_catalog::SavedProject),
-    SessionTextMatches(Vec<SessionTextMatch>),
+    SessionTextMatches(SessionTextSearchPage),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
     /// Whether a queued startup prompt was withdrawn before delivery.
@@ -1886,9 +1933,10 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
         }
         response = read_frame(stream).await?;
     }
-    let reply: DaemonReply = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
-        .await
-        .context("reply decoder task failed")??;
+    let reply: DaemonReply =
+        mj_core::runtime::spawn_blocking(move || serde_json::from_slice(&body))
+            .await
+            .context("reply decoder task failed")??;
     ensure!(
         reply.is_chunked(),
         "daemon chunked a reply that is never chunked"
@@ -2784,9 +2832,38 @@ impl DaemonClient {
         }
     }
 
+    async fn request_without_reconnect(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        match self.request_once(action).await? {
+            DaemonReply::UpgradePending => {
+                bail!("the daemon refused admission while being replaced; reopen to sync again")
+            }
+            reply => Ok(reply),
+        }
+    }
+
+    pub async fn wiki_sync_request(&mut self) -> Result<WikiSyncStatus> {
+        match self
+            .request_without_reconnect(DaemonAction::WikiSyncRequest)
+            .await?
+        {
+            DaemonReply::WikiSyncStatus(status) => Ok(status),
+            reply => bail!("unexpected SessionWiki sync reply {reply:?}"),
+        }
+    }
+
+    pub async fn wiki_sync_watch(&mut self, epoch: String, after: u64) -> Result<WikiSyncStatus> {
+        match self
+            .request_without_reconnect(DaemonAction::WikiSyncWatch { epoch, after })
+            .await?
+        {
+            DaemonReply::WikiSyncStatus(status) => Ok(status),
+            reply => bail!("unexpected SessionWiki sync reply {reply:?}"),
+        }
+    }
+
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
-            .request(DaemonAction::WikiSearch { query, limit })
+            .request_without_reconnect(DaemonAction::WikiSearch { query, limit })
             .await?
         {
             DaemonReply::WikiRows(page) => Ok(page),
@@ -2797,9 +2874,9 @@ impl DaemonClient {
     /// The live sessions whose user or agent messages contain `query`, and
     /// which of the two matched. Answers from the SessionWiki index, so a very
     /// new message can be missing until the next sync.
-    pub async fn session_text_search(&mut self, query: String) -> Result<Vec<SessionTextMatch>> {
+    pub async fn session_text_search(&mut self, query: String) -> Result<SessionTextSearchPage> {
         match self
-            .request(DaemonAction::SessionTextSearch { query })
+            .request_without_reconnect(DaemonAction::SessionTextSearch { query })
             .await?
         {
             DaemonReply::SessionTextMatches(matches) => Ok(matches),
@@ -3718,7 +3795,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unchunked.
 /// The first protocol with notification cards and completion-bound transcript reads.
 pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
-pub const PROTOCOL_VERSION: u32 = NOTIFICATION_STACK_PROTOCOL;
+/// The first protocol with daemon-owned notify-once alert events.
+pub const ALERT_EVENTS_PROTOCOL: u32 = 108;
+// Version 107: explicit SessionWiki sync generations and progress watches.
+pub const PROTOCOL_VERSION: u32 = ALERT_EVENTS_PROTOCOL;
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -3975,7 +4055,7 @@ mod tests {
             let metadata = cancellation_metadata(listener.local_addr().unwrap());
             let (received, waiting) = tokio::sync::oneshot::channel();
             let (release, released) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(async move {
+            let server = mj_core::runtime::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                 write_frame(
@@ -4047,7 +4127,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let metadata = cancellation_metadata(listener.local_addr().unwrap());
         let (received, waiting) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut total = 0;
             while total < 128 * 1024 {
@@ -4106,7 +4186,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
             write_frame(
@@ -4151,7 +4231,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut byte = [0_u8; 1];
             assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
@@ -4183,7 +4263,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
             assert_eq!(request.protocol_version, PROTOCOL_VERSION);
@@ -4255,7 +4335,7 @@ mod tests {
             .unwrap(),
         );
         let expected_draft = serde_json::to_value(&draft).unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             for (index, model) in [
                 None,
@@ -4342,7 +4422,7 @@ mod tests {
             },
         };
         let expected = serde_json::to_value(&action).unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             for reply in [
                 Some(DaemonReply::UpgradePending),
                 Some(DaemonReply::Done),
@@ -4399,7 +4479,7 @@ mod tests {
         };
         let bytes = vec![42; 192 * 1024];
         let expected = bytes.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let mut accepted = 0;
             for attempt in 0..4 {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -4579,7 +4659,7 @@ mod tests {
             session_id: "observed-session".into(),
             operation_id: "accepted-operation".into(),
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             for phase in 0..5 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();

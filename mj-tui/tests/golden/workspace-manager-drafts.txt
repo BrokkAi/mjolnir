@@ -6,10 +6,9 @@ action: SelectWorkspace { workspace_id: "alpha" }
 │ Default  Echo  Foxtrot             ≡ ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
-│ Create   Open   Filter: _____________││                                                                    │
-│No sessions yet                       ││                          ✦  M J O L N I R                          │
-│Create new work or open a session.    ││                                                                    │
-│                                      ││                 Create a session to start building.                │
+│ Create   Open   Filter: _____________││                          ✦  M J O L N I R                          │
+│No sessions yet                       ││                                                                    │
+│Create new work or open a session.    ││                 Create a session to start building.                │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
@@ -20,19 +19,20 @@ action: SelectWorkspace { workspace_id: "alpha" }
 │                                      │╭ No live session ───────────────────────────────────────────────────╮
 │                                      ││No live session in this workspace.                                  │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                   │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets              │
-│                                      ││  claude-1  Claude Code  refreshing…                                │
-│                                      ││  codex-1   Codex        refreshing…                                │
-│                                      ││  codex-2   Codex        refreshing…                                │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                   │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: SelectWorkspace { workspace_id: "beta" }
 
@@ -41,10 +41,9 @@ action: SelectWorkspace { workspace_id: "beta" }
 │ Default  Echo  Foxtrot             ≡ ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
-│ Create   Open   Filter: _____________││                                                                    │
-│No sessions yet                       ││                          ✦  M J O L N I R                          │
-│Create new work or open a session.    ││                                                                    │
-│                                      ││                 Create a session to start building.                │
+│ Create   Open   Filter: _____________││                          ✦  M J O L N I R                          │
+│No sessions yet                       ││                                                                    │
+│Create new work or open a session.    ││                 Create a session to start building.                │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
@@ -55,19 +54,20 @@ action: SelectWorkspace { workspace_id: "beta" }
 │                                      │╭ No live session ───────────────────────────────────────────────────╮
 │                                      ││No live session in this workspace.                                  │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                   │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets              │
-│                                      ││  claude-1  Claude Code  refreshing…                                │
-│                                      ││  codex-1   Codex        refreshing…                                │
-│                                      ││  codex-2   Codex        refreshing…                                │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                   │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: LoadWorkspaceManagement { generation: 1 }
 
@@ -85,24 +85,24 @@ action: LoadWorkspaceManagement { generation: 1 }
 │              │                                                              Open           │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
 │              │                                                                             │  one.         │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-│                                                                                               ────── ▁   ▄ ╮
-│                                                                                                            │
-╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│  claude-1:   │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│  codex-1: r  │                                                                             │               │
+│  codex-2: r  │                                                                             │               │
+╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+╭ Notificatio                                                                                   ────── ▁   ▄ ╮
+│Nothing need                                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: None
 
@@ -120,24 +120,24 @@ action: None
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
 │              │                                                                             │  one.         │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-│                                                                                               ────── ▁   ▄ ╮
-│                                                                                                            │
-╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│  claude-1:   │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│  codex-1: r  │                                                                             │               │
+│  codex-2: r  │                                                                             │               │
+╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+╭ Notificatio                                                                                   ────── ▁   ▄ ╮
+│Nothing need                                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: None
 
@@ -155,24 +155,24 @@ action: None
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
 │              │                                                                             │  one.         │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-│                                                                                               ────── ▁   ▄ ╮
-│                                                                                                            │
-╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│  claude-1:   │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│  codex-1: r  │                                                                             │               │
+│  codex-2: r  │                                                                             │               │
+╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+╭ Notificatio                                                                                   ────── ▁   ▄ ╮
+│Nothing need                                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 
@@ -190,24 +190,24 @@ action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
-│              │                                                                             │               │
 │              │                                                                             │  ─────────────╯
 │              │                                                                             │  ─────────────╮
 │              │                                                                             │               │
 │              │                                                                             │  one.         │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │  ─────────────╯
-│              │                                                                             │  ────── ▁   ▄ ╮
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
-│              ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
-│                                                                                               ────── ▁   ▄ ╮
-│                                                                                                            │
-╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╰────────────  │                                                                             │  ─────────────╯
+╭ Targets ▾ ─  │                                                                             │  ────── ▁   ▄ ╮
+│  Host / fle  │                                                                             │               │
+╰────────────  │                                                                             │  ─────────────╯
+╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
+│ANTHROPIC     │                                                                             │               │
+│  claude-1:   │                                                                             │               │
+│OPENAI        │                                                                             │               │
+│  codex-1: r  │                                                                             │               │
+│  codex-2: r  │                                                                             │               │
+╰────────────  ╰─────────────────────────────────────────────────────────────────────────────╯  ─────────────╯
+╭ Notificatio                                                                                   ────── ▁   ▄ ╮
+│Nothing need                                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === seven workspace rows in Standard sidebar (110x32) ===
@@ -215,33 +215,33 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 00 界   Project 01 界      ▐ ≡ ││                                                                    │
 │ Project 02 界   Project 03 界      ▐   ││                                                                    │
 │ Project 04 界   Project 05 界      ▐   ││                                                                    │
-│ Project 06 界   Project 07 界      ▐   ││                                                                    │
-│ Project 08 界   Project 09 界      │   ││                          ✦  M J O L N I R                          │
-│ Project 10 界   Project 11 界      │   ││                                                                    │
-│ Project 12 界   Project 13 界      │   ││                 Create a session to start building.                │
+│ Project 06 界   Project 07 界      ▐   ││                          ✦  M J O L N I R                          │
+│ Project 08 界   Project 09 界      │   ││                                                                    │
+│ Project 10 界   Project 11 界      │   ││                 Create a session to start building.                │
+│ Project 12 界   Project 13 界      │   ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
 │ Create   Open   Filter: _____________││                                                                    │
 │No sessions yet                       ││                                                                    │
 │Create new work or open a session.    ││                                                                    │
-│                                      ││                                                                    │
 │                                      │╰────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No live session ───────────────────────────────────────────────────╮
 │                                      ││No live session in this workspace.                                  │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                   │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets              │
-│                                      ││  claude-1  Claude Code  refreshing…                                │
-│                                      ││  codex-1   Codex        refreshing…                                │
-│                                      ││  codex-2   Codex        refreshing…                                │
-│                                      │╰────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                                   │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
 === seven workspace rows in Maximized sidebar (110x32) ===
@@ -249,16 +249,15 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 00 界   Project 01 界   Project 02 界      ▐ ≡ ││                                                     │
 │ Project 03 界   Project 04 界   Project 05 界      ▐   ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
-│ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      │   ││         Create a session to start building.         │
+│ Project 09 界   Project 10 界   Project 11 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││         Create a session to start building.         │
+│ Project 18 界   Project 19 界   Project 20 界      │   ││                                                     │
 ╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
 │                                                     ││No live session in this workspace.                   │
@@ -268,10 +267,11 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  Host / fleet  Targets  CPU  RAM                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                                                      │
-│  claude-1  Claude Code  refreshing…                                                                        │
-│  codex-1   Codex        refreshing…                                                                        │
-│  codex-2   Codex        refreshing…                                                                        │
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
@@ -283,16 +283,15 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││         Create a session to start building.         │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
 ╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
 │                                                     ││No live session in this workspace.                   │
@@ -302,10 +301,11 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  Host / fleet  Targets  CPU  RAM                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                                                      │
-│  claude-1  Claude Code  refreshing…                                                                        │
-│  codex-1   Codex        refreshing…                                                                        │
-│  codex-2   Codex        refreshing…                                                                        │
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
@@ -317,16 +317,15 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││         Create a session to start building.         │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
 ╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
 │                                                     ││No live session in this workspace.                   │
@@ -336,10 +335,11 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  Host / fleet  Targets  CPU  RAM                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                                                      │
-│  claude-1  Claude Code  refreshing…                                                                        │
-│  codex-1   Codex        refreshing…                                                                        │
-│  codex-2   Codex        refreshing…                                                                        │
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
@@ -351,16 +351,15 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
-│ Project 21 界   Project 22 界   Project 23 界      ▐   ││         Create a session to start building.         │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││         Create a session to start building.         │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
 ╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
 │ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ No live session ────────────────────────────────────╮
 │                                                     ││No live session in this workspace.                   │
@@ -370,10 +369,11 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  Host / fleet  Targets  CPU  RAM                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                                                      │
-│  claude-1  Claude Code  refreshing…                                                                        │
-│  codex-1   Codex        refreshing…                                                                        │
-│  codex-2   Codex        refreshing…                                                                        │
+│ANTHROPIC                                                                                                   │
+│  claude-1: refreshing…                                                                                     │
+│OPENAI                                                                                                      │
+│  codex-1: refreshing…                                                                                      │
+│  codex-2: refreshing…                                                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                           │
@@ -385,11 +385,10 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 23… ▾  ≡ ││                                                                                        │
 ╰──────────────────╯│                                                                                        │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                        │
-│ Create   Open    ││                                                                                        │
-│No sessions yet   ││                                    ✦  M J O L N I R                                    │
-│Create new work or││                                                                                        │
-│open a session.   ││                           Create a session to start building.                          │
-│                  ││                                                                                        │
+│ Create   Open    ││                                    ✦  M J O L N I R                                    │
+│No sessions yet   ││                                                                                        │
+│Create new work or││                           Create a session to start building.                          │
+│open a session.   ││                                                                                        │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
@@ -404,10 +403,11 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │                  ││  Host / fleet  Targets  CPU  RAM                                                       │
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
-│                  ││            Harness      Weekly      Resets  5H Resets                                  │
-│                  ││  claude-1  Claude Code  refreshing…                                                    │
-│                  ││  codex-1   Codex        refreshing…                                                    │
-│                  ││  codex-2   Codex        refreshing…                                                    │
+│                  ││ANTHROPIC                                                                               │
+│                  ││  claude-1: refreshing…                                                                 │
+│                  ││OPENAI                                                                                  │
+│                  ││  codex-1: refreshing…                                                                  │
+│                  ││  codex-2: refreshing…                                                                  │
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                       │
@@ -419,29 +419,29 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │ Project 23… ▾  ≡ ││                                                                                        │
 ╰╭Workspaces───────────────╮                                                                                 │
 ╭│Project 00 界             │                                                                                 │
-││Project 01 界             │                                                                                 │
-││Project 02 界             │                             ✦  M J O L N I R                                    │
-││Project 03 界             │                                                                                 │
-││Project 04 界             │                    Create a session to start building.                          │
+││Project 01 界             │                             ✦  M J O L N I R                                    │
+││Project 02 界             │                                                                                 │
+││Project 03 界             │                    Create a session to start building.                          │
+││Project 04 界             │                                                                                 │
 ││Project 05 界             │                                                                                 │
 ││Project 06 界             │                                                                                 │
 ││Project 07 界             │                                                                                 │
 ││Project 08 界             │                                                                                 │
 ││Project 09 界             │                                                                                 │
-││Project 10 界             │                                                                                 │
-││Project 11 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 12 界             │e session ───────────────────────────────────────────────────────────────────────╮
-││Project 13 界             │ session in this workspace.                                                      │
-││Project 14 界             │trl+b c to create a session or ctrl+b g to find one.                             │
-││Project 15 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 16 界             │s ▾ ────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-││Project 17 界             │/ fleet  Targets  CPU  RAM                                                       │
-││Project 18 界             │─────────────────────────────────────────────────────────────────────────────────╯
-││Project 19 界             │es ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
-││Project 20 界             │     Harness      Weekly      Resets  5H Resets                                  │
-││Project 21 界             │e-1  Claude Code  refreshing…                                                    │
-││Project 22 界             │-1   Codex        refreshing…                                                    │
-││Project 23 界  (current)  │-2   Codex        refreshing…                                                    │
+││Project 10 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 11 界             │e session ───────────────────────────────────────────────────────────────────────╮
+││Project 12 界             │ session in this workspace.                                                      │
+││Project 13 界             │trl+b c to create a session or ctrl+b g to find one.                             │
+││Project 14 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 15 界             │s ▾ ────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 16 界             │/ fleet  Targets  CPU  RAM                                                       │
+││Project 17 界             │─────────────────────────────────────────────────────────────────────────────────╯
+││Project 18 界             │es ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
+││Project 19 界             │IC                                                                               │
+││Project 20 界             │e-1: refreshing…                                                                 │
+││Project 21 界             │                                                                                 │
+││Project 22 界             │-1: refreshing…                                                                  │
+││Project 23 界  (current)  │-2: refreshing…                                                                  │
 │╰─────────────────────────╯─────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                       │
@@ -454,11 +454,10 @@ dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
 │ Project 00… ▾  ≡ ││                                                                                        │
 ╰──────────────────╯│                                                                                        │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                        │
-│ Create   Open    ││                                                                                        │
-│No sessions yet   ││                                    ✦  M J O L N I R                                    │
-│Create new work or││                                                                                        │
-│open a session.   ││                           Create a session to start building.                          │
-│                  ││                                                                                        │
+│ Create   Open    ││                                    ✦  M J O L N I R                                    │
+│No sessions yet   ││                                                                                        │
+│Create new work or││                           Create a session to start building.                          │
+│open a session.   ││                                                                                        │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
 │                  ││                                                                                        │
@@ -473,10 +472,11 @@ dropdown action: SelectWorkspace { workspace_id: "workspace-0" }
 │                  ││  Host / fleet  Targets  CPU  RAM                                                       │
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────── ▁   ▄ ╮
-│                  ││            Harness      Weekly      Resets  5H Resets                                  │
-│                  ││  claude-1  Claude Code  refreshing…                                                    │
-│                  ││  codex-1   Codex        refreshing…                                                    │
-│                  ││  codex-2   Codex        refreshing…                                                    │
+│                  ││ANTHROPIC                                                                               │
+│                  ││  claude-1: refreshing…                                                                 │
+│                  ││OPENAI                                                                                  │
+│                  ││  codex-1: refreshing…                                                                  │
+│                  ││  codex-2: refreshing…                                                                  │
 │                  │╰────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                       │

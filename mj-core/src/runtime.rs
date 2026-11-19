@@ -233,10 +233,52 @@ where
     if tokio::runtime::Handle::current().runtime_flavor()
         == tokio::runtime::RuntimeFlavor::MultiThread
     {
-        tokio::task::spawn_blocking(move || block_on(Box::pin(future)))
+        spawn_blocking(move || block_on(Box::pin(future)))
     } else {
-        tokio::spawn(async move { Ok(future.await) })
+        spawn(async move { Ok(future.await) })
     }
+}
+
+/// Start a task, as `tokio::spawn` does, with the future boxed first.
+///
+/// Tokio generates its task machinery (about thirty functions) once for every
+/// type of future it is handed, and every `async` block is its own type. A
+/// boxed future has one type for each output type, so that code is generated
+/// once for each output type instead of once for each call. Measured on
+/// `mj-daemon`'s tests, where task machinery was over half of the generated
+/// code: the compile went from 6.9 GB and 64 s to 5.0 GB and 52 s. The cost at
+/// run time is one allocation when a task starts.
+///
+/// `clippy.toml` disallows calling `tokio::spawn` directly so that new code
+/// comes through here.
+#[track_caller]
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let boxed: std::pin::Pin<Box<dyn Future<Output = F::Output> + Send>> = Box::pin(future);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this is the one place tasks are handed to tokio"
+    )]
+    tokio::spawn(boxed)
+}
+
+/// Run blocking work on tokio's blocking pool, as
+/// `tokio::task::spawn_blocking` does, with the closure boxed first for the
+/// same reason as [`spawn`].
+#[track_caller]
+pub fn spawn_blocking<R>(work: impl FnOnce() -> R + Send + 'static) -> tokio::task::JoinHandle<R>
+where
+    R: Send + 'static,
+{
+    let boxed: Box<dyn FnOnce() -> R + Send> = Box::new(work);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this is the one place blocking work is handed to tokio"
+    )]
+    tokio::task::spawn_blocking(boxed)
 }
 
 /// Shut the process's runtime down in the order that keeps [`block_on`]
@@ -272,7 +314,7 @@ mod tests {
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking(move || {
                 started_tx.send(()).ok();
                 let result = STATE.block_on_with(async {
                     tokio::time::sleep(Duration::from_secs(30)).await;
@@ -329,7 +371,7 @@ mod tests {
             let waits = (0..3)
                 .map(|_| {
                     let mut release = release_rx.clone();
-                    tokio::spawn(async move {
+                    spawn(async move {
                         off_async_worker(|| {
                             while !*release.borrow_and_update() {
                                 std::thread::sleep(Duration::from_millis(5));
@@ -340,7 +382,7 @@ mod tests {
                 .collect::<Vec<_>>();
             // Let every wait start before the releasing task is spawned.
             std::thread::sleep(Duration::from_millis(100));
-            tokio::spawn(async move {
+            spawn(async move {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 release_tx.send_replace(true);
             })

@@ -127,7 +127,7 @@ async fn decision_update(
             serde_json::json!({"sessionUpdate":"session_info_update", "_meta":meta}),
         )?;
         let persisted = update.clone();
-        tokio::task::spawn_blocking(move || (journal.0)(persisted))
+        mj_core::runtime::spawn_blocking(move || (journal.0)(persisted))
             .await
             .context("persist goal decision task")??;
         spec.goal_recovery
@@ -501,6 +501,7 @@ for line in sys.stdin:
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
+                instruction_role: None,
                 subagent_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
@@ -523,7 +524,6 @@ for line in sys.stdin:
                 harness: HarnessKind::Codex,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
                 claude_permission_mode: Default::default(),
-                observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
@@ -533,7 +533,7 @@ for line in sys.stdin:
             };
             let (tx, rx) = mpsc::channel(8);
             let (events, mut receive) = mpsc::channel(8);
-            let task = tokio::spawn(run(spec, rx, events));
+            let task = mj_core::runtime::spawn(run(spec, rx, events));
             let mut bytes = 0;
             if let Some(accept) = answer {
                 loop {
@@ -677,6 +677,7 @@ for line in sys.stdin:
                     bridge_spec_path: None,
                     subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                     managed_subagent: false,
+                    instruction_role: None,
                     subagent_mcp_socket: None,
                     clear_context_request: None,
                     context_restore: None,
@@ -698,7 +699,6 @@ for line in sys.stdin:
                     harness,
                     execution_policy: ExecutionPolicy::ConfiguredApprovals,
                     claude_permission_mode: Default::default(),
-                    observe_policy: None,
                     acp_activity: Default::default(),
                     step_clock: Default::default(),
                     tools_in_flight: Default::default(),
@@ -708,7 +708,7 @@ for line in sys.stdin:
                 };
                 let (tx, rx) = mpsc::channel(8);
                 let (events, mut receive) = mpsc::channel(2);
-                let task = tokio::spawn(run(spec, rx, events));
+                let task = mj_core::runtime::spawn(run(spec, rx, events));
                 async fn next(rx: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
                     tokio::time::timeout(Duration::from_secs(10), rx.recv())
                         .await

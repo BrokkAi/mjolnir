@@ -80,7 +80,7 @@ impl RecoveryCoordinator {
         let (results_tx, results_rx) = observation_channel();
         let gate = session_manager.session_gate.clone();
         let coordinator_gate = gate.clone();
-        let supervisor = tokio::spawn(async move {
+        let supervisor = mj_core::runtime::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();
             let mut attempts = JoinSet::new();
             let mut closing = false;
@@ -164,7 +164,7 @@ impl RecoveryCoordinator {
                                     let target = result.expected_target.clone();
                                     let detail = detail.clone();
                                     let settling = admission.clone();
-                                    let persisted = tokio::task::spawn_blocking(move || {
+                                    let persisted = mj_core::runtime::spawn_blocking(move || {
                                         let result = record_recovery_failure_if_current(&session_id, &target, expected_checkpoint.as_deref(), &detail);
                                         drop(settling);
                                         result

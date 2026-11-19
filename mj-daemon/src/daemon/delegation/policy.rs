@@ -939,7 +939,7 @@ mod tests {
             scan.start(old.clone()),
             Some(crate::daemon::QuotaRefreshIntent::ReconcileSources)
         );
-        let task = tokio::spawn(async {});
+        let task = mj_core::runtime::spawn(async {});
         let task_id = task.id();
         task.await.unwrap();
         scan.task_started(task_id);
@@ -966,7 +966,7 @@ mod tests {
             scan.start(config.clone()),
             Some(crate::daemon::QuotaRefreshIntent::Force)
         );
-        let task = tokio::spawn(async {});
+        let task = mj_core::runtime::spawn(async {});
         let task_id = task.id();
         task.await.unwrap();
         scan.task_started(task_id);
@@ -1023,7 +1023,6 @@ mod tests {
             },
             state: Default::default(),
         };
-        controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Auto;
         let before = quota_refresh_profiles(&controller);
         let (profiles_tx, profiles_rx) = watch::channel(QuotaRefreshBatch::default());
         let mut batch = QuotaRefreshBatch {
@@ -1095,27 +1094,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["added", "claude", "codex"]
         );
-
-        controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Host;
-        let runtime_changed = quota_refresh_profiles(&controller);
-        assert!(replace_source_requests(
-            &mut batch,
-            &profiles_tx,
-            runtime_changed.clone()
-        ));
-        let runtime_batch = profiles_rx.borrow().clone();
-        assert!(!runtime_batch.refresh);
-        assert_eq!(
-            runtime_batch.profiles[0].runtime.choice,
-            mj_core::config::QuotaRuntimeChoice::Host
-        );
-        let runtime_generation = runtime_batch.generation;
-        assert!(!replace_source_requests(
-            &mut batch,
-            &profiles_tx,
-            runtime_changed
-        ));
-        assert_eq!(profiles_rx.borrow().generation, runtime_generation);
     }
 
     // Hard-won: #1487: an old quota result repopulated an edited profile's slot.

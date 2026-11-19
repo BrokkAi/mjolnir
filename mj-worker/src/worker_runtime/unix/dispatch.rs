@@ -1212,6 +1212,9 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::Warning { message })?;
         }
         RuntimeEvent::HarnessRestarting { message } => {
+            // Close admission before interrupting anything: interruption may
+            // otherwise promote a replacement ahead of SessionRestarted.
+            relay.clear_acp_readiness();
             relay.record_observation(RelayObservation::NativeAgent {
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
@@ -1219,7 +1222,13 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::Warning {
                 message: message.clone(),
             })?;
-            for (command_id, _) in std::mem::take(in_flight) {
+            let mut interrupted: Vec<_> = std::mem::take(in_flight).into_iter().collect();
+            // Record the prompt before its controls: terminating a cancel
+            // clears its target, which recovery needs to honor the user's stop.
+            interrupted.sort_by_key(|(_, command)| {
+                command.kind() != mj_core::relay::RelayCommandKind::Prompt
+            });
+            for (command_id, _) in interrupted {
                 relay.record_command_interrupted(
                     &command_id,
                     mj_core::event_outcome::OutcomeReason::WorkerRestarted,
@@ -1531,7 +1540,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::ContinueAuthorizedWork { .. }
         | RelayCommand::ResumeAfterQuota { .. }) => {
             let mut prompt = command
-                .prompt_blocks()
+                .prompt_blocks_for_command(&claimed.command_id)
                 .expect("prompt command")
                 .into_owned();
             if let Some(context) = &claimed.hidden_prompt_context {
@@ -1914,7 +1923,7 @@ mod startup_tests {
                     },
                 );
             }
-            let coordinator = tokio::spawn(run_relay_coordinator(
+            let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
                 relay.clone(),
                 received,
                 wakes,

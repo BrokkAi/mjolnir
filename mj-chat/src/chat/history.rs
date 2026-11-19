@@ -98,7 +98,7 @@ impl ChatState {
                     let generation = request.generation;
                     let updates = self.composer_runtime.tx.clone();
                     let session = session();
-                    self.composer_runtime.history_task = Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(async move {
+                    self.composer_runtime.history_task = Some(super::composer::RemoteResultForwarder(Some(mj_core::runtime::spawn(async move {
                         let result = match session.await {
                             Ok(session) => Self::resolve_history_search_request(request, &session).await,
                             Err(error) => Err(format!("{error:#}")),
@@ -111,7 +111,7 @@ impl ChatState {
                 ComposerRequest::SessionHistory(generation) => {
                     let updates = self.composer_runtime.tx.clone();
                     let session = session();
-                    self.composer_runtime.session_history_task = Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(async move {
+                    self.composer_runtime.session_history_task = Some(super::composer::RemoteResultForwarder(Some(mj_core::runtime::spawn(async move {
                         let result = match session.await {
                             Ok(session) => session.session_prompts().await.map_err(|error| format!("{error:#}")),
                             Err(error) => Err(format!("{error:#}")),
@@ -135,6 +135,12 @@ impl ChatState {
                 }
             }
         }
+    }
+
+    /// Whether this composer has ever asked for its session's history.
+    /// Generations start at zero and only advance on a request.
+    pub(super) fn session_history_requested(&self) -> bool {
+        self.session_history_generation != 0
     }
 
     pub fn request_session_history(&mut self) {

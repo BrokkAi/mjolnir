@@ -7622,6 +7622,12 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
         !record_subagent_handback_to(&path, &child.id, &handback("turn-1", "again")).unwrap(),
         "a second report for the same turn is refused"
     );
+    // Hard-won: 540e61a0d: a restart continuation could overwrite its turn's report.
+    let recovered = mj_core::continuation::restart_continuation_id("turn-1");
+    assert!(
+        !record_subagent_handback_to(&path, &child.id, &handback(&recovered, "again")).unwrap(),
+        "a restart continuation is the same turn"
+    );
     assert!(record_subagent_handback_to(&path, &child.id, &handback("turn-2", "next")).unwrap());
     assert_eq!(
         load_subagent_report_from(&path, &child.id)

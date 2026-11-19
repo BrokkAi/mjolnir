@@ -565,7 +565,7 @@ impl RuntimeState {
         ignore_nested_repositories: bool,
     ) -> Result<DaemonLifecycleResult> {
         let cancelled = control.cancelled.clone();
-        let mut controller = tokio::task::spawn_blocking(Controller::load)
+        let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon close task")??;
         let executor = DaemonStageReportingExecutor::new(
@@ -711,7 +711,7 @@ impl RuntimeState {
         let caller_result = result.clone();
         let channel = result.clone();
         let state = Arc::clone(self);
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if let Err(error) = Self::wait_lifecycle_result(result).await {
                 tracing::warn!(%session_id, error = format!("{error:#}"), "deferred Podman cleanup failed");
                 state.push_notice(
@@ -783,7 +783,7 @@ impl RuntimeState {
                 Ok(result) => {
                     let state = self.clone();
                     let completed = result.clone();
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         if let Err(error) = Self::wait_lifecycle_result(result).await {
                             tracing::warn!(%session_id, error=format!("{error:#}"), "failed startup cleanup remains pending; retry in 30s");
                         }

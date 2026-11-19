@@ -29,7 +29,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":watch.enabled,"use_gpu":watch.use_gpu,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
         }
         "jev" => json!({"enabled":true}),
-        "quota" => json!({"runtime":"auto"}),
+        "quota" => json!({}),
         "daemon" => json!({"runtime":"host","image":null,"mounts":[]}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
@@ -599,12 +599,7 @@ pub fn section_summary(
                 "On · GitHub activity".to_owned()
             }
         }
-        "quota" => match section["runtime"].as_str() {
-            Some("podman") => "Podman".to_owned(),
-            Some("docker") => "Docker".to_owned(),
-            Some("host") => "Host".to_owned(),
-            _ => "Auto · container when available".to_owned(),
-        },
+        "quota" => "Host".to_owned(),
         "daemon" => match section["runtime"].as_str() {
             Some("podman") => "Podman container".to_owned(),
             Some("docker") => "Docker container".to_owned(),
@@ -803,7 +798,6 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
         "tool_output" => &["grouped", "inline"],
-        "runtime" if path == ["quota", "runtime"] => &["auto", "podman", "docker", "host"],
         "runtime" if path == ["daemon", "runtime"] => &["host", "podman", "docker"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
@@ -1024,10 +1018,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "review" => "Reviewers for code review before push. With no reviewers, review is off.",
         "quota" => {
-            "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled."
-        }
-        "runtime" if path.first().is_some_and(|key| key == "quota") => {
-            "Auto: this machine when the agent is installed here, else an enabled local Podman runtime, else Docker. Podman or Docker: always that engine. Host: never a container."
+            "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation."
         }
         "daemon" => {
             "Where the background daemon runs. Saving a change moves it there; running sessions keep going."
@@ -1054,7 +1045,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
         }
         "use_same_on_all_targets" => {
-            "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
+            "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
         }
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {

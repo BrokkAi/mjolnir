@@ -25,7 +25,7 @@ pub(crate) struct SubagentDraft {
     harness: Option<mj_core::config::HarnessKind>,
     /// The profile whose remembered policy initialized this draft.
     profile_id: Option<String>,
-    /// Whether the destination target runs with `permissions = "yolo"`.
+    /// Whether the harness runs without approvals on the destination target.
     yolo: bool,
 }
 

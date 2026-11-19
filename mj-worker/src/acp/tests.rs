@@ -50,7 +50,7 @@ for line in sys.stdin:
         // session task waiting on its own sends while the notification
         // handler runs, which is the order that exposed the race.
         let (event_tx, mut event_rx) = mpsc::channel(1);
-        let runtime = tokio::spawn(run(
+        let runtime = mj_core::runtime::spawn(run(
             LaunchSpec {
                 operator_away: Default::default(),
                 imported_logins: None,
@@ -58,6 +58,7 @@ for line in sys.stdin:
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
+                instruction_role: None,
                 subagent_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
@@ -76,7 +77,6 @@ for line in sys.stdin:
                 harness: HarnessKind::Claude,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
                 claude_permission_mode: Default::default(),
-                observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
@@ -177,7 +177,7 @@ for line in sys.stdin:
 "#).unwrap();
         let (request_tx, request_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::channel(64);
-        let runtime = tokio::spawn(run(
+        let runtime = mj_core::runtime::spawn(run(
             LaunchSpec {
                 operator_away: Default::default(),
                 imported_logins: None,
@@ -185,6 +185,7 @@ for line in sys.stdin:
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
+                instruction_role: None,
                 subagent_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
@@ -203,7 +204,6 @@ for line in sys.stdin:
                 harness,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
                 claude_permission_mode: Default::default(),
-                observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
@@ -337,6 +337,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -355,7 +356,6 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -367,6 +367,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         &spec,
         &spec.additional_directories,
         true,
+        None,
     ))
     .unwrap();
     assert_eq!(
@@ -379,12 +380,14 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             &spec,
             &spec.additional_directories,
             SessionId::from("native"),
+            None,
         ))
         .unwrap(),
         serde_json::to_value(load_session_request(
             &spec,
             &spec.additional_directories,
             SessionId::from("native"),
+            None,
         ))
         .unwrap(),
     ] {
@@ -426,18 +429,21 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
                     &spec,
                     &spec.additional_directories,
                     true,
+                    None,
                 ))
                 .unwrap(),
                 serde_json::to_value(resume_session_request(
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
                 serde_json::to_value(load_session_request(
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
             ] {
@@ -704,18 +710,21 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         &spec,
                         &spec.additional_directories,
                         true,
+                        None,
                     ))
                     .unwrap(),
                     serde_json::to_value(load_session_request(
                         &spec,
                         &spec.additional_directories,
                         SessionId::from("native"),
+                        None,
                     ))
                     .unwrap(),
                     serde_json::to_value(resume_session_request(
                         &spec,
                         &spec.additional_directories,
                         SessionId::from("native"),
+                        None,
                     ))
                     .unwrap(),
                 ] {
@@ -863,6 +872,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     false,
+                    None,
                 ))
                 .unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
@@ -880,6 +890,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     true,
+                    None,
                 ))
                 .unwrap();
                 assert!(absent["mcpServers"].as_array().unwrap().is_empty());
@@ -908,6 +919,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     true,
+                    None,
                 ))
                 .unwrap(),
             ),
@@ -917,6 +929,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
             ),
@@ -926,6 +939,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
             ),
@@ -1053,7 +1067,7 @@ async fn codex_session_titles(
 ) -> (serde_json::Value, Vec<String>) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (prompts_tx, mut prompts_rx) = mpsc::unbounded_channel();
-    let bridge = tokio::spawn(titling_codex_bridge(bridge_stream, prompts_tx));
+    let bridge = mj_core::runtime::spawn(titling_codex_bridge(bridge_stream, prompts_tx));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
@@ -1068,7 +1082,7 @@ async fn codex_session_titles(
         repository_roots: BTreeMap::new(),
         mcp_delivery: ProjectMemoryMcpDelivery::Acp,
     });
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -1275,6 +1289,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -1293,7 +1308,6 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1365,6 +1379,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -1396,7 +1411,6 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1415,6 +1429,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         &spec,
         &spec.additional_directories,
         true,
+        None,
     ))
     .unwrap();
     assert_eq!(
@@ -1478,6 +1493,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::None,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
         clear_context_request: None,
         context_restore: None,
@@ -1496,7 +1512,6 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -1542,7 +1557,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     for harness in [HarnessKind::Codex, HarnessKind::Claude] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-        let bridge = tokio::spawn(async move {
+        let bridge = mj_core::runtime::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
             let mut lines = BufReader::new(read).lines();
             while let Some(line) = lines.next_line().await.unwrap() {
@@ -1627,6 +1642,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             stall_policy: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -1645,11 +1661,10 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock,
         };
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 transport,
                 spec,
@@ -1795,554 +1810,6 @@ fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
     assert!(allow_permission_response(&rejected_only).is_none());
 }
 
-struct ObserveRound {
-    action: &'static str,
-    timeout: bool,
-    timeout_ms: u64,
-    fail_closed: bool,
-    execution_policy: ExecutionPolicy,
-    choice: Option<&'static str>,
-}
-
-async fn run_observe_permission_round(
-    round: ObserveRound,
-) -> (
-    serde_json::Value,
-    Vec<String>,
-    Option<ElicitationRequest>,
-    Vec<(String, serde_json::Value)>,
-) {
-    use serde_json::{Value, json};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let action = round.action.to_owned();
-    let timeout_reply = round.timeout;
-    let acknowledgements = usize::from(action != "allow" && !timeout_reply);
-    let policy_server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for index in 0..=acknowledgements {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                .await
-                .expect("policy client did not make its request")
-                .unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut chunk).await.unwrap();
-                request.extend_from_slice(&chunk[..read]);
-                let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .unwrap();
-                if request.len() < end + 4 + length {
-                    continue;
-                }
-                let path = headers
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap()
-                    .to_owned();
-                let body: Value =
-                    serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
-                requests.push((path, body));
-                if timeout_reply {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    return requests;
-                }
-                let response = if index == 0 {
-                    json!({
-                        "decision": action,
-                        "policy_id": 1,
-                        "policy_name": "Observe test policy",
-                        "message": format!("Observe asks for {action}")
-                    })
-                } else {
-                    json!({"acknowledged": true})
-                }
-                .to_string();
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
-                            response.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                break;
-            }
-        }
-        requests
-    });
-
-    let (client, agent) = tokio::io::duplex(64 * 1024);
-    let (client_read, client_write) = tokio::io::split(client);
-    let (agent_read, mut agent_write) = tokio::io::split(agent);
-    let (commands, mut requests) = mpsc::channel(16);
-    let (event_tx, mut events) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Dsh);
-    spec.resume_session = None;
-    spec.execution_policy = round.execution_policy;
-    spec.observe_policy = Some(
-        crate::observe::PolicyClient::new(
-            mj_core::observe::ObserveEnforcementConfig {
-                url: format!("http://{address}"),
-                token: "token".into(),
-                timeout_ms: round.timeout_ms,
-                fail_closed: round.fail_closed,
-            },
-            "logical-session",
-        )
-        .unwrap(),
-    );
-    let driver = tokio::spawn(async move {
-        drive(
-            ByteStreams::new(client_write.compat_write(), client_read.compat()),
-            spec,
-            &mut requests,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    let mut input = BufReader::new(agent_read).lines();
-    let mut send = async |message: Value| {
-        agent_write
-            .write_all(format!("{message}\n").as_bytes())
-            .await
-            .unwrap();
-    };
-
-    commands
-        .send(CommandRequest::Prompt {
-            request_id: "observe-round".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("run it"))],
-        })
-        .await
-        .unwrap();
-    loop {
-        let line = tokio::time::timeout(Duration::from_secs(5), input.next_line())
-            .await
-            .expect("ACP request timed out")
-            .unwrap()
-            .expect("ACP closed unexpectedly");
-        let message: Value = serde_json::from_str(&line).unwrap();
-        let result = match message["method"].as_str() {
-            Some("initialize") => json!({"protocolVersion": 1}),
-            Some("session/new") => json!({
-                "sessionId": "dsh-session",
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/set_config_option") => json!({
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/prompt") => break,
-            _ => json!({}),
-        };
-        if !message["id"].is_null() {
-            send(json!({"jsonrpc": "2.0", "id": message["id"], "result": result})).await;
-        }
-    }
-    send(json!({
-        "jsonrpc": "2.0",
-        "id": "permission-1",
-        "method": "session/request_permission",
-        "params": {
-            "sessionId": "dsh-session",
-            "toolCall": {
-                "toolCallId": "call-1",
-                "title": "Run command",
-                "kind": "execute",
-                "rawInput": {"command": "git push --force origin main"}
-            },
-            "options": [
-                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
-                {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
-            ]
-        }
-    }))
-    .await;
-
-    let mut response = None;
-    let mut warnings = Vec::new();
-    let mut form = None;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while response.is_none() {
-            tokio::select! {
-                line = input.next_line() => {
-                    let line = line.unwrap().expect("ACP closed before the permission response");
-                    let message: Value = serde_json::from_str(&line).unwrap();
-                    if message["id"] == "permission-1" {
-                        response = Some(message);
-                    }
-                }
-                event = events.recv() => {
-                    match event.expect("runtime event channel closed") {
-                        RuntimeEvent::Warning { message } => warnings.push(message),
-                        RuntimeEvent::ElicitationRequested { request } => {
-                            form = Some(request.clone());
-                            let choice = round.choice.expect("the policy form needs an answer");
-                            let (resolved_tx, resolved_rx) = oneshot::channel();
-                            commands
-                                .send(CommandRequest::ResolveElicitation {
-                                    elicitation_id: request.id,
-                                    response: ElicitationResponse::Accept {
-                                        content: BTreeMap::from([(
-                                            "choice".into(),
-                                            ElicitationValue::String(choice.into()),
-                                        )]),
-                                    },
-                                    resolved: resolved_tx,
-                                })
-                                .await
-                                .unwrap();
-                            resolved_rx.await.unwrap().unwrap();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .expect("permission round timed out");
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
-    {
-        if let RuntimeEvent::Warning { message } = event {
-            warnings.push(message);
-        }
-    }
-
-    let policy_requests = policy_server.await.unwrap();
-    driver.abort();
-    (response.unwrap(), warnings, form, policy_requests)
-}
-
-#[tokio::test]
-async fn observe_ask_uses_one_form_and_acknowledges_the_selected_outcome() {
-    for (choice, expected_option, expected_outcome) in [
-        ("allow_once", "allow_once", "approved"),
-        ("reject_once", "reject_once", "rejected"),
-    ] {
-        let (response, _, form, requests) = run_observe_permission_round(ObserveRound {
-            action: "ask",
-            timeout: false,
-            timeout_ms: 3_000,
-            fail_closed: true,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            choice: Some(choice),
-        })
-        .await;
-        assert_eq!(response["result"]["outcome"]["optionId"], expected_option);
-        let form = form.expect("an ask policy must present a form");
-        assert!(form.message.contains("Brokk Observe requires approval"));
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].0, "/api/v1/policy/evaluate");
-        assert_eq!(requests[1].0, "/api/v1/policy/acknowledge");
-        assert_eq!(requests[1].1["decision"], "ask");
-        assert_eq!(requests[1].1["outcome"], expected_outcome);
-    }
-}
-
-#[tokio::test]
-async fn observe_warn_and_timeout_follow_their_declared_behavior() {
-    let (response, warnings, form, requests) = run_observe_permission_round(ObserveRound {
-        action: "warn",
-        timeout: false,
-        timeout_ms: 3_000,
-        fail_closed: true,
-        execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        choice: Some("allow_once"),
-    })
-    .await;
-    assert_eq!(response["result"]["outcome"]["optionId"], "allow_once");
-    assert!(
-        form.is_some(),
-        "warn preserves configured approval behavior"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("Observe asks for warn"))
-    );
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].0, "/api/v1/policy/acknowledge");
-    assert_eq!(requests[1].1["decision"], "warn");
-    assert_eq!(requests[1].1["outcome"], "warned");
-
-    for (fail_closed, expected, warning) in [
-        (
-            false,
-            "allow_once",
-            "allowing the call because fail-closed is disabled",
-        ),
-        (
-            true,
-            "reject_once",
-            "policy unavailable and fail-closed is enabled",
-        ),
-    ] {
-        let (response, warnings, form, requests) = run_observe_permission_round(ObserveRound {
-            action: "deny",
-            timeout: true,
-            timeout_ms: 100,
-            fail_closed,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            choice: None,
-        })
-        .await;
-        assert_eq!(response["result"]["outcome"]["optionId"], expected);
-        assert!(form.is_none());
-        assert!(warnings.iter().any(|message| message.contains(warning)));
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].0, "/api/v1/policy/evaluate");
-    }
-}
-
-#[tokio::test]
-async fn observe_denial_precedes_automatic_approval_and_rejects_once() {
-    use serde_json::{Value, json};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let policy_server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for _ in 0..2 {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                .await
-                .expect("policy client did not make both requests")
-                .unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut chunk).await.unwrap();
-                request.extend_from_slice(&chunk[..read]);
-                let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .unwrap();
-                if request.len() < end + 4 + length {
-                    continue;
-                }
-                let path = headers
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap()
-                    .to_owned();
-                let body: Value =
-                    serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
-                requests.push((path, body));
-                let response = if requests.len() == 1 {
-                    json!({
-                        "decision": "deny",
-                        "policy_id": 1,
-                        "policy_name": "Protected branch",
-                        "message": "Force-push denied"
-                    })
-                } else {
-                    json!({"acknowledged": true})
-                }
-                .to_string();
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
-                            response.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                break;
-            }
-        }
-        requests
-    });
-
-    let (client, agent) = tokio::io::duplex(64 * 1024);
-    let (client_read, client_write) = tokio::io::split(client);
-    let (agent_read, mut agent_write) = tokio::io::split(agent);
-    let (commands, mut requests) = mpsc::channel(16);
-    let (event_tx, _events) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Dsh);
-    spec.resume_session = None;
-    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    spec.observe_policy = Some(
-        crate::observe::PolicyClient::new(
-            mj_core::observe::ObserveEnforcementConfig {
-                url: format!("http://{address}"),
-                token: "token".into(),
-                timeout_ms: 3_000,
-                fail_closed: true,
-            },
-            "logical-session",
-        )
-        .unwrap(),
-    );
-    let driver = tokio::spawn(async move {
-        drive(
-            ByteStreams::new(client_write.compat_write(), client_read.compat()),
-            spec,
-            &mut requests,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    let mut input = BufReader::new(agent_read).lines();
-    let mut next_message = async || -> Value {
-        let line = tokio::time::timeout(Duration::from_secs(5), input.next_line())
-            .await
-            .expect("ACP message timed out")
-            .unwrap()
-            .expect("ACP closed unexpectedly");
-        serde_json::from_str(&line).unwrap()
-    };
-    let mut send = async |message: Value| {
-        agent_write
-            .write_all(format!("{message}\n").as_bytes())
-            .await
-            .unwrap();
-    };
-
-    commands
-        .send(CommandRequest::Prompt {
-            request_id: "observe-deny".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("push it"))],
-        })
-        .await
-        .unwrap();
-    loop {
-        let message = next_message().await;
-        let result = match message["method"].as_str() {
-            Some("initialize") => json!({"protocolVersion": 1}),
-            Some("session/new") => json!({
-                "sessionId": "dsh-session",
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/set_config_option") => json!({
-                "configOptions": [{
-                    "id": "permission_mode",
-                    "name": "Tool permissions",
-                    "type": "select",
-                    "currentValue": "ask",
-                    "options": [
-                        {"value": "ask", "name": "Ask before sensitive tools"},
-                        {"value": "allow", "name": "Allow sensitive tools"},
-                        {"value": "deny", "name": "Deny sensitive tools"}
-                    ]
-                }]
-            }),
-            Some("session/prompt") => break,
-            _ => json!({}),
-        };
-        if !message["id"].is_null() {
-            send(json!({"jsonrpc": "2.0", "id": message["id"], "result": result})).await;
-        }
-    }
-    send(json!({
-        "jsonrpc": "2.0",
-        "id": "permission-1",
-        "method": "session/request_permission",
-        "params": {
-            "sessionId": "dsh-session",
-            "toolCall": {
-                "toolCallId": "call-1",
-                "title": "Run command",
-                "kind": "execute",
-                "rawInput": {"command": "git push --force origin main"}
-            },
-            "options": [
-                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
-                {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
-            ]
-        }
-    }))
-    .await;
-
-    let response = loop {
-        let message = next_message().await;
-        if message["id"] == "permission-1" {
-            break message;
-        }
-    };
-    assert_eq!(response["result"]["outcome"]["outcome"], "selected");
-    assert_eq!(response["result"]["outcome"]["optionId"], "reject_once");
-    let policy_requests = policy_server.await.unwrap();
-    let policy_request = &policy_requests[0].1;
-    assert_eq!(policy_requests[0].0, "/api/v1/policy/evaluate");
-    assert_eq!(policy_request["tool_name"], "Bash");
-    assert_eq!(
-        policy_request["tool_input"]["command"],
-        "git push --force origin main"
-    );
-    assert_eq!(policy_request["harness"], "dsh");
-    assert_eq!(policy_request["session_id"], "logical-session");
-    assert_eq!(policy_request["native_session_id"], "dsh-session");
-    let acknowledgement = &policy_requests[1].1;
-    assert_eq!(policy_requests[1].0, "/api/v1/policy/acknowledge");
-    assert_eq!(acknowledgement["session_id"], "logical-session");
-    assert_eq!(acknowledgement["event_id"], policy_request["event_id"]);
-    assert_eq!(acknowledgement["decision"], "deny");
-    assert_eq!(acknowledgement["outcome"], "rejected");
-    driver.abort();
-}
-
 #[tokio::test]
 async fn runtime_event_delivery_waits_for_bounded_channel_capacity() {
     let (events_tx, mut events_rx) = mpsc::channel(1);
@@ -2356,7 +1823,7 @@ async fn runtime_event_delivery_waits_for_bounded_channel_capacity() {
     .unwrap();
 
     let blocked_tx = events_tx.clone();
-    let blocked = tokio::spawn(async move {
+    let blocked = mj_core::runtime::spawn(async move {
         emit_runtime_event(
             &blocked_tx,
             RuntimeEvent::Warning {
@@ -2662,14 +2129,14 @@ async fn answer_to_ext_request(
 ) -> serde_json::Value {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (answered_tx, answered_rx) = tokio::sync::oneshot::channel();
-    let bridge = tokio::spawn(ext_request_bridge(bridge_stream, method, answered_tx));
+    let bridge = mj_core::runtime::spawn(ext_request_bridge(bridge_stream, method, answered_tx));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     // Drain events so a full channel can never be mistaken for silence.
-    let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let events = mj_core::runtime::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
@@ -2677,6 +2144,7 @@ async fn answer_to_ext_request(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -2695,7 +2163,6 @@ async fn answer_to_ext_request(
         harness: HarnessKind::Grok,
         execution_policy,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -2703,7 +2170,7 @@ async fn answer_to_ext_request(
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -2866,7 +2333,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (initialized_tx, initialized_rx) = oneshot::channel();
     let (answered_tx, answered_rx) = oneshot::channel();
-    let bridge = tokio::spawn(elicitation_bridge(
+    let bridge = mj_core::runtime::spawn(elicitation_bridge(
         bridge_stream,
         initialized_tx,
         answered_tx,
@@ -2883,6 +2350,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -2901,7 +2369,6 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -2909,7 +2376,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -3387,7 +2854,7 @@ async fn policy_is_enforced_before_session_is_reported(
 ) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
-    let bridge = tokio::spawn(mode_change_bridge(
+    let bridge = mj_core::runtime::spawn(mode_change_bridge(
         bridge_stream,
         ModeSurface::Both,
         None,
@@ -3404,6 +2871,7 @@ async fn policy_is_enforced_before_session_is_reported(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -3422,7 +2890,6 @@ async fn policy_is_enforced_before_session_is_reported(
         harness,
         execution_policy,
         claude_permission_mode,
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -3430,7 +2897,7 @@ async fn policy_is_enforced_before_session_is_reported(
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -3672,7 +3139,7 @@ async fn a_guardian_muse_restored_in_plan_still_needs_its_approval_mode() {
 
 async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(allow_all_only_muse_bridge(bridge_stream, plan));
+    let bridge = mj_core::runtime::spawn(allow_all_only_muse_bridge(bridge_stream, plan));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(1);
@@ -3684,6 +3151,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: plan.then(|| crate::acp::ContextReset {
@@ -3706,7 +3174,6 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -3714,7 +3181,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -3745,7 +3212,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
 #[tokio::test]
 async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(stubborn_mode_bridge(bridge_stream));
+    let bridge = mj_core::runtime::spawn(stubborn_mode_bridge(bridge_stream));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(1);
@@ -3757,6 +3224,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -3775,7 +3243,6 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -3783,7 +3250,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -3933,14 +3400,14 @@ async fn codex_refresh_failure_bridge(stream: tokio::io::DuplexStream) {
 #[tokio::test]
 async fn a_failure_the_harness_already_streamed_is_not_repeated_as_a_warning() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(codex_refresh_failure_bridge(bridge_stream));
+    let bridge = mj_core::runtime::spawn(codex_refresh_failure_bridge(bridge_stream));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let mut spec = reload_fallback_spec(HarnessKind::Codex);
     spec.resume_session = None;
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -4023,7 +3490,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     login_identity.installed(Some(mj_core::credentials::credential_fingerprint(
         b"old-access",
     )));
-    let bridge = tokio::spawn(scripted_bridge(
+    let bridge = mj_core::runtime::spawn(scripted_bridge(
         bridge_stream,
         login_path,
         login_identity.clone(),
@@ -4040,6 +3507,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -4061,7 +3529,6 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -4069,7 +3536,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -4462,6 +3929,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -4481,7 +3949,6 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -4498,7 +3965,8 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
 async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let bridge = tokio::spawn(silent_after_prompt_bridge(bridge_stream, observed_tx, true));
+    let bridge =
+        mj_core::runtime::spawn(silent_after_prompt_bridge(bridge_stream, observed_tx, true));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
@@ -4510,7 +3978,7 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
     // The relay records the tool call the bridge announced; the watchdog reads
     // the same handle, which is the whole of the fix.
     let tools = spec.tools_in_flight.clone();
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -4564,7 +4032,8 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
 async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let bridge = tokio::spawn(silent_after_prompt_bridge(bridge_stream, observed_tx, true));
+    let bridge =
+        mj_core::runtime::spawn(silent_after_prompt_bridge(bridge_stream, observed_tx, true));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
@@ -4574,7 +4043,7 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
         tool_call: Some(Duration::from_millis(400)),
     });
     let tools = spec.tools_in_flight.clone();
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -4633,7 +4102,7 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
 async fn a_silent_harness_fails_the_turn_with_a_reason() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let bridge = tokio::spawn(silent_after_prompt_bridge(
+    let bridge = mj_core::runtime::spawn(silent_after_prompt_bridge(
         bridge_stream,
         observed_tx,
         false,
@@ -4646,7 +4115,7 @@ async fn a_silent_harness_fails_the_turn_with_a_reason() {
         silence: Some(Duration::from_millis(200)),
         tool_call: Some(Duration::from_secs(3_600)),
     });
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -4803,7 +4272,7 @@ async fn the_first_prompt_of_an_older_opencode_waits_for_the_tool_registry_and_2
     ] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-        let bridge = tokio::spawn(prompt_echoing_bridge_reporting(
+        let bridge = mj_core::runtime::spawn(prompt_echoing_bridge_reporting(
             bridge_stream,
             observed_tx,
             version,
@@ -4819,7 +4288,7 @@ async fn the_first_prompt_of_an_older_opencode_waits_for_the_tool_registry_and_2
             prompt: vec![ContentBlock::Text(TextContent::new(request_id))],
         };
         request_tx.send(prompt("first")).await.unwrap();
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 transport,
                 spec,
@@ -5033,7 +4502,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (complete_tx, complete_rx) = mpsc::channel(1);
-    let bridge = tokio::spawn(steering_bridge(
+    let bridge = mj_core::runtime::spawn(steering_bridge(
         bridge_stream,
         observed_tx,
         complete_rx,
@@ -5050,6 +4519,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5068,7 +4538,6 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5076,7 +4545,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -5301,10 +4770,10 @@ async fn a_prompt_does_not_wait_for_a_stalled_login_observation() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join(".credentials.json");
     let gate = crate::test_support::stalled_read_file(&path);
-    let observation = tokio::spawn(read_claude_login_fingerprint(path));
+    let observation = mj_core::runtime::spawn(read_claude_login_fingerprint(path));
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let identity = ClaudeLoginIdentity::default();
-    let bridge = tokio::spawn(scripted_bridge(
+    let bridge = mj_core::runtime::spawn(scripted_bridge(
         bridge_stream,
         home.path().join("harness-login"),
         identity.clone(),
@@ -5323,7 +4792,7 @@ async fn a_prompt_does_not_wait_for_a_stalled_login_observation() {
         "CLAUDE_CONFIG_DIR".into(),
         home.path().to_string_lossy().into_owned(),
     );
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -5369,7 +4838,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (complete_tx, complete_rx) = mpsc::channel(1);
-    let bridge = tokio::spawn(stalled_prompt_bridge(
+    let bridge = mj_core::runtime::spawn(stalled_prompt_bridge(
         bridge_stream,
         observed_tx,
         complete_rx,
@@ -5385,6 +4854,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5403,7 +4873,6 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5411,7 +4880,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -5512,7 +4981,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (_complete_tx, complete_rx) = mpsc::channel(1);
-    let bridge = tokio::spawn(stalled_prompt_bridge(
+    let bridge = mj_core::runtime::spawn(stalled_prompt_bridge(
         bridge_stream,
         observed_tx,
         complete_rx,
@@ -5528,6 +4997,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5546,7 +5016,6 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -5554,7 +5023,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -5625,6 +5094,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -5643,7 +5113,6 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -5658,7 +5127,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     let (first_client, first_bridge) = tokio::io::duplex(64 * 1024);
     let (first_observed_tx, mut first_observed_rx) = mpsc::unbounded_channel();
     let (_complete_tx, complete_rx) = mpsc::channel(1);
-    let first = tokio::spawn(stalled_prompt_bridge(
+    let first = mj_core::runtime::spawn(stalled_prompt_bridge(
         first_bridge,
         first_observed_tx,
         complete_rx,
@@ -5668,7 +5137,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let first_events = event_tx.clone();
-    let first_driver = tokio::spawn(async move {
+    let first_driver = mj_core::runtime::spawn(async move {
         let mut request_rx = request_rx;
         let result = drive(
             first_transport,
@@ -5730,10 +5199,10 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
 
     let (second_client, second_bridge) = tokio::io::duplex(64 * 1024);
     let (second_observed_tx, mut second_observed_rx) = mpsc::unbounded_channel();
-    let second = tokio::spawn(prompt_echoing_bridge(second_bridge, second_observed_tx));
+    let second = mj_core::runtime::spawn(prompt_echoing_bridge(second_bridge, second_observed_tx));
     let (second_read, second_write) = tokio::io::split(second_client);
     let second_transport = ByteStreams::new(second_write.compat_write(), second_read.compat());
-    let second_driver = tokio::spawn(async move {
+    let second_driver = mj_core::runtime::spawn(async move {
         drive(
             second_transport,
             scripted_spec(Some("scripted".into())),
@@ -5935,7 +5404,7 @@ mod terminals {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let (scripted_tx, scripted_rx) = mpsc::unbounded_channel();
         let (answers_tx, answers_rx) = mpsc::unbounded_channel();
-        let bridge = tokio::spawn(client_request_bridge(
+        let bridge = mj_core::runtime::spawn(client_request_bridge(
             bridge_stream,
             scripted_rx,
             answers_tx,
@@ -5949,7 +5418,7 @@ mod terminals {
         // and keep them so a test can read what the runtime reported.
         let observed = Arc::new(Mutex::new(Vec::new()));
         let recorder = observed.clone();
-        let events = tokio::spawn(async move {
+        let events = mj_core::runtime::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 recorder
                     .lock()
@@ -5964,6 +5433,7 @@ mod terminals {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -5982,7 +5452,6 @@ mod terminals {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -5990,7 +5459,7 @@ mod terminals {
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
         };
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 transport,
                 spec,
@@ -6397,7 +5866,7 @@ for line in sys.stdin:
 "#, send_prompt = if send_prompt { "True" } else { "False" })).unwrap();
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(
+    let runtime = mj_core::runtime::spawn(run(
         LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
@@ -6405,6 +5874,7 @@ for line in sys.stdin:
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -6423,7 +5893,6 @@ for line in sys.stdin:
             harness: HarnessKind::Codex,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -6587,6 +6056,7 @@ for line in sys.stdin:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
@@ -6619,7 +6089,6 @@ for line in sys.stdin:
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -6627,7 +6096,7 @@ for line in sys.stdin:
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
 
     let mut started = Vec::new();
     let mut prompt_sent = false;
@@ -6746,6 +6215,8 @@ while True:
 
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
+    let profile = temp.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
@@ -6753,13 +6224,17 @@ while True:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
-        environment: BTreeMap::new(),
+        environment: BTreeMap::from([(
+            "KIMI_CODE_HOME".into(),
+            profile.to_string_lossy().into_owned(),
+        )]),
         cwd: temp.path().to_path_buf(),
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
@@ -6778,7 +6253,6 @@ while True:
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -6786,7 +6260,7 @@ while True:
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
 
     let mut started = Vec::new();
     let mut saw_reload = false;
@@ -6904,6 +6378,7 @@ while True:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -6922,7 +6397,6 @@ while True:
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -6930,7 +6404,7 @@ while True:
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
 
     let mut finished = Vec::new();
     let wait_for_finished_prompt =
@@ -7014,6 +6488,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7036,7 +6511,6 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -7099,6 +6573,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -7117,7 +6592,6 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::Unconstrained,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -7340,7 +6814,7 @@ async fn session_reload_rejecting_bridge(
     }
 }
 
-fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
+pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
@@ -7348,6 +6822,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7366,7 +6841,6 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -7380,7 +6854,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
 async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(session_reload_rejecting_bridge(
+    let bridge = mj_core::runtime::spawn(session_reload_rejecting_bridge(
         bridge_stream,
         observed_tx,
         false,
@@ -7389,7 +6863,7 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (_request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(32);
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             reload_fallback_spec(HarnessKind::Codex),
@@ -7434,6 +6908,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -7452,7 +6927,6 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
@@ -7592,6 +7066,7 @@ fn missing_native_session_spec(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7610,7 +7085,6 @@ fn missing_native_session_spec(
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -7664,7 +7138,7 @@ async fn assert_unused_native_session_is_replaced(
         })
         .await
         .unwrap();
-    let runtime = tokio::spawn(run(
+    let runtime = mj_core::runtime::spawn(run(
         missing_native_session_spec(
             temp.path(),
             &script,
@@ -7736,7 +7210,7 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
     let script = missing_native_session_script(temp.path(), &missing_codex_thread_error());
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(
+    let runtime = mj_core::runtime::spawn(run(
         missing_native_session_spec(temp.path(), &script, HarnessKind::Codex, true),
         request_rx,
         event_tx,
@@ -7773,7 +7247,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
     let (client_stream, bridge_stream) = tokio::io::duplex(128 * 1024);
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let bridge = tokio::spawn(async move {
+    let bridge = mj_core::runtime::spawn(async move {
         let (read, mut write) = tokio::io::split(bridge_stream);
         let mut lines = BufReader::new(read).lines();
         let mut gate = Some((started_tx, release_rx));
@@ -7819,7 +7293,7 @@ async fn active_harness_turn_is_authoritative_even_after_prolonged_silence() {
         endpoint: format!("http://{}/", classifier.local_addr().unwrap()),
     });
     let context = spec.turn_context.clone();
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -7900,7 +7374,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         (HarnessKind::Codex, true),
     ] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-        let bridge = tokio::spawn(async move {
+        let bridge = mj_core::runtime::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
             let mut lines = BufReader::new(read).lines();
             while let Some(line) = lines.next_line().await.unwrap() {
@@ -7981,6 +7455,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             stall_policy: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -7999,12 +7474,11 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock,
         };
 
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 transport,
                 spec,
@@ -8131,7 +7605,7 @@ for line in sys.stdin:
     spec.harness = HarnessKind::Claude;
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
     wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::SessionConfigured { .. })
     })
@@ -8148,7 +7622,7 @@ for line in sys.stdin:
     })
     .await;
     drop(request_tx);
-    let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let drain = mj_core::runtime::spawn(async move { while event_rx.recv().await.is_some() {} });
     tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
@@ -8213,7 +7687,7 @@ for line in sys.stdin:
     spec.harness = harness;
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
     wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::SessionConfigured { .. })
     })
@@ -8244,7 +7718,7 @@ for line in sys.stdin:
     .await;
     drop(request_tx);
     // Drain the bounded event channel while shutdown completes.
-    let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let drain = mj_core::runtime::spawn(async move { while event_rx.recv().await.is_some() {} });
     tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
@@ -8319,7 +7793,7 @@ async fn live_adapter_compacts_and_replaces_context() {
     spec.verdict = None;
     let (tx, rx) = mpsc::channel(4);
     let (events_tx, mut events) = mpsc::channel(256);
-    let runtime = tokio::spawn(run(spec, rx, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, rx, events_tx));
     let mut original = None;
     async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
         tokio::time::timeout(Duration::from_secs(180), events.recv())
@@ -8435,6 +7909,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -8453,7 +7928,6 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -8461,7 +7935,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             ByteStreams::new(client_write.compat_write(), client_read.compat()),
             spec,
@@ -8803,7 +8277,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     // keeps the client stream open, so the bridge never sees end of input.
     let received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let bridge_received = received.clone();
-    let bridge = tokio::spawn(async move {
+    let bridge = mj_core::runtime::spawn(async move {
         bridge_write
             .write_all(b"==> Detected target: linux-x64\n")
             .await
@@ -8835,7 +8309,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     );
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let events = mj_core::runtime::spawn(async move { while event_rx.recv().await.is_some() {} });
     let opened = Arc::new(Mutex::new(None));
     let spec = LaunchSpec {
         operator_away: Default::default(),
@@ -8844,6 +8318,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -8862,7 +8337,6 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
@@ -8870,7 +8344,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
     };
-    let driver = tokio::spawn({
+    let driver = mj_core::runtime::spawn({
         let opened = opened.clone();
         async move { drive(transport, spec, &mut request_rx, event_tx, opened, false).await }
     });
@@ -8939,7 +8413,7 @@ fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
 async fn a_form_the_harness_withdraws_still_resolves() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(async move {
+    let bridge = mj_core::runtime::spawn(async move {
         let (read, mut write) = tokio::io::split(bridge_stream);
         let mut lines = BufReader::new(read).lines();
         let mut prompt_id = None;
@@ -9005,7 +8479,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
         silence: None,
         tool_call: None,
     });
-    let mut driver = tokio::spawn(async move {
+    let mut driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -9156,14 +8630,14 @@ async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
         "category":if failure_kind.is_some() {"limit"} else {"service"},
         "severity":"error", "actions":actions, "title":title});
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-        let bridge = tokio::spawn(typed_failure_bridge(bridge_stream, failure));
+        let bridge = mj_core::runtime::spawn(typed_failure_bridge(bridge_stream, failure));
         let (client_read, client_write) = tokio::io::split(client_stream);
         let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::channel(64);
         let mut spec = reload_fallback_spec(harness);
         spec.resume_session = None;
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 transport,
                 spec,
@@ -9319,12 +8793,13 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (release_tx, release_rx) = mpsc::unbounded_channel();
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(held_prompt_bridge(bridge_stream, observed_tx, release_rx));
+    let bridge =
+        mj_core::runtime::spawn(held_prompt_bridge(bridge_stream, observed_tx, release_rx));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(256);
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,
@@ -9366,4 +8841,406 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
     }
     assert!(finished, "the turn finished before the reload");
     bridge.abort();
+}
+
+/// Replay pinned-adapter lifecycle replies (Claude source-derived) against real driver requests.
+// Hard-won: 621276a78: the unsupported-adapter branch had no phase that reached it.
+// Hard-won: 5fc951f2e: shared Claude profiles were told to use unregistered tools.
+#[tokio::test]
+async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    for (harness, recording) in [
+        (
+            HarnessKind::Kimi,
+            include_str!("testdata/project-memory/kimi-opens.jsonl"),
+        ),
+        (
+            HarnessKind::OpenCode,
+            include_str!("testdata/project-memory/opencode-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Grok,
+            include_str!("testdata/project-memory/grok-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Claude,
+            include_str!("testdata/project-memory/claude-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Codex,
+            include_str!("testdata/project-memory/codex-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Muse,
+            include_str!("testdata/project-memory/muse-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Dsh,
+            include_str!("testdata/project-memory/dsh-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Antigravity,
+            include_str!("testdata/project-memory/antigravity-opens.jsonl"),
+        ),
+    ] {
+        let replies: BTreeMap<String, serde_json::Value> = recording
+            .lines()
+            .map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                (
+                    value["method"].as_str().unwrap().into(),
+                    value["result"].clone(),
+                )
+            })
+            .collect();
+        for phase in [
+            "new",
+            "unregistered-profile",
+            "load",
+            "resume",
+            "clear",
+            "unreadable-load",
+            "fifo-load",
+            "unsupported-adapter",
+            "unsupported-brief-writer",
+            "unsupported-reviewer",
+        ] {
+            if phase == "unregistered-profile" && harness != HarnessKind::Claude {
+                continue;
+            }
+            #[cfg(not(unix))]
+            if phase == "fifo-load" {
+                continue;
+            }
+            let resumed = matches!(
+                phase,
+                "load" | "resume" | "unreadable-load" | "fifo-load" | "unsupported-adapter"
+            );
+            let temp = tempfile::tempdir().unwrap();
+            let native_file = matches!(
+                harness,
+                HarnessKind::Kimi | HarnessKind::OpenCode | HarnessKind::Grok
+            );
+            if native_file
+                && matches!(
+                    phase,
+                    "unsupported-adapter"
+                        | "unsupported-brief-writer"
+                        | "unsupported-reviewer"
+                        | "unreadable-load"
+                        | "fifo-load"
+                )
+            {
+                continue;
+            }
+            let staged_home = harness.home_from_environment(temp.path().join("profile"));
+            std::fs::create_dir_all(&staged_home).unwrap();
+            let native_path = staged_home.join(harness.agent_instructions_file());
+            std::fs::write(&native_path, "user profile instructions\r\n").unwrap();
+            let mut spec = reload_fallback_spec(harness);
+            spec.environment.insert(
+                harness.home_env().into(),
+                temp.path().join("profile").to_string_lossy().into(),
+            );
+            spec.resume_session = resumed.then(|| "native".into());
+            spec.instruction_role = match phase {
+                "unsupported-brief-writer" => Some(InstructionRole::BriefWriter),
+                "unsupported-reviewer" => Some(InstructionRole::Reviewer),
+                _ => None,
+            };
+            spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::MessageOnly));
+            spec.subagent_mcp_socket
+                .as_mut()
+                .unwrap()
+                .profile_registration =
+                harness == HarnessKind::Claude && phase != "unregistered-profile";
+            spec.subagent_mcp_socket.as_mut().unwrap().review_tools = true;
+            spec.project_memory = Some(ProjectMemoryLaunchConfig {
+                history_socket: None,
+                project_key: "test".into(),
+                root: temp.path().join("memory"),
+                baseline_root: temp.path().join("baseline"),
+                repository_roots: BTreeMap::new(),
+                mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+            });
+            let index = spec
+                .project_memory
+                .as_ref()
+                .unwrap()
+                .root
+                .join(mj_core::project_memory::MEMORY_INDEX);
+            if phase == "unreadable-load" {
+                std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+                std::fs::write(&index, [0xff]).unwrap();
+            }
+            #[cfg(unix)]
+            if phase == "fifo-load" {
+                use std::os::unix::ffi::OsStrExt;
+                std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+                let fifo = std::ffi::CString::new(index.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            }
+            let (expected_events, _rx) = mpsc::channel(256);
+            let expected = instructions::compose(&spec, true, &expected_events)
+                .await
+                .unwrap();
+            if phase == "unregistered-profile" {
+                assert!(!expected.contains("send_message"));
+                assert!(!expected.contains("request_review"));
+            } else if harness == HarnessKind::Claude {
+                assert!(expected.contains("send_message"));
+                assert!(expected.contains("request_review"));
+            }
+            if phase == "clear" {
+                spec.clear_context_request = Some(ContextReset {
+                    request_id: "clear".into(),
+                    selectors: vec![],
+                    mode: None,
+                });
+            }
+            let mut replies = replies.clone();
+            if matches!(phase, "load" | "unreadable-load" | "fifo-load") {
+                replies.get_mut("initialize").unwrap()["agentCapabilities"]["sessionCapabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("resume");
+            } else if phase == "resume"
+                && matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
+            {
+                // Isolate the resume builder from Codex's native-child replay policy.
+                replies.get_mut("initialize").unwrap()["_meta"]["jetbrains"]["air"]["capabilities"] =
+                    serde_json::json!([]);
+            }
+
+            if matches!(
+                phase,
+                "unsupported-adapter" | "unsupported-brief-writer" | "unsupported-reviewer"
+            ) {
+                let capabilities = &mut replies.get_mut("initialize").unwrap()["agentCapabilities"];
+                capabilities["sessionCapabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("systemPrompt");
+                if let Some(meta) = capabilities
+                    .get_mut("_meta")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    meta.remove("antigravity");
+                }
+            }
+            let adapter_version = replies["initialize"]["agentInfo"]["version"]
+                .as_str()
+                .unwrap_or("(unknown version)")
+                .to_owned();
+            let (client, peer) = tokio::io::duplex(64 * 1024);
+            let bridge = mj_core::runtime::spawn(async move {
+                let (read, mut write) = tokio::io::split(peer);
+                let mut lines = BufReader::new(read).lines();
+                let mut saw_open = false;
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let Some(id) = request.get("id") else {
+                        continue;
+                    };
+                    let mut result = replies
+                        .get(if method == "session/load" {
+                            "session/resume"
+                        } else {
+                            method
+                        })
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
+                    if method == "session/set_config_option" {
+                        let mut options = replies["session/new"]["configOptions"].clone();
+                        for option in options.as_array_mut().unwrap() {
+                            if option["id"] == request["params"]["configId"] {
+                                option["currentValue"] = request["params"]["value"].clone();
+                            }
+                        }
+                        result = serde_json::json!({"configOptions": options});
+                    }
+                    if method.starts_with("session/")
+                        && matches!(method, "session/new" | "session/resume" | "session/load")
+                    {
+                        if phase == "unsupported-adapter" {
+                            assert!(request["params"]["systemPrompt"].is_null());
+                            assert!(
+                                request["params"]["_meta"]["antigravity"]["systemPrompt"].is_null()
+                            );
+                            assert_eq!(
+                                std::fs::read_to_string(&native_path).unwrap(),
+                                "user profile instructions\r\n"
+                            );
+                        } else if native_file {
+                            assert!(request["params"]["systemPrompt"].is_null());
+                            let file = std::fs::read_to_string(&native_path).unwrap();
+                            assert!(file.starts_with("user profile instructions\r\n"));
+                            assert_eq!(file, "user profile instructions\r\n");
+                            assert!(expected.is_empty());
+                        } else if harness == HarnessKind::Antigravity {
+                            assert_eq!(
+                                request["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
+                                expected
+                            );
+                            assert!(request["params"]["systemPrompt"].is_null());
+                        } else if expected.is_empty() {
+                            assert!(request["params"]["systemPrompt"].is_null());
+                        } else {
+                            assert_eq!(
+                                request["params"]["systemPrompt"],
+                                serde_json::json!({
+                                    "mode":"append", "content":[{"type":"text", "text":expected}]
+                                }),
+                                "{harness:?} {method}"
+                            );
+                        }
+                        saw_open = true;
+                    }
+                    let reply = serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result});
+                    write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    saw_open,
+                    !matches!(phase, "unsupported-brief-writer" | "unsupported-reviewer")
+                );
+            });
+            let (read, write) = tokio::io::split(client);
+            let transport = ByteStreams::new(write.compat_write(), read.compat());
+            let (tx, mut rx) = mpsc::channel(4);
+            let (events_tx, mut events) = mpsc::channel(256);
+            let driver = mj_core::runtime::spawn(async move {
+                drive(
+                    transport,
+                    spec,
+                    &mut rx,
+                    events_tx,
+                    Arc::new(Mutex::new(None)),
+                    false,
+                )
+                .await
+            });
+            if matches!(phase, "unsupported-brief-writer" | "unsupported-reviewer") {
+                while let Some(event) =
+                    tokio::time::timeout(crate::test_support::IO_TIMEOUT, events.recv())
+                        .await
+                        .unwrap()
+                {
+                    assert!(!matches!(
+                        event,
+                        RuntimeEvent::SessionStarted { .. }
+                            | RuntimeEvent::SessionConfigured { .. }
+                    ));
+                }
+                let error = driver.await.unwrap().unwrap_err();
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains(if phase == "unsupported-reviewer" {
+                        "Cannot start the automated reviewer"
+                    } else {
+                        "Cannot start the relation brief writer"
+                    }) && message.contains(harness.display_name())
+                        && message.contains(&adapter_version),
+                    "{message}"
+                );
+                drop(tx);
+                bridge.await.unwrap();
+                continue;
+            }
+            let mut index_warning = false;
+            let mut delivery_warning = false;
+            loop {
+                let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, events.recv())
+                    .await
+                    .unwrap();
+                let Some(event) = event else {
+                    panic!("{harness:?} {phase}: {:?}", driver.await);
+                };
+                if let RuntimeEvent::Warning { message } = &event {
+                    if message
+                        .contains("standing instructions and project memory could not be delivered")
+                    {
+                        assert!(message.contains(harness.display_name()));
+                        assert!(message.contains(&adapter_version));
+                        assert!(message.contains("Updating the adapter"));
+                        delivery_warning = true;
+                    }
+                    if message.contains("Project memory index") && message.contains("unavailable") {
+                        assert!(message.contains(index.to_str().unwrap()));
+                        assert!(message.contains(if phase == "fifo-load" {
+                            "regular file"
+                        } else {
+                            "UTF-8"
+                        }));
+                        index_warning = true;
+                    }
+                }
+                if let RuntimeEvent::ContextCleared { memory, .. } = &event {
+                    assert!(memory.is_none());
+                }
+                if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+                    break;
+                }
+            }
+            assert_eq!(
+                index_warning,
+                matches!(phase, "unreadable-load" | "fifo-load") && harness != HarnessKind::Claude,
+                "{harness:?} {phase}"
+            );
+            assert_eq!(
+                delivery_warning,
+                phase == "unsupported-adapter",
+                "{harness:?} {phase}"
+            );
+            drop(tx);
+            while events.recv().await.is_some() {}
+            driver.await.unwrap().unwrap();
+            bridge.await.unwrap();
+        }
+    }
+}
+
+// Hard-won: cd79f2d22: canceled Tokio blocking reads still held runtime shutdown open.
+#[cfg(unix)]
+#[test]
+fn session_instructions_stalled_read_does_not_hold_runtime_shutdown() {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let memory_root = temp.path().join("memory");
+    std::fs::create_dir_all(&memory_root).unwrap();
+    let index = memory_root.join("MEMORY.md");
+    let fifo = std::ffi::CString::new(index.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let reader_index = index.clone();
+    let (cancel, canceled) = oneshot::channel();
+    let (runtime_exited, exited) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            tokio::select! {
+                result = file_read_off_runtime("stalled-filesystem-test", move || {
+                    // The store rejects FIFOs; here one simulates a hung regular-file read
+                    // inside the same off-runtime reader used for valid indexes.
+                    std::fs::read_to_string(reader_index).context("read stalled filesystem")
+                }) => panic!("FIFO read ended before cancellation: {result:?}"),
+                _ = canceled => {}
+            }
+        });
+        drop(runtime);
+        runtime_exited.send(()).unwrap();
+    });
+    // Writer open proves the reader is inside the real filesystem call.
+    // Hold it open without bytes until after the runtime has exited.
+    let writer = std::fs::OpenOptions::new().write(true).open(index).unwrap();
+    cancel.send(()).unwrap();
+    let shutdown = exited.recv_timeout(crate::test_support::IO_TIMEOUT);
+    drop(writer);
+    shutdown.expect("the runtime exits without waiting for the memory reader");
+    runtime_thread.join().unwrap();
 }

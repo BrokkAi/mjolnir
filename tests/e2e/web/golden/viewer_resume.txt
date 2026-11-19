@@ -15,7 +15,7 @@ Tie B
 shared-project · alpha
 Jan 1, 1970
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Newest profile work\nalpha-project · alpha\nJan 1, 1970","value":"","disabled":false},{"id":null,"text":"A very long session title that must stay inside the phone viewport without horizontal scrolling\nolder-project · alpha\nJan 1, 1970\na pomegranate sentinel","value":"","disabled":false},{"id":null,"text":"Tie A\nshared-project · alpha\nJan 1, 1970","value":"","disabled":false},{"id":null,"text":"Tie B\nshared-project · alpha\nJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 state: {"sessionIds":["newest","older","tie-a","tie-b"],"width":{"document":390,"viewport":390}}
 === search uses index hits and their snippets (390x844) ===
 Resume a session
@@ -28,7 +28,7 @@ Newest profile work
 alpha-project · alpha
 Jan 1, 1970
 controls: [{"id":"resume-search","text":null,"value":"pomegranate","disabled":false},{"id":null,"text":"A very long session title that must stay inside the phone viewport without horizontal scrolling\nolder-project · alpha\nJan 1, 1970\na pomegranate sentinel","value":"","disabled":false},{"id":null,"text":"Newest profile work\nalpha-project · alpha\nJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["","","pomegranate"]
 state: {"sessionIds":["older","newest"]}
 === empty resume search (390x844) ===
 Resume a session
@@ -36,7 +36,7 @@ Find a session
 
 No matching sessions.
 controls: [{"id":"resume-search","text":null,"value":"does-not-exist","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false}]
-request: GET /api/v1/wiki/search ["","does-not-exist"]
+request: GET /api/v1/wiki/search ["","","pomegranate","does-not-exist"]
 === selected resumable session (390x844) ===
 Back to sessions
 Mutating session
@@ -53,7 +53,7 @@ local
 remote
 Resume
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Mutating sessionlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profile\nalpha\nbeta","value":"alpha","disabled":false},{"id":null,"text":"Choose target\nlocal\nremote","value":"local","disabled":false},{"id":null,"text":"Resume","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 === selected card after error and queued prompt arrive (390x844) ===
 Back to sessions
 Mutating session
@@ -76,7 +76,7 @@ Run them after resuming
 Discard them
 Resume
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Mutating sessionlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profile\nalpha\nbeta","value":"alpha","disabled":false},{"id":null,"text":"Choose target\nlocal\nremote","value":"local","disabled":false},{"id":null,"text":"Choose 1 queued prompt\nRun them after resuming\nDiscard them","value":"start","disabled":false},{"id":null,"text":"Resume","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 === failed first launch uses saved settings (390x844) ===
 Back to sessions
 Mutating session
@@ -93,7 +93,7 @@ Retry launch
 
 Worker bootstrap failed.
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Mutating sessionlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Retry launch","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 === archived index entry and live search hit (390x844) ===
 Resume a session
 Find a session
@@ -107,7 +107,7 @@ mjolnir · /tmp/project · 3 messages
 Sep 17
 the single word is hello
 controls: [{"id":"resume-search","text":null,"value":"pomegranate","disabled":false},{"id":null,"text":"Suspended test\nlocal · alpha\nJan 1, 1970\na pomegranate sentinel","value":"","disabled":false},{"id":null,"text":"Archived pomegranate work\nmjolnir · /tmp/project · 3 messages\nSep 17\nthe single word is hello","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false}]
-request: GET /api/v1/wiki/search ["","pomegranate"]
+request: GET /api/v1/wiki/search ["","","pomegranate"]
 state: {"archivedIds":["archived-one"],"liveIds":["suspended"]}
 === archived brief before restore (390x844) ===
 Back to sessions
@@ -131,7 +131,7 @@ local
 remote
 Restore
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Suspended testlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":null,"text":"Archived pomegranate workmjolnir · /tmp/project · 3 messagesSep 17the single word is hello","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profile\nalpha\nbeta","value":"","disabled":false},{"id":null,"text":"Choose target\nlocal\nremote","value":"","disabled":false},{"id":null,"text":"Restore","value":"","disabled":true}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 === restored archive opens as a new conversation (390x844) ===
 restored
 Live
@@ -139,7 +139,7 @@ Earlier messages
 
 Not Found
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Suspended testlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":null,"text":"Archived pomegranate workmjolnir · /tmp/project · 3 messagesSep 17the single word is hello","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profilealphabeta","value":"beta","disabled":false},{"id":null,"text":"Choose targetlocalremote","value":"remote","disabled":false},{"id":null,"text":"Restore","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 action: POST /api/v1/wiki/archive/restore [{"id":"archived-one","body":{"workspace_id":"test","profile_id":"beta","target_id":"remote"}}]
 === failed Move remains visible in the conversation without a worker ===
 the move did not finish while resuming the destination. Source suspended with a verified checkpoint. Retry Move or resume with the source settings. The daemon log records the reason under reference failed-move
@@ -163,5 +163,5 @@ local
 remote
 Resume
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Suspended testlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profile\nalpha\nbeta","value":"alpha","disabled":false},{"id":null,"text":"Choose target\nlocal\nremote","value":"local","disabled":false},{"id":null,"text":"Resume","value":"","disabled":false}]
-request: GET /api/v1/wiki/search [""]
+request: GET /api/v1/wiki/search ["",""]
 state: {"preflightRequests":[]}

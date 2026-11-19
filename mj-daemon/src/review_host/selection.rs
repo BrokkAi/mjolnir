@@ -19,7 +19,7 @@ pub(crate) async fn resolve(
     settings: Option<ReviewConfig>,
     backend: Arc<dyn SubagentBackend>,
 ) -> Result<Vec<ResolvedReviewSettings>> {
-    let controller = tokio::task::spawn_blocking(Controller::load).await??;
+    let controller = mj_core::runtime::spawn_blocking(Controller::load).await??;
     let settings = settings.unwrap_or_else(|| controller.config.review.clone());
     let session = controller
         .state

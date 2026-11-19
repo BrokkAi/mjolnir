@@ -140,12 +140,7 @@ impl ActiveChat {
     /// Reports a daemon refusal in the prompt status, or as a notice when no
     /// review is open -- a refused `/review` has nowhere else to appear.
     pub fn report_review_refusal(&mut self, message: String) {
-        match self.state.turn_review_mut() {
-            Some(review) => {
-                review.report_failure(message);
-            }
-            None => self.state.set_notice(message),
-        }
+        self.state.report_review_refusal(message);
     }
 
     /// Reports a background worker that stopped on its own. Cheap enough to
@@ -164,16 +159,6 @@ impl ActiveChat {
         let update = match update {
             ChatIoUpdate::SessionReconnected(result) => {
                 self.finish_session_reconnect(result);
-                return;
-            }
-            ChatIoUpdate::ReviewerNotice(notice) => {
-                self.state.conversation_notice(notice);
-                return;
-            }
-            ChatIoUpdate::ReviewerStarted(result) => {
-                if let Err(error) = result {
-                    self.report_review_refusal(error);
-                }
                 return;
             }
             update => update,
@@ -231,10 +216,10 @@ impl ActiveChat {
         self.voice_probe_pending = true;
         self.voice_probe_at = Some(std::time::Instant::now());
         let updates = self.voice_updates_tx.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let result = async {
                 if let Some(reason) =
-                    tokio::task::spawn_blocking(crate::speech::voice_input_unavailable_reason)
+                    mj_core::runtime::spawn_blocking(crate::speech::voice_input_unavailable_reason)
                         .await?
                 {
                     return Ok(Err(reason));
@@ -357,7 +342,7 @@ impl ActiveChat {
         let session_id = self.session.session_id().to_owned();
         let session_manager = self.session_manager.clone();
         let updates = self.chat_io_tx.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let result = session_manager
                 .wait_for_session(&session_id, SESSION_ACTOR_RECONNECT_WAIT)
                 .await

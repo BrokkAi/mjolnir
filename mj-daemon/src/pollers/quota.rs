@@ -2,13 +2,11 @@ use super::*;
 
 pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshRequest> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let runtime = mj_controller::quota::QuotaRuntimeConfig::of(&controller.config);
+
     controller
         .config
         .enabled_profiles()
-        .map(|(id, profile)| {
-            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
-        })
+        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
         .collect()
 }
 
@@ -21,7 +19,7 @@ pub fn claude_grant_only_requests(
     live_profile_ids: &std::collections::BTreeSet<String>,
 ) -> Vec<QuotaRefreshRequest> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let runtime = mj_controller::quota::QuotaRuntimeConfig::of(config);
+
     config
         .profiles
         .iter()
@@ -30,9 +28,7 @@ pub fn claude_grant_only_requests(
                 && profile.kind == mj_core::config::HarnessKind::Claude
                 && live_profile_ids.contains(*id)
         })
-        .map(|(id, profile)| {
-            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
-        })
+        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
         .collect()
 }
 
@@ -85,7 +81,7 @@ pub(super) fn spawn_quota_refresher_with(
 ) {
     let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
-    // Grant renewal is its own task: a slow lock, container start or
+    // Grant renewal is its own task: a slow lock, harness preparation or
     // `claude auth login` must not hold up a probe, and a usage hold must
     // not hold up a renewal.
     spawn_claude_grant_refresher(
@@ -97,22 +93,7 @@ pub(super) fn spawn_quota_refresher_with(
         },
         Some(updates_tx.clone()),
     );
-    tokio::spawn(async move {
-        // A daemon that stopped mid-check left its quota container running;
-        // this instance owns it, and nothing else will remove it. Unit tests
-        // start pollers too, with the instance identity of the user's real
-        // daemon, and must never reach the host's container engine.
-        if !cfg!(test)
-            && let Err(error) = tokio::task::spawn_blocking(|| {
-                mj_controller::quota_runtime::sweep_quota_containers(
-                    &mj_core::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
-                    std::env::var_os("PATH").as_deref(),
-                )
-            })
-            .await
-        {
-            tracing::warn!(%error, "quota container sweep task failed");
-        }
+    mj_core::runtime::spawn(async move {
         let mut quotas = QuotaManager::default();
         let mut batch = QuotaRefreshBatch::default();
         // The cache identity each profile was last adopted under. A changed
@@ -263,7 +244,7 @@ pub(super) fn spawn_claude_grant_refresher(
     renewal: GrantRenewal,
     updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         let mut running: std::collections::BTreeMap<tokio::task::Id, QuotaRefreshRequest> =
             Default::default();
@@ -441,7 +422,7 @@ async fn adopt_profiles(
         quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
-        let stored = match tokio::task::spawn_blocking(move || load(&for_request)).await {
+        let stored = match mj_core::runtime::spawn_blocking(move || load(&for_request)).await {
             Ok(stored) => stored,
             Err(error) => {
                 tracing::warn!(%error, "stored quota read task failed");
@@ -559,7 +540,7 @@ pub fn spawn_image_refresher(
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
             IMAGE_REFRESH_INTERVAL,
@@ -786,7 +767,7 @@ pub(super) async fn refresh_host_after_startup(
     }
     // ProcessExecutor is synchronous, and a pull is long: it belongs on a
     // blocking thread, never on the runtime.
-    match tokio::task::spawn_blocking(move || run(refresh)).await {
+    match mj_core::runtime::spawn_blocking(move || run(refresh)).await {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, "container image refresh task failed");

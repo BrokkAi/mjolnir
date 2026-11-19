@@ -13,11 +13,95 @@ use mj_core::relay::RelayCommand;
 
 use super::PromptImage;
 use super::{
-    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, SubmissionKind, TurnControlIntent,
-    queued_prompt_preview,
+    ChatElicitationDraft, ChatState, PlanControl, PlanReviewFollowup, PromptPayload,
+    SubmissionKind, TurnControlIntent, queued_prompt_preview,
 };
 #[cfg(test)]
 use crate::clipboard::ClipboardImage;
+
+// Feedback keys are constructed here; harness request IDs remain opaque.
+fn reviewer_answer_key(role: Option<&str>, request: &ElicitationRequest) -> String {
+    format!("reviewer-answer:{}", serde_json::json!([role, request.id]))
+}
+
+impl ChatState {
+    pub(super) fn deferred_form_result_drafts(&self) -> Vec<ChatElicitationDraft> {
+        self.deferred_form_results
+            .iter()
+            .filter_map(|result| {
+                let ChatRemoteResult::ReviewerAnswer {
+                    draft: Some(draft),
+                    result: Err(error),
+                } = result
+                else {
+                    return None;
+                };
+                if error.contains("is no longer pending") {
+                    return None;
+                }
+                let mut draft = (**draft).clone();
+                draft
+                    .form
+                    .set_response_error(format!("Answer was not sent: {error}"));
+                Some(draft)
+            })
+            .collect()
+    }
+
+    pub(super) fn apply_deferred_form_results(&mut self) {
+        // One pass: a result waiting for another visible form is requeued.
+        for result in std::mem::take(&mut self.deferred_form_results) {
+            apply_chat_remote_result(self, result);
+        }
+    }
+
+    pub(super) fn has_pending_elicitation_answers(&self) -> bool {
+        self.operation_feedback
+            .keys()
+            .any(|key| key.starts_with("reviewer-answer:") || key.starts_with("answer:"))
+    }
+
+    pub(super) fn reviewer_answer_pending(
+        &self,
+        role: Option<&str>,
+        request: &ElicitationRequest,
+    ) -> bool {
+        self.operation_feedback
+            .contains_key(&reviewer_answer_key(role, request))
+    }
+
+    pub(super) fn report_review_refusal(&mut self, message: String) {
+        match self.turn_review_mut() {
+            Some(review) => {
+                review.report_failure(message);
+            }
+            None => self.set_notice(message),
+        }
+    }
+}
+
+fn finish_reviewer_answer(
+    chat: &mut ChatState,
+    draft: Option<Box<ChatElicitationDraft>>,
+    result: std::result::Result<(), String>,
+) {
+    let Err(error) = result else {
+        return;
+    };
+    if error.contains("is no longer pending") {
+        if draft.is_some() {
+            chat.conversation_notice("The reviewer's request had already ended (answered elsewhere, withdrawn, or expired), so this answer was not delivered.");
+        }
+        return;
+    }
+    if let Some(draft) = draft
+        && !chat.restore_failed_reviewer_elicitation(*draft, error.clone())
+    {
+        return;
+    }
+    tracing::warn!(session_id = %chat.session_id, %error, "reviewer answer failed and was shown in the UI");
+    chat.report_review_refusal(error);
+}
 
 const CHAT_REMOTE_QUEUE_CAPACITY: usize = 32;
 const SESSION_ACTOR_REPLACEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -70,6 +154,12 @@ pub(super) enum ChatRemoteOperation {
         command: Option<RelayCommand>,
         shell_command_ids: Vec<String>,
     },
+    ReviewerAnswer {
+        role: String,
+        request_id: String,
+        response: ElicitationResponse,
+        draft: Option<Box<ChatElicitationDraft>>,
+    },
     RespondElicitation {
         request: ElicitationRequest,
         response: ElicitationResponse,
@@ -100,6 +190,12 @@ impl ChatRemoteOperation {
                     TurnControlIntent::ApplyQueued => "Applying queued input…",
                 }
                 .into(),
+            )),
+            Self::ReviewerAnswer {
+                draft: Some(draft), ..
+            } => Some((
+                reviewer_answer_key(draft.reviewer_role(), draft.request()),
+                "Sending reviewer answer…".into(),
             )),
             Self::RespondElicitation { request, .. } => {
                 Some((format!("answer:{}", request.id), "Sending answer…".into()))
@@ -157,6 +253,10 @@ pub(super) enum ChatRemoteResult {
         intent: TurnControlIntent,
         result: std::result::Result<(), String>,
     },
+    ReviewerAnswer {
+        draft: Option<Box<ChatElicitationDraft>>,
+        result: std::result::Result<(), String>,
+    },
     RespondElicitation {
         request: ElicitationRequest,
         desired_plan_active: Option<bool>,
@@ -186,6 +286,9 @@ impl ChatRemoteResult {
             Self::SetConfig { key, .. } => Some(format!("config:{key}")),
             Self::PlanCommand { command_id, .. } => Some(format!("plan:{command_id}")),
             Self::Cancel { .. } => Some("turn-control".into()),
+            Self::ReviewerAnswer {
+                draft: Some(draft), ..
+            } => Some(reviewer_answer_key(draft.reviewer_role(), draft.request())),
             Self::RespondElicitation { request, .. } => Some(format!("answer:{}", request.id)),
             _ => None,
         }
@@ -219,6 +322,9 @@ impl ChatRemoteResult {
                 result: Err(error), ..
             }
             | Self::Cancel {
+                result: Err(error), ..
+            }
+            | Self::ReviewerAnswer {
                 result: Err(error), ..
             }
             | Self::RespondElicitation {
@@ -284,7 +390,7 @@ impl ChatRemoteSupervisor {
         let (results_tx, results_rx) = tokio::sync::mpsc::unbounded_channel();
         let attached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let worker_attached = attached.clone();
-        let worker = tokio::spawn(run_chat_remote_worker(
+        let worker = mj_core::runtime::spawn(run_chat_remote_worker(
             session,
             session_manager,
             operations_rx,
@@ -334,8 +440,8 @@ impl ChatRemoteSupervisor {
         updates: tokio::sync::mpsc::UnboundedSender<super::composer::ComposerIoUpdate>,
     ) -> Option<super::composer::RemoteResultForwarder> {
         let mut results = self.results.take()?;
-        Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(
-            async move {
+        Some(super::composer::RemoteResultForwarder(Some(
+            mj_core::runtime::spawn(async move {
                 while let Some(result) = results.receiver.recv().await {
                     if let Err(error) =
                         updates.send(super::composer::ComposerIoUpdate::Remote(result))
@@ -348,8 +454,8 @@ impl ChatRemoteSupervisor {
                         break;
                     }
                 }
-            },
-        ))))
+            }),
+        )))
     }
 
     pub(super) async fn take_finished(
@@ -437,6 +543,7 @@ async fn run_chat_remote_worker(
                 }
                 enqueue_chat_remote_operation(
                     &session,
+                    &session_manager,
                     operation,
                     &mut pending,
                     &results,
@@ -460,12 +567,35 @@ async fn run_chat_remote_worker(
 
 async fn enqueue_chat_remote_operation(
     session: &ManagedSessionHandle,
+    session_manager: &SessionManagerControl,
     operation: ChatRemoteOperation,
     pending: &mut tokio::task::JoinSet<()>,
     results: &tokio::sync::mpsc::UnboundedSender<ChatRemoteResult>,
     attached: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     match operation {
+        ChatRemoteOperation::ReviewerAnswer {
+            role,
+            request_id,
+            response,
+            draft,
+        } => {
+            let control = session_manager.clone();
+            let results = results.clone();
+            let attached = attached.clone();
+            pending.spawn(async move {
+                let result = match control.session(role).await {
+                    Ok(handle) => handle.respond_elicitation(request_id, response).await,
+                    Err(error) => Err(error),
+                }
+                .map_err(|error| format!("{error:#}"));
+                publish_chat_remote_result(
+                    &results,
+                    &attached,
+                    ChatRemoteResult::ReviewerAnswer { draft, result },
+                );
+            });
+        }
         ChatRemoteOperation::RecordNotice { id, text } => {
             let session = session.clone();
             let results = results.clone();
@@ -1040,6 +1170,19 @@ fn refused_slash_command<'a>(text: &'a str, images: &[PromptImage]) -> Option<&'
 }
 
 pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteResult) {
+    // A parked composer owns delivery, but not the session/review projection.
+    // Keep projection-dependent results intact until a live view owns both.
+    if (chat.standby
+        && matches!(
+            &result,
+            ChatRemoteResult::RespondElicitation { .. } | ChatRemoteResult::ReviewerAnswer { .. }
+        ))
+        || (!chat.review_projection_known
+            && matches!(&result, ChatRemoteResult::ReviewerAnswer { .. }))
+    {
+        chat.deferred_form_results.push(result);
+        return;
+    }
     if let Some(key) = result.feedback_key()
         && !matches!(result, ChatRemoteResult::Cancel { result: Ok(()), .. })
     {
@@ -1047,7 +1190,11 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
     }
     // Keep diagnostics in the process log as well as in recoverable rows.
     // Publishing a conversation notice must never recursively publish failure.
-    if let Some(error) = result.failure_message() {
+    if let Some(error) = result.failure_message()
+        && !matches!(&result, ChatRemoteResult::ReviewerAnswer { .. })
+    {
+        // Reviewer recovery can wait for another form; it logs only when
+        // applied, rather than on each attempt to surface the saved result.
         tracing::warn!(
             session_id = %chat.session_id,
             %error,
@@ -1189,6 +1336,9 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
                 chat.conversation_notice(intent.failure_notice(&error));
             }
         }
+        ChatRemoteResult::ReviewerAnswer { draft, result } => {
+            finish_reviewer_answer(chat, draft, result)
+        }
         ChatRemoteResult::RespondElicitation {
             request,
             desired_plan_active,
@@ -1208,7 +1358,7 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         } => {
             chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
             if !answered {
-                chat.restore_elicitation(request);
+                chat.restore_failed_elicitation(request, format!("Answer was not sent: {error}"));
             }
             chat.conversation_notice(if answered {
                 format!("Answer sent; follow-up failed: {error}")
@@ -1377,9 +1527,15 @@ pub(super) fn queue_chat_remote_operation(
                     chat.finish_plan_mode_change(!requested_active);
                     restore_unsent_input(chat, &original);
                 }
+                ChatRemoteOperation::ReviewerAnswer { draft, .. } => {
+                    finish_reviewer_answer(chat, draft, Err("session command queue is full".into()))
+                }
                 ChatRemoteOperation::RespondElicitation { request, .. } => {
                     chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
-                    chat.restore_elicitation(request)
+                    chat.restore_failed_elicitation(
+                        request,
+                        "Answer was not sent: session command queue is full".into(),
+                    );
                 }
                 ChatRemoteOperation::Cancel { intent, .. } => {
                     chat.turn_control_submitting = false;
@@ -1425,6 +1581,94 @@ mod tests {
         transcript_text(chat, 100)
             .iter()
             .any(|line| line.contains(text))
+    }
+
+    // Hard-won: 4c23909e0: a late rejected answer labeled the next request with the old request's failure.
+    #[test]
+    fn rejected_elicitation_does_not_label_a_newer_form() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let old = ElicitationRequest {
+            id: "old".into(),
+            message: "Old approval".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+            tool_permission: None,
+        };
+        let mut new = old.clone();
+        new.id = "new".into();
+        new.message = "New approval".into();
+        chat.restore_elicitation(new.clone());
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::RespondElicitation {
+                request: old.clone(),
+                desired_plan_active: None,
+                answered: false,
+                result: Err("late rejection".into()),
+            },
+        );
+        assert_eq!(chat.elicitation.as_ref().unwrap().request(), &new);
+        let lines = crate::chat::test_support::drawn_transcript(&mut chat, 100, 24);
+        let form_start = chat
+            .frame_surfaces
+            .surface(crate::selection::SurfaceId::ElicitationMessage)
+            .unwrap()
+            .rect
+            .y as usize;
+        assert!(
+            !lines[form_start..]
+                .iter()
+                .any(|line| line.contains("Answer was not sent"))
+        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Answer was not sent: late rejection"
+        ));
+        // Hard-won: 57e492d: identical request payloads from two harnesses shared a primary error.
+        chat.elicitation = None;
+        chat.show_review_role_elicitation(Some("reviewer".into()), new.clone());
+        chat.pending_elicitations = vec![new.clone()];
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::RespondElicitation {
+                request: new,
+                desired_plan_active: None,
+                answered: false,
+                result: Err("primary-only failure".into()),
+            },
+        );
+        assert!(
+            !serde_json::to_string(&chat.elicitation_draft())
+                .unwrap()
+                .contains("primary-only failure")
+        );
+        // The following independent scenario has no reviewer surface.
+        chat.elicitation = None;
+        chat.elicitation_is_reviewers = false;
+        chat.elicitation_role = None;
+        // Hard-won: 5dc2084: a parked primary rejection revived a request removed by the refreshed projection.
+        let config: mj_core::config::Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+        let mut parked = ChatState::standby(
+            "parked-primary",
+            &config,
+            Default::default(),
+            Default::default(),
+        );
+        parked.adopt_live_composer(chat.take_live_composer().unwrap());
+        apply_chat_remote_result(
+            &mut parked,
+            ChatRemoteResult::RespondElicitation {
+                request: old,
+                desired_plan_active: None,
+                answered: false,
+                result: Err("ended request".into()),
+            },
+        );
+        chat.apply_materialized(&MaterializedSession::empty("parked-primary"), &[], &[]);
+        chat.adopt_live_composer(parked.take_live_composer().unwrap());
+        chat.apply_deferred_form_results();
+        assert!(chat.elicitation.is_none());
     }
 
     #[test]
@@ -1538,7 +1782,7 @@ mod tests {
         let mut legacy_upload_started = Some(legacy_upload_started);
         let (receipt_upload_started, receipt_started) = tokio::sync::oneshot::channel();
         let mut receipt_upload_started = Some(receipt_upload_started);
-        let uploads = tokio::spawn(async move {
+        let uploads = mj_core::runtime::spawn(async move {
             for attempt in 0..6 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut body = Vec::new();

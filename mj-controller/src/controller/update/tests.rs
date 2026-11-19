@@ -474,7 +474,7 @@ async fn serve_update_sources(
         .await
         .expect("bind loopback listener");
     let addr = listener.local_addr().expect("listener address");
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut buffer = vec![0u8; 4096];
             let read = socket.read(&mut buffer).await.unwrap_or(0);

@@ -1,0 +1,37 @@
+{
+  "reviewer_launch": {
+    "profile_id": "fixture-reviewer",
+    "harness": "codex",
+    "bridge_command": "/fixture/bridge",
+    "bridge_args": [],
+    "environment": {},
+    "excluded_environment": [],
+    "execution_policy": "configured_approvals",
+    "model": "fixture-reviewer",
+    "effort": "medium",
+    "generation": 0
+  },
+  "run_mode": "harness",
+  "session_id": "recorded-reviewer",
+  "subagents": {
+    "mode": "none"
+  },
+  "handback_tool": true,
+  "agent_mailboxes_enabled": true,
+  "initial_model": "fixture-reviewer",
+  "review_trigger": "off",
+  "target_environment": {},
+  "seed_image_environment": false,
+  "harness": "codex",
+  "harness_home": "/fixture/profile",
+  "authentication_marker": "auth.json",
+  "bridge_command": "/fixture/worker",
+  "bridge_args": [],
+  "harness_runtime": "managed_remote",
+  "environment": {},
+  "excluded_environment": [],
+  "cwd": "/fixture/workspace",
+  "additional_directories": [],
+  "native_session_id": null,
+  "execution_policy": "configured_approvals"
+}

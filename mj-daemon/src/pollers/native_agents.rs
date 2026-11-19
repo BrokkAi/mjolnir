@@ -218,7 +218,7 @@ async fn native_read<T: Send + 'static>(
         .acquire_owned()
         .await
         .context("native projection readers stopped")?;
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let _permit = permit;
         let result = read();
         if let Err(error) = &result {

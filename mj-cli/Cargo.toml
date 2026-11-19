@@ -60,10 +60,14 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Purge freed daemon pages asynchronously, using jemalloc's normal decay policy.
-# `stats` and `profiling` stay inactive unless `_RJEM_MALLOC_CONF` turns them on
+# `override_allocator_on_supported_platforms` makes jemalloc the process's only
+# `malloc`, so the statically linked C code (SQLite, zstd, aws-lc) and glibc
+# itself share its arenas and decay instead of keeping glibc's per-thread
+# arenas (measured 2026-11-18: glibc held 3.3 GB with 250 MB in use).
+# `stats` and `profiling` stay inactive unless `MALLOC_CONF` turns them on
 # for one process (for example `prof:true` or `stats_print:true`), so a live
 # daemon's heap can be measured without a special build.
-tikv-jemallocator = { version = "0.7", features = ["background_threads", "stats", "profiling"] }
+tikv-jemallocator = { version = "0.7", features = ["background_threads", "stats", "profiling", "override_allocator_on_supported_platforms"] }
 
 [target.'cfg(windows)'.dependencies]
 # Stops an unresponsive daemon through a handle that pins its identity.

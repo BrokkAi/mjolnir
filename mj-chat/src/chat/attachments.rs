@@ -331,7 +331,7 @@ pub(super) async fn upload_prepared_image(
     if image.reference.is_some() {
         return Ok(image);
     }
-    let (bytes, reference) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (bytes, reference) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
         let bytes =
             base64::engine::general_purpose::STANDARD.decode(image.data_base64.as_bytes())?;
         let optimized = mj_client::image::optimize_image(&bytes)?;

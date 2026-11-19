@@ -39,7 +39,7 @@ pub async fn resolve() -> Result<&'static Environment> {
     ENVIRONMENT
         .get_or_try_init(|| async {
             let cancellation = crate::subprocess::scoped_preparation_cancellation();
-            tokio::task::spawn_blocking(move || match cancellation {
+            crate::runtime::spawn_blocking(move || match cancellation {
                 Some(cancellation) => discover_cancellable(cancellation),
                 None => discover(),
             })

@@ -746,7 +746,7 @@ impl Controller {
     async fn diagnose_suspension_worker(&self, session_id: &str, phase: &str) {
         let placement = self.worker_placement(session_id);
         let probe = match placement {
-            Ok((backend, worker_root)) => tokio::task::spawn_blocking(move || {
+            Ok((backend, worker_root)) => mj_core::runtime::spawn_blocking(move || {
                 // A diagnosis reports; it never installs or waits on the store.
                 super::worker_binary::diagnose_worker_read_only(
                     &targets::BoundedProcessExecutor::new(Duration::from_secs(5)),
@@ -851,7 +851,7 @@ impl Controller {
         let session_id = session_id.to_owned();
         let cause = cause.to_owned();
         let observed_updated_at = observed_updated_at.to_owned();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             let mut controller = Controller::load()?;
             controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
         })

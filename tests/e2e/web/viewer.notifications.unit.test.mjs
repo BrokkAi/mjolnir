@@ -449,10 +449,12 @@ test('Go to Session opens a pending form\'s holder and returns here on Back', ()
   assert.equal(view.nodes.body.textContent, 'Pick an option');
   assert.equal(view.nodes.position.textContent, '2 of 2');
   assert.deepEqual(view.requests, [], 'the card already carries the form text');
+  view.nodes.open.onclick();
+  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
   view.nodes.previous.onclick();
   assert.equal(view.requests.at(-1).url, '/api/sessions/parent/notification-message?through=2');
   view.nodes.open.onclick();
-  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
+  assert.deepEqual(plain(view.nav).at(-1).sessionId, 'parent');
   // Both the history entry and the viewer's own back control follow the route.
   assert.equal(view.read('routeHash(nav[0])'), '#notifications/child');
   assert.deepEqual(plain(view.read('parseRoute("#notifications/child")')), { name: 'conversation', sessionId: 'child', from: 'notifications' });
@@ -602,19 +604,28 @@ test('launch failures are cards after the ! cards, counted, openable and dismiss
   assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)', 'only the ! card counts for Clear all !');
 });
 
-test('text, Quick reply and Go to Session all name the form holder', async () => {
-  const view = screen([row('parent', 'needs_input', 3, { form_holder: 'child' }),
+test('selected stack entries target the parent and the live form targets its holder', async () => {
+  const card = stack('needs_input', 3, [message(2, 'important', 'none')], {
+    holder: 'child', form: { request_id: 'r1', message: 'Please decide' },
+  });
+  const view = screen([row('parent', 'needs_input', 3, { notification_card: card }),
     row('child', 'working', 1, { subagent_parent_id: 'parent', pending_elicitation_ids: ['r1'] })]);
   view.render();
+  assert.equal(view.read('inboxDestination(inboxEntries()[0], 0)'), 'parent');
+  view.nodes.previous.onclick();
   view.nodes.input.value = 'yes';
   view.nodes.input.oninput();
-  assert.equal(view.read('inboxDrafts.has("child")'), true, 'the draft belongs to the destination');
+  assert.equal(view.read('inboxDrafts.has("parent")'), true, 'the selected entry reply belongs to parent');
   view.nodes.reply.onsubmit({ preventDefault() {} });
   await settle();
-  assert.equal(view.requests.find(r => r.body?.action === 'prompt').body.session_id, 'child');
+  assert.equal(view.requests.find(r => r.body?.action === 'prompt').body.session_id, 'parent');
+  view.nodes.open.onclick();
+  assert.equal(plain(view.nav).at(-1).sessionId, 'parent');
+  view.nodes.next.onclick();
+  view.render();
+  assert.equal(view.read('inboxDestination(inboxEntries()[0], 1)'), 'child');
   view.nodes.open.onclick();
   assert.equal(plain(view.nav).at(-1).sessionId, 'child');
-  assert.equal(view.read('inboxDestination(inboxEntries()[0])'), 'child');
 });
 
 // Hard-won: review of 045f5fe81: persistent buttons acted on the new first card after a snapshot reordered the stack.
@@ -721,33 +732,6 @@ test('when the draft cannot be checked, or the composer is no longer empty, noth
   assert.equal(typed.read('composerHandoffs.size'), 0);
 });
 
-test('the message request carries the identity the card captured, and a conflict is discarded until the next snapshot', async () => {
-  const conflict = Object.assign(new Error('the notification changed'), { code: 'notification_changed', status: 409 });
-  const view = screen([row('p', 'needs_input', 3, { form_holder: 'c1', question_message: 'agent:p' }),
-    row('c1', 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: ['r1', 'r2'] })],
-  { texts: { '/api/sessions/p/notification-message': conflict } });
-  await settle();
-  const reads = () => view.requests.filter(r => r.url.includes('/p/notification-message'));
-  const params = new URL(reads()[0].url, 'http://x').searchParams;
-  assert.deepEqual(Object.fromEntries(params), { holder: 'c1', requests: 'r1,r2', question: '' });
-  assert.equal(view.nodes.body.textContent, 'loading…', 'a conflicting answer shows no text');
-  assert.equal(view.read('[...inboxTexts.values()].some(entry => entry.state === "ready")'), false, 'nothing is cached under the card');
-  view.render(); view.render();
-  await settle();
-  assert.equal(reads().length, 1, 'the same snapshot does not ask again');
-  // The next snapshot brings the new holder; the card asks for that identity.
-  view.answers.set('/api/sessions/p/notification-message', { session_id: 'c2', text: 'B asks' });
-  view.context.viewerState.rows.set('c2', row('c2', 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: ['r9'] }));
-  view.context.viewerState.rows.get('p').form_holder = 'c2';
-  view.context.viewerState.cursor = { sequence: 2 };
-  view.render();
-  await settle();
-  const latest = new URL(reads().at(-1).url, 'http://x').searchParams;
-  assert.deepEqual(Object.fromEntries(latest), { holder: 'c2', requests: 'r9', question: '' });
-  assert.equal(view.nodes.body.textContent, 'B asks');
-  assert.equal(view.read('inboxDestination(inboxEntries()[0])'), 'c2', 'text and destination name the same holder');
-});
-
 test('a card without a Quick reply hides its form even though the form is a flex box', () => {
   const css = readFileSync(new URL('../../../mj-server/src/web/viewer.css', import.meta.url), 'utf8');
   assert.match(css, /\.inbox-reply\s*\{[^}]*display:\s*flex/);
@@ -773,18 +757,6 @@ test('a new form request or holder after a skip is a new card, not deferred', ()
   view.context.viewerState.rows.get('p').form_holder = 'c2';
   assert.deepEqual(view.ids(), ['p', 'b'], 'a new holder');
   assert.equal(view.read('inboxSkipped.length'), 0);
-});
-
-test('an ! card asks for the message at its ReadThrough ordinal, and the cache keys on the same identity as skip', async () => {
-  const view = screen([row('a', 'important', 3, { notification_dismissal: { read_through: 41 } })],
-    { texts: { '/api/sessions/a/notification-message': { text: 'the reply at 41' } } });
-  await settle();
-  const params = new URL(view.requests.find(r => r.url.includes('/a/notification-message')).url, 'http://x').searchParams;
-  assert.equal(params.get('through'), '41');
-  const entry = view.read('inboxEntries()[0]');
-  assert.equal(view.read('[...inboxTexts.keys()][0]'), view.read('inboxKey(inboxEntries()[0])'));
-  assert.equal(view.read('inboxCard(inboxEntries()[0]).key'), view.read('inboxKey(inboxEntries()[0])'));
-  assert.ok(entry);
 });
 
 /// A Quick reply whose refusal arrives after `act` has run; resolves with the view.
@@ -880,6 +852,27 @@ test('a refusal while the card is still shown keeps the text in Quick reply and 
   assert.equal(view.read('composerHandoffs.size'), 0);
   assert.equal(view.nodes.input.value, 'my reply, in full');
   assert.equal(view.nodes.cardError.textContent, 'Not sent: session is closed');
+});
+
+test('a refused parent-entry reply on a mixed card restores to Quick reply without hand-off', async () => {
+  const mixed = stack('needs_input', 3, [message(2, 'important', 'none')], {
+    holder: 'child', form: { request_id: 'r1', message: 'Child approval' },
+  });
+  const view = screen([row('parent', 'needs_input', 3, { notification_card: mixed }),
+    row('child', 'working', 1, { subagent_parent_id: 'parent' })]);
+  view.nodes.previous.onclick();
+  view.nodes.input.value = 'reply to parent';
+  view.nodes.input.oninput();
+  let refuse;
+  view.answers.set('prompt:parent', () => new Promise((_, reject) => {
+    refuse = () => reject(Object.assign(new Error('session is closed'), { status: 409 }));
+  }));
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  refuse();
+  await settle();
+  assert.ok(noticeButton(view, 'Restore to Quick reply'));
+  assert.equal(noticeButton(view, 'Hand to conversation'), undefined);
 });
 
 test('an unconfirmed delivery is reported but never handed back for resending', async () => {

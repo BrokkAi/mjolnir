@@ -1271,7 +1271,7 @@ mod tests {
             .with_state(seen.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{address}"), seen)
@@ -1395,7 +1395,7 @@ mod tests {
             .with_state(refusals.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
         let mut client = ApiClient::new(url, "secret-token".into()).unwrap();
@@ -1473,7 +1473,7 @@ mod tests {
             .with_state((answers, bodies.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
         let client = ApiClient::new(url, "secret-token".into()).unwrap();
@@ -1514,7 +1514,7 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             axum::serve(listener, Router::new()).await.unwrap();
         });
         assert!(
@@ -1618,7 +1618,7 @@ mod tests {
         };
         let address = listener.local_addr().unwrap();
         let url = format!("https://{authority}:{}", address.port());
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             axum_server::from_tcp_rustls(listener, tls)
                 .serve(app.into_make_service())
                 .await
@@ -1677,7 +1677,7 @@ mod tests {
         let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
         let proxy_was_used = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed_proxy = proxy_was_used.clone();
-        let proxy_task = tokio::spawn(async move {
+        let proxy_task = mj_core::runtime::spawn(async move {
             if tokio::time::timeout(Duration::from_millis(300), proxy_listener.accept())
                 .await
                 .is_ok()
@@ -1759,7 +1759,7 @@ mod tests {
             .with_state(visited.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
@@ -1797,7 +1797,7 @@ mod tests {
             "test".into(),
         )
         .unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         let clear = client

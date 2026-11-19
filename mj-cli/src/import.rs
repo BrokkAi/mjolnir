@@ -839,7 +839,7 @@ pub(crate) fn spawn_dashboard_import(
         config: controller.config.clone(),
         state: controller.state.clone(),
     };
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let last_detail_update = Mutex::new(Instant::now() - Duration::from_secs(1));
         let report = |step: usize, total: Option<usize>, message: &str, force: bool| {
             if cancelled.load(Ordering::Acquire) {
@@ -1126,7 +1126,6 @@ mod tests {
                 rows: Vec::new(),
                 status: WikiStatus {
                     state: WikiIndexState::Ready,
-                    topping_up: false,
                 },
             },
         );

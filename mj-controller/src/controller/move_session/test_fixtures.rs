@@ -1,14 +1,22 @@
 //! Fixtures shared by the move tests here and in mj-daemon, which reaches
 //! them through the `test-support` feature.
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 use anyhow::Result;
 
+#[cfg(unix)]
 use super::Controller;
-use crate::controller::test_support::{IsolatedTest, checkpoint_test_session};
+use crate::controller::test_support::IsolatedTest;
+#[cfg(unix)]
+use crate::controller::test_support::checkpoint_test_session;
+#[cfg(unix)]
 use mj_core::config::{Config, HarnessKind, HarnessProfile};
 #[cfg(unix)]
 use mj_core::state::CheckpointMetadata;
@@ -16,8 +24,11 @@ use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposi
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 
+#[cfg(unix)]
 use crate::controller::checkpoint::stand_in::*;
+#[cfg(unix)]
 use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
+#[cfg(unix)]
 use mj_core::state::{MaterializedSession, SessionState, State, TargetLocator};
 
 pub const MOVE_QUEUE_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";

@@ -224,12 +224,17 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    /// Whether the index is stale enough that a query should ask for a sync.
-    fn wiki_sync_is_stale(&self) -> bool {
-        false
+    fn wiki_sync_request(&self) -> anyhow::Result<mj_client::daemon::WikiSyncStatus> {
+        anyhow::bail!("SessionWiki sync is unavailable")
     }
 
-    fn wiki_request_sync(&self) {}
+    fn wiki_sync_watch(
+        &self,
+        _epoch: String,
+        _after: u64,
+    ) -> BoxFuture<'_, anyhow::Result<mj_client::daemon::WikiSyncStatus>> {
+        Box::pin(async { anyhow::bail!("SessionWiki sync is unavailable") })
+    }
 
     fn wiki_search(&self, _query: String, _limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
@@ -469,12 +474,19 @@ impl ExportRuntime for RuntimeState {
         Box::pin(RuntimeState::refresh_workspaces(self))
     }
 
-    fn wiki_sync_is_stale(&self) -> bool {
-        mj_controller::sessionwiki::sync_is_stale(self.wiki().last_success())
+    fn wiki_sync_request(&self) -> Result<mj_client::daemon::WikiSyncStatus> {
+        let target = self.wiki().request_sync(false);
+        let mut status = self.wiki().state();
+        status.target = Some(target);
+        Ok(status)
     }
 
-    fn wiki_request_sync(&self) {
-        self.wiki().request_sync(false);
+    fn wiki_sync_watch(
+        &self,
+        epoch: String,
+        after: u64,
+    ) -> BoxFuture<'_, Result<mj_client::daemon::WikiSyncStatus>> {
+        Box::pin(self.wiki().watch_after(epoch, after))
     }
 
     fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
@@ -1666,7 +1678,7 @@ impl ApiBackend {
             return Ok((summaries, starts));
         }
         // An offline backend has no writer publication to observe.
-        let mut summaries = tokio::task::spawn_blocking(move || {
+        let mut summaries = mj_core::runtime::spawn_blocking(move || {
             ids.into_iter()
                 .map(|id| {
                     let summary = mj_controller::database::load_materialized_session_summary(&id)?;
@@ -3343,7 +3355,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(job)
+    mj_core::runtime::spawn_blocking(job)
         .await
         .with_context(|| format!("{label} task panicked"))?
 }
@@ -3362,7 +3374,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    match tokio::task::spawn_blocking(job).await {
+    match mj_core::runtime::spawn_blocking(job).await {
         Ok(result) => result.map_err(ExportError::Failed),
         Err(error) => Err(ExportError::Failed(anyhow!(
             "{label} task panicked: {error}"
@@ -3394,11 +3406,11 @@ async fn supervised_checkpoint(
     session_id: String,
 ) -> Result<mj_core::state::CheckpointMetadata> {
     let upgrade_work = mj_controller::upgrade::activity("API checkpoint")?;
-    let checkpoint = tokio::spawn(async move {
+    let checkpoint = mj_core::runtime::spawn(async move {
         let _upgrade_work = upgrade_work;
         exports.checkpoint_now(session_id).await
     });
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = match checkpoint.await {
             Ok(result) => result,
             Err(error) => Err(anyhow!("the session checkpoint task failed: {error}")),
@@ -3592,7 +3604,7 @@ async fn write_workspace_file(
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
     let worker_cancelled = cancelled.clone();
-    let mut transfer = tokio::task::spawn_blocking(move || {
+    let mut transfer = mj_core::runtime::spawn_blocking(move || {
         let binary = format!(
             "{}/hel",
             targets::worker_root(&layout.backend, &session_id)?
@@ -3792,7 +3804,7 @@ impl SubagentBackend for ApiBackend {
         bundle_id: String,
     ) -> BoxFuture<'_, Result<(), mj_controller::controller::GithubBundleSelectionError>> {
         Box::pin(async move {
-            let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
+            let config = mj_core::runtime::spawn_blocking(mj_core::config::Config::load)
                 .await
                 .map_err(|error| {
                     mj_controller::controller::GithubBundleSelectionError::Provider(anyhow!(
@@ -3812,7 +3824,7 @@ impl SubagentBackend for ApiBackend {
         repositories: Vec<(String, String)>,
     ) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
-            let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
+            let config = mj_core::runtime::spawn_blocking(mj_core::config::Config::load)
                 .await
                 .context("GitHub token configuration task failed")??;
             let app = config.github.app.as_ref().ok_or_else(|| {
@@ -3866,7 +3878,7 @@ impl SubagentBackend for ApiBackend {
         name: String,
     ) -> BoxFuture<'_, Result<mj_core::workspace::WorkspaceRecord>> {
         Box::pin(async move {
-            let workspace = tokio::task::spawn_blocking(move || {
+            let workspace = mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::create_or_get_workspace(&name)
             })
             .await??;
@@ -4120,12 +4132,16 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn wiki_sync_is_stale(&self) -> bool {
-        self.exports.wiki_sync_is_stale()
+    fn wiki_sync_request(&self) -> Result<mj_client::daemon::WikiSyncStatus> {
+        self.exports.wiki_sync_request()
     }
 
-    fn wiki_request_sync(&self) {
-        self.exports.wiki_request_sync();
+    fn wiki_sync_watch(
+        &self,
+        epoch: String,
+        after: u64,
+    ) -> BoxFuture<'_, Result<mj_client::daemon::WikiSyncStatus>> {
+        self.exports.wiki_sync_watch(epoch, after)
     }
 
     fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
@@ -4453,10 +4469,10 @@ impl SubagentBackend for ApiBackend {
             // even if the request is cancelled while stdin is streaming.
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let _cancel_on_drop = super::ProcessCancellationGuard(cancelled.clone());
-            let task = tokio::spawn(write_workspace_file(
+            let task = mj_core::runtime::spawn(write_workspace_file(
                 exports, session_id, path, bytes, overwrite, cancelled,
             ));
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = task
                     .await
                     .map_err(|error| ExportError::Failed(error.into()))

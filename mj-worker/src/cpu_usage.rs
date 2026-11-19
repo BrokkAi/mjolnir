@@ -105,7 +105,7 @@ pub(crate) async fn sample_cpu(
         scope,
         ..CpuSampler::default()
     };
-    let counter = tokio::task::spawn_blocking(move || CpuCounter::discover(accounting)).await;
+    let counter = mj_core::runtime::spawn_blocking(move || CpuCounter::discover(accounting)).await;
     let counter = match counter {
         Ok(Ok(counter)) => Ok(counter),
         Ok(Err(error)) => Err(format!("{error:#}")),
@@ -116,11 +116,12 @@ pub(crate) async fn sample_cpu(
     loop {
         ticks.tick().await;
         let counter = counter.clone();
-        let result = tokio::task::spawn_blocking(move || -> Result<(Instant, Duration, u32)> {
-            let counter = counter.map_err(anyhow::Error::msg)?;
-            Ok((Instant::now(), counter.read()?, online_cpus()?))
-        })
-        .await;
+        let result =
+            mj_core::runtime::spawn_blocking(move || -> Result<(Instant, Duration, u32)> {
+                let counter = counter.map_err(anyhow::Error::msg)?;
+                Ok((Instant::now(), counter.read()?, online_cpus()?))
+            })
+            .await;
         let value = match result {
             Ok(Ok((at, cpu, count))) => {
                 sampler.observe(at, cpu, count);

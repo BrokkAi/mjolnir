@@ -206,6 +206,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -224,7 +225,6 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -301,7 +301,7 @@ async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_p
     );
     spec.args.push("raw".into());
     let saved = spec.accepted_config.clone();
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
     for (index, (key, value)) in [
         ("model", "default"),
@@ -406,7 +406,7 @@ async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_p
     let (events_tx, mut events) = mpsc::channel(64);
     // Queue before startup. The fake fails if this prompt sees profile defaults.
     prompt(&commands, "check-after-worker").await;
-    let runtime = tokio::spawn(run(
+    let runtime = mj_core::runtime::spawn(run(
         launch(root.path(), script, restored),
         requests,
         events_tx,
@@ -446,7 +446,7 @@ async fn a_refused_saved_model_keeps_the_worker_live_for_model_changes() {
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     let saved = spec.accepted_config.clone();
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     let mut configured = false;
     let mut warned = false;
     let request = loop {
@@ -583,7 +583,7 @@ async fn a_withdrawn_saved_model_starts_on_the_default_and_its_replacement_survi
     let saved = spec.accepted_config.clone();
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
 
     let request = recovery_question(&mut events).await;
     assert_eq!(request.id, SESSION_CONFIG_RECOVERY_ID);
@@ -681,7 +681,7 @@ async fn a_withdrawn_saved_model_starts_on_the_default_and_its_replacement_survi
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     prompt(&commands, "after-recovery").await;
-    let runtime = tokio::spawn(run(
+    let runtime = mj_core::runtime::spawn(run(
         launch(root.path(), script, restored),
         requests,
         events_tx,
@@ -718,7 +718,7 @@ async fn declining_the_recovery_question_keeps_the_harness_default_and_clears_th
     let saved = spec.accepted_config.clone();
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
 
     let request = recovery_question(&mut events).await;
     answer_recovery(&commands, &request.id, ElicitationResponse::Decline).await;
@@ -803,7 +803,7 @@ async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_
     );
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
 
     let options = set_config(&commands, &mut events, "model", "chosen").await;
@@ -838,7 +838,7 @@ async fn a_change_the_harness_answers_with_no_configuration_keeps_the_selectors_
     );
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
 
     let options = set_config(&commands, &mut events, "model", "chosen").await;
@@ -901,7 +901,7 @@ async fn claude_resume_pins_the_saved_model_before_catalogue_and_queued_prompt()
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     prompt(&commands, "queued-before-startup").await;
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     for turn in 0..3 {
         let mut ready = false;
         loop {
@@ -1058,7 +1058,7 @@ for line in sys.stdin:
     ];
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
 
     commands
@@ -1190,7 +1190,7 @@ async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_
     let accepted = spec.accepted_config.clone();
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     let journal = root.path().join("relay");
     let mut relay =
         DurableRelay::open(&journal, "0123456789abcdef0123456789abcdef", "test").unwrap();
@@ -1286,7 +1286,7 @@ async fn a_claude_model_the_bridge_cannot_place_is_refused_and_the_model_kept() 
     let accepted = spec.accepted_config.clone();
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
 
     let (value, _) = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
@@ -1338,7 +1338,7 @@ async fn an_unlisted_value_is_refused_with_the_accepted_values() {
     );
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
     let refusal = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
         .await
@@ -1481,7 +1481,7 @@ async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> Haik
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     prompt(&commands, "queued-before-startup").await;
-    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
     let mut resumed = HaikuFallbackResume {
         warnings: Vec::new(),
         mode: None,
@@ -1650,7 +1650,7 @@ async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
         }
         let (commands, requests) = mpsc::channel(8);
         let (events_tx, mut events) = mpsc::channel(64);
-        let runtime = tokio::spawn(run(spec, requests, events_tx));
+        let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
         loop {
             if let RuntimeEvent::SessionConfigured { config_options } = next(&mut events).await {
                 assert_eq!(

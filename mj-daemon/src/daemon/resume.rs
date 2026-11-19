@@ -151,7 +151,7 @@ impl RuntimeState {
                         }
                     })
                     .await?;
-                    let mut controller = tokio::task::spawn_blocking(Controller::load)
+                    let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
                         .await
                         .context("load controller for daemon resume task")??;
                     let executor = DaemonStageReportingExecutor::new(

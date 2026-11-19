@@ -1,0 +1,40 @@
+[package]
+name = "brokk-mj-review-host"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Mjolnir's turn review host: runs each session's review and reports it to every surface"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_review_host"
+# The crate has no doc tests; looking for them makes rustdoc compile it again.
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+mj-client.workspace = true
+mj-review.workspace = true
+mj-checkpoint.workspace = true
+mj-store.workspace = true
+mj-session-runtime.workspace = true
+mj-accounts.workspace = true
+anyhow.workspace = true
+futures = "0.3"
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["compat", "io"] }
+tracing.workspace = true
+
+[dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+mj-targets = { workspace = true, features = ["test-support"] }
+mj-store = { workspace = true, features = ["test-support"] }
+mj-session-runtime = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

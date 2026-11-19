@@ -217,7 +217,7 @@ mod tests {
         let mut tasks = Vec::new();
         for _ in 0..MAX_PENDING {
             let endpoint = endpoint.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(mj_core::runtime::spawn(async move {
                 endpoint
                     .query(
                         HistoryQuery::TraceFile {
@@ -267,7 +267,8 @@ mod tests {
             limit: 20,
         };
         let cloned = endpoint.clone();
-        let pending = tokio::spawn(async move { cloned.query(request, Path::new("/")).await });
+        let pending =
+            mj_core::runtime::spawn(async move { cloned.query(request, Path::new("/")).await });
         let requests = loop {
             let requests = endpoint.requests();
             if !requests.is_empty() {
@@ -289,7 +290,7 @@ mod tests {
         );
         assert!(endpoint.requests().is_empty());
         let cloned = endpoint.clone();
-        let pending = tokio::spawn(async move {
+        let pending = mj_core::runtime::spawn(async move {
             cloned
                 .query(
                     HistoryQuery::TraceFile {

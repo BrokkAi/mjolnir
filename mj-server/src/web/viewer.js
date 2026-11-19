@@ -43,6 +43,7 @@ const bootStatus = document.querySelector('#boot-status'),
   resumeDetail = document.querySelector('#resume-detail'),
   resumeSearch = document.querySelector('#resume-search'),
   resumeWikiNote = document.querySelector('#resume-wiki-note'),
+  resumeWikiProgress = document.querySelector('#resume-wiki-progress'),
   resumeArchived = document.querySelector('#resume-archived'),
   resumeArchivedRows = document.querySelector('#resume-archived-rows'),
   resumeDetailBack = document.querySelector('#resume-detail-back'),
@@ -401,6 +402,7 @@ function applyRoute() {
       resumeListState(previousRoute.workspaceId).scrollTop = window.scrollY;
     }
   }
+  if (previousRoute.name === 'resume' && (route.name !== 'resume' || route.workspaceId !== previousRoute.workspaceId)) stopWikiSync();
   if (!snapshot) return;
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
@@ -1269,9 +1271,18 @@ function inboxSessionFailed(entry) {
 /// Quick reply sends to this session and Go to Session opens it. A parent
 /// promoted by a child's pending request opens the form holder. A launch
 /// failure opens the session it was for, when there is one.
-function inboxDestination(entry) {
+// Stack entries address their session; only the live form addresses its holder.
+function notificationItemDestination(stack, sessionId, index) {
+  return stack.form && index >= stack.entries.length ? stack.holder ?? sessionId : sessionId;
+}
+
+function inboxDestination(entry, selectedIndex = null) {
   if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
-  if (entry.notification_card) return entry.notification_card.holder ?? entry.id;
+  if (entry.notification_card) {
+    const stack = entry.notification_card;
+    const index = selectedIndex ?? stack.entries.length + Number(Boolean(stack.form)) - 1;
+    return notificationItemDestination(stack, entry.id, index);
+  }
   if (inboxSessionFailed(entry)) return entry.id;
   const holder = childFormHolder(entry);
   return holder && sessionById(holder) ? holder : entry.id;
@@ -1281,7 +1292,7 @@ function inboxDestination(entry) {
 function inboxKey(entry) {
   if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
   const stack = entry.notification_card;
-  if (stack) return JSON.stringify([entry.id, stack.holder, stack.badge, stack.dismissal,
+  if (stack) return JSON.stringify([entry.id, notificationItemDestination(stack, entry.id, stack.entries.length), stack.badge, stack.dismissal,
     stack.entries, stack.form?.request_id]);
   const identity = inboxTextIdentity(entry);
   return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
@@ -1570,7 +1581,11 @@ const inboxFailureNotices = new Map();
 function inboxHasReplyCard(destination) {
   return inboxEntries().some(entry => {
     const card = inboxCard(entry);
-    return card.canReply && card.destination === destination;
+    const stack = entry.notification_card;
+    const destinations = stack
+      ? [ ...(stack.entries.length ? [entry.id] : []), ...(stack.form ? [notificationItemDestination(stack, entry.id, stack.entries.length)] : []) ]
+      : [card.destination];
+    return card.canReply && destinations.includes(destination);
   });
 }
 
@@ -1838,6 +1853,7 @@ function renderInbox() {
   const retained = inboxSelection?.sessionId === entry.id ? itemIds.indexOf(inboxSelection.itemId) : -1;
   const count = itemIds.length;
   const index = retained >= 0 ? retained : count - 1;
+  card.destination = inboxDestination(entry, index);
   if (!count) inboxSelection = null;
   else if (retained < 0) inboxSelection = { sessionId: entry.id, itemId: itemIds[index] };
   nodes.pager.hidden = !count;
@@ -3231,10 +3247,10 @@ function draftTarget(draft) {
   return snapshot?.targets.find(target => target.id === draft?.targetId);
 }
 
-// YOLO targets are SSH bare targets with permissions = "yolo"; containers
-// are unconstrained but have no permission mode and use the shared set.
+// The server decides which targets run without approvals and so use the
+// YOLO sub-agent set.
 function targetYolo(draft) {
-  return draftTarget(draft)?.permission_mode === 'yolo';
+  return draftTarget(draft)?.yolo === true;
 }
 
 function targetSubagentsConfigured(draft) {
@@ -4560,7 +4576,7 @@ function renderResumable() {
   // already said and redrawn when a later answer arrives.
   startWikiSearchIfIdle(state.query);
   if (resumeSearch && document.activeElement !== resumeSearch) resumeSearch.value = state.query;
-  renderWikiSearchBox();
+  renderWikiSearchBox(state);
   const query = state.query.trim();
   // One search path: with a query, the list is the sessions the index
   // returned, in the order it ranked them. Nothing is matched here.
@@ -4644,12 +4660,6 @@ function resumeChoiceField(label, id, items, value, onChange) {
 // one started is dropped, so the list always shows the newest query's result.
 
 const WIKI_SEARCH_DEBOUNCE_MS = 250;
-/// How long the page waits before asking again while the first build runs.
-const WIKI_INDEXING_POLL_MS = 5000;
-/// How long it waits before repeating the query while a sync is running.
-const WIKI_TOP_UP_POLL_MS = 2000;
-/// How many times one query is repeated for a running sync.
-const WIKI_TOP_UP_LIMIT = 10;
 const WIKI_SEARCH_LIMIT = 50;
 const WIKI_BRIEF_CHARS = 24000;
 
@@ -4667,9 +4677,11 @@ const wikiState = {
   /// first build runs, or `version_mismatch`. Nothing has answered yet, so the
   /// page starts closed rather than offering a search it cannot run. A daemon
   /// that answers without a status is treated as ready.
-  status: { state: 'indexing', topping_up: false },
-  /// How many times the current query has been repeated for a running sync.
-  topUps: 0,
+  status: { state: 'indexing' },
+  sync: null,
+  syncError: '',
+  syncController: null,
+  searchController: null,
   /// True once the daemon has said there is nothing to ask: this daemon has no
   /// wiki routes at all. Asking again in this page load would only repeat the
   /// same answer.
@@ -4684,12 +4696,10 @@ const wikiState = {
 const wikiRowNodes = new Map();
 
 /// Ask for the current query after a pause. Each keystroke replaces the
-/// pending timer, so one request follows a burst of typing. The repeats a
-/// still-building or still-syncing index asks for use the same timer with
-/// their own longer waits.
-function scheduleWikiSearch(query, delayMs = WIKI_SEARCH_DEBOUNCE_MS) {
-  // A new query gets its own repeat budget; the old one's is spent.
-  if (query !== wikiState.query) wikiState.topUps = 0;
+/// pending timer, so one request follows a burst of typing. Sync completion
+/// asks once more for whichever query is current then.
+function scheduleWikiSearch(query, delayMs = WIKI_SEARCH_DEBOUNCE_MS, syncRefresh = false) {
+  if (wikiState.query.trim() !== query.trim()) wikiState.searchController?.abort();
   wikiState.query = query;
   wikiState.started = true;
   if (wikiState.unavailable) return;
@@ -4698,55 +4708,104 @@ function scheduleWikiSearch(query, delayMs = WIKI_SEARCH_DEBOUNCE_MS) {
     wikiState.timer = null;
     // The timer's return value is nothing to the browser; handing the request
     // back is what lets a test wait for the round trip it started.
-    return runWikiSearch();
+    return runWikiSearch(syncRefresh);
   }, delayMs);
 }
 
 /// Schedule the first search of a visit. Rendering calls this; it only ever
 /// sets a timer, so no fetch happens while the page is being drawn.
 function startWikiSearchIfIdle(query) {
-  if (wikiState.started || wikiState.unavailable) return;
-  // This first ask has no typing to wait out, and its answer is what opens the
-  // search box, so it goes as soon as the page yields.
-  scheduleWikiSearch(query || '', 0);
-}
-
-/// Ask again when the last answer was not the final one.
-///
-/// While the first build runs the whole answer will change, so the page polls
-/// every five seconds until it is ready, which is also what re-enables the
-/// search box. While a sync is topping the index up the same query may gain
-/// rows, so it is repeated every two seconds, at most ten times.
-function scheduleWikiRefresh() {
   if (wikiState.unavailable) return;
-  const { state, topping_up: toppingUp } = wikiState.status;
-  if (state === 'version_mismatch') return;
-  if (state === 'indexing') {
-    scheduleWikiSearch(wikiState.query, WIKI_INDEXING_POLL_MS);
-    return;
+  if (!wikiState.syncController) {
+    const controller = new AbortController();
+    wikiState.syncController = controller;
+    // Fetches start after rendering has yielded.
+    Promise.resolve().then(() => followWikiSync(controller));
   }
-  if (toppingUp && wikiState.topUps < WIKI_TOP_UP_LIMIT) {
-    wikiState.topUps += 1;
-    scheduleWikiSearch(wikiState.query, WIKI_TOP_UP_POLL_MS);
+  if (!wikiState.started) scheduleWikiSearch(query || '', 0);
+}
+
+function stopWikiSync() {
+  wikiState.syncController?.abort();
+  wikiState.syncController = null;
+  wikiState.sync = null;
+  wikiState.syncError = '';
+  wikiState.searchController?.abort();
+  wikiState.searchController = null;
+  wikiState.requestId += 1;
+  wikiState.searching = false;
+  wikiState.started = false;
+  if (wikiState.timer !== null) clearTimeout(wikiState.timer);
+  wikiState.timer = null;
+}
+
+function renderWikiListIfVisible() {
+  if (route.name === 'resume' && !route.sessionId && !route.wikiId) renderResumable();
+}
+
+async function followWikiSync(controller) {
+  const signal = controller.signal;
+  try {
+    let status = await request('/api/v1/wiki/sync', { method: 'POST', signal });
+    const target = status.target;
+    for (;;) {
+      if (signal.aborted) return;
+      wikiState.sync = { ...status, target };
+      if (status.finished >= target) {
+        if (status.successful >= target) {
+          // Supersede any pre-sync read, even if its answer has not arrived.
+          wikiState.searchController?.abort();
+          wikiState.requestId += 1;
+          scheduleWikiSearch(wikiState.query, 0, true);
+        }
+        else wikiState.syncError = `Index sync failed: ${status.outcome.failed}`;
+        renderWikiListIfVisible();
+        return;
+      }
+      renderWikiListIfVisible();
+      const next = await request(`/api/v1/wiki/sync/watch?epoch=${encodeURIComponent(status.epoch)}&after=${status.version}`, { signal });
+      if (next.epoch !== status.epoch) throw new Error('session index daemon changed; reopen to sync again');
+      status = next;
+    }
+  } catch (error) {
+    if (signal.aborted) return;
+    wikiState.syncError = `Index sync failed: ${error.message}`;
+    renderWikiListIfVisible();
   }
 }
 
-async function runWikiSearch() {
+function wikiSyncLabel() {
+  if (wikiState.syncError) return wikiState.syncError;
+  const status = wikiState.sync;
+  if (!status) return wikiState.syncController ? 'Syncing session index…' : '';
+  if (status.finished >= status.target) return wikiState.searching || wikiState.timer !== null ? 'Searching…' : '';
+  if (status.started < status.target) return 'Waiting for session index sync…';
+  const progress = status.running;
+  if (!progress?.tool) return 'Syncing session index…';
+  if (progress.total === null) return `Scanning ${progress.tool}`;
+  const blocks = progress.total === 0 ? 10 : Math.min(10, Math.floor(progress.done * 10 / progress.total));
+  return `Syncing ${progress.tool} ${progress.adapter}/${progress.adapters} ▕${'█'.repeat(blocks)}${'░'.repeat(10 - blocks)}▏ ${progress.done.toLocaleString()}/${progress.total.toLocaleString()}`;
+}
+
+async function runWikiSearch(syncRefresh = false) {
   if (wikiState.unavailable) return;
   wikiState.requestId += 1;
   const requestId = wikiState.requestId;
+  wikiState.searchController?.abort();
+  const controller = new AbortController();
+  wikiState.searchController = controller;
   const query = wikiState.query.trim();
+  const current = () => !controller.signal.aborted && requestId === wikiState.requestId && route.name === 'resume' && wikiState.query.trim() === query;
   wikiState.searching = true;
   try {
-    const body = await request(
-      `/api/v1/wiki/search?q=${encodeURIComponent(query)}&limit=${WIKI_SEARCH_LIMIT}`);
-    if (requestId !== wikiState.requestId) return;
+    const body = await request(`/api/v1/wiki/search?q=${encodeURIComponent(query)}&limit=${WIKI_SEARCH_LIMIT}`, { signal: controller.signal });
+    if (!current()) return;
     wikiState.rows = body?.rows || [];
-    wikiState.status = body?.status || { state: 'ready', topping_up: false };
+    wikiState.status = body?.status || { state: 'ready' };
     wikiState.error = '';
-    scheduleWikiRefresh();
   } catch (err) {
-    if (requestId !== wikiState.requestId) return;
+    if (!current()) return;
+    if (syncRefresh) wikiState.syncError = `Index sync failed: ${err.message}`;
     if (err.status === 404) {
       // A daemon without these routes. There is nothing to search and nothing
       // to report; the page simply has no archived sessions and no search.
@@ -4758,9 +4817,10 @@ async function runWikiSearch() {
       wikiState.error = err.message;
     }
   } finally {
+    if (wikiState.searchController === controller) wikiState.searchController = null;
     if (requestId === wikiState.requestId) {
       wikiState.searching = false;
-      if (route.name === 'resume') renderResumable();
+      renderWikiListIfVisible();
     }
   }
 }
@@ -4769,7 +4829,6 @@ async function runWikiSearch() {
 /// the index can answer.
 function wikiSearchPlaceholder() {
   if (wikiState.unavailable) return 'Search is unavailable';
-  if (wikiState.status.state === 'indexing') return 'Indexing…';
   if (wikiState.status.state === 'version_mismatch') {
     return 'SessionWiki index is from a newer version';
   }
@@ -4778,13 +4837,18 @@ function wikiSearchPlaceholder() {
 
 const WIKI_SEARCH_PLACEHOLDER = 'Title, project, or anything said';
 
-/// Search is the index's answer, so the box is closed until the index can
-/// answer. The list and the rows keep working meanwhile.
-function renderWikiSearchBox() {
+/// Searching remains available during a build; an incompatible index is the
+/// only index state that closes the box.
+function renderWikiSearchBox(state) {
   if (!resumeSearch) return;
   const placeholder = wikiSearchPlaceholder();
   resumeSearch.disabled = Boolean(placeholder);
   resumeSearch.placeholder = placeholder || WIKI_SEARCH_PLACEHOLDER;
+  if (placeholder) {
+    state.query = '';
+    wikiState.query = '';
+    resumeSearch.value = '';
+  }
 }
 
 /// The rows the Archived section lists: the tool's own copy is gone and this
@@ -4873,6 +4937,11 @@ function wikiRowNode(row) {
 
 function renderWikiSections() {
   if (!resumeArchived || !resumeArchivedRows || !resumeWikiNote) return;
+  if (resumeWikiProgress) {
+    const progress = wikiSyncLabel();
+    resumeWikiProgress.textContent = progress;
+    resumeWikiProgress.classList.toggle('hidden', !progress);
+  }
   const note = wikiState.unavailable ? wikiState.notice : wikiState.error;
   resumeWikiNote.textContent = note;
   resumeWikiNote.classList.toggle('hidden', !note);
@@ -6445,6 +6514,7 @@ function startEvents(since = viewerState.cursor) {
 }
 
 function showLogin() {
+  stopWikiSync();
   signedOut = true;
   snapshot = undefined;
   viewerState.install({ sessions: [] });

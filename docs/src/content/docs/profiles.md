@@ -28,7 +28,8 @@ then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
 
 **Use the same subagents on all targets** is checked by default. Uncheck it to
-give SSH bare targets with `permissions = "yolo"` their own Straightforward,
+give targets whose harness runs without approvals (containers, and SSH bare
+targets with `permissions = "yolo"`) their own Straightforward,
 Subtle, and Oracle choices under **YOLO Target Subagents**. The maximum
 concurrent children limit stays shared. The YOLO group starts empty; an empty
 group means no Mjolnir sub-agents or oracle on YOLO targets. Checking the box
