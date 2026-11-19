@@ -343,6 +343,8 @@ pub(crate) struct PoolMember {
     pub banked: Option<u64>,
     pub five_hour: Option<QuotaWindow>,
     pub five_hour_awaiting_reading: bool,
+    /// The provider's reset text, for reports without a reset timestamp.
+    pub reset_text: Option<String>,
     pub five_hour_idle: bool,
     pub fable: Option<u8>,
     pub note: Option<String>,
@@ -491,6 +493,7 @@ pub(crate) fn provider_pools(
                         .map(|other| other.resets_at_epoch_seconds.unwrap_or(i64::MAX))
                         .max(),
                     banked: report.banked_resets_for_window(window),
+                    reset_text: window.resets.clone(),
                     five_hour: report
                         .five_hour_window()
                         .filter(|five| *five != window)

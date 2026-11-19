@@ -446,6 +446,15 @@ fn readable_on(background: Color) -> Color {
     }
 }
 
+/// Countdown to a reset, falling back to the provider's reset text when the
+/// report carries no timestamp.
+pub(crate) fn reset_label(reset: Option<i64>, text: Option<&str>, now: u64) -> String {
+    match (reset, text) {
+        (None, Some(text)) => text.to_owned(),
+        (reset, _) => reset_duration(reset, now),
+    }
+}
+
 pub(crate) fn reset_duration(reset: Option<i64>, now: u64) -> String {
     let Some(reset) = reset else {
         return "?".into();
@@ -509,7 +518,7 @@ fn pool_bar(
             format!(
                 "{}{}",
                 if theme::ascii() { "r" } else { "↻" },
-                reset_duration(member.reset, now)
+                reset_label(member.reset, member.reset_text.as_deref(), now)
             )
         };
         if refreshing.contains(&member.id) && text.chars().count() >= cells {
@@ -709,14 +718,14 @@ fn lane_note(
                 .reset
                 .map(|reset| clock(reset, "%a %H:%M"))
                 .unwrap_or_else(|| "unknown".into()),
-            reset_duration(member.reset, now)
+            reset_label(member.reset, member.reset_text.as_deref(), now)
         )
     } else {
         format!(
             "{} {}%, resets in {}",
             period.label(),
             member.remaining,
-            reset_duration(member.reset, now)
+            reset_label(member.reset, member.reset_text.as_deref(), now)
         )
     };
     if member.five_hour_awaiting_reading {
@@ -727,7 +736,7 @@ fn lane_note(
             quota_remaining_percent(five)
                 .map(|remaining| remaining.to_string())
                 .unwrap_or_else(|| "?".into()),
-            reset_duration(five.resets_at_epoch_seconds, now)
+            reset_label(five.resets_at_epoch_seconds, five.resets.as_deref(), now)
         ));
     } else if member.remaining > 0
         && !member.awaiting_reading
