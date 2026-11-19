@@ -117,8 +117,13 @@ impl ExitWatch {
             let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
             // SAFETY: one valid pollfd for the duration of the call.
             let ready = unsafe { libc::poll(&mut poll, 1, millis) };
-            // An interrupted or failed poll reports a possible exit, so the
-            // caller reaps instead of waiting on a descriptor it cannot use.
+            if ready < 0 {
+                // A failed poll (interrupted, or refused by a syscall filter)
+                // keeps the plain pace and reports a possible exit, so the
+                // caller reaps instead of spinning on a descriptor it cannot use.
+                std::thread::sleep(timeout);
+                return true;
+            }
             return ready != 0;
         }
         if !timeout.is_zero() {
