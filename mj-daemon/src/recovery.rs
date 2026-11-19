@@ -534,7 +534,7 @@ mod tests {
     fn observation(position: u64) -> RecoveryObservation {
         RecoveryObservation {
             session: session_record("session-1"),
-            config: Arc::new(Config::default()),
+            config: Config::default().into(),
             latest_completed_turn_ordinal: latest_completed_turn_ordinal(&completed(position)),
             checkpoint_wait: None,
         }

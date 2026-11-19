@@ -47,7 +47,7 @@ const WORKER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[derive(Debug, Clone)]
 pub struct WorkerUpgradeObservation {
     pub session: SessionRecord,
-    pub config: Arc<Config>,
+    pub config: mj_core::snapshot_map::SharedSnapshot<Config>,
     /// Worker-input compatibility identity reported in hello, or `None` when
     /// it is too old to report one. `None` counts as outdated.
     pub worker_build: Option<String>,
@@ -445,7 +445,7 @@ mod tests {
     fn observation(worker_build: Option<&str>, quiet: bool) -> WorkerUpgradeObservation {
         WorkerUpgradeObservation {
             session: session_record(SessionState::Running),
-            config: Arc::new(Config::default()),
+            config: Config::default().into(),
             worker_build: worker_build.map(str::to_owned),
             quiet,
         }
