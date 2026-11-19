@@ -60,6 +60,7 @@ pub fn inspect_submodules(
         &mut inspection,
         None,
         None,
+        false,
     )?;
     Ok(inspection)
 }
@@ -78,11 +79,13 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub remote_refs_stale: bool,
     pub local_work: Vec<crate::snapshot::ModuleLocalWork>,
     pub operations: Vec<(PathBuf, crate::snapshot::GitOperationKind)>,
+    pub uninitialized_origins: Vec<crate::snapshot::UninitializedOrigin>,
 }
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     origin_override: Option<&str>,
+    managed: bool,
 ) -> Result<SnapshotSubmoduleInspection> {
     let mut inspection = SubmoduleInspection::default();
     let mut snapshot = SnapshotSubmoduleInspection::default();
@@ -93,6 +96,7 @@ pub(crate) fn inspect_snapshot_submodules(
         &mut inspection,
         Some(&mut snapshot),
         origin_override,
+        managed,
     )?;
     snapshot.dirty = inspection.dirty;
     snapshot.unregistered = inspection.unregistered;
@@ -129,6 +133,7 @@ fn inspect_checkout(
     inspection: &mut SubmoduleInspection,
     mut snapshot: Option<&mut SnapshotSubmoduleInspection>,
     origin_override: Option<&str>,
+    managed: bool,
 ) -> Result<()> {
     let mut gitlinks = gitlinks(runner, checkout)?;
     if snapshot.is_some() {
@@ -161,22 +166,72 @@ fn inspect_checkout(
     if gitlinks.is_empty() {
         return Ok(());
     }
-    let registered = if snapshot.is_some() {
+    let SnapshotModulesConfig {
+        paths: registered,
+        urls,
+    } = if snapshot.is_some() {
         snapshot_registered_submodules(runner, checkout)?
     } else {
-        registered_submodules(runner, checkout)?
+        SnapshotModulesConfig {
+            paths: registered_submodules(runner, checkout)?,
+            ..Default::default()
+        }
     };
+    // Cache gitlink OIDs per owning repository instead of rereading the index
+    // for each uninitialized module.
+    let indexed = if snapshot.is_some() {
+        snapshot_index_gitlinks(runner, checkout)?
+    } else {
+        Vec::new()
+    };
+    let indexed: std::collections::BTreeMap<_, _> = indexed
+        .into_iter()
+        .map(|entry| (entry.path, entry.commit))
+        .collect();
+    let mut committed = std::collections::BTreeMap::new();
+    if snapshot.is_some() {
+        let tree = runner.run(checkout, &git_command(&["ls-tree", "-r", "-z", "HEAD"]))?;
+        if tree.status == 0 {
+            for entry in tree
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|entry| entry.starts_with(b"160000 "))
+            {
+                let tab = entry
+                    .iter()
+                    .position(|byte| *byte == b'\t')
+                    .context("missing HEAD gitlink path")?;
+                let oid = std::str::from_utf8(&entry[..tab])?
+                    .split_whitespace()
+                    .nth(2)
+                    .context("missing HEAD gitlink object")?;
+                committed.insert(
+                    mj_core::path_input::from_git_bytes(&entry[tab + 1..])?,
+                    oid.to_owned(),
+                );
+            }
+        }
+    }
     if let Some(snapshot) = snapshot.as_deref_mut() {
         snapshot
             .index_gitlinks
             .extend(
-                snapshot_index_gitlinks(runner, checkout)?
-                    .into_iter()
-                    .map(|mut entry| {
-                        entry.path = prefix.join(entry.path);
-                        entry
+                indexed
+                    .iter()
+                    .map(|(path, commit)| crate::snapshot::SnapshotGitlink {
+                        path: prefix.join(path),
+                        commit: commit.clone(),
                     }),
             );
+        inventory_uninitialized_files(
+            runner,
+            checkout,
+            prefix,
+            gitlinks.iter().filter(|path| {
+                registered.contains_key(*path) && !checkout.join(path).join(".git").exists()
+            }),
+            &mut snapshot.untracked,
+        )?;
     }
     for gitlink in gitlinks {
         let named = prefix.join(&gitlink);
@@ -187,73 +242,59 @@ fn inspect_checkout(
         let submodule = checkout.join(&gitlink);
         if !submodule.join(".git").exists() {
             if let Some(snapshot) = snapshot.as_deref_mut() {
-                // Git normally stops at an indexed gitlink. Remove it only
-                // from a private index so its ordinary files enter consent,
-                // with the parent's and directory's ignore rules intact.
-                let index = crate::snapshot::private_index(runner, checkout)?;
-                let env = vec![("GIT_INDEX_FILE".into(), index.path().as_os_str().to_owned())];
-                let removed = runner.run(
-                    checkout,
-                    &GitCommand {
-                        arguments: [
-                            std::ffi::OsString::from("--literal-pathspecs"),
-                            "update-index".into(),
-                            "--force-remove".into(),
-                            "--".into(),
-                            gitlink.as_os_str().to_owned(),
-                        ]
-                        .to_vec(),
-                        env: env.clone(),
-                        ..Default::default()
-                    },
-                )?;
-                ensure!(
-                    removed.status == 0,
-                    "inspect uninitialized module files: {}",
-                    String::from_utf8_lossy(&removed.stderr)
+                let url_key = format!(
+                    "{}.url",
+                    std::str::from_utf8(config_key)?
+                        .strip_suffix(".path")
+                        .context("invalid submodule path key")?
                 );
-                let files = runner.run(
-                    checkout,
-                    &GitCommand {
-                        arguments: [
-                            std::ffi::OsString::from("--literal-pathspecs"),
-                            "ls-files".into(),
-                            "--others".into(),
-                            "--exclude-standard".into(),
-                            "-z".into(),
-                            "--".into(),
-                            gitlink.as_os_str().to_owned(),
-                        ]
-                        .to_vec(),
-                        env,
-                        ..Default::default()
-                    },
-                )?;
-                ensure!(
-                    files.status == 0,
-                    "list uninitialized module files: {}",
-                    String::from_utf8_lossy(&files.stderr)
-                );
-                for path in files
-                    .stdout
-                    .split(|byte| *byte == 0)
-                    .filter(|path| !path.is_empty())
-                {
-                    snapshot
-                        .untracked
-                        .push(prefix.join(mj_core::path_input::from_git_bytes(path)?));
+                let url = urls.get(&url_key).map(String::as_str);
+                // Availability can trust an unchanged committed pin; teardown
+                // cannot trust a local remote that will disappear with it.
+                if managed && let Some(url) = url {
+                    let resolved = crate::snapshot::resolve_submodule_url(
+                        runner,
+                        checkout,
+                        url,
+                        origin_override,
+                    )?;
+                    let neutral =
+                        tempfile::tempdir().context("create neutral submodule route probe")?;
+                    let mut query = git_command(&["ls-remote", "--get-url", &resolved]);
+                    query.env.push((
+                        "GIT_CEILING_DIRECTORIES".into(),
+                        neutral.path().as_os_str().to_owned(),
+                    ));
+                    let effective = runner.run(neutral.path(), &query)?;
+                    ensure_inspected(&effective)?;
+                    let effective = std::str::from_utf8(
+                        effective
+                            .stdout
+                            .strip_suffix(b"\n")
+                            .unwrap_or(&effective.stdout),
+                    )?;
+                    if let Some(route) =
+                        crate::snapshot::local_origin_route(neutral.path(), effective)?
+                    {
+                        snapshot
+                            .uninitialized_origins
+                            .push(crate::snapshot::UninitializedOrigin {
+                                owner: prefix.to_path_buf(),
+                                config_key: url_key,
+                                route,
+                            });
+                    }
                 }
-            }
-            if snapshot.is_some()
-                && !uninitialized_gitlink_available(
+                if !uninitialized_gitlink_available(
                     runner,
                     checkout,
-                    &gitlink,
-                    config_key,
+                    indexed.get(&gitlink),
+                    committed.get(&gitlink),
+                    url,
                     origin_override,
-                )?
-            {
-                inspection.dirty.push(named);
+                )? {
+                    inspection.dirty.push(named);
+                }
             }
             continue;
         }
@@ -434,6 +475,7 @@ fn inspect_checkout(
             inspection,
             snapshot.as_deref_mut(),
             None,
+            managed,
         )?;
     }
     Ok(())
@@ -714,58 +756,23 @@ fn unpublished_local_work(
 fn uninitialized_gitlink_available(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
-    path: &Path,
-    config_key: &[u8],
+    indexed: Option<&String>,
+    committed: Option<&String>,
+    url: Option<&str>,
     origin_override: Option<&str>,
 ) -> Result<bool> {
-    let indexed = snapshot_index_gitlinks(runner, checkout)?
-        .into_iter()
-        .find(|entry| entry.path == path);
     let Some(indexed) = indexed else {
         return Ok(true);
     };
-    let mut arguments: Vec<std::ffi::OsString> =
-        ["--literal-pathspecs", "ls-tree", "-z", "HEAD", "--"]
-            .into_iter()
-            .map(Into::into)
-            .collect();
-    arguments.push(path.as_os_str().to_owned());
-    let head = runner.run(
-        checkout,
-        &GitCommand {
-            arguments,
-            ..Default::default()
-        },
-    )?;
-    let old = head
-        .stdout
-        .split(|byte| *byte == 0)
-        .find(|entry| entry.starts_with(b"160000 "))
-        .and_then(|entry| entry.split(|byte| *byte == b'\t').next())
-        .and_then(|header| header.split(|byte| *byte == b' ').nth(2));
-    if old.is_some_and(|old| old == indexed.commit.as_bytes()) {
+    if committed == Some(indexed) {
         return Ok(true);
     }
-    // Cached admin repositories may point at a fork. Only .gitmodules tips
-    // authorize an uninitialized pointer change; initialize to check ancestry.
-    let key = std::str::from_utf8(config_key)?
-        .strip_suffix(".path")
-        .context("invalid submodule path key")?;
-    let url = runner.run(
-        checkout,
-        &git_command(&[
-            "config",
-            "--file",
-            ".gitmodules",
-            "--get",
-            &format!("{key}.url"),
-        ]),
-    )?;
-    if url.status != 0 {
+    // Only .gitmodules advertised tips authorize an uninitialized pointer
+    // change; initialize the module to prove ancestry instead.
+    let Some(url) = url else {
         return Ok(false);
-    }
-    let mut url =
-        std::str::from_utf8(url.stdout.strip_suffix(b"\n").unwrap_or(&url.stdout))?.to_owned();
+    };
+    let mut url = url.to_owned();
     if origin_override.is_some()
         && (url.starts_with("./") || url.starts_with("../"))
         && runner
@@ -793,7 +800,7 @@ fn uninitialized_gitlink_available(
             .lines()
             .filter_map(|line| line.split_once('\t'))
             .any(|(oid, name)| {
-                oid == indexed.commit
+                oid == indexed.as_str()
                     && (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
             });
     Ok(exact_tip)
@@ -898,38 +905,142 @@ fn gitlinks(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<BTreeSet<P
     Ok(gitlinks)
 }
 
-/// Submodule paths that `.gitmodules` registers. Git's own submodule commands
-/// read the file from the working tree, and so does this.
+/// Paths and URLs come from one version of .gitmodules, so an unresolved
+/// operation cannot mix working-tree registration with committed remotes.
+#[derive(Default)]
+struct SnapshotModulesConfig {
+    paths: std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    urls: std::collections::BTreeMap<String, String>,
+}
 fn snapshot_registered_submodules(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
-) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+) -> Result<SnapshotModulesConfig> {
     let unmerged = submodule_git(
         runner,
         checkout,
         &["ls-files", "--unmerged", "--", ".gitmodules"],
     )?;
-    if unmerged.is_empty() {
-        return registered_submodules(runner, checkout);
-    }
-    // Use committed registration to inventory an unresolved operation. Managed
-    // capture aborts before repinning; raw capture skips the working overlay.
-    let committed = submodule_git(runner, checkout, &["ls-tree", "HEAD", "--", ".gitmodules"])?;
-    if committed.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
-    }
+    let source = if unmerged.is_empty() {
+        if !checkout.join(".gitmodules").exists() {
+            return Ok(Default::default());
+        }
+        ["--file", ".gitmodules"]
+    } else {
+        // Inventory must reach the operation policy even with conflict markers.
+        if submodule_git(runner, checkout, &["ls-tree", "HEAD", "--", ".gitmodules"])?.is_empty() {
+            return Ok(Default::default());
+        }
+        ["--blob", "HEAD:.gitmodules"]
+    };
     let output = runner.run(
         checkout,
         &git_command(&[
             "config",
-            "--blob",
-            "HEAD:.gitmodules",
+            source[0],
+            source[1],
             "--null",
             "--get-regexp",
-            r"^submodule\..*\.path$",
+            r"^submodule\..*\.(path|url)$",
         ]),
     )?;
-    parse_registered_submodules(output)
+    if output.status == 1 {
+        return Ok(Default::default());
+    }
+    ensure_inspected(&output)?;
+    let mut paths = std::collections::BTreeMap::new();
+    let mut urls = std::collections::BTreeMap::new();
+    for entry in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let newline = entry
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .context("invalid submodule config")?;
+        let (key, value) = (&entry[..newline], &entry[newline + 1..]);
+        if key.ends_with(b".path") {
+            paths.insert(mj_core::path_input::from_git_bytes(value)?, key.to_vec());
+        } else {
+            urls.insert(
+                std::str::from_utf8(key)?.to_owned(),
+                std::str::from_utf8(value)?.to_owned(),
+            );
+        }
+    }
+    Ok(SnapshotModulesConfig { paths, urls })
+}
+
+/// Uninitialized gitlinks hide ordinary files from Git. Inspect all nonempty
+/// directories through one private index, without copying an index for absent
+/// or empty paths. NUL stdin avoids argument limits and preserves native paths.
+fn inventory_uninitialized_files<'a>(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    prefix: &Path,
+    paths: impl Iterator<Item = &'a PathBuf>,
+    untracked: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let mut directories = BTreeSet::new();
+    for path in paths {
+        let location = checkout.join(path);
+        match fs::symlink_metadata(&location) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || fs::read_dir(location)?.next().transpose()?.is_some() {
+                    directories.insert(path.clone());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect uninitialized module directory"),
+        }
+    }
+    if directories.is_empty() {
+        return Ok(());
+    }
+    let index = crate::snapshot::private_index(runner, checkout)?;
+    let env = vec![("GIT_INDEX_FILE".into(), index.path().as_os_str().to_owned())];
+    let mut stdin = Vec::new();
+    for path in &directories {
+        stdin.extend(crate::archive::slash_path(path)?.as_bytes());
+        stdin.push(0);
+    }
+    let removed = runner.run(
+        checkout,
+        &GitCommand {
+            arguments: ["update-index", "--force-remove", "-z", "--stdin"]
+                .map(Into::into)
+                .to_vec(),
+            env: env.clone(),
+            stdin,
+        },
+    )?;
+    ensure_inspected(&removed)?;
+    let files = runner.run(
+        checkout,
+        &GitCommand {
+            arguments: ["ls-files", "--others", "--exclude-standard", "-z"]
+                .map(Into::into)
+                .to_vec(),
+            env,
+            ..Default::default()
+        },
+    )?;
+    ensure_inspected(&files)?;
+    for path in files
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = mj_core::path_input::from_git_bytes(path)?;
+        if path
+            .ancestors()
+            .any(|ancestor| directories.contains(ancestor))
+        {
+            untracked.push(prefix.join(path));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn registered_gitlinks_at(
