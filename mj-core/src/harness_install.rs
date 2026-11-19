@@ -1820,6 +1820,10 @@ fn extract_node_archive(
     let mut archive = tar::Archive::new(decoder);
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
+    // As `Archive::unpack` does: directory entries (which carry no data) are
+    // applied last, deepest first, so a read-only directory's mode is set only
+    // after its contents exist. `unpack_in` creates missing parents itself.
+    let mut directories = Vec::new();
     for (index, entry) in archive
         .entries()
         .context("read Node.js archive")?
@@ -1833,8 +1837,18 @@ fn extract_node_archive(
             return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
                 .context("while extracting"));
         }
+        let mut entry = entry.context("read Node.js archive entry")?;
+        if entry.header().entry_type() == tar::EntryType::Directory {
+            directories.push(entry);
+            continue;
+        }
         entry
-            .context("read Node.js archive entry")?
+            .unpack_in(destination)
+            .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    }
+    directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+    for mut directory in directories {
+        directory
             .unpack_in(destination)
             .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
     }
