@@ -99,7 +99,7 @@ pub fn spawn_gc_on(
         loop {
             interval.tick().await;
             let root = root.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::runtime::spawn_blocking(move || {
                 collect_obsolete_installs(&root.join(harness.id()), pin(harness).install_id)
             })
             .await;
@@ -238,7 +238,7 @@ pub async fn locate(
                 );
             } else {
                 let search = environment.clone();
-                let available = tokio::task::spawn_blocking(move || {
+                let available = crate::runtime::spawn_blocking(move || {
                     target_native_harness_is_available(harness, &search)
                 })
                 .await
@@ -320,7 +320,7 @@ async fn locate_in_image(
     };
     let search = environment.clone();
     let names = [bridge_name, entry_name, cli_name];
-    let found = tokio::task::spawn_blocking(move || {
+    let found = crate::runtime::spawn_blocking(move || {
         names
             .iter()
             .map(|name| find_command(Path::new(name), &search))
@@ -427,7 +427,7 @@ async fn compatible_bridge(
 ) -> Result<Option<PathBuf>> {
     let search = environment.clone();
     let selected =
-        tokio::task::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
+        crate::runtime::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
             .await
             .context("find target bridge task failed")??;
     let Some(selected) = selected else {
@@ -731,7 +731,9 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
     let started = Instant::now();
     let cancellation = crate::subprocess::preparation_cancellation();
     loop {
-        anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+        if cancellation.is_cancelled() {
+            return Err(crate::subprocess::PreparationCancelled.into());
+        }
         let result = if shared {
             file.try_lock_shared()
         } else {
@@ -752,7 +754,7 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(25)) => {},
-            _ = cancellation.cancelled() => bail!("preparation cancelled"),
+            _ = cancellation.cancelled() => return Err(crate::subprocess::PreparationCancelled.into()),
         }
     }
 }
@@ -1039,8 +1041,14 @@ async fn install_antigravity_from_metadata(
     let executable = bin.join("agy");
     let archive_for_extract = archive.clone();
     let output = executable.clone();
-    tokio::task::spawn_blocking(move || {
-        extract_archive_file(&archive_for_extract, Path::new("antigravity"), &output)
+    let cancellation = crate::subprocess::preparation_cancellation();
+    crate::runtime::spawn_blocking(move || {
+        extract_archive_file(
+            &archive_for_extract,
+            Path::new("antigravity"),
+            &output,
+            &cancellation,
+        )
     })
     .await
     .context("Antigravity extraction task failed")??;
@@ -1114,11 +1122,13 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     let entrypoint = staging.join("opencode");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
-    tokio::task::spawn_blocking(move || {
+    let cancellation = crate::subprocess::preparation_cancellation();
+    crate::runtime::spawn_blocking(move || {
         extract_archive_file(
             &archive_for_extract,
             Path::new("package/bin/opencode"),
             &entrypoint_for_extract,
+            &cancellation,
         )
     })
     .await
@@ -1129,7 +1139,16 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     Ok(())
 }
 
-fn extract_archive_file(archive: &Path, wanted: &Path, destination: &Path) -> Result<()> {
+/// Extraction runs on a blocking thread that cancellation cannot interrupt, so
+/// the installer awaits it and it checks `cancellation` between entries (and
+/// between chunks of one file): staging and the install lock are released only
+/// after the writer has stopped. One entry or chunk is written to completion.
+fn extract_archive_file(
+    archive: &Path,
+    wanted: &Path,
+    destination: &Path,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let archive_file =
         File::open(archive).with_context(|| format!("open archive {}", archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive_file);
@@ -1139,6 +1158,10 @@ fn extract_archive_file(archive: &Path, wanted: &Path, destination: &Path) -> Re
         .entries()
         .with_context(|| format!("read archive {}", archive_name.display()))?
     {
+        if cancellation.is_cancelled() {
+            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
+                .context("while extracting"));
+        }
         let mut entry =
             entry.with_context(|| format!("read archive {}", archive_name.display()))?;
         let path = entry
@@ -1171,10 +1194,20 @@ async fn download_verified_async(
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
     let cancellation = crate::subprocess::preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(crate::subprocess::PreparationCancelled.into());
+    }
     let work = async {
         download_verified_inner(url, destination, environment).await?;
-        let actual = crate::worker_launch::worker_executable_digest(destination)?;
+        // Hashing reads the whole artifact; keep it off the async workers,
+        // which also serve the daemon's clients. It only reads, so a
+        // cancellation that abandons it is safe.
+        let path = destination.to_owned();
+        let actual = crate::runtime::spawn_blocking(move || {
+            crate::worker_launch::worker_executable_digest(&path)
+        })
+        .await
+        .context("hash downloaded artifact task failed")??;
         anyhow::ensure!(
             actual == expected,
             "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
@@ -1184,7 +1217,7 @@ async fn download_verified_async(
     };
     let result = tokio::select! {
         result = work => result,
-        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+        _ = cancellation.cancelled() => Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)),
     };
     if result.is_err() {
         let _ = std::fs::remove_file(destination);
@@ -1229,8 +1262,12 @@ async fn download_verified_inner(
         .get(url)
         .send()
         .await
+        // reqwest's errors carry the final URL after redirects, which can be a
+        // signed URL with a token in its query; `url` is our validated one.
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("request artifact {url}"))?
         .error_for_status()
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("download artifact {url}"))?;
     if response
         .content_length()
@@ -1248,6 +1285,7 @@ async fn download_verified_inner(
     while let Some(chunk) = response
         .chunk()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("read artifact {url}"))?
     {
         received = received.saturating_add(chunk.len() as u64);
@@ -1430,8 +1468,9 @@ async fn install_managed_node(
         download_verified_async(&url, &archive, field("sha256")?, environment).await?;
         let staging_root = staging.path().to_path_buf();
         let folder_for_extract = folder.clone();
-        tokio::task::spawn_blocking(move || {
-            extract_node_archive(&archive, &staging_root, &folder_for_extract)
+        let cancellation = crate::subprocess::preparation_cancellation();
+        crate::runtime::spawn_blocking(move || {
+            extract_node_archive(&archive, &staging_root, &folder_for_extract, &cancellation)
         })
         .await
         .context("Node.js extraction task failed")??;
@@ -1516,24 +1555,31 @@ fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
 }
 
 fn node_distribution_url(environment: &BTreeMap<String, String>, file: &str) -> Result<String> {
-    let configured = environment
-        .get("NODEJS_ORG_MIRROR")
-        .or_else(|| environment.get("NVM_NODEJS_ORG_MIRROR"))
-        .map(String::as_str)
-        .filter(|value| !value.is_empty());
-    let base = configured.unwrap_or(DEFAULT_NODE_DIST_URL);
-    let parsed =
-        url::Url::parse(base).with_context(|| format!("parse Node.js download mirror {base:?}"))?;
+    // The first setting present wins, even when empty: an explicitly empty
+    // NODEJS_ORG_MIRROR selects the official distribution over an inherited
+    // NVM_NODEJS_ORG_MIRROR.
+    let configured = ["NODEJS_ORG_MIRROR", "NVM_NODEJS_ORG_MIRROR"]
+        .into_iter()
+        .find_map(|name| Some((name, environment.get(name)?.as_str())))
+        .filter(|(_, value)| !value.is_empty());
+    let (setting, base) = configured.unwrap_or(("the default mirror", DEFAULT_NODE_DIST_URL));
+    // Errors name the setting and the rule, never any part of the URL: a
+    // rejected value can hold credentials anywhere (a missing "https://" turns
+    // "user:secret@host" into a scheme and path), and these errors reach the
+    // daemon log.
+    let parsed = url::Url::parse(base).map_err(|error| {
+        anyhow!("{setting} is not a valid Node.js download mirror URL: {error}")
+    })?;
     anyhow::ensure!(
         artifact_url_is_allowed(&parsed),
-        "Node.js download mirror must use HTTPS: {base}"
+        "{setting} must name an HTTPS Node.js download mirror"
     );
     anyhow::ensure!(
         parsed.username().is_empty()
             && parsed.password().is_none()
             && parsed.query().is_none()
             && parsed.fragment().is_none(),
-        "Node.js download mirror must be a plain HTTPS base URL without credentials, a query, or a fragment: {base}"
+        "{setting} must be a plain HTTPS base URL without credentials, a query, or a fragment"
     );
     Ok(format!(
         "{}/v{NODE_VERSION}/{file}",
@@ -1654,6 +1700,11 @@ async fn managed_node_health(
     let output = match bounded_env_output(&mut node, &probe_environment).await {
         Ok(output) => output,
         Err(error) => {
+            // A probe cut short by cancellation says nothing about the
+            // install, which the caller would otherwise remove.
+            if crate::subprocess::is_preparation_cancelled(&error) {
+                return Err(error);
+            }
             return Ok(ManagedNodeHealth::Unusable(format!(
                 "node --version could not run: {error:#}"
             )));
@@ -1678,6 +1729,9 @@ async fn managed_node_health(
         let output = match bounded_env_output(&mut command, &probe_environment).await {
             Ok(output) => output,
             Err(error) => {
+                if crate::subprocess::is_preparation_cancelled(&error) {
+                    return Err(error);
+                }
                 return Ok(ManagedNodeHealth::Unusable(format!(
                     "{name} --version could not run: {error:#}"
                 )));
@@ -1729,14 +1783,83 @@ fn prepend_path(environment: &mut BTreeMap<String, String>, bin: &Path) -> Resul
     Ok(())
 }
 
-fn extract_node_archive(archive: &Path, destination: &Path, folder: &str) -> Result<()> {
+/// Test-only synchronization with the Node.js extractor: a test registers a
+/// callback for a directory, and the extractor calls it before each entry it
+/// unpacks under that directory.
+#[cfg(test)]
+mod extraction_hooks {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn(usize) + Send + Sync>;
+    static HOOKS: Mutex<Vec<(PathBuf, Hook)>> = Mutex::new(Vec::new());
+
+    pub(super) fn register(root: &Path, hook: impl Fn(usize) + Send + Sync + 'static) {
+        HOOKS
+            .lock()
+            .unwrap()
+            .push((root.to_path_buf(), Arc::new(hook)));
+    }
+
+    pub(super) fn entry_reached(destination: &Path, index: usize) {
+        let hook = HOOKS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(root, _)| destination.starts_with(root))
+            .map(|(_, hook)| hook.clone());
+        if let Some(hook) = hook {
+            hook(index);
+        }
+    }
+}
+
+/// Unpacks entry by entry (what `Archive::unpack` does) so cancellation can
+/// stop it between entries; see [`extract_archive_file`].
+fn extract_node_archive(
+    archive: &Path,
+    destination: &Path,
+    folder: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let archive = File::open(archive)
         .with_context(|| format!("open Node.js archive {}", archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive);
     let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(destination)
-        .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create {}", destination.display()))?;
+    // As `Archive::unpack` does: directory entries (which carry no data) are
+    // applied last, deepest first, so a read-only directory's mode is set only
+    // after its contents exist. `unpack_in` creates missing parents itself.
+    let mut directories = Vec::new();
+    for (index, entry) in archive
+        .entries()
+        .context("read Node.js archive")?
+        .enumerate()
+    {
+        #[cfg(test)]
+        extraction_hooks::entry_reached(destination, index);
+        #[cfg(not(test))]
+        let _ = index;
+        if cancellation.is_cancelled() {
+            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
+                .context("while extracting"));
+        }
+        let mut entry = entry.context("read Node.js archive entry")?;
+        if entry.header().entry_type() == tar::EntryType::Directory {
+            directories.push(entry);
+            continue;
+        }
+        entry
+            .unpack_in(destination)
+            .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    }
+    directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+    for mut directory in directories {
+        directory
+            .unpack_in(destination)
+            .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    }
     let extracted = destination.join(folder);
     anyhow::ensure!(
         extracted.is_dir(),
@@ -1828,8 +1951,9 @@ async fn install_grok_from_metadata(
     let entrypoint = bin.join("grok");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
-    tokio::task::spawn_blocking(move || {
-        extract_zstd_file(&archive_for_extract, &entrypoint_for_extract)
+    let cancellation = crate::subprocess::preparation_cancellation();
+    crate::runtime::spawn_blocking(move || {
+        extract_zstd_file(&archive_for_extract, &entrypoint_for_extract, &cancellation)
     })
     .await
     .context("Grok extraction task failed")??;
@@ -1841,16 +1965,33 @@ async fn install_grok_from_metadata(
     Ok(())
 }
 
-fn extract_zstd_file(archive: &Path, destination: &Path) -> Result<()> {
+/// Copies in chunks so cancellation lands within one chunk; see
+/// [`extract_archive_file`].
+fn extract_zstd_file(
+    archive: &Path,
+    destination: &Path,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let input =
         File::open(archive).with_context(|| format!("open Grok archive {}", archive.display()))?;
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(input))
         .map_err(|error| anyhow!("read Grok archive {}: {error}", archive.display()))?;
     let mut output = File::create(destination)
         .with_context(|| format!("create Grok executable {}", destination.display()))?;
-    std::io::copy(&mut decoder, &mut output)
-        .with_context(|| format!("extract Grok executable to {}", destination.display()))?;
-    Ok(())
+    let mut chunk = vec![0_u8; 1 << 20];
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
+                .context("while extracting"));
+        }
+        let count = std::io::Read::read(&mut decoder, &mut chunk)
+            .with_context(|| format!("read Grok archive {}", archive.display()))?;
+        if count == 0 {
+            return Ok(());
+        }
+        std::io::Write::write_all(&mut output, &chunk[..count])
+            .with_context(|| format!("extract Grok executable to {}", destination.display()))?;
+    }
 }
 
 fn kimi_artifact_base(environment: &BTreeMap<String, String>) -> String {
@@ -2443,7 +2584,13 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap();
         let destination = temp.path().join("opencode");
 
-        extract_archive_file(&archive, Path::new("package/bin/opencode"), &destination).unwrap();
+        extract_archive_file(
+            &archive,
+            Path::new("package/bin/opencode"),
+            &destination,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read(&destination).unwrap(),
@@ -2566,6 +2713,19 @@ mod tests {
             format!("https://mirror.example/node/v{NODE_VERSION}/{file}")
         );
 
+        // An explicitly empty NODEJS_ORG_MIRROR clears the inherited NVM one.
+        let environment = BTreeMap::from([
+            ("NODEJS_ORG_MIRROR".into(), String::new()),
+            (
+                "NVM_NODEJS_ORG_MIRROR".into(),
+                "https://nvm.example/node".into(),
+            ),
+        ]);
+        assert_eq!(
+            node_distribution_url(&environment, &file).unwrap(),
+            format!("https://nodejs.org/dist/v{NODE_VERSION}/{file}")
+        );
+
         let environment = BTreeMap::from([
             (
                 "NVM_NODEJS_ORG_MIRROR".into(),
@@ -2585,11 +2745,19 @@ mod tests {
             "http://mirror.example/node",
             "https://user:secret@mirror.example/node",
             "https://mirror.example/node?token=secret",
+            "http://user:secret@mirror.example/node",
+            "not a url secret",
+            "user:secret@mirror.example/node",
         ] {
             let environment = BTreeMap::from([("NODEJS_ORG_MIRROR".into(), mirror.into())]);
+            let Err(error) = node_distribution_url(&environment, &file) else {
+                panic!("{mirror:?} was accepted");
+            };
+            // The daemon logs this error, so it must not echo the secret.
+            let message = format!("{error:#}");
             assert!(
-                node_distribution_url(&environment, &file).is_err(),
-                "{mirror:?} was accepted"
+                message.contains("NODEJS_ORG_MIRROR") && !message.contains("secret"),
+                "{message}"
             );
         }
     }
@@ -2740,6 +2908,12 @@ mod tests {
     }
 
     fn fake_node_archive(root: &Path) -> (PathBuf, serde_json::Value) {
+        fake_node_archive_with_filler(root, 0)
+    }
+
+    /// The fake Node.js archive plus `filler` one-byte files, so extraction
+    /// takes long enough for a test to cancel it midway.
+    fn fake_node_archive_with_filler(root: &Path, filler: usize) -> (PathBuf, serde_json::Value) {
         let (key, target) = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => ("linux-x86_64", "linux-x64"),
             ("linux", "aarch64") => ("linux-aarch64", "linux-arm64"),
@@ -2783,6 +2957,15 @@ mod tests {
             header.set_cksum();
             builder
                 .append_data(&mut header, format!("{root}/bin/{name}"), std::io::empty())
+                .unwrap();
+        }
+        for index in 0..filler {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{root}/lib/filler/{index}"), &b"x"[..])
                 .unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
@@ -3157,6 +3340,146 @@ mod tests {
         }));
     }
 
+    // The extraction runs on a blocking thread, so the installer must await it:
+    // staging and the install lock are released only after its writer stopped.
+    #[test]
+    fn cancelling_node_extraction_stops_the_writer_before_staging_is_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, metadata) = fake_node_archive_with_filler(temp.path(), 30_000);
+        let (_server, _tools, mut environment) = fake_node_server(&archive, temp.path());
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            temp.path().join("cache").to_string_lossy().into_owned(),
+        );
+        let root = temp.path().join("node");
+        let folder = format!("node-v{NODE_VERSION}-{}", environment_target());
+        let staged = |root: &Path| {
+            std::fs::read_dir(root)
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".install-")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The extractor stops at entry 100, with 29,900 entries still to
+        // unpack, until the test has cancelled: cancellation then lands
+        // mid-extraction however the threads are scheduled.
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+        let resume_rx = std::sync::Mutex::new(resume_rx);
+        // The hook pauses the first extraction under `root` only: the later
+        // install that proves the cache is repaired must run unhindered. The
+        // wait is bounded so a broken test fails instead of hanging.
+        let paused = std::sync::atomic::AtomicBool::new(false);
+        extraction_hooks::register(&root, move |index| {
+            if index == 100 && !paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                reached_tx.send(()).unwrap();
+                resume_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("the test never resumed the paused extractor");
+            }
+        });
+        let mut cancelled_environment = environment.clone();
+        let error = run_async(async {
+            let token = tokio_util::sync::CancellationToken::new();
+            let install = crate::subprocess::with_preparation_cancellation(
+                token.clone(),
+                install_managed_node(&root, &mut cancelled_environment, &metadata),
+            );
+            tokio::pin!(install);
+            loop {
+                tokio::select! {
+                    result = &mut install => panic!("install ended before extraction paused: {:?}", result.err()),
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+                if reached_rx.try_recv().is_ok() {
+                    break;
+                }
+            }
+            token.cancel();
+            resume_tx.send(()).unwrap();
+            match install.await {
+                Err(error) => error,
+                Ok(_) => panic!("a cancelled install must fail"),
+            }
+        });
+        assert!(
+            format!("{error:#}").contains("while extracting"),
+            "cancellation did not land during extraction: {error:#}"
+        );
+        assert!(staged(&root).is_empty(), "staging outlived the install");
+        assert!(!root.join(&folder).exists(), "cancelled install published");
+
+        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        assert!(runtime.path().join("bin/node").is_file());
+    }
+
+    // A probe cut short by cancellation is not evidence that the cached Node.js
+    // is broken: the installer must report the cancellation and keep the cache.
+    #[test]
+    fn cancelling_the_cached_node_probe_keeps_the_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_archive, metadata) = fake_node_archive(temp.path());
+        let root = temp.path().join("node");
+        let install = root.join(format!("node-v{NODE_VERSION}-{}", environment_target()));
+        let started = temp.path().join("probe-started");
+        executable(
+            &install.join("bin/node"),
+            &format!("#!/bin/sh\n: > '{}'\nexec sleep 300\n", started.display()),
+        );
+        for name in ["npm", "npx"] {
+            executable(&install.join("bin").join(name), "#!/bin/sh\nexit 0\n");
+        }
+        open_lock(&install.join(LEASE_FILE)).unwrap();
+        let mut environment = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+
+        let error = run_async(async {
+            let token = tokio_util::sync::CancellationToken::new();
+            let call = crate::subprocess::with_preparation_cancellation(
+                token.clone(),
+                install_managed_node(&root, &mut environment, &metadata),
+            );
+            tokio::pin!(call);
+            let mut waited = 0;
+            while !started.exists() {
+                assert!(waited < 500, "the cached Node.js probe never started");
+                waited += 1;
+                tokio::select! {
+                    result = &mut call => panic!("call ended before the probe ran: {:?}", result.err()),
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+            token.cancel();
+            match call.await {
+                Err(error) => error,
+                Ok(_) => panic!("a cancelled call must fail"),
+            }
+        });
+        assert!(
+            crate::subprocess::is_preparation_cancelled(&error),
+            "not a cancellation: {error:#}"
+        );
+        assert!(
+            entrypoint_is_executable(&install.join("bin/node")),
+            "cancellation removed the cached Node.js"
+        );
+        assert!(
+            std::fs::read_dir(&root).unwrap().all(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                !name.starts_with(".install-")
+            }),
+            "cancellation left set-aside or staging directories"
+        );
+    }
+
     #[test]
     fn unsupported_system_node_is_replaced_with_the_managed_runtime() {
         let temp = tempfile::tempdir().unwrap();
@@ -3351,6 +3674,103 @@ mod tests {
         .unwrap();
 
         assert!(!abandoned.exists());
+        assert!(managed.command.exists());
+    }
+
+    // Cancelling a background preparation (the daemon's quota prewarm, #1595)
+    // must stop npm's whole process group and publish nothing, and a later
+    // installation must complete from the same cache.
+    #[test]
+    fn cancelling_an_install_stops_npm_and_leaves_a_cache_the_next_install_completes() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let install_counter = temp.path().join("installs");
+        let environment = fake_node_tools(temp.path(), &install_counter);
+        let pid_file = temp.path().join("npm-child.pid");
+        executable(
+            &temp.path().join("bin/npm"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\nsleep 300 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        );
+
+        let error = run_async(async {
+            let token = tokio_util::sync::CancellationToken::new();
+            let install = crate::subprocess::with_preparation_cancellation(
+                token.clone(),
+                resolve_at_async(
+                    &cache,
+                    HarnessKind::Codex,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                ),
+            );
+            tokio::pin!(install);
+            // The shell creates the file before it writes the PID, so wait for
+            // a complete one, and fail if it never appears.
+            let mut waited = 0;
+            while std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+                .is_none()
+            {
+                assert!(waited < 500, "npm never recorded its child's PID");
+                waited += 1;
+                tokio::select! {
+                    result = &mut install => panic!("install ended before npm started: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+            token.cancel();
+            install.await.unwrap_err()
+        });
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+
+        let child = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .expect("the test waited for a complete PID")
+            .to_string();
+        // `kill -0` also succeeds on a zombie, which has already stopped
+        // running. Ask `ps` for the process state: no output (gone) or `Z`
+        // means it is not running, whether or not anything reaped it.
+        let alive = || {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &child])
+                .stderr(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        for _ in 0..100 {
+            if !alive() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "npm's child outlived the cancelled install");
+        let published = std::fs::read_dir(cache.join(HarnessKind::Codex.id()))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with(".install"))
+            .collect::<Vec<_>>();
+        assert!(
+            published.is_empty(),
+            "cancelled install published {published:?}"
+        );
+
+        let environment = fake_node_tools(temp.path(), &install_counter);
+        let managed = resolve_at(
+            &cache,
+            HarnessKind::Codex,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
         assert!(managed.command.exists());
     }
 

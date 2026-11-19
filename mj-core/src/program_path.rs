@@ -90,7 +90,7 @@ pub async fn find_antigravity_program(
     environment: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Option<PathBuf>> {
     let search = environment.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<PathBuf>> {
+    crate::runtime::spawn_blocking(move || -> anyhow::Result<Option<PathBuf>> {
         let path = search
             .get("PATH")
             .map(std::ffi::OsString::from)

@@ -120,7 +120,7 @@ pub(crate) async fn current_profile_login(
         return Ok(None);
     };
     let profile = profile.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         // Codex's auth scheme comes from its config file.
         if profile.auth_scheme().uses_native_login_file() {
             LoginFingerprint::read_file(kind, &marker)

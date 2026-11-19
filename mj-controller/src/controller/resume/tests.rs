@@ -1501,7 +1501,10 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             .env(RESUME_ROLLBACK_TEST_CHILD, "1")
             // A remote target needs a portable worker; any existing file
             // satisfies the preflight so the test reaches provisioning.
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env("MJ_DATA_DIR", directory.path())
             .env("GH_TOKEN", "test-token")
             .run();
@@ -1754,7 +1757,10 @@ fn failed_resume_retires_a_checkout_it_recreated() {
             .env(RETIRED_WORKTREE_RESUME_TEST_CHILD, "1")
             // A remote target needs a portable worker; any existing file
             // satisfies the preflight so the test reaches provisioning.
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .run();
@@ -1975,7 +1981,10 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             .env(RAW_CONVERSION_TEST_CHILD, "1")
             // A remote target needs a portable worker; any existing file
             // satisfies the preflight so the test reaches provisioning.
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .env("GH_TOKEN", "test-token")

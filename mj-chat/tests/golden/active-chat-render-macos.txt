@@ -232,15 +232,15 @@ transcript before prompt=true prompt hit=Some(PromptInput)
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ × Overlaid dialog ───────────────────────────────────────────────────────────────────────────────╮
 │Visible dialog message                                                                            │
-│                                       Submit these answers                                       │
+│                                                                                                  │
 │  Answer & Next     Previous     Cancel                                                           │
 │                                                                                                  │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 Transcript rect=(2, 1, 96, 14)
-ModalBody rect=(1, 18, 98, 1)
-ElicitationMessage rect=(1, 17, 98, 1)
+ModalBody rect=(1, 19, 98, 0)
+ElicitationMessage rect=(1, 17, 98, 2)
 transcript above message=true prompt hidden=true message hit=Some(ElicitationMessage)
 footer=Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
@@ -263,14 +263,14 @@ footer=Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ × Custom title ──────────────────────────────────────────────────────────────╮
 │One short question                                                            │
-│                             Submit these answers                             │
+│                                                                              │
 │  Answer & Next     Previous     Cancel                                       │
 │                                                                              │
 │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 Transcript rect=(2, 1, 76, 14)
-ElicitationMessage rect=(1, 17, 78, 1)
+ElicitationMessage rect=(1, 17, 78, 2)
 natural question height=7 actual=7 transcript taller than message=true
 
 === tall elicitation is capped without overlap (80x24) ===

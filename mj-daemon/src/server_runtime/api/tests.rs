@@ -3455,7 +3455,7 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
     let state: Arc<dyn ExportRuntime> = exports.clone();
     let sessions = remote.control.clone();
     let row = pending[0].clone();
-    let delivery = tokio::spawn(async move {
+    let delivery = mj_core::runtime::spawn(async move {
         crate::daemon::mailbox_delivery::deliver_mailbox_event(
             state,
             &sessions,
@@ -3679,15 +3679,16 @@ async fn send_to_registered_child_before_attachment_queues_mailbox_without_a_tur
     let _writer = mj_controller::database::install_isolated_test_writer();
     let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
     let registration = manager.control.clone();
-    let registration =
-        tokio::task::spawn_blocking(move || registration.register_starting_blocking("child-1"))
-            .await
-            .unwrap()
-            .unwrap();
+    let registration = mj_core::runtime::spawn_blocking(move || {
+        registration.register_starting_blocking("child-1")
+    })
+    .await
+    .unwrap()
+    .unwrap();
     // Publish the child only after the manager owns its launch. No target or
     // actor is ever attached: this makes the startup window deterministic.
     store_parent_and_child("child-1");
-    tokio::task::spawn_blocking(move || registration.publish())
+    mj_core::runtime::spawn_blocking(move || registration.publish())
         .await
         .unwrap()
         .unwrap();
@@ -3749,12 +3750,12 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
     let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
     let owner = manager.control.clone();
     let registration =
-        tokio::task::spawn_blocking(move || owner.register_starting_blocking("child-1"))
+        mj_core::runtime::spawn_blocking(move || owner.register_starting_blocking("child-1"))
             .await
             .unwrap()
             .unwrap();
     store_parent_and_child("child-1");
-    tokio::task::spawn_blocking(move || registration.publish())
+    mj_core::runtime::spawn_blocking(move || registration.publish())
         .await
         .unwrap()
         .unwrap();
@@ -3799,7 +3800,7 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
             Box::pin(async move {
                 let route = self.inner.parent_message_route(id).await?;
                 let failed = self.failed.clone();
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     mj_controller::database::save_startup_cleanup_outcome(&failed, true)
                 })
                 .await??;
@@ -3914,10 +3915,12 @@ async fn recovered_child_create_queues_new_messages_before_attachment() {
     mj_controller::database::save_startup_cleanup_outcome(&child, false).unwrap();
     let first = mj_controller::session_manager::spawn_session_manager().unwrap();
     let owner = first.control.clone();
-    tokio::task::spawn_blocking(move || owner.register_starting_blocking("child-1")?.publish())
-        .await
-        .unwrap()
-        .unwrap();
+    mj_core::runtime::spawn_blocking(move || {
+        owner.register_starting_blocking("child-1")?.publish()
+    })
+    .await
+    .unwrap()
+    .unwrap();
     let request = mj_core::subagent::SubagentToolRequest {
         originating_command_id: None,
         request_id: "before-daemon-replacement".into(),
@@ -3999,12 +4002,13 @@ async fn startup_retry_preserves_parent_message_and_launch_registration() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
     let owner = manager.control.clone();
-    let held = tokio::task::spawn_blocking(move || owner.register_starting_blocking("child-1"))
-        .await
-        .unwrap()
-        .unwrap();
+    let held =
+        mj_core::runtime::spawn_blocking(move || owner.register_starting_blocking("child-1"))
+            .await
+            .unwrap()
+            .unwrap();
     store_parent_and_child("child-1");
-    tokio::task::spawn_blocking(move || held.publish())
+    mj_core::runtime::spawn_blocking(move || held.publish())
         .await
         .unwrap()
         .unwrap();
@@ -4113,11 +4117,12 @@ async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication
     let _writer = mj_controller::database::install_isolated_test_writer();
     let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
     let owner = manager.control.clone();
-    let registration =
-        tokio::task::spawn_blocking(move || owner.register_starting_blocking("precommit-abort"))
-            .await
-            .unwrap()
-            .unwrap();
+    let registration = mj_core::runtime::spawn_blocking(move || {
+        owner.register_starting_blocking("precommit-abort")
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert!(matches!(
         manager
             .control
@@ -4145,7 +4150,7 @@ async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication
     ] {
         let owner = manager.control.clone();
         let mut registration = Some(
-            tokio::task::spawn_blocking(move || owner.register_starting_blocking(id))
+            mj_core::runtime::spawn_blocking(move || owner.register_starting_blocking(id))
                 .await
                 .unwrap()
                 .unwrap(),
@@ -4153,7 +4158,7 @@ async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication
         store_parent_and_child(id);
         if transition == "after" {
             let held = registration.take().unwrap();
-            tokio::task::spawn_blocking(move || held.publish())
+            mj_core::runtime::spawn_blocking(move || held.publish())
                 .await
                 .unwrap()
                 .unwrap();
@@ -4171,7 +4176,7 @@ async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication
         // Test both the ordinary feed transition and a delayed handover after
         // the entire failed/removed lifetime has coalesced in the feed.
         if let Some(held) = registration {
-            tokio::task::spawn_blocking(move || held.publish())
+            mj_core::runtime::spawn_blocking(move || held.publish())
                 .await
                 .unwrap()
                 .unwrap();
@@ -5287,7 +5292,7 @@ async fn queued_input_waits_for_initial_prompt_with_a_legacy_worker() {
     let exports = ParkingExports::new(SessionState::Running, None);
     let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
     let startup_id = hold_child_start(&backend);
-    let mut pending = tokio::spawn({
+    let mut pending = mj_core::runtime::spawn({
         let backend = backend.clone();
         async move { send_input(&backend, "follow-up").await }
     });
@@ -5332,7 +5337,7 @@ async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
         let exports = ParkingExports::new(SessionState::Running, None);
         let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
         let startup_id = hold_child_start(&backend);
-        let mut pending = tokio::spawn({
+        let mut pending = mj_core::runtime::spawn({
             let backend = backend.clone();
             async move { send_input(&backend, "must not run").await }
         });
@@ -6036,7 +6041,7 @@ async fn a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay
     let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
     let state: Arc<dyn ExportRuntime> = exports.clone();
     let sessions = remote.control.clone();
-    let delivery = tokio::spawn(async move {
+    let delivery = mj_core::runtime::spawn(async move {
         crate::daemon::mailbox_delivery::deliver_mailbox_event(
             state,
             &sessions,
@@ -7403,7 +7408,7 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
         let control = remote.control.clone();
         let exports = exports.clone();
         let event = event.clone();
-        let delivery = tokio::spawn(async move {
+        let delivery = mj_core::runtime::spawn(async move {
             crate::daemon::mailbox_delivery::deliver_mailbox_event(
                 exports, &control, "parent-1", event, false,
             )
@@ -7786,7 +7791,10 @@ async fn forced_refresh_uses_the_new_default_for_the_allowlist() {
         assert_eq!(calls.first(), Some(&None));
         assert_eq!(choices.model, selected.or(Some("new-default".into())));
         choices.model = default;
-        let choices = choices.restricted_to(&["allowed".into()]);
+        let choices = choices.restricted_to(&mj_core::config::ModelOffer {
+            models: vec!["allowed".into()],
+            ..Default::default()
+        });
         assert_eq!(
             choices
                 .models

@@ -1,8 +1,6 @@
 //! Launch settings and private MCP configuration for reviewer child sessions.
 
-use std::path::Path;
-
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::Controller;
 use super::worker_binary::bridge_launch;
@@ -67,75 +65,6 @@ impl Controller {
     }
 }
 
-/// Writes `servers` into the staged profile of a harness that reads its MCP
-/// configuration from disk.
-///
-/// Claude Code reads `mcpServers` from `.claude.json` in its config directory;
-/// Kimi reads `mcpServers` from `mcp.json` in its home, and needs the runtime
-/// id its own schema carries. Both files are the reviewer's private copy, so
-/// nothing here can reach the user's own configuration.
-pub(super) fn configure_staged_review_mcp(
-    harness: mj_core::config::HarnessKind,
-    profile_stage: &Path,
-    servers: &[ReviewMcpServer],
-) -> Result<()> {
-    let Some(file) = harness.mcp_config_file() else {
-        bail!("{harness:?} does not read MCP servers from its profile");
-    };
-    let kimi = harness == mj_core::config::HarnessKind::Kimi;
-    let path = profile_stage.join(file);
-    let mut document = match std::fs::read(&path) {
-        Ok(body) => serde_json::from_slice::<serde_json::Value>(&body)
-            .with_context(|| format!("parse staged reviewer configuration {}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            serde_json::Value::Object(serde_json::Map::new())
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read staged reviewer configuration {}", path.display()));
-        }
-    };
-    let root = document.as_object_mut().with_context(|| {
-        format!(
-            "staged reviewer configuration {} must contain a JSON object",
-            path.display()
-        )
-    })?;
-    let configured = root
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-        .as_object_mut()
-        .with_context(|| {
-            format!(
-                "mcpServers in staged reviewer configuration {} must be a JSON object",
-                path.display()
-            )
-        })?;
-    for server in servers {
-        let mut entry = serde_json::json!({
-            "command": server.command,
-            "args": server.args,
-        });
-        if kimi {
-            let object = entry
-                .as_object_mut()
-                .expect("the server entry is a JSON object");
-            object.insert("transport".into(), "stdio".into());
-            object.insert("runtime_id".into(), "local".into());
-        } else {
-            let object = entry
-                .as_object_mut()
-                .expect("the server entry is a JSON object");
-            object.insert("type".into(), "stdio".into());
-        }
-        configured.insert(server.name.clone(), entry);
-    }
-    let mut body = serde_json::to_vec_pretty(&document)?;
-    body.push(b'\n');
-    mj_core::config::atomic_write(&path, &body)
-        .with_context(|| format!("write staged reviewer configuration {}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +72,7 @@ mod tests {
     use mj_core::config::{Config, HarnessKind, HarnessProfile, TargetTemplate};
     use mj_core::state::{SessionState, State};
     use std::collections::BTreeMap;
+    use std::path::Path;
     const SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
     fn fixture(directory: &Path, locator: mj_core::state::TargetLocator) -> (Controller, String) {
         let session_id = SESSION_ID;

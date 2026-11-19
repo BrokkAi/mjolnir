@@ -29,7 +29,7 @@ impl DaemonConnector {
         if let Some(connector) = shared.upgrade() {
             return Ok(connector);
         }
-        let placement = tokio::task::spawn_blocking(|| {
+        let placement = mj_core::runtime::spawn_blocking(|| {
             DaemonConfig::load_placement(&mj_core::config::config_path())
         })
         .await
@@ -100,7 +100,7 @@ impl DaemonConnector {
         if self.is_ssh() {
             return self.remote(DiscoveryIntent::Existing, None).await;
         }
-        let metadata = tokio::task::spawn_blocking(super::read_metadata)
+        let metadata = mj_core::runtime::spawn_blocking(super::read_metadata)
             .await
             .context("read daemon metadata task failed")??;
         DaemonClient::connect(metadata).await

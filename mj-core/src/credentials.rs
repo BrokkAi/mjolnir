@@ -721,7 +721,7 @@ pub async fn read_login_under_native_lock<T: Send + 'static>(
         }
     };
     match CredentialWriteGuard::acquire_within(kind, &marker, lock_wait).await {
-        Ok(guard) => tokio::task::spawn_blocking(move || {
+        Ok(guard) => crate::runtime::spawn_blocking(move || {
             let value = read();
             drop(guard);
             value

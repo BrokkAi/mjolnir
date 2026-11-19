@@ -838,7 +838,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let controller = waking_controller(root.path(), 60_000);
         let executor = Arc::new(WakeTarget::new());
-        let waking = tokio::spawn({
+        let waking = mj_core::runtime::spawn({
             let executor = executor.clone();
             async move {
                 controller
@@ -1055,7 +1055,7 @@ mod tests {
         *executor.racer.lock().unwrap() = Some((handle, tokio::runtime::Handle::current()));
         // What the daemon's target refresher does: once the store says the
         // child is parked, the session manager no longer holds it.
-        let refresher = tokio::spawn(async move {
+        let refresher = mj_core::runtime::spawn(async move {
             while crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap()
                 != Some(SessionState::Parked)
             {
@@ -1151,7 +1151,7 @@ mod tests {
             .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
             .await
             .unwrap();
-        let refresher = tokio::spawn(async move {
+        let refresher = mj_core::runtime::spawn(async move {
             while crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap()
                 != Some(SessionState::Error)
             {

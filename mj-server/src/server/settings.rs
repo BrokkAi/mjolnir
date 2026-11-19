@@ -112,7 +112,7 @@ pub(super) async fn read_settings(
     State(state): State<ServerState>,
 ) -> Result<Json<SettingsDocument>, ApiError> {
     let capabilities = capabilities(&state);
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let config = Config::load().map_err(|error| unreadable(format!("{error:#}")))?;
         Ok(document(&config, &[], &capabilities))
     })
@@ -232,7 +232,7 @@ pub(super) async fn render_settings_page(
     let capabilities = capabilities(&state);
     let backend = state.subagent.clone();
     // Discovery reads the configuration file.
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let mut draft = request.draft;
         let unreachable = discover(&mut draft, &capabilities, backend.as_deref());
         let page =
@@ -263,7 +263,7 @@ pub(super) async fn edit_settings(
     }
     // Discovery reads the configuration file, and an edit may expand `~`
     // against this user's home directory.
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let mut before = request.draft;
         let unreachable = discover(&mut before, &capabilities, None);
         let mut draft = before.clone();
@@ -306,7 +306,7 @@ async fn autoconfigure_settings(
         .subagent
         .clone()
         .ok_or_else(|| ApiError::bad_request("Reviewer discovery is unavailable."))?;
-    let (mut draft, config, incoming) = tokio::task::spawn_blocking(move || {
+    let (mut draft, config, incoming) = mj_core::runtime::spawn_blocking(move || {
         let incoming = request.draft.clone();
         let mut draft = request.draft;
         let stored =
@@ -449,7 +449,7 @@ async fn autoconfigure_settings(
     hidden::rehide_restored(&mut draft, &incoming);
     let snapshot = capabilities(&state);
     let backend = state.subagent.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         discover(&mut draft, &snapshot, backend.as_deref());
         let page = render(&draft, &["review".into()], None).map_err(ApiError::not_found)?;
         Ok(SettingsEditResponse {
@@ -497,7 +497,7 @@ async fn save_draft_settings(
         draft,
         page,
     } = request;
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let current = Config::load().map_err(|error| unreadable(format!("{error:#}")))?;
         let stored = serde_json::to_value(&current).map_err(unreadable)?;
         let mut draft = draft;

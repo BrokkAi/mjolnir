@@ -48,7 +48,7 @@ pub(crate) async fn resolve_workspace(
     let legacy_name = GoPreferences::workspace_name(&mode.directory);
     let dashboard_name = crate::workspace_name_for_directory(&mode.directory);
     let this_directory = mode.directory.clone();
-    let bound_elsewhere = tokio::task::spawn_blocking(move || {
+    let bound_elsewhere = mj_core::runtime::spawn_blocking(move || {
         GoPreferences::load(&GoPreferences::path()).map(|preferences| {
             preferences
                 .workspaces()
@@ -94,7 +94,7 @@ pub(crate) async fn resolve_workspace(
     // session it reuses, and is stored apart from the folder's Go recipe.
     let directory = mode.directory.clone();
     let saved_id = id.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         GoPreferences::bind_workspace(&GoPreferences::path(), directory, saved_id)
     })
     .await

@@ -18,7 +18,7 @@ fn report(id: &str) -> SubagentToolRequest {
 
 async fn call(endpoint: SubagentEndpoint, request: SubagentToolRequest) -> serde_json::Value {
     let (mut client, server) = UnixStream::pair().unwrap();
-    let handler = tokio::spawn(serve_one(server, endpoint));
+    let handler = mj_core::runtime::spawn(serve_one(server, endpoint));
     client
         .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
         .await
@@ -58,7 +58,7 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
     endpoint.subagent_kind = Some(SubagentKind::Worker);
     let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let http = tokio::spawn(async move {
+    let http = mj_core::runtime::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = BufReader::new(socket);
         let mut length = 0;
@@ -110,10 +110,10 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
                 .is_none()
         );
     }
-    let first = tokio::spawn(call(endpoint.clone(), report("first")));
+    let first = mj_core::runtime::spawn(call(endpoint.clone(), report("first")));
     let evidence = seen_rx.await.unwrap();
     println!("HANDBACK_WORKER_BODY={}", evidence);
-    let retry = tokio::spawn(call(endpoint.clone(), report("first")));
+    let retry = mj_core::runtime::spawn(call(endpoint.clone(), report("first")));
     let retry_gate_refs = Arc::strong_count(&endpoint.handback_gate);
     loop {
         if Arc::strong_count(&endpoint.handback_gate) > retry_gate_refs {
@@ -129,7 +129,7 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
     // Both state owners remain available while classification is awaiting HTTP.
     let _state = relay.lock().unwrap().operational_state();
     // Hard-won: 2afc06c9a: a concurrent handback with another request ID was delivered while the first check was pending
-    let different = tokio::spawn(call(endpoint.clone(), report("different")));
+    let different = mj_core::runtime::spawn(call(endpoint.clone(), report("different")));
     let different_gate_refs = Arc::strong_count(&endpoint.handback_gate);
     loop {
         if Arc::strong_count(&endpoint.handback_gate) > different_gate_refs {
@@ -188,7 +188,7 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
             .requests
             .contains_key("first")
     );
-    let second = tokio::spawn(call(endpoint.clone(), report("second")));
+    let second = mj_core::runtime::spawn(call(endpoint.clone(), report("second")));
     let mut changes = endpoint.generations();
     loop {
         if endpoint
@@ -247,7 +247,7 @@ async fn slow_handback_glide_delivers_unchecked_and_consumes_check() {
     let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
     endpoint.relay = Some(Arc::new(RelayCell::new(owner)));
     endpoint.subagent_kind = Some(SubagentKind::Worker);
-    let http = tokio::spawn(async move {
+    let http = mj_core::runtime::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = BufReader::new(socket);
         let mut length = 0;
@@ -267,7 +267,7 @@ async fn slow_handback_glide_delivers_unchecked_and_consumes_check() {
         // The caller has already delivered unchecked; no response is needed.
     });
     let started = Instant::now();
-    let first = tokio::spawn(call(endpoint.clone(), report("slow")));
+    let first = mj_core::runtime::spawn(call(endpoint.clone(), report("slow")));
     let mut changes = endpoint.generations();
     loop {
         if endpoint.state.lock().unwrap().requests.contains_key("slow") {

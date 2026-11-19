@@ -32,6 +32,7 @@ const SCOPED_VIEWS: usize = 32;
 impl RuntimeHistory {
     fn cursor(&self) -> RuntimeCursor {
         RuntimeCursor {
+            alert_sequence: 0,
             incarnation: self.incarnation.clone(),
             sequence: self.sequence,
             subagent_parents: Default::default(),
@@ -410,17 +411,84 @@ impl RuntimeState {
         // during capture remains pending, so attachment cannot lose its wakeup.
         let mut revisions = self.revisions.subscribe();
         revisions.borrow_and_update();
-        let mut current = self.capture_runtime()?;
-        current.subagent_parents = subagent_parents.clone();
-        if wait && cursor.as_ref() == Some(&current) {
-            let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
+        let mut may_wait = wait;
+        loop {
             self.capture_runtime()?;
+            let (mut frame, same_runtime, metadata) = {
+                let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+                let current = history.cursor();
+                let same_runtime = cursor.as_ref().is_some_and(|cursor| {
+                    cursor.incarnation == current.incarnation
+                        && cursor.sequence == current.sequence
+                        && cursor.subagent_parents == subagent_parents
+                });
+                let metadata = history.full.metadata.clone();
+                let mut frame =
+                    history.frame_for_subagent_parents(cursor.as_ref(), &subagent_parents);
+                if matches!(frame, RuntimeFrame::ResetRequired) {
+                    let mut cursor = history.cursor();
+                    cursor.subagent_parents = subagent_parents.clone();
+                    let projection = history
+                        .scoped(cursor.sequence, &subagent_parents)
+                        .context("current runtime scope")?
+                        .projection
+                        .clone();
+                    frame = RuntimeFrame::Snapshot {
+                        cursor,
+                        projection: Box::new(projection),
+                    };
+                }
+                (frame, same_runtime, metadata)
+            };
+            // A frozen frame can receive a newer alert frontier, never an older
+            // frontier paired with a newer runtime cursor. Subscribe before both.
+            let after = cursor.as_ref().map(|cursor| cursor.alert_sequence);
+            let read = mj_controller::web_push::blocking(move || {
+                mj_controller::database::alert_events_since(after)
+            })
+            .await;
+            // An unreadable alert ledger must not stop runtime updates. A client
+            // that already holds a frontier keeps it, with no events, and gets
+            // them on a later request once the ledger reads again. A fresh
+            // attach has no frontier to keep, and its read touches only the
+            // sequence, so a failure there means the store itself is unreadable.
+            let (high, events) = match (read, after) {
+                (Ok(read), _) => read,
+                (Err(error), Some(after)) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        after,
+                        "alert events could not be read; serving runtime updates without them"
+                    );
+                    (after, Vec::new())
+                }
+                (Err(error), None) => return Err(error),
+            };
+            if may_wait && same_runtime && after == Some(high) {
+                let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
+                may_wait = false;
+                continue;
+            }
+            match &mut frame {
+                RuntimeFrame::Snapshot { cursor, projection } => {
+                    cursor.alert_sequence = high;
+                    projection.metadata.alert_high_sequence = high;
+                    projection.metadata.alert_events = events;
+                }
+                RuntimeFrame::Delta {
+                    cursor, changes, ..
+                } => {
+                    cursor.alert_sequence = high;
+                    if changes.metadata.is_some() || after != Some(high) {
+                        let metadata = changes.metadata.get_or_insert(metadata);
+                        metadata.alert_high_sequence = high;
+                        metadata.alert_events = events;
+                    }
+                }
+                RuntimeFrame::ResetRequired => {}
+            }
+            return Ok(frame);
         }
-        Ok(self
-            .feed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .frame_for_subagent_parents(cursor.as_ref(), &subagent_parents))
     }
 }
 
@@ -428,6 +496,556 @@ impl RuntimeState {
 mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
+
+    // Hard-won: 751b46ebb: a partial text-read failure cached the observation and prevented retries.
+    // Hard-won: 78a59a943: one unreadable notification body stopped the observer and daemon.
+    // Hard-won: eb348fefb: deferred observations never resumed after a handoff lapsed without a revision.
+    // Hard-won: 6b12ea8ea: transcript-only revisions repeatedly submitted notification writes.
+    // Hard-won: eb00602a0: notification observations could queue writes after handoff drained.
+    #[tokio::test]
+    async fn alert_events_cross_the_protocol_108_feed_and_resume_after_restart() {
+        const CHILD: &str = "MJ_TEST_ALERT_EVENTS_FEED";
+        const TEST: &str = "alert_events_cross_the_protocol_108_feed_and_resume_after_restart";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), TEST),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "alert-events-108")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        assert_eq!(
+            mj_client::daemon::PROTOCOL_VERSION,
+            mj_client::daemon::ALERT_EVENTS_PROTOCOL
+        );
+        let log = mj_controller::test_log::CapturedLog::default();
+        tracing::subscriber::set_global_default(log.clone())
+            .expect("isolated observer log subscriber");
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let state = super::super::tests::test_runtime_state();
+        let mut config = super::super::tests::runtime_test_config();
+        config.phone.enabled = false;
+        state.owner().install_config(config);
+        assert!(
+            !state
+                .runtime_publication()
+                .unwrap()
+                .metadata
+                .config
+                .phone
+                .enabled
+        );
+        let mut publication = RuntimeProjection::default();
+        publication.metadata.notification_cards = Some(Default::default());
+        mj_controller::web_push::blocking(move || {
+            mj_controller::database::notification_reconcile(publication)
+        })
+        .await
+        .unwrap();
+        let mut replica = RuntimeReplica::default();
+        replica
+            .apply(state.runtime_changes(None, false).await.unwrap())
+            .unwrap();
+        let attached = replica.cursor.clone();
+        let mut publication = RuntimeProjection::default();
+        publication.metadata.notification_cards =
+            Some(mj_core::snapshot_map::SnapshotMap::from([(
+                "parent".into(),
+                mj_client::runtime_feed::NotificationCard {
+                    since_ms: 1,
+                    badge: mj_core::attention::NotificationKind::NeedsInput,
+                    entries: vec![],
+                    dismissal: None,
+                    holder: Some("child".into()),
+                    form: Some(mj_client::runtime_feed::CardForm {
+                        source: mj_client::runtime_feed::CardFormSource::Elicitation,
+                        raised_at_ms: 1,
+                        request_id: "elicitation-1".into(),
+                        message: "Choose a branch".into(),
+                    }),
+                },
+            )]));
+        mj_controller::web_push::blocking(move || {
+            mj_controller::database::notification_reconcile(publication)
+        })
+        .await
+        .unwrap();
+        // Alert publication may race the runtime snapshot: advancing the alert
+        // frontier is valid even when the runtime sequence has not changed.
+        // The existing server long-poll expires after 30 seconds. A committed
+        // alert must return before that expiry, even without a runtime revision.
+        let frame = tokio::time::timeout(
+            Duration::from_secs(30),
+            state.runtime_changes(attached.clone(), true),
+        )
+        .await
+        .expect("a committed alert must not wait for long-poll expiry")
+        .unwrap();
+        let wire = serde_json::to_vec(&frame).unwrap();
+        replica
+            .apply(serde_json::from_slice(&wire).unwrap())
+            .unwrap();
+        let events = &replica.projection.metadata.alert_events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].destination, "child");
+        assert_eq!(events[0].text, "Choose a branch");
+        let high = replica.projection.metadata.alert_high_sequence;
+        // Publication, not the terminal, excludes managed children and muted rows.
+        let mut hidden = RuntimeProjection::default();
+        hidden.metadata.config = super::super::tests::runtime_test_config().into();
+        let mut record =
+            super::super::tests::runtime_test_session("hidden", "workspace", SessionState::Running);
+        hidden.records.insert("hidden".into(), record.clone());
+        let mut worker = mj_core::relay::RelaySnapshot::new("hidden".into()).operational_state();
+        worker.relay_protocol_version = Some(mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL);
+        worker.notification_stack = mj_core::attention::NotificationStack {
+            revision: 10,
+            entries: vec![mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 1,
+                completed_ordinal: 10,
+                kind: mj_core::attention::NotificationKind::Important,
+                message: mj_core::attention::EntryMessage::None,
+            }],
+        }
+        .into();
+        let mut view = RuntimeSessionView::from_managed(
+            "hidden".into(),
+            mj_client::session::ManagedSessionView {
+                connected: true,
+                ..Default::default()
+            },
+        );
+        view.operational = Some(worker.into());
+        hidden.sessions.insert("hidden".into(), view);
+        hidden.subagents.insert(
+            "hidden".into(),
+            super::super::tests::runtime_test_subagent("hidden", "parent").into(),
+        );
+        super::super::attention::update(&RuntimeProjection::default(), &mut hidden, None);
+        assert!(
+            hidden
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        mj_controller::web_push::blocking({
+            let hidden = hidden.clone();
+            move || mj_controller::database::push_reconcile(hidden)
+        })
+        .await
+        .unwrap();
+        let previous = hidden.clone();
+        hidden.subagents.clear();
+        super::super::attention::update(&previous, &mut hidden, None);
+        assert!(
+            hidden
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .contains_key("hidden"),
+            "the same item is visible when it belongs to a top-level session"
+        );
+        let previous = hidden.clone();
+        record.notifications_ignored = true;
+        hidden.records.insert("hidden".into(), record);
+        super::super::attention::update(&previous, &mut hidden, None);
+        assert!(
+            hidden
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        let mut served_record = hidden.records["hidden"].clone();
+        served_record.notifications_ignored = false;
+        let served_view = hidden.sessions["hidden"].clone();
+        mj_controller::web_push::blocking(move || mj_controller::database::push_reconcile(hidden))
+            .await
+            .unwrap();
+        assert_eq!(
+            mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
+                .await
+                .unwrap()
+                .0,
+            high
+        );
+        replica
+            .apply(
+                state
+                    .runtime_changes(replica.cursor.clone(), false)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        // The replacement daemon has no runtime history for the old cursor.
+        let replacement = super::super::tests::test_runtime_state();
+        let resumed = replacement
+            .runtime_changes(replica.cursor.clone(), false)
+            .await
+            .unwrap();
+        replica.apply(resumed).unwrap();
+        assert_eq!(replica.projection.metadata.alert_high_sequence, high);
+        assert!(replica.projection.metadata.alert_events.is_empty());
+        // A client disconnected before the event catches up through a snapshot.
+        let resumed = replacement.runtime_changes(attached, false).await.unwrap();
+        let mut disconnected = RuntimeReplica::default();
+        disconnected.apply(resumed.clone()).unwrap();
+        assert_eq!(disconnected.projection.metadata.alert_events.len(), 1);
+        replica.apply(resumed).unwrap();
+        assert!(
+            replica.projection.metadata.alert_events.is_empty(),
+            "an acknowledged batch must not replay on replacement snapshots"
+        );
+        let mut fresh = RuntimeReplica::default();
+        fresh
+            .apply(replacement.runtime_changes(None, false).await.unwrap())
+            .unwrap();
+        assert_eq!(fresh.projection.metadata.alert_high_sequence, high);
+        assert!(fresh.projection.metadata.alert_events.is_empty());
+        let mut config = super::super::tests::runtime_test_config();
+        config.phone.enabled = false;
+        assert!(!config.phone.enabled);
+        state.owner().install_config(config);
+        let mut stored_record = served_record.clone();
+        stored_record.workspace_id = mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned();
+        mj_controller::web_push::blocking(move || {
+            mj_controller::database::save_session(&stored_record)?;
+            let connection = rusqlite::Connection::open(mj_controller::database::database_path())?;
+            connection.execute_batch("INSERT OR IGNORE INTO materialized_sessions(session_id) VALUES('hidden');
+                INSERT INTO materialized_transcript_items(session_id,stable_id,position,latest_content_event_ordinal,created_at_ms,last_changed_at_ms,body_json)
+                VALUES('hidden','agent:corrupt',1,12,1,1,'not-json');")?;
+            Ok(())
+        }).await.unwrap();
+        let mut served_view = served_view;
+        let mut worker = (**served_view.operational.as_ref().unwrap()).clone();
+        let mut stack = (*worker.notification_stack).clone();
+        stack.revision = 12;
+        stack
+            .entries
+            .push(mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 1,
+                completed_ordinal: 12,
+                kind: mj_core::attention::NotificationKind::Important,
+                message: mj_core::attention::EntryMessage::Found("agent:corrupt".into()),
+            });
+        worker.notification_stack = stack.into();
+        served_view.operational = Some(worker.into());
+        state.owner().edit_sessions(|sessions| {
+            sessions.insert("hidden".into(), served_record);
+        });
+        state.owner().sessions.insert("hidden".into(), served_view);
+        let mut revisions = state.revisions();
+        revisions.borrow_and_update();
+        let cancellation = CancellationToken::new();
+        let mut observer = mj_core::runtime::spawn(crate::daemon::push_delivery::run_alerts(
+            state.clone(),
+            cancellation.clone(),
+        ));
+        tokio::select! {
+            changed = revisions.changed() => { changed.unwrap(); },
+            result = &mut observer => panic!("one unreadable item must not stop the notification observer: {result:?}"),
+        }
+        let (_, events) = mj_controller::web_push::blocking(move || {
+            mj_controller::database::alert_events_since(Some(high))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "the standalone daemon service produces alerts with phone disabled"
+        );
+        assert!(
+            !observer.is_finished(),
+            "the observer keeps running after the item read failure"
+        );
+        assert!(
+            log.at(tracing::Level::WARN)
+                .iter()
+                .any(|line| line.contains("notification text")
+                    && line.contains("session=")
+                    && line.contains("hidden")
+                    && line.contains("identity=")
+                    && line.contains("agent:corrupt")),
+            "the warning names the failing item and session"
+        );
+        let undecided = mj_controller::web_push::blocking(|| {
+            let connection = rusqlite::Connection::open(mj_controller::database::database_path())?;
+            Ok(connection.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM alert_events WHERE identity=?1)",
+                [r#"["message","hidden","agent:corrupt"]"#],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+        assert!(
+            undecided,
+            "a failed item remains eligible for a later observation"
+        );
+        // Mark revisions seen before the repair, so the observer's recovery
+        // revision cannot be consumed before the ledger is checked.
+        revisions.borrow_and_update();
+        let before_repair =
+            mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
+                .await
+                .unwrap()
+                .0;
+        mj_controller::web_push::blocking(|| {
+            let connection = rusqlite::Connection::open(mj_controller::database::database_path())?;
+            let body = mj_core::transcript::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "Recovered question?"}})],
+                streaming: false,
+            };
+            connection.execute(
+                "UPDATE materialized_transcript_items SET body_json=?1 WHERE session_id='hidden' AND stable_id='agent:corrupt'",
+                [serde_json::to_string(&body)?],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        // Hard-won: 4bf70672c: an observation with an unreadable item waited for an unrelated revision, so an idle daemon never retried it.
+        // No revision is published here: the observer's own failure backoff must retry the repaired item.
+        loop {
+            tokio::select! {
+                changed = revisions.changed() => { changed.unwrap(); },
+                result = &mut observer => panic!("observer stopped before retrying repaired text: {result:?}"),
+            }
+            let (_, recovered) = mj_controller::web_push::blocking(move || {
+                mj_controller::database::alert_events_since(Some(before_repair))
+            })
+            .await
+            .unwrap();
+            if !recovered.is_empty() {
+                assert_eq!(recovered.len(), 1, "successful items must not alert again");
+                assert_eq!(recovered[0].text, "Recovered question?");
+                assert_eq!(
+                    recovered[0].identity,
+                    r#"["message","hidden","agent:corrupt"]"#
+                );
+                break;
+            }
+        }
+        // A failed write retries on the backoff even when no revision follows.
+        let high_before_failure =
+            mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
+                .await
+                .unwrap()
+                .0;
+        mj_controller::web_push::blocking(|| {
+            rusqlite::Connection::open(mj_controller::database::database_path())?.execute_batch(
+                "CREATE TRIGGER fail_retry_write BEFORE INSERT ON alert_events \
+                 BEGIN SELECT RAISE(ABORT, 'retry write failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut retried_view = state.owner().sessions.get("hidden").unwrap().clone();
+        let mut retried_worker = (**retried_view.operational.as_ref().unwrap()).clone();
+        let mut retried_stack = (*retried_worker.notification_stack).clone();
+        retried_stack.revision = 13;
+        retried_stack
+            .entries
+            .push(mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 2,
+                completed_ordinal: 13,
+                kind: mj_core::attention::NotificationKind::Important,
+                message: mj_core::attention::EntryMessage::None,
+            });
+        retried_worker.notification_stack = retried_stack.into();
+        retried_view.operational = Some(retried_worker.into());
+        state.owner().sessions.insert("hidden".into(), retried_view);
+        revisions.borrow_and_update();
+        state.publish_revision();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !log
+                .at(tracing::Level::WARN)
+                .iter()
+                .any(|line| line.contains("retry write failure"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the failed write is logged");
+        mj_controller::web_push::blocking(|| {
+            rusqlite::Connection::open(mj_controller::database::database_path())?
+                .execute_batch("DROP TRIGGER fail_retry_write;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // No further revision: only the backoff can commit the alert.
+        let committed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (_, events) = mj_controller::web_push::blocking(move || {
+                    mj_controller::database::alert_events_since(Some(high_before_failure))
+                })
+                .await
+                .unwrap();
+                if !events.is_empty() {
+                    break events;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the backoff retry commits without a new revision");
+        assert_eq!(committed.len(), 1);
+        assert!(!observer.is_finished());
+        cancellation.cancel();
+        observer.await.unwrap().unwrap();
+        let mut observer_inputs = crate::daemon::push_delivery::NotificationReconciler::default();
+        let mut streaming = state.runtime_publication().unwrap();
+        assert!(matches!(
+            observer_inputs.reconcile(streaming.clone()).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Observed(_)
+        ));
+        streaming
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("hidden")
+            .unwrap()
+            .entries[0]
+            .completed_ordinal += 1;
+        mj_controller::upgrade::gate().begin_draining();
+        let deferred_observation = observer_inputs.reconcile(streaming.clone()).await.unwrap();
+        assert_eq!(
+            deferred_observation,
+            crate::daemon::push_delivery::NotificationObservation::Deferred
+        );
+        let cancellation = CancellationToken::new();
+        revisions.borrow_and_update();
+        let before_resume = *revisions.borrow();
+        let mut resuming = Box::pin(crate::daemon::push_delivery::wait_for_notification_change(
+            deferred_observation,
+            &mut revisions,
+            &cancellation,
+            Duration::from_secs(1),
+        ));
+        assert!(futures::poll!(&mut resuming).is_pending());
+        mj_controller::upgrade::gate().expire_drain_for_test();
+        assert!(resuming.await.unwrap());
+        assert_eq!(
+            *revisions.borrow(),
+            before_resume,
+            "gate lapse resumes reconciliation without a runtime revision"
+        );
+        assert_eq!(
+            observer_inputs.reconcile(streaming.clone()).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Observed(true)
+        );
+        // A failed write is reported and retried by the next observation.
+        let mut failing = streaming.clone();
+        failing
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("hidden")
+            .unwrap()
+            .entries[0]
+            .completed_ordinal += 3;
+        let injected = |sql: &'static str| {
+            mj_controller::web_push::blocking(move || {
+                rusqlite::Connection::open(mj_controller::database::database_path())?
+                    .execute_batch(sql)?;
+                Ok(())
+            })
+        };
+        injected(
+            "CREATE TRIGGER fail_alert_write BEFORE INSERT ON alert_events \
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            observer_inputs.reconcile(failing.clone()).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Failed
+        );
+        assert!(
+            log.at(tracing::Level::WARN)
+                .iter()
+                .any(|line| line.contains("injected write failure")),
+            "the failed write is logged at WARN"
+        );
+        injected("DROP TRIGGER fail_alert_write;").await.unwrap();
+        assert_eq!(
+            observer_inputs.reconcile(failing.clone()).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Observed(true),
+            "a failed observation is not recorded, so the retry commits it"
+        );
+        streaming = failing;
+        mj_core::runtime::spawn_blocking(move || _writer.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        streaming.revision += 1;
+        let mut transcript = mj_core::state::MaterializedSession::empty("hidden");
+        transcript.applied_event_ordinal = 50;
+        streaming.transcripts.insert(
+            "hidden".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &transcript,
+                &mj_core::state::ProjectionWindow::default(),
+                1024,
+            ),
+        );
+        assert_eq!(
+            observer_inputs.reconcile(streaming).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Unchanged,
+            "streaming-only revisions must not submit work to the stopped writer"
+        );
+        let (before_drain, _) =
+            mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
+                .await
+                .unwrap();
+        let mut deferred = state.runtime_publication().unwrap();
+        deferred
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("hidden")
+            .unwrap()
+            .entries[0]
+            .completed_ordinal += 2;
+        mj_controller::upgrade::gate().begin_draining();
+        assert!(
+            mj_controller::web_push::blocking(move || {
+                mj_controller::database::notification_reconcile(deferred)
+            })
+            .await
+            .unwrap()
+            .is_none(),
+            "draining refuses another disposable notification write"
+        );
+        let (after_drain, _) =
+            mj_controller::web_push::blocking(|| mj_controller::database::alert_events_since(None))
+                .await
+                .unwrap();
+        assert_eq!(before_drain, after_drain);
+        assert!(
+            mj_controller::upgrade::gate().try_close(),
+            "refused reconciliation leaves no admission hold"
+        );
+        let cancellation = CancellationToken::new();
+        let observer = mj_core::runtime::spawn(crate::daemon::push_delivery::run_alerts(
+            state,
+            cancellation.clone(),
+        ));
+        cancellation.cancel();
+        observer.await.unwrap().unwrap();
+    }
 
     #[test]
     fn retained_cursors_replay_and_slow_or_replaced_clients_reset() {
@@ -444,6 +1062,7 @@ mod tests {
         replica.apply(history.frame(Some(&original))).unwrap();
         assert_eq!(replica.projection, next);
         let wrong = RuntimeCursor {
+            alert_sequence: 0,
             incarnation: "previous-daemon".into(),
             sequence: 1,
             subagent_parents: Default::default(),
@@ -513,6 +1132,7 @@ mod tests {
             SessionTailReply::NoTail
         );
         let replaced = RuntimeCursor {
+            alert_sequence: 0,
             incarnation: "previous-daemon".into(),
             sequence: held.sequence,
             subagent_parents: Default::default(),
@@ -522,6 +1142,7 @@ mod tests {
             SessionTailReply::ResetRequired
         );
         let pruned = RuntimeCursor {
+            alert_sequence: 0,
             sequence: 0,
             ..held
         };
@@ -551,8 +1172,16 @@ mod tests {
         ));
     }
 
+    // Hard-won: 70e0c821d: a fresh store converted to WAL while another connection migrated it failed with "database is locked".
     #[tokio::test]
     async fn draft_hydration_publishes_shared_capabilities_without_adopting_the_draft() {
+        if super::super::tests::isolate_runtime_feed_test(
+            module_path!(),
+            "draft_hydration_publishes_shared_capabilities_without_adopting_the_draft",
+        ) {
+            return;
+        }
+
         use mj_controller::profile_catalog::{ProfileCatalog, counting_probe, test_config};
         use mj_core::config::HarnessKind;
         use mj_core::profile_capabilities::CapabilityState;
@@ -605,8 +1234,16 @@ mod tests {
         assert_eq!(*replica.projection.metadata.config, Config::default());
     }
 
+    // Hard-won: c21e3b62b: transcript deltas unnecessarily resent all runtime metadata.
     #[tokio::test]
     async fn attaching_and_then_changing_owner_state_yields_an_incremental_frame() {
+        if super::super::tests::isolate_runtime_feed_test(
+            module_path!(),
+            "attaching_and_then_changing_owner_state_yields_an_incremental_frame",
+        ) {
+            return;
+        }
+
         let state = super::super::tests::test_runtime_state_with(Controller {
             config: super::super::tests::runtime_test_config(),
             state: Default::default(),
@@ -641,6 +1278,70 @@ mod tests {
             replica.projection.sessions["new"].attention,
             mj_core::attention::SessionAttention::Unreachable
         );
+        let mut streamed = mj_core::state::MaterializedSession::empty("new");
+        streamed.applied_event_ordinal = 1;
+        state.owner().transcripts.insert(
+            "new".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &streamed,
+                &mj_core::state::ProjectionWindow::default(),
+                1024,
+            ),
+        );
+        state.publish_revision();
+        replica
+            .apply(
+                state
+                    .runtime_changes(replica.cursor.clone(), false)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        streamed.applied_event_ordinal = 2;
+        streamed
+            .transcript
+            .push(Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: "agent:stream".into(),
+                position: 1,
+                latest_content_event_ordinal: Some(2),
+                created_at_ms: 0,
+                last_changed_at_ms: 1,
+                body: mj_core::transcript::TranscriptBody::Agent {
+                    chunks: vec![
+                        serde_json::json!({"content":{"type":"text","text":"streaming reply"}}),
+                    ],
+                    streaming: true,
+                },
+            }));
+        state.owner().transcripts.insert(
+            "new".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &streamed,
+                &mj_core::state::ProjectionWindow::default(),
+                1024,
+            ),
+        );
+        state.publish_revision();
+        let frame = state
+            .runtime_changes(replica.cursor.clone(), false)
+            .await
+            .unwrap();
+        let RuntimeFrame::Delta {
+            changes, cursor, ..
+        } = &frame
+        else {
+            panic!("expected streaming delta");
+        };
+        assert!(!changes.transcripts.is_empty());
+        assert!(
+            changes.metadata.is_none(),
+            "transcript-only deltas must not resend unchanged metadata"
+        );
+        assert_eq!(
+            cursor.alert_sequence,
+            replica.cursor.as_ref().unwrap().alert_sequence
+        );
+        replica.apply(frame).unwrap();
         let cursor = replica.cursor.clone();
         let mut config = (*replica.projection.metadata.config).clone();
         config.profiles.remove("codex");

@@ -71,7 +71,7 @@ pub async fn prepare_harness_launch(
         None
     };
     let (prepared_spec, prepared_environment) =
-        tokio::task::spawn_blocking(move || -> Result<_> {
+        mj_core::runtime::spawn_blocking(move || -> Result<_> {
             let before = environment.clone();
             super::tool_cache::prepare(&spec.cwd, &mut environment)?;
             spec.environment.extend(
@@ -104,7 +104,7 @@ pub async fn prepare_harness_launch(
     if let Some(managed) = &managed {
         spec.harness_lease = Some(managed.lease_path.clone());
     }
-    let (spec, environment) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (spec, environment) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
         let command = if spec.command.is_relative() && spec.command.components().count() > 1 {
             spec.cwd.join(&spec.command)
         } else {
@@ -186,7 +186,7 @@ pub(super) async fn freeze_node_entrypoints(
         launch.spec.command = node.clone();
     }
     let root = root.join("node-entrypoints");
-    let providers = tokio::task::spawn_blocking(move || -> Result<_> {
+    let providers = mj_core::runtime::spawn_blocking(move || -> Result<_> {
         let mut launchers = Vec::new();
         if !providers.is_empty() {
             std::fs::create_dir_all(&root)?;
@@ -297,7 +297,7 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
         )
         .join(".config"),
     };
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    mj_core::runtime::spawn_blocking(move || -> Result<()> {
         // The shared cache is optional. The controller reports why it could not
         // prepare the policy and starts the session without the mbx launchers,
         // so a policy that is absent here must not refuse the harness. Report

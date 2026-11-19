@@ -68,6 +68,31 @@ struct LifecycleAdmissionOptions {
     acceptance: Option<LifecycleAcceptance>,
 }
 
+/// A lifecycle's work with its closure and future types erased. The
+/// admission functions below are large, and as generic functions they were
+/// compiled again for each of the 109 closures passed to them; taking the work
+/// boxed, they are compiled once. The entry points box it.
+type LifecycleWork = Box<
+    dyn FnOnce(
+            Arc<RuntimeState>,
+            String,
+            Arc<AtomicBool>,
+            SessionAdmission,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<DaemonLifecycleResult>> + Send>,
+        > + Send,
+>;
+
+fn boxed_lifecycle_work<F, Fut>(work: F) -> LifecycleWork
+where
+    F: FnOnce(Arc<RuntimeState>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+{
+    Box::new(move |state, session_id, cancelled, admission| {
+        Box::pin(work(state, session_id, cancelled, admission))
+    })
+}
+
 impl RuntimeState {
     pub(super) async fn start_or_join_lifecycle<F, Fut>(
         self: &Arc<Self>,
@@ -190,9 +215,16 @@ impl RuntimeState {
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
-        self.admit_lifecycle_mode(session_id, kind, start, None, AdmissionMode::Replay, work)
-            .await
-            .map(|started| started.result)
+        self.admit_lifecycle_mode(
+            session_id,
+            kind,
+            start,
+            None,
+            AdmissionMode::Replay,
+            boxed_lifecycle_work(work),
+        )
+        .await
+        .map(|started| started.result)
     }
 
     pub(super) async fn admit_prepared_lifecycle<F, Fut>(
@@ -213,25 +245,22 @@ impl RuntimeState {
             start,
             acceptance,
             AdmissionMode::FreshRequest,
-            work,
+            boxed_lifecycle_work(work),
         )
         .await
     }
 
     // A typed future breaks the supervision cycle: a completed lifecycle may
     // start its deferred cleanup through this same admission entry.
-    fn admit_lifecycle_mode<F, Fut>(
+    fn admit_lifecycle_mode(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
         start: LifecycleStart,
         acceptance: Option<LifecycleAcceptance>,
         mode: AdmissionMode,
-        work: F,
+        work: LifecycleWork,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StartedLifecycle>> + Send + '_>>
-    where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
         Box::pin(async move {
             let mut revisions = self.revisions.subscribe();
@@ -419,19 +448,15 @@ impl RuntimeState {
         })
     }
 
-    fn admit_lifecycle_locked<F, Fut>(
+    fn admit_lifecycle_locked(
         self: &Arc<Self>,
         lifecycle_owner: &mut super::owner::RuntimeStateOwner,
         session_id: String,
         kind: LifecycleKind,
         start: LifecycleStart,
         options: LifecycleAdmissionOptions,
-        work: F,
-    ) -> Result<StartedLifecycle>
-    where
-        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>, SessionAdmission) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
-    {
+        work: LifecycleWork,
+    ) -> Result<StartedLifecycle> {
         let LifecycleAdmissionOptions {
             queued,
             mode,
@@ -660,7 +685,7 @@ impl RuntimeState {
                 };
                 let operation = work.take().expect("new lifecycle operation has work");
                 let completed_channel = result_rx.clone();
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     let _upgrade_work = LifecycleAdmission(upgrade_work);
                     let operation_state = state.clone();
                     let operation_id = operation_session_id.clone();

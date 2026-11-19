@@ -1318,7 +1318,7 @@ async fn a_rejected_login_is_judged_against_the_login_the_renewer_writes() {
         .unwrap();
     // While the lock is held, the answer is unknown, not "refused".
     assert_eq!(decide(Duration::from_millis(200)).await, None);
-    let decision = tokio::spawn(decide(Duration::from_secs(10)));
+    let decision = crate::runtime::spawn(decide(Duration::from_secs(10)));
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::fs::write(marker, claude_login_with_token("new")).unwrap();
     drop(renewer);

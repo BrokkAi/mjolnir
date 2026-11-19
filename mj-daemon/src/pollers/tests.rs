@@ -888,7 +888,7 @@ async fn another_daemons_claude_login_change_is_forwarded_to_policy() {
         ..Default::default()
     });
     let (sender, mut updates) = tokio::sync::mpsc::channel(4);
-    let loop_task = tokio::spawn(renew_claude_grant_when_due(
+    let loop_task = mj_core::runtime::spawn(renew_claude_grant_when_due(
         request.clone(),
         receiver,
         QUOTA_REFRESH_INTERVAL,
@@ -1258,7 +1258,7 @@ printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","e
     let started = credentials.with_file_name("started");
     let launcher = fake_claude(directory.path());
     let gate = mj_controller::upgrade::gate().clone();
-    let caller = tokio::spawn(async move {
+    let caller = mj_core::runtime::spawn(async move {
         mj_controller::quota::refresh_claude_grant(
             &request,
             mj_core::clock::epoch_millis(),
@@ -1851,7 +1851,7 @@ echo sampled
 async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (finish_tx, finish_rx) = std::sync::mpsc::channel();
-    let sample = tokio::spawn(collect_local_capacity_with(move || {
+    let sample = mj_core::runtime::spawn(collect_local_capacity_with(move || {
         started_tx.send(()).unwrap();
         // Dropping finish_tx on a test failure also releases this thread.
         finish_rx.recv().context("test sample was cancelled")?;
@@ -3337,7 +3337,7 @@ async fn only_the_apple_container_refresh_waits_for_its_startup() {
     let settled = tokio_util::sync::CancellationToken::new();
     let cancellation = tokio_util::sync::CancellationToken::new();
     let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
-    let apple = tokio::spawn(refresh_host_after_startup(
+    let apple = mj_core::runtime::spawn(refresh_host_after_startup(
         refresh(mj_controller::targets::ImageHost::AppleContainer),
         settled.clone(),
         cancellation.clone(),

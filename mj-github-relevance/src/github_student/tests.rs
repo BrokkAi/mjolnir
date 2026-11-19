@@ -233,7 +233,7 @@ async fn owner_reuses_loaded_cpu_across_health_and_preference_changes() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let cancel = CancellationToken::new();
     let shutdown = cancel.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         axum::serve(
             listener,
             Router::new()
@@ -346,7 +346,7 @@ async fn owner_reuses_loaded_cpu_across_health_and_preference_changes() {
         .join(&assets::Manifest::pinned().revision);
     let gpu = {
         let engine = engine.clone();
-        tokio::task::spawn_blocking(move || engine.cpu_probe(&directory))
+        mj_core::runtime::spawn_blocking(move || engine.cpu_probe(&directory))
             .await
             .unwrap()
             .unwrap()

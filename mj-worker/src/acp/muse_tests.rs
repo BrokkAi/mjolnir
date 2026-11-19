@@ -48,7 +48,6 @@ pub(crate) async fn native_muse_turn(
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -58,7 +57,7 @@ pub(crate) async fn native_muse_turn(
     };
     let (commands, receiver) = mpsc::channel(16);
     let (sender, mut events) = mpsc::channel(128);
-    let task = tokio::spawn(run(spec, receiver, sender));
+    let task = mj_core::runtime::spawn(run(spec, receiver, sender));
     let mut session_id = String::new();
     let mut reply = String::new();
     let stop_reason = loop {
@@ -238,7 +237,6 @@ for line in sys.stdin:
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -248,7 +246,7 @@ for line in sys.stdin:
     };
     let (commands, receiver) = mpsc::channel(16);
     let (sender, mut events) = mpsc::channel(128);
-    let runtime = tokio::spawn(run(spec, receiver, sender));
+    let runtime = mj_core::runtime::spawn(run(spec, receiver, sender));
     let mut configured = false;
     let mut warnings = Vec::new();
     while let Some(event) = tokio::time::timeout(Duration::from_secs(15), events.recv())
@@ -398,7 +396,6 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             harness: HarnessKind::Muse,
             execution_policy: policy,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -408,7 +405,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         };
         let (commands, receiver) = mpsc::channel(16);
         let (sender, mut events) = mpsc::channel(128);
-        let task = tokio::spawn(run(spec, receiver, sender));
+        let task = mj_core::runtime::spawn(run(spec, receiver, sender));
         loop {
             match next(&mut events).await {
                 RuntimeEvent::SessionStarted { resumed, .. } => {

@@ -193,8 +193,8 @@ pub(super) fn spawn_controller_reload_with(
     completed: tokio::sync::mpsc::UnboundedSender<ControllerReloaded>,
     load: impl FnOnce() -> Result<Controller> + Send + 'static,
 ) {
-    tokio::spawn(async move {
-        let result = match tokio::task::spawn_blocking(load).await {
+    mj_core::runtime::spawn(async move {
+        let result = match mj_core::runtime::spawn_blocking(load).await {
             Ok(result) => result.map_err(|error| format!("{error:#}")),
             Err(error) => Err(format!("controller reload task failed: {error}")),
         };
@@ -237,7 +237,7 @@ pub(super) fn request_daemon_controller_reload(
     daemon_runtime: Arc<RuntimeState>,
     reason: &'static str,
 ) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         if let Err(error) = daemon_runtime.reload_controller().await {
             tracing::warn!(
                 error = format!("{error:#}"),

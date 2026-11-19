@@ -17,21 +17,21 @@
 │                     │   Sessions                                                                                   │                     │
 │                     │   Code Review                     Off                                                        │                     │
 │                     │   Sub-agents                      Up to 6 at once                                            │                     │
-│                     │   Quota checks                    Auto · container when available                            │                     │
+│                     │   Quota checks                    Host                                                       │                     │
 │                     │   SessionWiki                     Keeps every session                                        │                     │
 │                     │   Web Access                      On · 127.0.0.1:3765                                        │                     │
 │                     │                                                                                              │                     │
 │                     │   Display                                                                                    │                     │
-│                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │                     │
-│                     │   Notifications                   Terminal                                                   │  ───────────────────╯
-│                     │   Advanced                        All off                                                    │  ───────────────────╮
+│                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ───────────────────╯
+│                     │   Notifications                   Terminal                                                   │  ───────────────────╮
+│                     │   Advanced                        All off                                                    │                     │
 │                     │                                                                                              │                     │
-│                     │   Privacy                                                                                    │                     │
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │   Other                                                                                      │                     │
-│                     │   GitHub events                   On · GitHub activity                                       │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │   Privacy                                                                                    │  ───────────────────╯
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │   Other                                                                                      │  ───────────────────╯
+│                     │   GitHub events                   On · GitHub activity                                       │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Save and Close                                                                             │                     │
@@ -157,7 +157,7 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
   │   Sub-agents                      Up to 6 at once                                            │
-  │   Quota checks                    Auto · container when available                            │
+  │   Quota checks                    Host                                                       │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -355,7 +355,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
   │   Sub-agents                      Up to 6 at once                                            │
-  │   Quota checks                    Auto · container when available                            │
+  │   Quota checks                    Host                                                       │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -753,32 +753,32 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
-│hel ──────────────────────────────────││                                                          │
-│› ■ ACP pretty name               ◇ ⋯ ││        Select a session to open its conversation.        │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                     ✦  M J O L N I R                     │
+│ Create   Open   Filter: _____________││                                                          │
+│hel ──────────────────────────────────││        Select a session to open its conversation.        │
+│› ■ ACP pretty name               ◇ ⋯ ││                                                          │
 │  Stopped  podman  codex-1            ││                                                          │
 │  │ No messages yet                   ││                                                          │
 │  │                                   ││                                                          │
-│                                      ││                                                          │
 │                                      ││                                                          │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────╮
 │                                      ││No conversation open.                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                         │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                         │
+│  claude-1: refreshing…                                                                           │
+│OPENAI                                                                                            │
+│  codex-1: refreshing…                                                                            │
+│  codex-2: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Settings saved. New sessions use these defaults. Web listener changes apply on its next start.
 rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35, 104, 77)
 

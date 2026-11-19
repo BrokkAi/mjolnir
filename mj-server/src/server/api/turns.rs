@@ -27,7 +27,7 @@ pub(super) async fn transcript_history(
     let page = backend(&state)?
         .transcript_history(session_id, before)
         .await?;
-    let response = tokio::task::spawn_blocking(move || {
+    let response = mj_core::runtime::spawn_blocking(move || {
         let entries = mj_client::transcript::history_entries(&page);
         serde_json::json!({"items": entries, "before": page.before, "frontier": page.frontier})
     })

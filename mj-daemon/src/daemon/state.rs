@@ -83,7 +83,7 @@ impl RuntimeState {
             .flatten();
         let profile_catalog = crate::review_host::SharedProfileCatalog::default();
         let reviewer_runtime = crate::review_host::SharedReviewerRuntime::default();
-        let review_host = TurnReviewHost::spawn_notifying(
+        let review_host = crate::review_host::spawn_notifying(
             session_manager.clone(),
             {
                 let installed = review_config.clone();
@@ -361,6 +361,7 @@ impl RuntimeState {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,
@@ -777,7 +778,7 @@ impl RuntimeState {
         self.revisions.allocate()
     }
 
-    pub(super) fn publish_revision(&self) -> u64 {
+    pub(crate) fn publish_revision(&self) -> u64 {
         self.revisions.publish()
     }
 
@@ -897,13 +898,15 @@ impl RuntimeState {
         mj_controller::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
-        tokio::task::spawn_blocking(move || mj_controller::controller::create_quick_bundle(&source))
-            .await
-            .map_err(|error| {
-                mj_controller::controller::QuickBundleFailure::Persistence(anyhow!(
-                    "bundle creation task panicked: {error}"
-                ))
-            })?
+        mj_core::runtime::spawn_blocking(move || {
+            mj_controller::controller::create_quick_bundle(&source)
+        })
+        .await
+        .map_err(|error| {
+            mj_controller::controller::QuickBundleFailure::Persistence(anyhow!(
+                "bundle creation task panicked: {error}"
+            ))
+        })?
     }
 
     /// Persist exactly the picker-selected repository set under the same
@@ -916,7 +919,7 @@ impl RuntimeState {
         mj_controller::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::create_bundle_from_sources(&sources)
         })
         .await
@@ -931,7 +934,7 @@ impl RuntimeState {
     /// then publish the exact config returned by the persisted mutation.
     pub async fn remove_project(&self, bundle_id: String) -> Result<()> {
         let mut inactivity = self.config_mutation.lock().await;
-        let config = tokio::task::spawn_blocking(move || {
+        let config = mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::remove_bundle(&bundle_id)
         })
         .await
@@ -958,7 +961,7 @@ impl RuntimeState {
         // Keep the read and publication together: a delayed read must not
         // publish an older list after a newer removal has been published.
         let _refresh = self.workspace_refresh.lock().await;
-        let workspaces = tokio::task::spawn_blocking(mj_controller::database::list_workspaces)
+        let workspaces = mj_core::runtime::spawn_blocking(mj_controller::database::list_workspaces)
             .await
             .context("daemon workspace refresh task panicked")??;
         self.publish_workspaces(workspaces);
@@ -1110,7 +1113,7 @@ impl RuntimeState {
         let drain_session = session_id.to_owned();
         // One owned future: abort+join also settles the producer before a
         // cancellation releases its durable command receipts.
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             use futures::FutureExt;
             let mut backoff = Duration::from_secs(1);
             let mut failed_rounds: u32 = 0;

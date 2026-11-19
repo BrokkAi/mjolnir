@@ -363,11 +363,12 @@ form) remember choices. `mj acp`, sub-agents and archive restores do not.
 When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
 usable profile and chooses the one offering the exact model and, when named,
 the exact effort. It ranks by quota headroom paced against each window's reset,
-using the saved default profile to break ties. Profiles whose subscription
-carries a five-hour quota window come after profiles without one, regardless of
-how much the window has left, so the windowed allowance is preserved for work
-that cannot be billed; a subscription known to be out of quota for the model
-comes last. If no configured profile
+using the saved default profile to break ties. A profile currently inside a
+five-hour quota window comes after included quota without one and profiles whose
+quota is unknown, but before paid credits and usage-priced profiles, which bill
+each request; a profile with no five-hour window running is ranked like any
+other subscription. A subscription known to be out of quota for the model comes
+last. If no configured profile
 supports that selection, the request fails without changing the requested
 model or effort. Supplying both
 `profile_id` and `model` pins the profile and validates the model and effort on

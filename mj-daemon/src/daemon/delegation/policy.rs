@@ -421,8 +421,10 @@ impl Policy {
     /// Tell every attached surface what the daemon knows about quota.
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
+        // The installed profile decides which Antigravity pools people see.
+        let surfaced = surface_quota_reports(&reports, &self.state.owner().controller().config);
         self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(&reports),
+            reports: surfaced,
             probing: self.probing.clone(),
             cycles: self.cycles,
         });
@@ -773,15 +775,22 @@ fn reconcile_quota_publications(
     changed
 }
 
-fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQuota> {
+/// What people see of each report. An Antigravity profile shows only the
+/// pools the installed profile uses; the stored report keeps every pool for
+/// selection and quota recovery.
+fn surface_quota_reports(
+    reports: &QuotaReportMap,
+    config: &mj_core::config::Config,
+) -> BTreeMap<String, ProfileQuota> {
     reports
         .iter()
         .filter_map(|(id, publication)| {
             publication.effective_report(id).map(|report| {
-                (
-                    id.clone(),
-                    mj_controller::quota::surface_quota_report(&report),
-                )
+                let mut surfaced = mj_controller::quota::surface_quota_report(&report);
+                if let Ok(profile) = config.named_profile(id) {
+                    surfaced.retain_antigravity_pools(&profile.antigravity_pools());
+                }
+                (id.clone(), surfaced)
             })
         })
         .collect()
@@ -946,7 +955,7 @@ mod tests {
             scan.start(old.clone()),
             Some(crate::daemon::QuotaRefreshIntent::ReconcileSources)
         );
-        let task = tokio::spawn(async {});
+        let task = mj_core::runtime::spawn(async {});
         let task_id = task.id();
         task.await.unwrap();
         scan.task_started(task_id);
@@ -973,7 +982,7 @@ mod tests {
             scan.start(config.clone()),
             Some(crate::daemon::QuotaRefreshIntent::Force)
         );
-        let task = tokio::spawn(async {});
+        let task = mj_core::runtime::spawn(async {});
         let task_id = task.id();
         task.await.unwrap();
         scan.task_started(task_id);
@@ -1212,10 +1221,39 @@ mod tests {
             }],
             ..report.clone()
         };
+        // An Antigravity profile with its third-party pool turned off: the
+        // stored report keeps both pools, people see only Gemini.
+        let pool_window =
+            |pool: mj_core::config::AntigravityQuotaPool| mj_controller::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(50),
+                duration_seconds: Some(604_800),
+                model_scope: Some(pool.model_scope().into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            };
+        let gemini = ProfileQuota {
+            profile_id: "gemini".into(),
+            harness: mj_core::config::HarnessKind::Antigravity,
+            windows: mj_core::config::AntigravityQuotaPool::ALL
+                .map(pool_window)
+                .to_vec(),
+            ..report.clone()
+        };
         let reports = BTreeMap::from([
             ("claude".to_owned(), report.clone()),
             ("codex".to_owned(), codex.clone()),
+            ("gemini".to_owned(), gemini.clone()),
         ]);
+        let mut config = mj_core::config::Config::default();
+        let mut gemini_profile = mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Antigravity,
+            "/profiles/gemini",
+        );
+        gemini_profile.third_party_models = false;
+        config.profiles.insert("gemini".into(), gemini_profile);
         let publications = reports
             .iter()
             .map(|(id, report)| {
@@ -1230,7 +1268,7 @@ mod tests {
             })
             .collect::<QuotaReportMap>();
         let snapshot = mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(&publications),
+            reports: surface_quota_reports(&publications, &config),
             ..Default::default()
         };
         let serialized = serde_json::to_vec(&snapshot).expect("serialize published snapshot");
@@ -1247,5 +1285,18 @@ mod tests {
             Some(17)
         );
         assert_eq!(snapshot.reports["codex"].windows.len(), 0);
+        assert_eq!(
+            publications["gemini"]
+                .report
+                .as_ref()
+                .unwrap()
+                .windows
+                .len(),
+            2
+        );
+        assert_eq!(
+            snapshot.reports["gemini"].windows,
+            [pool_window(mj_core::config::AntigravityQuotaPool::Gemini)]
+        );
     }
 }

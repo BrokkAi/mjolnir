@@ -663,10 +663,10 @@ pub(crate) async fn run_server(
                     // a terminal client's place in a conversation is not the
                     // phone's to expire.
                     let Ok(upgrade_task) = mj_controller::upgrade::activity("phone client pruning") else { continue };
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let upgrade_blocking = _upgrade_task.clone();
-                        let pruned = tokio::task::spawn_blocking(move || {
+                        let pruned = mj_core::runtime::spawn_blocking(move || {
                             let _upgrade_blocking = upgrade_blocking;
                             mj_controller::database::prune_phone_client_state(client_state_retention)
                         })
@@ -728,10 +728,10 @@ pub(crate) async fn run_server(
                         crate::server::ClientStateRequest::Read { client_id, session_id, reply } => {
                             let workspace = workspace_of(&session_id);
                             let Ok(upgrade_task) = mj_controller::upgrade::activity("viewer state read") else { continue };
-                            tokio::spawn(async move {
+                            mj_core::runtime::spawn(async move {
                                 let _upgrade_task = upgrade_task;
                                 let upgrade_blocking = _upgrade_task.clone();
-                                let answer = tokio::task::spawn_blocking(move || {
+                                let answer = mj_core::runtime::spawn_blocking(move || {
                                     let _upgrade_blocking = upgrade_blocking;
                                     let workspace = workspace.context("unknown session")?;
                                     let state = mj_controller::database::client_session_state(
@@ -749,10 +749,10 @@ pub(crate) async fn run_server(
                         crate::server::ClientStateRequest::SaveDraft { client_id, session_id, draft, reply } => {
                             let workspace = workspace_of(&session_id);
                             let Ok(upgrade_task) = mj_controller::upgrade::activity("draft save") else { continue };
-                            tokio::spawn(async move {
+                            mj_core::runtime::spawn(async move {
                                 let _upgrade_task = upgrade_task;
                                 let upgrade_blocking = _upgrade_task.clone();
-                                let answer = tokio::task::spawn_blocking(move || {
+                                let answer = mj_core::runtime::spawn_blocking(move || {
                                     let _upgrade_blocking = upgrade_blocking;
                                     let workspace = workspace.context("unknown session")?;
                                     mj_controller::database::persist_client_draft(
@@ -772,10 +772,10 @@ pub(crate) async fn run_server(
                                 .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
                                 .collect::<Vec<_>>();
                             let Ok(upgrade_task) = mj_controller::upgrade::activity("workspace read marker") else { continue };
-                            tokio::spawn(async move {
+                            mj_core::runtime::spawn(async move {
                                 let _upgrade_task = upgrade_task;
                                 let upgrade_blocking = _upgrade_task.clone();
-                                let answer = tokio::task::spawn_blocking(move || {
+                                let answer = mj_core::runtime::spawn_blocking(move || {
                                     let _upgrade_blocking = upgrade_blocking;
                                     for (session_id, through) in sessions {
                                         // A receipt that would move backwards
@@ -795,10 +795,10 @@ pub(crate) async fn run_server(
                         crate::server::ClientStateRequest::History { session_id, query, scope, reply } => {
                             let bundle = bundle_of(&session_id);
                             let Ok(upgrade_task) = mj_controller::upgrade::activity("history search") else { continue };
-                            tokio::spawn(async move {
+                            mj_core::runtime::spawn(async move {
                                 let _upgrade_task = upgrade_task;
                                 let upgrade_blocking = _upgrade_task.clone();
-                                let answer = tokio::task::spawn_blocking(move || {
+                                let answer = mj_core::runtime::spawn_blocking(move || {
                                     let _upgrade_blocking = upgrade_blocking;
                                     let bundle = bundle.context("unknown session")?;
                                     let scope = match scope.as_str() {
@@ -984,7 +984,7 @@ pub(crate) async fn run_server(
                         let _upgrade_task = upgrade_task;
                         let cancelled = Arc::new(AtomicBool::new(false));
                         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
-                        let mut blocking = tokio::task::spawn_blocking(move || {
+                        let mut blocking = mj_core::runtime::spawn_blocking(move || {
                             let executor = CancellableProcessExecutor::new(cancelled.clone())
                                 .with_deadline(Duration::from_secs(30));
                             preflight_new_request(config, mj_client::daemon::NewSessionPreflightRequest {
@@ -1088,10 +1088,10 @@ pub(crate) async fn run_server(
                             let done = receipt_done_tx.clone();
                             let persisted_session_id = session_id.clone();
                             let Ok(upgrade_task) = mj_controller::upgrade::activity("read receipt") else { continue };
-                            tokio::spawn(async move {
+                            mj_core::runtime::spawn(async move {
                                 let _upgrade_task = upgrade_task;
                                 let upgrade_blocking = _upgrade_task.clone();
-                                let joined = tokio::task::spawn_blocking(move || {
+                                let joined = mj_core::runtime::spawn_blocking(move || {
                                     let _upgrade_blocking = upgrade_blocking;
                                     mj_controller::database::persist_read_receipt(
                                         &client_id,
@@ -1305,10 +1305,10 @@ pub(crate) async fn run_server(
                         ControllerAction::Destroy { .. } => Some(mj_core::state::DESTRUCTION_FAILURE_PREFIX),
                         _ => None,
                     };
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         let upgrade_blocking = upgrade_work.clone();
                         let _upgrade_work = upgrade_work;
-                        let joined = tokio::task::spawn_blocking(move || {
+                        let joined = mj_core::runtime::spawn_blocking(move || {
                             let _upgrade_blocking = upgrade_blocking;
                             let mut admission_reply = admission_reply;
                             let result = (|| -> Result<()> {
@@ -1600,7 +1600,7 @@ pub(crate) async fn run_server(
     // The recorder runs beside the server, never as an arm of this select:
     // a recording failure must not end `run_server` and take the API down
     // with it (issue 1117).
-    let recorder = tokio::spawn(api_activity::record_activity_stream(
+    let recorder = mj_core::runtime::spawn(api_activity::record_activity_stream(
         activity_snapshots,
         mj_controller::database::record_api_activities,
     ));
@@ -1651,7 +1651,7 @@ impl ViewerServer {
     pub(crate) fn spawn(
         server: impl std::future::Future<Output = Result<()>> + Send + 'static,
     ) -> Self {
-        Self(tokio::spawn(server))
+        Self(mj_core::runtime::spawn(server))
     }
 
     /// Resolves when the server stops on its own, with whatever it stopped

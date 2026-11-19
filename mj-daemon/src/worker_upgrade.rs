@@ -111,7 +111,7 @@ impl WorkerUpgradeCoordinator {
         let (results_tx, results_rx) = observation_channel();
         let gate = recovery.gate.clone();
         let coordinator_gate = gate.clone();
-        let supervisor = tokio::spawn(async move {
+        let supervisor = mj_core::runtime::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();
             let mut attempts = JoinSet::new();
             let mut closing = false;
@@ -731,7 +731,7 @@ mod tests {
             .unwrap();
         let id = session.id.clone();
         let revision = session.updated_at.clone();
-        let settling = tokio::spawn(admission.run_blocking(move |cancelled| {
+        let settling = mj_core::runtime::spawn(admission.run_blocking(move |cancelled| {
             settle_preparation_failure(&id, &failure, &revision, &cancelled)
         }));
         tokio::time::timeout(Duration::from_secs(5), async {

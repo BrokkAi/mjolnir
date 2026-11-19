@@ -7,13 +7,15 @@ pub mod checkpoint;
 mod container_upgrade;
 pub mod environment;
 pub use crate::database::SessionResumeOptions;
+use crate::github_app;
 pub(crate) use mj_build_cache::git_cache;
-mod github_app;
+pub mod credential_targets;
+mod github_tokens;
 mod interrupted;
 pub use interrupted::interrupted_lifecycle_cause;
 pub mod lifecycle;
+pub use crate::local_profile_homes;
 pub use lifecycle::LifecycleFailureReason;
-pub mod local_profile_homes;
 pub use mj_build_cache::mbx;
 pub mod move_session;
 mod network_git;
@@ -21,10 +23,10 @@ mod new_session_preflight;
 pub(crate) use mj_build_cache::tool_cache;
 pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
-pub mod profile_config;
+pub use crate::profile_config;
 mod provisioning;
 pub mod publication;
-mod readiness;
+pub(crate) use mj_session_runtime::readiness;
 pub use readiness::HarnessPreparationFailure;
 pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
@@ -41,8 +43,9 @@ pub use subagents::recover_registered_subagent_startup;
 pub mod test_support;
 pub mod update;
 pub(crate) use mj_worker_staging::worker_binary;
+#[cfg(test)]
+mod session_runtime_tests;
 mod worker_launch;
-mod worker_project_memory;
 mod worker_restart;
 #[cfg(test)]
 mod worker_staging_tests;
@@ -92,8 +95,8 @@ use crate::targets::CommandSpec;
 use crate::targets::{self, AdditionalMount, CommandExecutor, SshTarget};
 
 pub use crate::targets::image_refresh_plan;
+pub use crate::targets::path_exists_on_managed_target;
 pub use backend::backend_locator;
-pub(crate) use backend::controller_github_token;
 pub use backend::validate_resource_allocation;
 pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
@@ -116,7 +119,6 @@ pub use worker_binary::{
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
     shared_content_ssh, worker_source_problem,
 };
-pub use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
@@ -621,6 +623,8 @@ pub struct SessionLaunchOptions {
     pub no_github_events: bool,
     /// Withhold GitHub credentials; inherited by children.
     pub no_github_credentials: bool,
+    /// Start with notifications ignored; see `SessionRecord::notifications_ignored`.
+    pub notifications_ignored: bool,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -899,6 +903,7 @@ impl Controller {
             no_project_memory,
             no_github_events,
             no_github_credentials,
+            notifications_ignored,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1068,7 +1073,7 @@ impl Controller {
         let record = SessionRecord {
             oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
-            notifications_ignored: false,
+            notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
             build_cache: None,

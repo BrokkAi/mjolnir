@@ -266,7 +266,7 @@ async fn platform(config: &Config, target: &str, cancel: &CancellationToken) -> 
         .clone();
     let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
         .with_cancellation(cancel.clone());
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         crate::controller::backend::session_image_platform(&template, &executor)
     })
     .await
@@ -328,7 +328,7 @@ async fn run(
     operation: Arc<Operation>,
 ) -> Result<ImageResult> {
     let selecting = request.clone();
-    let selection = tokio::task::spawn_blocking(move || select(&selecting, status))
+    let selection = mj_core::runtime::spawn_blocking(move || select(&selecting, status))
         .await
         .context("join image build selection")??;
     if status {
@@ -508,7 +508,7 @@ async fn run(
     }
     ensure!(!operation.cancel.is_cancelled(), "image build cancelled");
     let image = reference.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let _assignment = crate::upgrade::activity_unless_draining("image assignment")?;
         Config::update(|config| {
             ensure!(
@@ -608,7 +608,7 @@ async fn prepare(
     let platform_for_pull = platform.to_owned();
     let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
         .with_cancellation(operation.cancel.clone());
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let lock = crate::image_pull_gate::image_pull_mutex(&host_for_pull, &base_for_pull);
         let _guard = crate::image_pull_gate::hold_image_pull(
             &lock,
@@ -795,7 +795,7 @@ async fn engine_command(
         }
     });
     let description = format!("{}: {}", host.label(), command.purpose);
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         executor.execute_with_stdin_observed(
             &command,
             &mut std::io::Cursor::new(input),

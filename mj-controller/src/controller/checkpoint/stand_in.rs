@@ -3,15 +3,23 @@
 //! controller fixtures built on it. mj-daemon's tests use these through the
 //! `test-support` feature.
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use mj_core::config::{Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate};
+#[cfg(unix)]
 use mj_core::state::{SessionState, State, TargetLocator};
 
+#[cfg(unix)]
 use crate::controller::Controller;
+#[cfg(unix)]
 use crate::controller::test_support::checkpoint_test_session;
+#[cfg(unix)]
 use crate::session_manager::ManagedSessionHandle;
+#[cfg(unix)]
 use crate::targets::CommandSpec;
 pub use mj_core::test_hooks::latch_relay::*;
 

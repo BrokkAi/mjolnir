@@ -1087,6 +1087,7 @@ impl DashboardState {
     pub fn apply_quota(&mut self, quota: ProfileQuota) {
         self.quota_refreshing.remove(&quota.profile_id);
         self.quotas.insert(quota.profile_id.clone(), quota);
+        self.clamp_selections();
         self.refresh_review_choices();
     }
 
@@ -1617,6 +1618,19 @@ impl DashboardState {
     }
 
     pub fn question_message(&self, session_id: &str) -> Option<&str> {
+        if let Some(entry) = self
+            .notification_cards
+            .as_ref()
+            .and_then(|cards| cards.get(session_id))
+            .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
+        {
+            return match &entry.message {
+                mj_core::attention::EntryMessage::Found(id) => Some(id.as_str()),
+                mj_core::attention::EntryMessage::Locating
+                | mj_core::attention::EntryMessage::None => None,
+            };
+        }
+
         self.session_details
             .get(session_id)
             .and_then(|detail| detail.question_message.as_deref())

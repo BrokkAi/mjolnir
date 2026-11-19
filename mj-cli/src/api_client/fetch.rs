@@ -64,7 +64,7 @@ impl ApiClient {
             .context("the daemon did not say where the path resolved; it predates `mj fetch`")?;
         let expected = response.content_length();
         let file =
-            tokio::task::spawn_blocking(mj_checkpoint::archive::create_fetch_spool).await??;
+            mj_core::runtime::spawn_blocking(mj_checkpoint::archive::create_fetch_spool).await??;
         let mut file = tokio::fs::File::from_std(file);
         let mut received = 0u64;
         while let Some(chunk) = response.chunk().await.context("read the fetched path")? {
@@ -81,6 +81,6 @@ impl ApiClient {
             );
         }
         let file = file.into_std().await;
-        tokio::task::spawn_blocking(move || FetchedPath::from_file(kind, path, file)).await?
+        mj_core::runtime::spawn_blocking(move || FetchedPath::from_file(kind, path, file)).await?
     }
 }

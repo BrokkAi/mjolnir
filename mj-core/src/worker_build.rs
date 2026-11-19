@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail, ensure};
 /// worker fixture with it.
 #[cfg(any(test, feature = "test-identity"))]
 const TEST_REVISION: &str = "0000000000000000000000000000000000000000";
-/// The worker stamp of the test identity, as a constant so that its bytes are
-/// in every test executable (see `installed`).
+/// The worker stamp of the test identity. Only [`test_worker_executable`]
+/// names it, so its bytes are in a test executable that hands itself over as
+/// a worker and in nothing else.
 #[cfg(any(test, feature = "test-identity"))]
 const TEST_WORKER_BUILD_STAMP: &str = concat!(
     "\0MJ-WORKER-BUILD:",
@@ -75,16 +76,28 @@ pub fn install(identity: BuildIdentity) {
     );
 }
 
+/// The running test executable, for a test that hands it to the code under
+/// test as the worker binary to verify and install.
+///
+/// A worker is recognised by a build stamp in its file. A real worker carries
+/// its own, which its entry point keeps (`mj_build_id::WORKER_BUILD_STAMP`); a
+/// test executable has no such entry point, so it gets the test identity's
+/// stamp by calling this. The stamp must not be anywhere else: this library is
+/// also linked, with the same features, into real `mj` and `mj-worker`
+/// binaries during a workspace test build, and a file with two different
+/// stamps is refused as conflicting (#1603).
+#[cfg(any(test, feature = "test-identity"))]
+#[must_use]
+pub fn test_worker_executable() -> std::path::PathBuf {
+    debug_assert!(TEST_WORKER_BUILD_STAMP.contains(TEST_REVISION));
+    std::hint::black_box(TEST_WORKER_BUILD_STAMP);
+    std::env::current_exe().expect("locate the running test executable")
+}
+
 fn installed() -> &'static BuildIdentity {
-    // A test binary has no `main` of ours to install one. Some tests hand
-    // their own executable to the code that verifies a worker binary, so the
-    // stamp has to be in that file, as it is in a real worker.
+    // A test binary has no `main` of ours to install one.
     #[cfg(any(test, feature = "test-identity"))]
-    return INSTALLED.get_or_init(|| {
-        debug_assert!(TEST_WORKER_BUILD_STAMP.contains(TEST_REVISION));
-        std::hint::black_box(TEST_WORKER_BUILD_STAMP);
-        BuildIdentity::for_tests()
-    });
+    return INSTALLED.get_or_init(BuildIdentity::for_tests);
     #[cfg(not(any(test, feature = "test-identity")))]
     INSTALLED
         .get()

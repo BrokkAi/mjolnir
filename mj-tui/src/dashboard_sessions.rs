@@ -4,24 +4,8 @@ use mj_chat::text_input::EditOutcome;
 use ratatui::style::Style;
 
 use mj_client::daemon::SessionTextMatchKind;
-use mj_client::quota::AntigravityQuotaPool;
 
 use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
-
-pub(crate) struct QuotaProfileRow<'a> {
-    pub id: &'a str,
-    pub harness: HarnessKind,
-    pub pool: Option<AntigravityQuotaPool>,
-}
-
-impl QuotaProfileRow<'_> {
-    pub fn label(&self) -> String {
-        self.pool.map_or_else(
-            || self.id.to_owned(),
-            |pool| format!("{} ({})", self.id, pool.label()),
-        )
-    }
-}
 
 /// How much a session needs a person right now, from least to most.
 ///
@@ -1132,7 +1116,7 @@ impl DashboardState {
                     targets_scroll: 0,
                     quota_scroll: 0,
                     capacity_index: 0,
-                    quota_index: 0,
+                    quota_selection: None,
                     pane_sizes: PaneSizes::default(),
                     conversation_layout: mj_core::workspace::ConversationLayout::default(),
                     collapsed_project_keys: BTreeSet::new(),
@@ -1386,7 +1370,10 @@ impl DashboardState {
         if quota.harness == HarnessKind::Antigravity {
             let pool_cell = |weekly: bool| {
                 PickerCell::text(
-                    AntigravityQuotaPool::ALL
+                    self.config
+                        .enabled_profile(id)
+                        .map(|profile| profile.antigravity_pools())
+                        .unwrap_or_default()
                         .into_iter()
                         .map(|pool| {
                             let report = quota.for_antigravity_pool(pool);
@@ -1468,31 +1455,84 @@ impl DashboardState {
         self.rebuild_resume_rows();
     }
 
-    /// The same ordered rows drive drawing, pointer/keyboard selection and
-    /// profile actions. Both Antigravity pools still act on one profile.
-    pub(crate) fn quota_profile_rows(&self) -> Vec<QuotaProfileRow<'_>> {
-        self.config
-            .enabled_profiles()
-            .flat_map(|(id, profile)| {
-                let pools = if profile.kind == HarnessKind::Antigravity {
-                    AntigravityQuotaPool::ALL.map(Some).to_vec()
-                } else {
-                    vec![None]
-                };
-                pools.into_iter().map(move |pool| QuotaProfileRow {
-                    id,
-                    harness: profile.kind,
-                    pool,
+    pub(crate) fn quota_pools(&self) -> Vec<crate::render::quota_pools::ProviderQuota> {
+        crate::render::quota_pools::provider_pools(
+            &self.config,
+            &self.quotas,
+            &self.quota_providers,
+            crate::render_changes::epoch_seconds(),
+        )
+    }
+
+    pub(crate) fn quota_rows(&self) -> Vec<crate::render::quota_pools::QuotaRow> {
+        crate::render::quota_pools::selectable_rows(&self.quota_pools(), &self.quota_expanded)
+    }
+
+    pub(crate) fn selected_quota_row(&self) -> Option<crate::render::quota_pools::QuotaRow> {
+        use crate::render::quota_pools::QuotaRow;
+        let pools = self.quota_pools();
+        let rows = crate::render::quota_pools::selectable_rows(&pools, &self.quota_expanded);
+        // A profile's row can change type between refreshes (a status row
+        // becomes a pool or lane after its first reading, and back on a
+        // failure), so follow the profile to its row or the pool it joined
+        // before falling back to its previous pool.
+        let profile_row = |id: &str| {
+            rows.iter()
+                .find(|row| match row {
+                    QuotaRow::Profile(other) | QuotaRow::Lane(_, other) => other == id,
+                    QuotaRow::Pool(_) => false,
                 })
+                .or_else(|| {
+                    rows.iter().find(|row| match row {
+                        QuotaRow::Pool(key) => pools
+                            .iter()
+                            .flat_map(|provider| &provider.pools)
+                            .find(|pool| pool.key == *key)
+                            .is_some_and(|pool| pool.members.iter().any(|member| member.id == id)),
+                        _ => false,
+                    })
+                })
+        };
+        self.quota_selection
+            .as_ref()
+            .and_then(|selected| {
+                rows.iter()
+                    .find(|row| *row == selected)
+                    .or_else(|| match selected {
+                        QuotaRow::Profile(id) | QuotaRow::Lane(_, id) => profile_row(id),
+                        QuotaRow::Pool(_) => None,
+                    })
+                    .or_else(|| {
+                        selected.pool().and_then(|key| {
+                            rows.iter().find(|row| **row == QuotaRow::Pool(key.clone()))
+                        })
+                    })
             })
-            .collect()
+            .or_else(|| rows.first())
+            .cloned()
+    }
+
+    pub(crate) fn toggle_quota_pool(&mut self) {
+        use crate::render::quota_pools::QuotaRow;
+        if let Some(row) = self.selected_quota_row() {
+            let Some(key) = row.pool().cloned() else {
+                return;
+            };
+            if matches!(row, QuotaRow::Lane(..)) || self.quota_expanded.contains(&key) {
+                self.quota_expanded.remove(&key);
+            } else {
+                self.quota_expanded.insert(key.clone());
+            }
+            self.quota_selection = Some(QuotaRow::Pool(key));
+            self.recenter_on_selection.set(Some(Focus::Quota));
+        }
     }
 
     pub(crate) fn focus_len_for(&self, focus: Focus) -> usize {
         match focus {
             Focus::Sessions => self.visible_session_indices().len(),
             Focus::Targets => self.capacity_details.len(),
-            Focus::Quota => self.quota_profile_rows().len(),
+            Focus::Quota => self.quota_rows().len(),
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
@@ -1532,12 +1572,11 @@ impl DashboardState {
                 }
             }
             Focus::Quota => {
-                if self.quota_index != index {
-                    self.quota_index = index;
-                    true
-                } else {
-                    false
-                }
+                let next = self.quota_rows().get(index).cloned();
+                let changed = self.quota_selection != next;
+                self.quota_selection = next;
+                self.recenter_on_selection.set(Some(Focus::Quota));
+                changed
             }
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => false,
         }
@@ -1547,13 +1586,44 @@ impl DashboardState {
         match focus {
             Focus::Sessions => self.selected_visible_index().unwrap_or(0),
             Focus::Targets => self.capacity_index,
-            Focus::Quota => self.quota_index,
+            Focus::Quota => {
+                let selected = self.selected_quota_row();
+                self.quota_rows()
+                    .iter()
+                    .position(|row| Some(row) == selected.as_ref())
+                    .unwrap_or(0)
+            }
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
+        if self.focus == Focus::Quota && self.scroll_tall_quota_row(delta) {
+            return;
+        }
         self.scroll_selection_for(self.focus, delta);
+    }
+
+    /// A selected quota row taller than the viewport (a wrapped note) shows
+    /// its remaining lines before a single-step move leaves it.
+    fn scroll_tall_quota_row(&mut self, delta: isize) -> bool {
+        let viewport = self.quota_viewport.get();
+        let Some((_, first, last)) = self.quota_rendered_selection.borrow().clone() else {
+            return false;
+        };
+        let offset = self.quota_scroll.get();
+        let next = if delta > 0 && last + 1 > offset + viewport && last + 1 - first > viewport {
+            offset + 1
+        } else if delta < 0 && offset > first && last + 1 - first > viewport {
+            offset - 1
+        } else {
+            return false;
+        };
+        self.quota_scroll.set(next);
+        if self.recenter_on_selection.get() == Some(Focus::Quota) {
+            self.recenter_on_selection.set(None);
+        }
+        true
     }
 
     /// Scrolls the Sessions list by `delta` rows without moving the selection.
@@ -1592,9 +1662,11 @@ impl DashboardState {
         let project_keys = self.project_keys();
         self.collapsed_project_keys
             .retain(|key| project_keys.contains(key));
-        self.quota_index = self
-            .quota_index
-            .min(self.quota_profile_rows().len().saturating_sub(1));
+        let quota_selection = self.selected_quota_row();
+        if self.quota_selection != quota_selection && self.focus == Focus::Quota {
+            self.recenter_on_selection.set(Some(Focus::Quota));
+        }
+        self.quota_selection = quota_selection;
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));

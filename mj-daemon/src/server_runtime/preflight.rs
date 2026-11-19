@@ -52,7 +52,7 @@ pub(super) fn spawn_resume_preflight(
     jobs.spawn(async move {
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
-        let mut blocking = tokio::task::spawn_blocking(move || {
+        let mut blocking = mj_core::runtime::spawn_blocking(move || {
             run_resume_preflight(config, state, &session_id, &target_id, cancelled)
         });
         let answer = tokio::select! {
@@ -101,7 +101,7 @@ pub(super) fn spawn_path_completion(
     jobs.spawn(async move {
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
-        let mut blocking = tokio::task::spawn_blocking(move || {
+        let mut blocking = mj_core::runtime::spawn_blocking(move || {
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(5));
             config_only_controller(config).complete_path(&host, &prefix, kind, &executor)
