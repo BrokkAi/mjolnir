@@ -185,10 +185,12 @@ pub(super) async fn deliver(
         .environment
         .get(variable)
         .with_context(|| format!("session instruction delivery requires staged {variable}"))?;
+    let profile_root = std::path::PathBuf::from(home);
     let path = spec
         .harness
-        .home_from_environment(home)
+        .home_from_environment(&profile_root)
         .join(spec.harness.agent_instructions_file());
+    let nested_home = spec.harness.nested_home().then_some(spec.harness.id());
     // One worker owns one staged instruction file. Move the write lease into
     // the I/O thread so a canceled open cannot let a replacement overtake it.
     let lease = NATIVE_FILE_WRITE.clone().lock_owned().await;
@@ -197,10 +199,34 @@ pub(super) async fn deliver(
         std::panic::AssertUnwindSafe(move || {
             let _lease = lease;
             let parent = path.parent().context("instruction file has no directory")?;
-            if std::fs::symlink_metadata(parent)?.file_type().is_symlink() {
-                return Ok(Some(std::fs::read_link(parent)?));
+            for directory in [&profile_root, parent] {
+                if std::fs::symlink_metadata(directory)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    return Ok(Some(std::fs::read_link(directory)?));
+                }
             }
-            replace_native_section(&path, &text)?;
+            // Anchor at the staged config root, then open each nested component
+            // without following links. Reopening the leaf by its ambient path
+            // would trust a linked OpenCode XDG root, including a concurrent swap.
+            let root = mj_core::confined_path::ConfinedDir::open_root(&profile_root)?
+                .with_context(|| format!("staged profile {} is missing", profile_root.display()))?;
+            let root = if let Some(directory) = nested_home {
+                root.open_dir(Path::new(directory))?.with_context(|| {
+                    format!(
+                        "staged instruction directory {} is missing",
+                        parent.display()
+                    )
+                })?
+            } else {
+                root
+            };
+            replace_native_section(
+                &root,
+                path.file_name().context("instruction file has no name")?,
+                &text,
+            )?;
             Ok(None::<std::path::PathBuf>)
         }),
     )
@@ -238,19 +264,12 @@ fn marker(bytes: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn replace_native_section(path: &Path, text: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("staged instruction file has no directory")?;
-    let name = path
-        .file_name()
-        .context("staged instruction file has no name")?;
-    let root = mj_core::confined_path::ConfinedDir::open_root(parent)?.with_context(|| {
-        format!(
-            "staged instruction directory {} is missing",
-            parent.display()
-        )
-    })?;
+fn replace_native_section(
+    root: &mj_core::confined_path::ConfinedDir,
+    name: &std::ffi::OsStr,
+    text: &str,
+) -> Result<()> {
+    let path = root.path().join(name);
     let bytes = root
         .read_bytes(name)
         .with_context(|| format!("read staged instructions {}", path.display()))?
@@ -309,20 +328,37 @@ mod tests {
     // Hard-won: 621276a78: quoted native end markers prevented the next open.
     // Hard-won: bc66f0faa: nested markers deleted user bytes and FIFO profiles stalled opens.
     // Hard-won: 1a5e072f9: legacy shared profile links broke native opens after worker upgrade.
+    // Hard-won: 67edd7b68: a linked XDG root bypassed the OpenCode leaf ownership check.
     #[cfg(unix)]
     #[tokio::test]
     async fn legacy_native_profile_links_warn_without_writing_shared_home() {
-        for harness in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Grok] {
+        for (harness, linked_root) in [
+            (HarnessKind::Kimi, false),
+            (HarnessKind::OpenCode, false),
+            (HarnessKind::Grok, false),
+            (HarnessKind::OpenCode, true),
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let shared = temp.path().join("shared");
             std::fs::create_dir_all(&shared).unwrap();
-            let file = shared.join(harness.agent_instructions_file());
+            let shared_home = if linked_root {
+                shared.join(harness.id())
+            } else {
+                shared.clone()
+            };
+            std::fs::create_dir_all(&shared_home).unwrap();
+            let file = shared_home.join(harness.agent_instructions_file());
             std::fs::write(&file, "user-owned instructions").unwrap();
             let legacy = temp.path().join("legacy").join(harness.id());
             std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(&shared, &legacy).unwrap();
             let mut spec = super::super::tests::reload_fallback_spec(harness);
-            harness.configure_staged_home_environment(&legacy, &mut spec.environment);
+            let home = if linked_root {
+                legacy.join(harness.id())
+            } else {
+                legacy.clone()
+            };
+            harness.configure_staged_home_environment(&home, &mut spec.environment);
             let (events, mut received) = mpsc::channel(16);
             assert!(
                 deliver(

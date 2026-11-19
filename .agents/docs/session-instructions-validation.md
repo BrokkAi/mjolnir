@@ -286,3 +286,18 @@ Source was checkpointed before each long build. Checks ran outside the sandbox o
 - `cargo clippy -p brokk-mj-core -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-review10-clippy.log`).
 
 Formatting/diff checks are clean. No still-failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings were overridden; the final candidate is submitted for re-review.
+
+
+## Eleventh review: nested OpenCode profile ownership
+
+The legacy-home check now covers the staged config root as well as the instruction directory. A linked XDG root with a regular opencode directory follows the existing visible unsupported-channel outcome: ordinary sessions warn and continue, while automated roles fail. Shared bytes remain unchanged.
+
+After those checks the native writer opens ConfinedDir at the explicit staged config root and opens the nested OpenCode directory through that handle without following links. The replacement helper receives the retained handle and file name instead of reopening the leaf by its ambient path. An ancestor swapped after checking therefore cannot redirect the operation into a shared profile. This uses the existing confinement API and its no-follow directory semantics; it adds no separate ownership flag or format.
+
+Extended the shared-profile regression to cover a linked XDG root containing a regular opencode leaf, in addition to the three existing linked-leaf layouts and automated-role outcomes. Source was checkpointed before builds. Checks ran outside the sandbox on the dev profile, with inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared and existing isolated test directories retained:
+
+- `cargo test -p brokk-mj-worker-runtime legacy_native_profile_links_warn_without_writing_shared_home`: 1 passed across four layouts (`memory-instructions-review11-legacy-test.log`).
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed (`memory-instructions-review11-worker-tests.log`).
+- `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-review11-clippy.log`).
+
+Formatting/diff checks are clean. No failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings were overridden; the candidate is submitted for re-review.

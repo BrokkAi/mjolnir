@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Eleventh review: reject linked staged config roots as well as instruction directories. Anchor the native writer at the config-root directory handle and open the nested OpenCode directory without following links. Extended the existing shared-profile regression to the linked XDG-root layout. Checkpoint saved before validation; shared-profile regression (1), instruction suite (4) and worker all-target clippy pass. No overrides; request re-review.
+
 - [x] (2026-11-19) Tenth review: carry Claude profile registration outcome through the existing launch field; compose agent guidance only for installed profile tools. Escape root paths, repository identifiers and unavailable-index reasons as prompt data. Source checkpoint saved before builds. Escaping regression (1), shared-profile regression (1), instruction suite (three passed initially, lifecycle passed after fixture correction) and core/worker all-target clippy pass. No overrides; request re-review.
 
 - [x] (2026-11-19) Ninth review: compose MCP guidance from the same negotiated availability used by the post-open warning. Muse without HTTP MCP grant omits agent/history guidance; configured memory data remains, and roles use their existing no-handback wording. Extended the Muse ACP fixture to capture append text with history and agent servers offered. Checkpoint saved before long builds; grant/withheld regression (1), failed-host diagnostic (1), instruction suite (4) and worker all-target clippy pass. No overrides; request re-review.
@@ -49,6 +51,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Surprises & Discoveries
+
+- Eleventh review found that checking only the instruction-directory leaf allowed a linked OpenCode XDG root to lead to a regular shared opencode directory. Native delivery now checks both directories for legacy links and retains a confined handle opened at the staged config root through nested lookup and atomic replacement, rather than reopening the ambient leaf path.
 
 - Tenth review found Claude preparation always reported successful profile registration even when the shared-home MessageOnly branch intentionally installed no server. The registration owner now returns the actual outcome through the existing field; composition uses it rather than inferring availability from the configured role. Paths and index-read errors are external data just like index contents and now share the same escaping.
 
