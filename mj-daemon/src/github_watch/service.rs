@@ -726,9 +726,9 @@ async fn classify_for_session(
 ) -> Result<()> {
     let repo_label = format!("{owner}/{repo}");
     let kind = item_kind_from_watch(&item.kind);
+    control.check_enabled()?;
     let created = evidence.is_none();
     let interested = if let Some(evidence) = evidence {
-        control.check_enabled()?;
         let verdict = classifier.classify(&evidence).await?;
         control.check_enabled()?;
         verdict.interested
@@ -826,7 +826,10 @@ async fn session_evidence_snapshot(session_id: String) -> Result<SessionEvidence
         )?
         .map(|materialized| mj_transcript::github_item::session_digest(&materialized))
         .unwrap_or_default();
-        Ok((digest, Arc::new(history)))
+        let history = Arc::new(history);
+        #[cfg(test)]
+        tests::observe_history_snapshot(&history);
+        Ok((digest, history))
     })
     .await
     .context("load GitHub session evidence snapshot")?
@@ -1827,6 +1830,14 @@ mod tests {
     impl GithubClassifier for FakeClassifier {
         fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
+                if let Some(snapshots) = HISTORY_SNAPSHOT_PROBE.lock().unwrap().as_ref() {
+                    assert!(
+                        snapshots
+                            .iter()
+                            .all(|snapshot| snapshot.upgrade().is_none()),
+                        "inference must not retain any history snapshot"
+                    );
+                }
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     evidence.session.history.is_some(),
@@ -3498,40 +3509,120 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    type HistorySnapshotProbe =
+        Vec<std::sync::Weak<Vec<mj_transcript::github_history::HistoryRow>>>;
+    static HISTORY_SNAPSHOT_PROBE: Mutex<Option<HistorySnapshotProbe>> = Mutex::new(None);
+
+    pub(super) fn observe_history_snapshot(
+        history: &Arc<Vec<mj_transcript::github_history::HistoryRow>>,
+    ) {
+        if let Some(snapshots) = HISTORY_SNAPSHOT_PROBE.lock().unwrap().as_mut() {
+            assert!(
+                snapshots
+                    .iter()
+                    .all(|snapshot| snapshot.upgrade().is_none()),
+                "a prior session snapshot is still alive while loading the next"
+            );
+            snapshots.push(Arc::downgrade(history));
+        }
+    }
+
     #[tokio::test]
     async fn prepared_classification_releases_history_before_inference() {
         if !run_isolated_child("prepared_classification_releases_history_before_inference") {
             return;
         }
         let _writer = mj_controller::database::install_isolated_test_writer();
-        let session = mj_controller::database::test_session("prepared", "project");
+        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let created = (DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
+            + chrono::Duration::seconds(1))
+        .to_rfc3339();
+        let items = (1..=2)
+            .map(|n| {
+                parse_github_item(&github_item(n, n, "synthetic", created.clone(), false)).unwrap()
+            })
+            .collect();
+        mj_controller::database::record_github_page(
+            "acme".into(),
+            "repo".into(),
+            items,
+            mj_controller::database::GithubFeedProgress::Main(created),
+        )
+        .unwrap();
+        let sessions = ["first", "second"]
+            .into_iter()
+            .map(|id| {
+                let mut session = mj_controller::database::test_session(id, "project");
+                session.created_at = cursor.watch_started_at.clone();
+                mj_controller::database::save_session(&session).unwrap();
+                session
+            })
+            .collect::<Vec<_>>();
+        *HISTORY_SNAPSHOT_PROBE.lock().unwrap() = Some(Vec::new());
+        let api = GithubApi::new("http://127.0.0.1:1", Some("snapshot-lifetime".into())).unwrap();
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &sessions,
+            fake_classifier(),
+            &cursor.watch_started_at,
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let snapshots = HISTORY_SNAPSHOT_PROBE.lock().unwrap().take().unwrap();
+        assert_eq!(
+            snapshots.len(),
+            2,
+            "both sessions must reach the snapshot loader"
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.upgrade().is_none())
+        );
+        assert!(
+            mj_controller::database::load_github_classification_failures("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // Hard-won: review 7fb8c222b: queued creator watches bypassed the enablement recheck.
+    #[tokio::test]
+    async fn prepared_creator_watch_rechecks_enablement_before_commit() {
+        if !run_isolated_child("prepared_creator_watch_rechecks_enablement_before_commit") {
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let session = mj_controller::database::test_session("creator", "project");
+        mj_controller::database::save_session(&session).unwrap();
         let item = parse_github_item(&github_item(
             1,
             1,
-            "interesting synthetic change",
+            "created item",
             "2026-11-18T00:00:00Z".into(),
-            false,
+            true,
         ))
         .unwrap();
-        let history = Arc::new(Vec::new());
-        let released = Arc::downgrade(&history);
-        let evidence = prepare_session_evidence(
+        let error = classify_for_session(
             "acme",
             "repo",
-            &item,
-            &session,
-            (SessionContext::default(), history),
-            Some("different-author"),
-            &PollControl::always_enabled(),
+            item,
+            session,
+            None,
+            fake_classifier(),
+            PollControl::new(|| false),
         )
         .await
-        .unwrap()
-        .unwrap();
+        .unwrap_err();
+        assert!(is_github_events_disabled(&error));
         assert!(
-            released.upgrade().is_none(),
-            "prepared input must not retain the session snapshot"
+            mj_controller::database::load_github_watches("acme", "repo")
+                .unwrap()
+                .is_empty()
         );
-        fake_classifier().classify(&evidence).await.unwrap();
     }
 
     struct FailingSessionClassifier(Arc<AtomicBool>);
