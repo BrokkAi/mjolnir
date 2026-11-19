@@ -285,7 +285,7 @@ fn inspect_checkout(
                     "status",
                     "--porcelain",
                     "--untracked-files=no",
-                    "--ignore-submodules=untracked",
+                    "--ignore-submodules=all",
                 ],
             )?
         } else {
@@ -353,10 +353,11 @@ fn uninitialized_gitlink_available(
     let Some(indexed) = indexed else {
         return Ok(true);
     };
-    let mut arguments: Vec<std::ffi::OsString> = ["ls-tree", "-z", "HEAD", "--"]
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let mut arguments: Vec<std::ffi::OsString> =
+        ["--literal-pathspecs", "ls-tree", "-z", "HEAD", "--"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
     arguments.push(path.as_os_str().to_owned());
     let head = runner.run(
         checkout,
@@ -374,6 +375,8 @@ fn uninitialized_gitlink_available(
     if old.is_some_and(|old| old == indexed.commit.as_bytes()) {
         return Ok(true);
     }
+    // Cached admin repositories may point at a fork. Only .gitmodules tips
+    // authorize an uninitialized pointer change; initialize to check ancestry.
     let key = std::str::from_utf8(config_key)?
         .strip_suffix(".path")
         .context("invalid submodule path key")?;
@@ -393,16 +396,15 @@ fn uninitialized_gitlink_available(
     let mut url = std::str::from_utf8(&url.stdout)?.trim().to_owned();
     url = crate::snapshot::resolve_submodule_url(runner, checkout, &url)?;
     let advertised = runner.run(checkout, &git_command(&["ls-remote", &url]))?;
-    if advertised.status != 0 {
-        return Ok(false);
-    }
-    Ok(std::str::from_utf8(&advertised.stdout)?
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .any(|(oid, name)| {
-            oid == indexed.commit
-                && (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
-        }))
+    let exact_tip = advertised.status == 0
+        && std::str::from_utf8(&advertised.stdout)?
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .any(|(oid, name)| {
+                oid == indexed.commit
+                    && (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+            });
+    Ok(exact_tip)
 }
 pub(crate) fn snapshot_index_gitlinks(
     runner: &dyn GitCommandRunner,
@@ -451,8 +453,10 @@ pub(crate) fn snapshot_gitlink_commits(
         (vec!["ls-tree", "-z", "HEAD", "--"], 2),
         (vec!["ls-files", "--stage", "-z", "--"], 1),
     ] {
-        let mut arguments: Vec<std::ffi::OsString> =
-            arguments.into_iter().map(Into::into).collect();
+        let mut arguments: Vec<std::ffi::OsString> = std::iter::once("--literal-pathspecs")
+            .chain(arguments)
+            .map(Into::into)
+            .collect();
         arguments.push(path.as_os_str().to_owned());
         let output = runner.run(
             checkout,
