@@ -572,6 +572,15 @@ pub(super) async fn handle_action(
             state.remove_project(bundle_id).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::WikiSyncRequest => {
+            let target = state.wiki().request_sync(false);
+            let mut status = state.wiki().state();
+            status.target = Some(target);
+            Ok(DaemonReply::WikiSyncStatus(status))
+        }
+        DaemonAction::WikiSyncWatch { epoch, after } => Ok(DaemonReply::WikiSyncStatus(
+            state.wiki().watch_after(epoch, after).await?,
+        )),
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
         )),
@@ -1302,6 +1311,9 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<mj_controller::upgrade::Work>> {
+    if matches!(action, DaemonAction::WikiSyncRequest) {
+        return mj_controller::upgrade::activity_unless_draining("wiki sync request").map(Some);
+    }
     if let DaemonAction::PreflightNewSession { request } = action
         && !request.remote_repairs.is_empty()
     {
@@ -1339,6 +1351,7 @@ pub(super) fn upgrade_request_activity(
             // Answered from durable state, so it holds no daemon work and a
             // handoff does not wait for it; the client asks again.
             | DaemonAction::WaitCreateSession { .. }
+            | DaemonAction::WikiSyncWatch { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

@@ -255,38 +255,24 @@ impl RuntimeState {
     /// Search the user's SessionWiki index, with this daemon's own live
     /// sessions marked so a surface can resume them instead of restoring them.
     pub async fn wiki_search(&self, query: String, limit: usize) -> Result<WikiSearchPage> {
-        self.request_wiki_sync_if_stale();
         let live = self.live_session_ids();
-        // Every caller is a resume list, and a sub-agent is never resumed on
-        // its own.
+        let status = self.wiki.status();
         let rows =
             blocking(move || mj_controller::sessionwiki::query_rows(&query, limit, &live, false))
                 .await?;
-        // The status is read after the rows, so a sync that finished while the
-        // query ran is reported as finished.
-        Ok(WikiSearchPage {
-            rows,
-            status: self.wiki.status(),
-        })
+        Ok(WikiSearchPage { rows, status })
     }
 
-    /// Ask for a background sync when the index is stale. Every search asks
-    /// here, so this is the one place that decides when a search syncs.
-    /// Answering now matters more than answering fresh: the sync runs in the
-    /// background and the next keystroke sees its result.
-    fn request_wiki_sync_if_stale(&self) {
-        if mj_controller::sessionwiki::sync_is_stale(self.wiki.last_success()) {
-            self.wiki.request_sync(false);
-        }
-    }
-
-    /// The live sessions whose user or agent messages contain `query`. Like
-    /// [`Self::wiki_search`], it answers from the index as it is and asks for
-    /// a sync for the next search.
-    pub async fn session_text_search(&self, query: String) -> Result<Vec<SessionTextMatch>> {
-        self.request_wiki_sync_if_stale();
+    /// Search the live sessions from the index as it stands.
+    pub async fn session_text_search(
+        &self,
+        query: String,
+    ) -> Result<mj_client::daemon::SessionTextSearchPage> {
         let live = self.live_session_ids();
-        blocking(move || mj_controller::sessionwiki::session_text_matches(&query, &live)).await
+        let matches =
+            blocking(move || mj_controller::sessionwiki::session_text_matches(&query, &live))
+                .await?;
+        Ok(mj_client::daemon::SessionTextSearchPage { matches })
     }
 
     /// The markdown briefing for one indexed session, or `None` when the index
@@ -2239,30 +2225,5 @@ impl RuntimeState {
             }
         }
         outcome
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::tests::test_runtime_state;
-    use std::sync::Arc;
-
-    /// RCL-1 (2026-09-29): the Sessions filter's conversation search asks for
-    /// the same non-forced sync the resume dialog's search asks for, so a
-    /// message sent since the last sync is found by the next keystroke.
-    // Hard-won: 13425c7c: session search missed messages newer than SessionWiki until it requested a sync.
-    #[tokio::test]
-    async fn a_session_text_search_asks_for_a_sync_like_the_resume_search() {
-        let mut state = test_runtime_state();
-        Arc::get_mut(&mut state).expect("the only handle").wiki =
-            mj_controller::sessionwiki::WikiIndexer::inert();
-        assert!(!state.wiki().sync_requested());
-
-        // An empty query never reads the index, so the request is all it does.
-        state.session_text_search("  ".into()).await.unwrap();
-        assert!(
-            state.wiki().sync_requested(),
-            "a stale index is synced for the next search"
-        );
     }
 }

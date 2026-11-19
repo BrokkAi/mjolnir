@@ -520,9 +520,10 @@ pub(crate) struct DashboardContext {
     selection_text: Option<String>,
 
     pub(crate) wiki_search_task: Option<(u64, tokio_util::sync::DropGuard)>,
-    /// The newest conversation search the Sessions filter asked for, read by
-    /// its debounced task the same way.
-    sessions_text_request: Arc<std::sync::atomic::AtomicU64>,
+    /// Own debounce and network reads for the current filter query.
+    sessions_text_task: Option<tokio_util::sync::DropGuard>,
+    wiki_sync_task: Option<(u64, tokio_util::sync::DropGuard)>,
+    sessions_sync_task: Option<(u64, tokio_util::sync::DropGuard)>,
     usage_report: usage_report::UsageReportLoader,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
@@ -733,6 +734,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         if context.shutdown_requested_at.is_none() {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
+            context.reconcile_wiki_syncs();
         }
         // The startup update notice waits for the same settled surface as a
         // hint, so its display time starts once it can be drawn rather than
@@ -2065,7 +2067,9 @@ impl DashboardContext {
             capacity_triggers_tx,
             capacity: Feed::new(capacity_updates_rx),
             wiki_search_task: None,
-            sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wiki_sync_task: None,
+            sessions_sync_task: None,
+            sessions_text_task: None,
             usage_report: usage_report::UsageReportLoader::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),

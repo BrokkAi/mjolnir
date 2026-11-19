@@ -73,6 +73,7 @@ mod surface_controls;
 pub mod tile_layout;
 mod welcome;
 mod widgets;
+mod wiki_sync;
 mod wizards;
 
 #[cfg(test)]
