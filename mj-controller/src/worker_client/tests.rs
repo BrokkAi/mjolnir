@@ -1,3 +1,4 @@
+pub(crate) use super::test_fixtures::*;
 use super::*;
 #[cfg(unix)]
 use crate::test_log::CapturedLog;
@@ -16,8 +17,6 @@ macro_rules! access {
         }
     };
 }
-
-const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
 #[test]
 fn relay_decoder_preserves_explicit_desynchronization() {
@@ -1194,22 +1193,6 @@ fn catch_up_page_stops_at_the_frontier_captured_before_stream_growth() {
     assert_eq!(clipped.events.last().unwrap().ordinal, 2);
 }
 
-#[cfg(unix)]
-fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
-    CredentialSyncTarget {
-        session_id: SESSION_ID.into(),
-        profile_id: "work".into(),
-        harness: mj_core::config::HarnessKind::Claude,
-        profile_home: profile_home.to_path_buf(),
-        aws_credentials: None,
-        skips_login_file_sync: false,
-        sync_github_token: false,
-        github: Default::default(),
-        skills_scope: mj_core::skills::SkillsScope::Localhost,
-        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
-    }
-}
-
 /// Plays a worker for one skills push: it reports a stale tree, then installs
 /// whatever archive it is sent, keeps a copy at the path in its third
 /// argument, and reports the fingerprint of the archive's uncompressed
@@ -1749,19 +1732,15 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
              if [ -f \"$MJ_AWS_ASSUME_FIXTURE\" ]; then exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"; fi\n\
              /bin/cat {denied} >&2; exit 254\n",
             calls = calls.display(),
-            denied = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/aws-sts-assume-role-access-denied.txt")
-                .display(),
+            denied = access_denied_reply(&bin).display(),
         ),
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
     // The recorded output, expiring far in the future so only the cache's
     // half-lifetime rule could ask for another call (it does not here).
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let fixture = scratch.path().join("assumed.json");
     std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
@@ -1873,10 +1852,8 @@ async fn role_scoped_mints_for_one_profile_run_together() {
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let fixture = scratch.path().join("assumed.json");
     std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
@@ -1947,10 +1924,8 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let fixture = scratch.path().join("assumed.json");
     std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
@@ -2008,174 +1983,6 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
     );
 }
 
-/// Plays a worker that keeps, in the directory named by its third argument,
-/// the AWS credentials, GitHub token and skills it is sent, and starts with a
-/// stale skills tree. Any request it does not expect fails the exchange.
-#[cfg(unix)]
-const AWS_SYNC_RELAY: &str = r#"
-import base64, gzip, hashlib, json, os, sys, time
-protocol, session, root = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-# A slow worker: its first AWS answer waits for this file, or fails the exchange.
-wait_for = sys.argv[4] if len(sys.argv) > 4 else ""
-# A slow login step: the first skills request announces itself and waits for this file.
-login_hold = sys.argv[5] if len(sys.argv) > 5 else ""
-def path(name): return os.path.join(root, name)
-def hold():
-    # The first AWS request of a slow worker announces itself and then waits.
-    if not wait_for: return
-    open(path("waiting"), "w").close()
-    tries = 0
-    while not os.path.exists(wait_for):
-        tries += 1
-        if tries > 200: sys.exit(1)
-        time.sleep(0.05)
-def state(name):
-    # Provider files missing or different: the worker reports the credentials
-    # absent although the secret file may still be there.
-    if name == "aws" and os.path.exists(path("provider-files-broken")):
-        return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
-    if not os.path.exists(path(name)):
-        return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
-    data = open(path(name), "rb").read()
-    return {"present": True, "fingerprint": hashlib.sha256(data).hexdigest(), "freshness_epoch_ms": None}
-for line in sys.stdin:
-    req = json.loads(line)
-    method = req["request"]["method"]
-    params = req["request"].get("params", {})
-    if method == "hello":
-        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "aws-sync-fixture", "session_id": session}}
-    elif method == "aws_credentials_state":
-        hold()
-        payload = {"type": "credential_state", "data": state("aws")}
-    elif method == "install_aws_credentials":
-        hold()
-        if os.path.exists(path("install-fails")): sys.exit(1)
-        secret = base64.b64decode(params["data"])
-        open(path("aws"), "wb").write(secret)
-        # The scope record sits beside the secret, bound to it by fingerprint.
-        if params.get("scope"):
-            json.dump({"scope": params["scope"], "secret_fingerprint": hashlib.sha256(secret).hexdigest()}, open(path("aws-scope.json"), "w"))
-        elif os.path.exists(path("aws-scope.json")):
-            os.remove(path("aws-scope.json"))
-        # The staged AWS configuration names the profile; withdrawing the
-        # credentials leaves it.
-        open(path("aws-config"), "w").write("[profile " + json.loads(secret)["Profile"] + "]\ncredential_process = cat aws\n")
-        payload = {"type": "credential_state", "data": state("aws")}
-    elif method == "aws_credentials_scope":
-        hold()
-        scope = None
-        if os.path.exists(path("aws-scope.json")) and os.path.exists(path("aws")):
-            stored = json.load(open(path("aws-scope.json")))
-            if stored["secret_fingerprint"] == hashlib.sha256(open(path("aws"), "rb").read()).hexdigest():
-                scope = stored["scope"]
-        profile = None
-        if os.path.exists(path("aws-config")):
-            for line in open(path("aws-config")).read().splitlines():
-                if line.startswith("[profile ") and line.endswith("]"):
-                    profile = line[len("[profile "):-1]
-                    break
-        payload = {"type": "aws_credentials_scope", "data": {"scope": scope, "profile": profile}}
-    elif method == "remove_aws_credentials":
-        if os.path.exists(path("remove-fails")): sys.exit(1)
-        for name in ("aws", "aws-scope.json"):
-            if os.path.exists(path(name)): os.remove(path(name))
-        payload = {"type": "credential_state", "data": state("aws")}
-    elif method == "github_token_state":
-        s = state("github")
-        payload = {"type": "github_token_state", "data": {"present": s["present"], "fingerprint": s["fingerprint"]}}
-    elif method == "install_github_token":
-        open(path("github"), "wb").write(base64.b64decode(params["data"]))
-        s = state("github")
-        payload = {"type": "github_token_state", "data": {"present": True, "fingerprint": s["fingerprint"]}}
-    elif method == "skills_state":
-        if login_hold:
-            open(path("login-holding"), "w").close()
-            tries = 0
-            while not os.path.exists(login_hold):
-                tries += 1
-                if tries > 200: sys.exit(1)
-                time.sleep(0.05)
-        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": open(path("skills")).read() if os.path.exists(path("skills")) else "stale"}}
-    elif method == "install_skills":
-        archive = base64.b64decode(params["data"])
-        body = archive[8:]
-        if archive[:8] == b"HELSKIL2":
-            body = gzip.decompress(body)
-        fingerprint = hashlib.sha256(b"HELSKIL1" + body).hexdigest()
-        open(path("skills"), "w").write(fingerprint)
-        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": fingerprint}}
-    else:
-        raise AssertionError(method)
-    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
-"#;
-
-/// A Claude session on [`AWS_SYNC_RELAY`] whose profile names a role, whose
-/// GitHub token comes from `token_file` and whose skills come from `home`.
-#[cfg(unix)]
-fn aws_sync_session(
-    home: &std::path::Path,
-    root: &std::path::Path,
-    token_file: &std::path::Path,
-    aws_cli: &std::path::Path,
-) -> CredentialSyncTarget {
-    aws_sync_session_named(home, root, token_file, aws_cli, SESSION_ID, None)
-}
-
-/// [`aws_sync_session`] for a named session, whose worker may wait for a
-/// file before answering about its AWS credentials.
-#[cfg(unix)]
-fn aws_sync_session_named(
-    home: &std::path::Path,
-    root: &std::path::Path,
-    token_file: &std::path::Path,
-    aws_cli: &std::path::Path,
-    session_id: &str,
-    worker_waits_for: Option<&std::path::Path>,
-) -> CredentialSyncTarget {
-    std::fs::create_dir_all(home.join("skills/review")).unwrap();
-    std::fs::write(home.join("skills/review/SKILL.md"), "review").unwrap();
-    // Staged, as launch does, under the profile the host environment names.
-    std::fs::write(
-        root.join("aws-config"),
-        "[profile bedrock]\ncredential_process = cat aws\n",
-    )
-    .unwrap();
-    let mut target = skills_sync_target(home);
-    target.session_id = session_id.into();
-    target.skips_login_file_sync = true;
-    target.sync_github_token = true;
-    target.github = mj_core::config::GithubConfig {
-        session_token_path: Some(token_file.to_path_buf()),
-        ..Default::default()
-    };
-    target.skills_scope = mj_core::skills::SkillsScope::Isolated;
-    target.spec = CommandSpec::new(
-        "python3",
-        [
-            "-u".to_owned(),
-            "-c".to_owned(),
-            AWS_SYNC_RELAY.to_owned(),
-            RELAY_PROTOCOL_VERSION.to_string(),
-            session_id.to_owned(),
-            root.to_string_lossy().into_owned(),
-        ]
-        .into_iter()
-        .chain(worker_waits_for.map(|path| path.to_string_lossy().into_owned()))
-        .collect::<Vec<_>>(),
-    )
-    .purpose("AWS sync test relay");
-    target.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
-        environment: BTreeMap::from([
-            ("PATH".into(), aws_cli.to_string_lossy().into_owned()),
-            ("AWS_PROFILE".into(), "bedrock".into()),
-        ]),
-        role: Some(role_config()),
-        mints: true,
-        selection: None,
-    });
-    target
-}
-
 /// An `aws` that refuses every `sts assume-role` with the recorded
 /// AccessDenied line.
 #[cfg(unix)]
@@ -2188,45 +1995,8 @@ fn refusing_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
         &aws,
         format!(
             "#!/bin/sh\n/bin/cat {} >&2\nexit 254\n",
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/aws-sts-assume-role-access-denied.txt")
-                .display()
+            access_denied_reply(&bin).display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
-    bin
-}
-
-/// The role the AWS sync tests configure.
-fn role_config() -> mj_core::config::AwsRoleConfig {
-    mj_core::config::AwsRoleConfig {
-        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
-        session_policy: None,
-        session_policy_arns: Vec::new(),
-        duration_seconds: None,
-        source_identity: false,
-    }
-}
-
-/// An `aws` that answers every `sts assume-role` with the recorded output,
-/// expiring far in the future.
-#[cfg(unix)]
-fn granting_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let bin = dir.join("granting-bin");
-    std::fs::create_dir(&bin).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
-    recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
-    let output = dir.join("granted.json");
-    std::fs::write(&output, serde_json::to_vec(&recorded).unwrap()).unwrap();
-    let aws = bin.join("aws");
-    std::fs::write(
-        &aws,
-        format!("#!/bin/sh\nexec /bin/cat {}\n", output.display()),
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2448,10 +2218,8 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                   policy_fingerprint: &str,
                   source_identity: Option<&str>,
                   sign: bool| {
-        let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/aws-sts-assume-role.json"
-        ))
-        .unwrap();
+        let mut recorded: serde_json::Value =
+            serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
         recorded["Credentials"]["Expiration"] = expiration.into();
         let credentials = mj_core::aws_credentials::AwsCredentials::from_assume_role(
             "bedrock",
@@ -2796,10 +2564,8 @@ async fn a_matching_secret_without_a_scope_record_is_installed_again() {
     let cli = granting_aws_cli(root.path());
     // What the mint will return, already on the worker: installed before the
     // worker could record a scope.
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let minted = mj_core::aws_credentials::AwsCredentials::from_assume_role(
         "bedrock",
@@ -3005,8 +2771,8 @@ async fn mac_sync_pass(
     let received = scratch.path().join("session-login");
     let target = claude_sync_target(home.path(), "claude-session", session_login, &received);
     let skills = Arc::new(CanonicalSkills::collect(&target));
-    let read = match crate::setup::read_claude_keychain_login(&**keychain).unwrap() {
-        crate::setup::KeychainLogin::Present(bytes) => {
+    let read = match crate::harness_auth::read_claude_keychain_login(&**keychain).unwrap() {
+        crate::harness_auth::KeychainLogin::Present(bytes) => {
             (CredentialSnapshot::of(kind, &bytes), bytes)
         }
         _ => (CredentialSnapshot::absent(), Vec::new()),
@@ -3256,10 +3022,8 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
         }
 
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
-            let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-                "../../tests/fixtures/aws-sts-assume-role.json"
-            ))
-            .unwrap();
+            let mut recorded: serde_json::Value =
+                serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
             recorded["Credentials"]["Expiration"] = chrono::DateTime::<chrono::Utc>::from(
                 std::time::SystemTime::now() + Duration::from_secs(3),
             )
@@ -3630,64 +3394,6 @@ async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
             .any(|outcome| outcome.session_id == "stalled"),
         "{answered:?}"
     );
-}
-
-// An open AWS failure outlives the task that reported it: the replacement
-// task's first clean cycle is reported too, so the notices end the failure and
-// report a later recurrence.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_replaced_renewal_task_still_ends_the_failure_its_predecessor_reported() {
-    use crate::pollers::CredentialSyncNotices;
-
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    let cli = granting_aws_cli(scratch.path());
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    std::fs::write(root.join("install-fails"), "").unwrap();
-    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "replaced", None);
-    let mut coordinator = CredentialSyncCoordinator::spawn();
-    let handle = coordinator.handle();
-    handle.set_targets(vec![target.clone()]);
-    let next_partial = async |coordinator: &mut CredentialSyncCoordinator| {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let result = coordinator.result().await.expect("coordinator stopped");
-                if result.partial {
-                    return result;
-                }
-            }
-        })
-        .await
-        .expect("a renewal result arrived")
-    };
-    let mut notices = CredentialSyncNotices::default();
-    let state = mj_core::state::State::default();
-
-    let failed = next_partial(&mut coordinator).await;
-    assert!(failed.failures().next().is_some(), "{failed:?}");
-    assert!(notices.notice(&failed, None, &state).is_some());
-
-    // The target changes (a role edit): its task is replaced, and the worker
-    // now accepts the install.
-    std::fs::remove_file(root.join("install-fails")).unwrap();
-    let mut changed = target.clone();
-    changed
-        .aws_credentials
-        .as_mut()
-        .unwrap()
-        .environment
-        .insert("AWS_REGION".into(), "us-east-2".into());
-    handle.set_targets(vec![changed]);
-    let clean = next_partial(&mut coordinator).await;
-    assert!(clean.failures().next().is_none(), "{clean:?}");
-    assert_eq!(notices.notice(&clean, None, &state), None);
-
-    // The failure ended, so it is reported again when it recurs.
-    assert!(notices.notice(&failed, None, &state).is_some());
 }
 
 // A renewal task stopped while its job waits on the session's actor takes the
@@ -6102,4 +5808,11 @@ async fn credential_install_readback_mismatch_concludes_the_delivery() {
         std::fs::read_to_string(attempts).unwrap().lines().count(),
         1
     );
+}
+
+/// AWS's recorded refusal, as a file the stand-in `aws` can print.
+fn access_denied_reply(directory: &std::path::Path) -> std::path::PathBuf {
+    let path = directory.join("access-denied.txt");
+    std::fs::write(&path, crate::aws_assume_role::test_fixtures::ACCESS_DENIED).unwrap();
+    path
 }

@@ -1,0 +1,1708 @@
+use super::diagnostics::ServingPhase;
+use super::*;
+use std::time::Instant;
+
+/// PID of the process this daemon must not outlive, if one was requested.
+///
+/// Tests start daemons that no client ever attaches to, so idle exit cannot
+/// retire them, and a test process that dies without unwinding never runs its
+/// teardown. Naming an owner makes the daemon responsible for its own lifetime.
+pub(super) fn owner_pid_to_watch() -> Result<Option<u32>> {
+    let Some(value) = mj_core::config::env_override("DAEMON_OWNER_PID") else {
+        return Ok(None);
+    };
+    let pid: u32 = value
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("MJ_DAEMON_OWNER_PID must be a process id, but it is {value:?}"))?;
+    ensure!(
+        process_is_alive(pid),
+        "MJ_DAEMON_OWNER_PID names process {pid}, which is not running"
+    );
+    Ok(Some(pid))
+}
+
+/// Where this daemon runs, from [`mj_core::placement::daemon_container`].
+pub(crate) fn placement() -> DaemonPlacement {
+    match mj_core::placement::daemon_container() {
+        Some(name) => DaemonPlacement::Container {
+            name,
+            runtime: match std::env::var(DAEMON_CONTAINER_RUNTIME_ENV).as_deref() {
+                Ok("podman") => Some(mj_core::config::DaemonRuntime::Podman),
+                Ok("docker") => Some(mj_core::config::DaemonRuntime::Docker),
+                _ => None,
+            },
+        },
+        None => DaemonPlacement::Host,
+    }
+}
+
+pub async fn run_daemon_process() -> Result<()> {
+    // Checked before the store is locked so a bad value fails fast and leaves
+    // no daemon state behind.
+    let owner_pid = owner_pid_to_watch()?;
+    let cancellation = mj_controller::termination::Coordinator::install().token();
+    let opening = Instant::now();
+    let guard = ControllerStoreGuard::acquire()?;
+    super::previous_daemon::report_unclean_previous_daemon();
+    let database_writer = guard.start_database_writer()?;
+    log_startup_phase("open the store", opening);
+    let epilogue_started = AtomicBool::new(false);
+    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid, cancellation.clone()).await;
+    cancellation.cancel();
+    if !epilogue_started.load(Ordering::Acquire) {
+        // Initialization failed before the runtime-owned epilogue existed.
+        // The same process-level bound still applies to closing the writer.
+        spawn_shutdown_watchdog();
+    }
+    // The writer commits every write it accepted before it stops, so this is
+    // the one wait after the epilogue that durability requires. Timed, so a
+    // slow exit says whether the writer or the runtime held it.
+    let writer_started = Instant::now();
+    let writer_shutdown = tokio::task::spawn_blocking(move || database_writer.shutdown())
+        .await
+        .context("database writer shutdown task panicked")
+        .and_then(std::convert::identity);
+    let writer_took = writer_started.elapsed();
+    if writer_took >= Duration::from_millis(250) {
+        tracing::info!(
+            duration_ms = writer_took.as_millis(),
+            "database writer shut down"
+        );
+    }
+    record_daemon_cleanup(&mut outcome, "shut down database writer", writer_shutdown);
+    outcome
+}
+
+pub(super) async fn run_daemon_runtime(
+    epilogue_started: &AtomicBool,
+    owner_pid: Option<u32>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let uploads = mj_core::config::data_dir().join("uploads");
+    if tokio::fs::try_exists(&uploads).await? {
+        tokio::fs::remove_dir_all(&uploads).await?;
+    }
+    let progress = super::diagnostics::DaemonProgressMonitor::start()?;
+    let startup_began = Instant::now();
+    // Before this daemon can start a checkpoint, so every checkpoint file older
+    // than this belongs to a checkpoint that no longer runs.
+    let started = SystemTime::now();
+    let startup_work = mj_controller::upgrade::startup_recovery()?;
+    // Freeze worker sources before any session can be created or upgraded.
+    // Copying binaries belongs on a blocking task, never the runtime event loop.
+    tokio::task::spawn_blocking(mj_controller::controller::pin_worker_binary_sources)
+        .await
+        .context("worker source snapshot task failed")??;
+    // Lock files outlive the SSH masters they guarded (launch finding R3-11).
+    tokio::task::spawn_blocking(mj_controller::targets::SshSessions::remove_stale_master_locks)
+        .await
+        .context("SSH master lock cleanup task failed")?;
+    Controller::recover_config_id_rename()?;
+    let config = Config::load()?;
+    mj_controller::database::recover_interrupted_checkpointing_sessions(
+        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )?;
+    mj_controller::controller::reconcile_managed_checkpoint_archives()?;
+
+    let loading = Instant::now();
+    let controller = tokio::task::spawn_blocking(|| {
+        let mut controller = Controller::load()?;
+        controller.prepare_persisted_sessions()?;
+        Ok::<_, anyhow::Error>(controller)
+    })
+    .await
+    .context("prepare persisted daemon sessions")??;
+    log_startup_phase("load persisted sessions", loading);
+    // A local session an earlier release started from a profile home keeps
+    // running from it until it is next staged. The link has to be in place
+    // before any launch configuration is refreshed or any credential sync runs.
+    {
+        let state = controller.state.clone();
+        tokio::task::spawn_blocking(move || {
+            mj_controller::controller::local_profile_homes::link_profile_homes_of_earlier_sessions(
+                &state,
+            )
+        })
+        .await
+        .context("earlier sessions' profile home link task failed")?;
+    }
+    // A container launcher chooses the endpoint and token, because it
+    // publishes the port and writes `daemon.json` itself; otherwise the daemon
+    // picks both.
+    let listen = match mj_core::config::env_override("DAEMON_LISTEN") {
+        Some(address) => address
+            .parse::<SocketAddr>()
+            .with_context(|| format!("MJ_DAEMON_LISTEN is not an address: {address:?}"))?,
+        None => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+    };
+    let listener = TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("bind the Mjolnir daemon endpoint {listen}"))?;
+    let token = match mj_core::config::env_override("DAEMON_TOKEN") {
+        Some(token) if !token.is_empty() => token,
+        _ => random_hex::<32>()?,
+    };
+    let metadata = DaemonMetadata {
+        protocol_version: PROTOCOL_VERSION,
+        pid: std::process::id(),
+        address: listener.local_addr()?,
+        token,
+        started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        // The version, with the revision and build times as semver build
+        // metadata that older clients ignore; see `mj_client::build_identity`.
+        build_version: mj_client::build_identity::this_build().published(),
+        // This is the daemon's own answer to "which start are you": a fresh
+        // random value every time the process starts, so a client can tell a
+        // replacement from the daemon it was talking to without a PID.
+        instance_id: random_hex::<16>()?,
+        // Keeping this answer in the daemon means clients no longer read
+        // `/proc`.
+        placement: placement(),
+    };
+    let workspaces = tokio::task::spawn_blocking(mj_controller::database::list_workspaces)
+        .await
+        .context("daemon workspace load task panicked")??;
+    let mut remote = if config.phone.enabled {
+        Some(spawn_remote_session_manager()?)
+    } else {
+        None
+    };
+
+    // Start the primary manager after store preparation. Bootstrap failures
+    // below have an awaited epilogue just like failures in the serving loop.
+    let (delegation_tx, delegation_updates) = mj_controller::session_manager::delegation_channel();
+    let manager =
+        mj_controller::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
+    manager.control.update_model_policies(&controller);
+    let manager_targets = manager.targets;
+    let manager_updates = manager.updates;
+    let manager_control = manager.control.clone();
+    let manager_shutdown = manager.shutdown;
+    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(manager_control.clone());
+    let recovery_observer = recovery.observer();
+    // Shares the recovery gate, so a recovery copy and a worker upgrade never
+    // act on one session at the same time.
+    let mut worker_upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        manager_control.clone(),
+        &recovery_observer,
+    );
+    let state = Arc::new(RuntimeState::new(
+        manager_control.clone(),
+        Controller {
+            config: controller.config.clone(),
+            state: controller.state.clone(),
+        },
+        recovery_observer.clone(),
+        worker_upgrades.observer(),
+        workspaces,
+    ));
+    let failure_runtime = Arc::downgrade(&state);
+    manager_control.install_harness_failure_handler(Arc::new(move |id, failure| {
+        let runtime = failure_runtime.clone();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .context("daemon stopped before readiness failure could be applied")?;
+            runtime.fail_unready_session(id, failure).await
+        })
+    }));
+    // Install the bounded failure recorder before worker observations start.
+    manager_targets.send_replace(dashboard_worker_targets(&controller));
+    log_relay_actors_launched(&manager_targets.borrow());
+    state
+        .reviewer_runtime
+        .set(Arc::downgrade(&state))
+        .expect("reviewer runtime installed once");
+    // Views are published only from the serving loop below, so the first
+    // targets are installed before any can arrive.
+    state.owner().install_relay_sessions(
+        manager_targets
+            .borrow()
+            .iter()
+            .map(|target| target.session_id.clone())
+            .collect(),
+    );
+    // Fires once the startup start of Apple's container service has finished,
+    // however it ended, so the image refresher's first look sees the service
+    // as startup left it instead of mid-start.
+    let apple_container_settled = CancellationToken::new();
+    let apple_container_startup = spawn_apple_container_startup(
+        state.clone(),
+        cancellation.clone(),
+        apple_container_settled.clone(),
+        config.targets.values().any(|target| {
+            matches!(
+                target,
+                mj_core::config::TargetTemplate::AppleContainer { .. }
+            )
+        }),
+    );
+    // Bootstrap already owns live managers. Capture its error so those owners
+    // are shut down before the process-level writer can be closed.
+    let bootstrapping = Instant::now();
+    let bootstrap = async {
+        let (move_operations, close_operations) =
+            blocking(mj_controller::database::load_move_recovery).await?;
+        let moves = move_operations.len();
+        let move_sessions = move_operations
+            .iter()
+            .map(|operation| operation.selection.session_id.clone())
+            .collect::<BTreeSet<_>>();
+        let move_owners = state
+            .recover_moves(move_operations, &close_operations)
+            .await?;
+        let mut lifecycle_owned = move_owners.moves;
+        let restart_intents = blocking(mj_controller::database::load_session_restarts).await?;
+        let restarts = restart_intents.len();
+        lifecycle_owned.extend(
+            restart_intents
+                .iter()
+                .map(|intent| intent.session_id.clone()),
+        );
+        lifecycle_owned.extend(state.recover_restarts(restart_intents).await?);
+        let create_intents = blocking(mj_controller::database::load_session_create_intents).await?;
+        let creates = create_intents.len();
+        lifecycle_owned.extend(state.recover_creates(create_intents).await?);
+        let (retained_cleanups, startup_cleanups) = {
+            let owner = state.owner();
+            let sessions = &owner.controller().state.sessions;
+            (
+                sessions
+                    .values()
+                    .filter(|session| {
+                        session.state == mj_core::state::SessionState::Stopped
+                            && session.target.is_some()
+                    })
+                    .count(),
+                sessions
+                    .values()
+                    .filter(|session| session.state == mj_core::state::SessionState::StartupCleanup)
+                    .count(),
+            )
+        };
+        state.resume_retained_cleanups().await;
+        state.resume_startup_cleanups(true).await;
+        tracing::info!(
+            moves,
+            restarts,
+            creates,
+            retained_cleanups,
+            startup_cleanups,
+            "daemon startup: recovery of moves, restarts and cleanups queued"
+        );
+        state.restore_startup_deliveries(&cancellation).await?;
+        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned, move_owners.closes))
+    }
+    .await;
+    log_startup_phase("recover moves and startup deliveries", bootstrapping);
+    let (move_sessions, move_owned, move_closes) = match bootstrap {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            epilogue_started.store(true, Ordering::Release);
+            spawn_shutdown_watchdog();
+            cancellation.cancel();
+            let mut outcome = Err(error);
+            if let Some(apple_container_startup) = apple_container_startup {
+                record_daemon_cleanup(
+                    &mut outcome,
+                    "join Apple container startup after bootstrap failure",
+                    apple_container_startup.await.map_err(anyhow::Error::new),
+                );
+            }
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down bootstrap worker upgrade coordinator",
+                worker_upgrades.shutdown().await,
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down bootstrap recovery coordinator",
+                recovery.shutdown().await,
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down code review host after bootstrap failure",
+                state
+                    .review_host()
+                    .shutdown()
+                    .await
+                    .map_err(anyhow::Error::msg),
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "cancel bootstrap lifecycle operations",
+                state.cancel_and_wait_lifecycles().await,
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "drain bootstrap startup deliveries",
+                state.cancel_and_join_startup_prompts().await,
+            );
+            if let Some(remote) = remote.take() {
+                record_daemon_cleanup(
+                    &mut outcome,
+                    "shut down bootstrap remote session manager",
+                    remote.shutdown.shutdown().await,
+                );
+            }
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down bootstrap session manager",
+                manager_shutdown.shutdown().await,
+            );
+            return outcome;
+        }
+    };
+    // Checkpoint files that a cancelled or interrupted checkpoint left in a
+    // local worker root. Deleting them can take minutes after a long leak, so
+    // this runs beside the daemon rather than before it serves. It stops at
+    // shutdown, and the next start finishes it.
+    let checkpoint_sweep = {
+        let cancellation = cancellation.clone();
+        tokio::task::spawn_blocking(move || {
+            mj_controller::controller::sweep_local_checkpoint_leftovers(
+                &mj_controller::targets::BoundedProcessExecutor::new(Duration::from_secs(15)),
+                started,
+                &|| cancellation.is_cancelled(),
+            );
+        })
+    };
+    let activity_cleanup = {
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            if let Err(error) = super::activity_cleanup::run(cancellation).await {
+                tracing::warn!(error = %format!("{error:#}"), "API activity cleanup stopped; the next daemon will retry");
+            }
+        })
+    };
+    let (delegation_services, mut delegation_task) = super::delegation::spawn(
+        state.clone(),
+        manager_control.clone(),
+        delegation_updates,
+        cancellation.clone(),
+    );
+    // Reviewer prewarm holds no admission: it is cancelled with the daemon
+    // and planned again from the session records by the next one.
+    let reviewer_prewarm = super::prewarm::spawn(state.clone(), cancellation.clone());
+    // Recovery can inspect the initial turn immediately. Install the quota
+    // owner and its current profile identities before starting that reader.
+    let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
+
+    // CPU publication is bounded and reconstructed from workers. It holds no
+    // admission during handoff and exits with the daemon's cancellation token.
+    let cpu_publication = {
+        let mut receiver = manager.session_cpu;
+        let state = state.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            let mut next_publication = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    changed = receiver.changed() => {
+                        if changed.is_err() {
+                            tracing::error!("session CPU publication channel closed");
+                            return;
+                        }
+                    }
+                }
+                // Publish the first update promptly, then coalesce other actors'
+                // updates. A separate polling phase adds a needless ten seconds.
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = tokio::time::sleep_until(next_publication) => {}
+                }
+                receiver.borrow_and_update();
+                state.publish_revision();
+                next_publication = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
+        })
+    };
+    let project_catalog = tokio::spawn(state.projects().run(cancellation.child_token()));
+    // Before the web viewer starts: it shows this service's readings.
+    let capacity_service =
+        super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
+    let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
+    let notification_pruning = tokio::spawn(super::attention::prune_read_notifications(
+        state.clone(),
+        cancellation.clone(),
+    ));
+
+    let target_refresh = spawn_manager_target_refresher(
+        manager_targets.clone(),
+        cancellation.clone(),
+        state.clone(),
+    );
+    let compatibility_watch = spawn_store_compatibility_watch(cancellation.clone());
+    let image_refresh = spawn_image_refresher(
+        {
+            let state = state.clone();
+            move || state.with_config(mj_controller::controller::image_refresh_plan)
+        },
+        {
+            // A background download is the daemon's own work, not a session's,
+            // so these notices carry an empty session id and reach every
+            // workspace.
+            let state = state.clone();
+            move |report| {
+                let text = match report {
+                    crate::pollers::ImageRefreshReport::Started { host, image } => {
+                        format!("Downloading image {image} for {host}\u{2026}")
+                    }
+                    crate::pollers::ImageRefreshReport::Pulled { host, image } => {
+                        format!("Image {image} is ready on {host}.")
+                    }
+                    crate::pollers::ImageRefreshReport::Failed { host, image, error } => {
+                        format!("Could not pull image {image} on {host}: {error}")
+                    }
+                };
+                state.push_notice("", text);
+            }
+        },
+        apple_container_settled,
+        cancellation.clone(),
+    );
+    let exit_when_idle = mj_core::config::env_override_os("DAEMON_EXIT_WHEN_IDLE").is_some();
+    let mut idle_tick = tokio::time::interval(Duration::from_millis(100));
+    idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut owner_tick = tokio::time::interval(Duration::from_millis(500));
+    owner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
+    recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut background_policy_tick = tokio::time::interval(Duration::from_secs(1));
+    background_policy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // How often the harness readiness wait is looked at. The wait itself is
+    // minutes long, so this only bounds how late a failure is noticed, and it
+    // reads in-memory state rather than the store.
+    let mut progress_tick = tokio::time::interval(Duration::from_secs(1));
+    progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut interrupted_close_tasks = Vec::new();
+    for session_id in interrupted_suspend_session_ids(&controller)
+        .into_iter()
+        .chain(move_closes)
+        .collect::<BTreeSet<_>>()
+    {
+        if move_owned.contains(&session_id) {
+            continue;
+        }
+        let recovery_state = state.clone();
+        let recovery_shutdown = cancellation.clone();
+        let updates = interrupted_close_tx.clone();
+        // A child's durable close is resumed by every daemon. Its worker
+        // connection may be unavailable for minutes and must not hold startup
+        // admission after the daemon begins serving.
+        let upgrade_work =
+            (!controller.state.subagents.contains_key(&session_id)).then(|| startup_work.clone());
+        let interrupted_close_task = tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
+            let result = tokio::select! {
+                result = recovery_state.recover_suspension(session_id.clone()) => result,
+                () = recovery_shutdown.cancelled() => return,
+            }
+            .map(|()| crate::pollers::LifecycleSuccess::Closed)
+            .map_err(|error| format!("{error:#}"));
+            if updates
+                .send(crate::pollers::LifecycleUpdate {
+                    session_id,
+                    result,
+                    deferred_cleanup: false,
+                })
+                .is_err()
+            {
+                tracing::debug!("suspension recovery receiver stopped");
+            }
+        });
+        interrupted_close_tasks.push(interrupted_close_task);
+    }
+    let interrupted_closes = interrupted_close_tasks.len();
+    // A destroy that failed left its record in `Error` with the target still
+    // present; it is finished the way `mj destroy` finishes it. The branch is
+    // kept, because whether to delete it was that command's choice and is not
+    // recorded.
+    for session_id in interrupted_destroy_session_ids(&controller) {
+        let recovery_state = state.clone();
+        let recovery_shutdown = cancellation.clone();
+        let updates = interrupted_close_tx.clone();
+        let upgrade_work = startup_work.clone();
+        interrupted_close_tasks.push(tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
+            let result = tokio::select! {
+                result = recovery_state.recover_destruction(session_id.clone()) => result,
+                () = recovery_shutdown.cancelled() => return,
+            }
+            .map(|()| crate::pollers::LifecycleSuccess::ForceDestroyed)
+            .map_err(|error| format!("{error:#}"));
+            let _ = updates.send(crate::pollers::LifecycleUpdate {
+                session_id,
+                result,
+                deferred_cleanup: false,
+            });
+        }));
+    }
+    let interrupted_destroys = interrupted_close_tasks.len() - interrupted_closes;
+    tracing::info!(
+        interrupted_closes,
+        interrupted_destroys,
+        "daemon startup: interrupted closes and destroys resumed"
+    );
+    // Whatever is still in an in-flight lifecycle state now has no owner: the
+    // moves, the interrupted closes, and the checkpointing rows above are
+    // every operation that legitimately resumes. The list comes from the
+    // startup snapshot, so a session created after this cannot be caught by
+    // it, and the writes run off this path because they touch the database.
+    let reconciliation = {
+        let unowned = unowned_interrupted_lifecycles(
+            &controller,
+            &move_owned.union(&move_sessions).cloned().collect(),
+        );
+        tracing::info!(
+            sessions = unowned.len(),
+            "daemon startup: interrupted lifecycles to mark failed"
+        );
+        (!unowned.is_empty()).then(|| {
+            let state = state.clone();
+            let upgrade_work = startup_work.clone();
+            tokio::spawn(async move {
+                let _upgrade_work = upgrade_work;
+                let reconciled = tokio::task::spawn_blocking(move || {
+                    let mut controller = Controller::load()?;
+                    let mut reconciled = 0usize;
+                    for (session_id, cause) in unowned {
+                        match controller.fail_interrupted_lifecycle(&session_id, &cause) {
+                            Ok(true) => {
+                                tracing::warn!(%session_id, %cause, "session left in flight by a daemon restart marked failed");
+                                reconciled += 1;
+                            }
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                %session_id,
+                                error = format!("{error:#}"),
+                                "could not reconcile an interrupted lifecycle state"
+                            ),
+                        }
+                    }
+                    anyhow::Ok(reconciled)
+                })
+                .await;
+                match reconciled {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(_)) => refresh_runtime_controller(&state).await,
+                    Ok(Err(error)) => tracing::warn!(
+                        error = format!("{error:#}"),
+                        "could not load the controller to reconcile interrupted lifecycles"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "interrupted lifecycle reconciliation task failed");
+                    }
+                }
+            })
+        })
+    };
+    // Rows left as tombstones by an older build, or by a discard that could
+    // not finish before the daemon stopped. The list comes from the startup
+    // snapshot, so a session that becomes lost after this is handled by the
+    // view watcher instead.
+    let tombstone_sweep = {
+        let tombstones = tombstone_session_ids(&controller);
+        tracing::info!(
+            sessions = tombstones.len(),
+            "daemon startup: tombstones to discard"
+        );
+        (!tombstones.is_empty()).then(|| {
+            let state = state.clone();
+            let upgrade_work = startup_work.clone();
+            tokio::spawn(async move {
+                let _upgrade_work = upgrade_work;
+                for session_id in tombstones {
+                    state.discard_lost_session(session_id).await;
+                }
+            })
+        })
+    };
+    let mut phone_publisher: Option<RemoteSessionPublisher> = None;
+    let mut phone_targets = None;
+    let mut prepared_targets = manager_targets.subscribe();
+    let mut phone_task = None;
+    let mut remote_request_bridge = None;
+    if let Some(remote) = remote.take() {
+        remote
+            .targets
+            .send_replace(prepared_targets.borrow_and_update().clone());
+        phone_targets = Some(remote.targets.clone());
+        phone_publisher = Some(remote.publisher.clone());
+        remote_request_bridge = Some(spawn_remote_request_bridge(
+            remote.requests,
+            manager_control.clone(),
+        ));
+        phone_task = Some(spawn_phone_server(
+            config.phone,
+            cancellation.clone(),
+            state.clone(),
+            SessionManagerChannels {
+                session_cpu: remote.control.session_cpu.clone(),
+                targets: remote.targets,
+                control: remote.control,
+                updates: remote.updates,
+                shutdown: remote.shutdown,
+            },
+            delegation_services,
+        ));
+    } else {
+        state.set_phone_status(WebViewerStatus::Disabled);
+        state.web_viewer.publish(crate::server::WebViewerAccess::Unavailable("Web access is disabled. Enable [phone].enabled in your configuration, then restart the daemon.".into()));
+    }
+    let daemon_metadata_path = metadata_path();
+    let mut client_tasks = tokio::task::JoinSet::new();
+    let mut delegation_outcome = None;
+    let mut cache_task = tokio::spawn(crate::daemon::mbx_service::run(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut mailbox_task = tokio::spawn(crate::daemon::mailbox_delivery::run(
+        state.clone(),
+        manager_control.clone(),
+        cancellation.clone(),
+    ));
+    let mut github_watch_task = tokio::spawn(crate::github_watch::service::run(
+        state.clone(),
+        cancellation.clone(),
+    ));
+
+    let mut alert_task = tokio::spawn(crate::daemon::push_delivery::run_alerts(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut alert_outcome = None;
+    let mut cache_outcome = None;
+    let mut mailbox_outcome = None;
+    let mut github_watch_outcome = None;
+
+    // Everything a client can use is initialized before this atomic
+    // publication. From here on every exit, including an error from the test
+    // hook or the event loop, flows through the same bounded epilogue.
+    let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
+    let mut auto_afk_outcome = None;
+    let mut outcome = async {
+        write_metadata(&daemon_metadata_path, &metadata)?;
+        reach_test_hook("daemon_metadata_before_listening").await?;
+        tracing::info!(
+            elapsed_ms = startup_began.elapsed().as_millis(),
+            resumed_close_and_destroy_tasks = interrupted_close_tasks.len(),
+            "daemon startup recovery finished"
+        );
+        tracing::info!("the daemon is serving");
+        drop(startup_work);
+        loop {
+            progress.serving_tick();
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = progress_tick.tick() => {},
+                changed = prepared_targets.changed(), if phone_targets.is_some() => {
+                    progress.phase(ServingPhase::Targets);
+                    changed.context("daemon worker target publication stopped")?;
+                    if let Some(targets) = &phone_targets {
+                        targets.send_replace(prepared_targets.borrow_and_update().clone());
+                    }
+                }
+                result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut alert_task, &mut alert_outcome, &cancellation, "notification service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut cache_task, &mut cache_outcome, &cancellation, "machine build cache service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut mailbox_task, &mut mailbox_outcome, &cancellation, "mailbox outbox service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut github_watch_task, &mut github_watch_outcome, &cancellation, "GitHub watch service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut delegation_task, &mut delegation_outcome, &cancellation, "delegation coordinator") => {
+                    result?;
+                    break;
+                }
+                _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
+                    progress.phase(ServingPhase::IdleCheck);
+                    state.prune_dead_clients();
+                    if state.attachments().is_empty() {
+                        break;
+                    }
+                }
+                _ = owner_tick.tick(), if owner_pid.is_some() => {
+                    progress.phase(ServingPhase::OwnerCheck);
+                    if let Some(owner) = owner_pid
+                        && !process_is_alive(owner)
+                    {
+                        tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
+                        break;
+                    }
+                }
+                _ = recovery_tick.tick() => {
+                    progress.phase(ServingPhase::Recovery);
+                    publish_background_results(
+                        &state,
+                        std::iter::from_fn(|| recovery.try_result()),
+                        std::iter::from_fn(|| worker_upgrades.try_result()),
+                    );
+                }
+                _ = background_policy_tick.tick() => {
+                    progress.phase(ServingPhase::BackgroundPolicy);
+                    state.refresh_background_policies();
+                    state.resume_startup_cleanups(false).await;
+                }
+                completed = interrupted_close_rx.recv() => {
+                    progress.phase(ServingPhase::SuspensionRecovery);
+                    if let Some(completed) = completed {
+                        let recovered = completed.result.is_ok();
+                        if let Err(error) = completed.result {
+                            tracing::warn!(session_id = %completed.session_id, %error, "daemon could not resume interrupted close");
+                        }
+                        refresh_runtime_controller(&state).await;
+                        if recovered && completed.deferred_cleanup
+                            && let Err(error) = state.start_deferred_cleanup(completed.session_id.clone()).await
+                        {
+                            tracing::warn!(session_id = %completed.session_id, error = format!("{error:#}"), "could not continue cleanup after interrupted close");
+                            state.push_notice(
+                                &completed.session_id,
+                                format!("Could not continue container storage cleanup: {error:#}"),
+                            );
+                        }
+                    }
+                }
+                accepted = listener.accept() => {
+                    progress.phase(ServingPhase::Client);
+                    let (stream, peer) = accepted.context("accept Mjolnir daemon client")?;
+                    if !peer.ip().is_loopback() {
+                        tracing::warn!(%peer, "rejected non-loopback daemon client");
+                        continue;
+                    }
+                    let metadata = metadata.clone();
+                    let state = state.clone();
+                    let cancellation = cancellation.clone();
+                    client_tasks.spawn(async move {
+                        if let Err(error) = serve_client(stream, metadata, state, cancellation).await {
+                            tracing::debug!(error = format!("{error:#}"), "daemon client disconnected");
+                        }
+                    });
+                }
+                completed = client_tasks.join_next(), if !client_tasks.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        tracing::warn!(%error, "daemon client task failed");
+                    }
+                }
+                update = update_feed.next() => {
+                    progress.phase(ServingPhase::SessionUpdate);
+                    // The feed says why it ended. A shutdown also stops the
+                    // continuation service and closes this channel, so a
+                    // closed channel is not evidence of a failure.
+                    let Some(update) = update? else { break };
+                    if let Some(raw) = update.raw_observation.as_ref()
+                        && raw.native_session_is_ready()
+                        && let Some(build) = update.view.snapshot.as_ref().and_then(|snapshot| snapshot.worker_build.clone())
+                    {
+                        let observation = {
+                            let owner = state.owner();
+                            owner.controller().state.sessions.get(&update.session_id).and_then(|session| {
+                                Some((session.last_profile.clone(), mj_controller::controller::profile_config::observation_check(session.target.as_ref()?)?))
+                            })
+                        };
+                        if let Some((profile, check)) = observation {
+                            let raw = raw.clone();
+                            let state = state.clone();
+                            client_tasks.spawn(async move {
+                                let Ok(_activity) = mj_controller::upgrade::activity("profile choice cache") else { return; };
+                                match mj_controller::controller::profile_config::observe(profile.clone(), build, raw, check).await {
+                                    Ok(true) => {
+                                        if let Some(backend) = state.report_backend.get().and_then(std::sync::Weak::upgrade) {
+                                            backend.profile_catalog().reread_failed(&profile);
+                                        }
+                                    }
+                                    Ok(false) => {},
+                                    Err(error) => tracing::warn!(%error, "could not cache observed profile choices"),
+                                }
+                            });
+                        }
+                    }
+                    if let Some((detail, observed_updated_at)) =
+                        state.missing_target_record(&update.session_id, &update.view)
+                    {
+                        let state = state.clone();
+                        let session_id = update.session_id.clone();
+                        client_tasks.spawn(async move {
+                            // Shutdown cancels this task. An uncommitted write
+                            // is rediscovered from the next daemon's actor.
+                            state.persist_missing_target(
+                                &session_id, detail, observed_updated_at,
+                            ).await;
+                        });
+                    }
+                    if let Some(publisher) = phone_publisher.as_ref()
+                        && let Err(error) = publisher.try_publish(
+                            update.session_id.clone(),
+                            update.view.clone(),
+                        )
+                    {
+                        tracing::warn!(%error, "phone session view bridge stopped");
+                        phone_publisher = None;
+                    }
+                    // Every session's view passes here whether or not anything is
+                    // attached, which is exactly what an automatic review needs to
+                    // see: the turn that just finished.
+                    // The continuation completion gate has already notified review.
+                    state.publish_session(update.session_id, update.view).await?;
+                    // State is published before waking the delivery owner, so
+                    // its readiness check observes the same session update.
+                    mj_controller::mailbox_outbox::notify_mailbox_outbox_changed();
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    progress.phase(ServingPhase::Shutdown);
+    let mut epilogue = EpilogueClock::start();
+    epilogue_started.store(true, Ordering::Release);
+    spawn_shutdown_watchdog();
+    // Idle exit and fallible loop exits do not arrive through the termination
+    // coordinator. Stop every daemon-owned task before closing the sole writer.
+    cancellation.cancel();
+    epilogue.record(
+        &mut outcome,
+        "join auto AFK timer",
+        match auto_afk_outcome {
+            Some(result) => result,
+            None => auto_afk
+                .await
+                .context("auto AFK task panicked")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join API activity cleanup",
+        activity_cleanup.await.map_err(anyhow::Error::from),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join machine build cache applications",
+        match cache_outcome {
+            Some(result) => result,
+            None => cache_task
+                .await
+                .context("machine cache service failed")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join mailbox outbox service",
+        match mailbox_outcome {
+            Some(result) => result,
+            None => mailbox_task
+                .await
+                .context("mailbox outbox service failed")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join GitHub watch service",
+        match github_watch_outcome {
+            Some(result) => result,
+            None => github_watch_task
+                .await
+                .context("GitHub watch service failed")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join notification service",
+        match alert_outcome {
+            Some(result) => result,
+            None => alert_task
+                .await
+                .context("notification service failed")
+                .and_then(|result| result),
+        },
+    );
+    // Recovery copies and worker upgrades do not hold up a handoff, so some
+    // may still be running. Stop them first: the next daemon starts them again.
+    // The coordinators share one gate, and dropping either cancels both.
+    epilogue.record(
+        &mut outcome,
+        "shut down worker upgrade coordinator",
+        worker_upgrades.shutdown().await,
+    );
+    epilogue.record(
+        &mut outcome,
+        "shut down recovery coordinator",
+        recovery.shutdown().await,
+    );
+    epilogue.record(
+        &mut outcome,
+        "join continuation service",
+        update_feed.join().await,
+    );
+    epilogue.record(
+        &mut outcome,
+        "join delegation coordinator",
+        match delegation_outcome {
+            Some(result) => result,
+            None => delegation_task
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result),
+        },
+    );
+    drop(interrupted_close_tx);
+    epilogue.record(
+        &mut outcome,
+        "remove daemon metadata",
+        remove_daemon_metadata(&daemon_metadata_path),
+    );
+    epilogue.record(
+        &mut outcome,
+        "shut down code review host",
+        state
+            .review_host()
+            .shutdown()
+            .await
+            .map_err(anyhow::Error::msg),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join CPU publication",
+        cpu_publication.await.map_err(anyhow::Error::from),
+    );
+    record_daemon_cleanup(
+        &mut outcome,
+        "join project discovery",
+        project_catalog.await.map_err(anyhow::Error::from),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join controller target refresher",
+        target_refresh.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join store compatibility watch",
+        compatibility_watch.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join reviewer prewarm",
+        reviewer_prewarm.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join container image refresher",
+        image_refresh.await.map_err(anyhow::Error::new),
+    );
+    if let Some(apple_container_startup) = apple_container_startup {
+        epilogue.record(
+            &mut outcome,
+            "join Apple container startup",
+            apple_container_startup.await.map_err(anyhow::Error::new),
+        );
+    }
+    epilogue.record(
+        &mut outcome,
+        "join capacity service",
+        capacity_service.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join Brokk Observe delivery",
+        observe_delivery
+            .await
+            .context("Brokk Observe delivery task panicked")
+            .and_then(std::convert::identity),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join notification pruning",
+        notification_pruning
+            .await
+            .context("notification pruning task panicked")
+            .and_then(std::convert::identity),
+    );
+    if let Some(phone_task) = phone_task {
+        epilogue.record(
+            &mut outcome,
+            "join phone server",
+            phone_task.await.map_err(anyhow::Error::new),
+        );
+    }
+    if let Some(remote_request_bridge) = remote_request_bridge {
+        epilogue.record(
+            &mut outcome,
+            "join phone session request bridge",
+            remote_request_bridge.await.map_err(anyhow::Error::new),
+        );
+    }
+    client_tasks.abort_all();
+    while let Some(result) = client_tasks.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            record_daemon_cleanup(
+                &mut outcome,
+                "join daemon client task",
+                Err(anyhow::Error::new(error)),
+            );
+        }
+    }
+    epilogue.record(&mut outcome, "join daemon client tasks", Ok(()));
+    epilogue.record(
+        &mut outcome,
+        "cancel daemon lifecycle operations",
+        state.cancel_and_wait_lifecycles().await,
+    );
+    epilogue.record(
+        &mut outcome,
+        "drain startup prompts",
+        state.cancel_and_join_startup_prompts().await,
+    );
+    if let Some(reconciliation) = reconciliation {
+        epilogue.record(
+            &mut outcome,
+            "join interrupted lifecycle reconciliation",
+            reconciliation.await.map_err(anyhow::Error::new),
+        );
+    }
+    if let Some(tombstone_sweep) = tombstone_sweep {
+        epilogue.record(
+            &mut outcome,
+            "join lost-session discard sweep",
+            tombstone_sweep.await.map_err(anyhow::Error::new),
+        );
+    }
+    epilogue.record(
+        &mut outcome,
+        "join checkpoint leftover sweep",
+        checkpoint_sweep.await.map_err(anyhow::Error::new),
+    );
+    for interrupted_close_task in interrupted_close_tasks {
+        epilogue.record(
+            &mut outcome,
+            "join interrupted close recovery",
+            interrupted_close_task.await.map_err(anyhow::Error::new),
+        );
+    }
+    epilogue.record(
+        &mut outcome,
+        "shut down controller daemon session manager",
+        manager_shutdown.shutdown().await,
+    );
+    epilogue.finish();
+    outcome
+}
+
+/// Log a startup phase that took long enough to matter, so a slow start after
+/// an upgrade records where its time went.
+/// One line naming how many session relay actors the daemon starts at once and
+/// what kind of target each reaches, so a slow start can be read against the
+/// size of its reconnect burst.
+fn log_relay_actors_launched(targets: &[mj_controller::session_manager::RelaySessionTarget]) {
+    let mut by_kind = BTreeMap::<&'static str, usize>::new();
+    for target in targets {
+        let kind = target.worker_recovery.as_ref().map_or("unknown", |plan| {
+            mj_core::targets::locator_kind_name(&plan.source_target)
+        });
+        *by_kind.entry(kind).or_default() += 1;
+    }
+    tracing::info!(
+        actors = targets.len(),
+        by_target_kind = ?by_kind,
+        "daemon startup: session relay actors launched"
+    );
+}
+
+fn log_startup_phase(phase: &'static str, started: Instant) {
+    let took = started.elapsed();
+    if took >= EpilogueClock::LOGGED_STEP {
+        tracing::info!(
+            phase,
+            duration_ms = took.as_millis(),
+            "daemon startup phase finished"
+        );
+    }
+}
+
+/// Sessions whose record is nothing but a tombstone: they ended without a
+/// target and without a checkpoint, so the record offers no action but its own
+/// removal. `DestroyedWithDataLoss` only ever comes from an older build.
+pub(super) fn tombstone_session_ids(controller: &Controller) -> Vec<String> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| {
+            matches!(
+                session.state,
+                SessionState::Lost | SessionState::DestroyedWithDataLoss
+            )
+        })
+        .map(|session| session.id.clone())
+        .collect()
+}
+
+/// A service can observe cancellation and finish before the serving loop
+/// selects its own cancellation branch. The shared token owns that decision;
+/// selecting a completed task alone does not mean the service failed.
+async fn supervise_service(
+    task: &mut tokio::task::JoinHandle<Result<()>>,
+    outcome: &mut Option<Result<()>>,
+    cancellation: &CancellationToken,
+    service: &'static str,
+) -> Result<()> {
+    let result = task.await;
+    // Preserve errors for the epilogue even during an orderly shutdown, and
+    // record the consumed join so cleanup never polls the task a second time.
+    *outcome = Some(
+        result
+            .with_context(|| format!("{service} failed"))
+            .and_then(std::convert::identity),
+    );
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+    anyhow::bail!("{service} stopped unexpectedly")
+}
+
+pub(super) fn remove_daemon_metadata(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+/// Keep the event-loop failure as the primary result while still running and
+/// reporting every cleanup step. If the loop ended normally, the first
+/// cleanup failure becomes the daemon's result.
+/// Times the shutdown epilogue, so a slow exit, such as the end of an upgrade
+/// handoff, records which step took the time.
+struct EpilogueClock {
+    began: Instant,
+    step: Instant,
+}
+
+impl EpilogueClock {
+    /// Steps shorter than this are not logged.
+    const LOGGED_STEP: Duration = Duration::from_millis(250);
+
+    fn start() -> Self {
+        let now = Instant::now();
+        tracing::info!("daemon shutdown began");
+        Self {
+            began: now,
+            step: now,
+        }
+    }
+
+    /// Record `cleanup`, the result of the step that just finished. Steps run
+    /// one after another, so the time since the previous one is this step's.
+    fn record(&mut self, outcome: &mut Result<()>, operation: &'static str, cleanup: Result<()>) {
+        let took = self.step.elapsed();
+        if took >= Self::LOGGED_STEP {
+            tracing::info!(
+                step = operation,
+                duration_ms = took.as_millis(),
+                "daemon shutdown step finished"
+            );
+        }
+        record_daemon_cleanup(outcome, operation, cleanup);
+        self.step = Instant::now();
+    }
+
+    fn finish(self) {
+        tracing::info!(
+            duration_ms = self.began.elapsed().as_millis(),
+            "daemon shutdown finished"
+        );
+    }
+}
+
+pub(super) fn record_daemon_cleanup(
+    outcome: &mut Result<()>,
+    operation: &'static str,
+    cleanup: Result<()>,
+) {
+    let Err(error) = cleanup else {
+        return;
+    };
+    let error = error.context(operation);
+    if outcome.is_ok() {
+        *outcome = Err(error);
+    } else {
+        tracing::warn!(error = format!("{error:#}"), "daemon cleanup step failed");
+    }
+}
+
+/// Bounds the epilogue below.
+///
+/// The daemon leaves on its own long before this fires: a graceful exit
+/// returns from `run_daemon_process`, the process exits 0, and this task dies
+/// with the runtime. It exists so no unwinding step can hold the process open
+/// past the deadline its clients wait on, whatever the cause of the shutdown.
+pub(super) fn spawn_shutdown_watchdog() {
+    tokio::spawn(async move {
+        tokio::time::sleep(SHUTDOWN_FORCE_EXIT_TIMEOUT).await;
+        tracing::error!(
+            seconds = SHUTDOWN_FORCE_EXIT_TIMEOUT.as_secs(),
+            "daemon shutdown did not finish in time; exiting"
+        );
+        // The metadata file points clients at a process that is about to stop
+        // answering. Removing it is what the epilogue would have done.
+        if let Err(error) = fs::remove_file(metadata_path())
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "could not remove daemon metadata before the forced exit");
+        }
+        // 128 + signal is reserved for exits that really were signalled.
+        std::process::exit(1);
+    });
+}
+
+pub(super) fn spawn_manager_target_refresher(
+    targets: tokio::sync::watch::Sender<Vec<mj_controller::session_manager::RelaySessionTarget>>,
+    cancellation: CancellationToken,
+    state: Arc<RuntimeState>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut committed = state
+            .committed
+            .as_ref()
+            .expect("daemon owns the writer")
+            .clone();
+        let mut revisions = state.revisions();
+        let mut refresh = tokio::time::interval(Duration::from_millis(500));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut installed = None;
+        let mut credential_installed = None;
+        let mut auth = crate::pollers::ProviderAuthCache::default();
+        let mut auth_profiles = None;
+        let mut staged_sources = None;
+        tokio::select! {
+        _ = cancellation.cancelled() => {},
+        _ = async {
+        loop {
+            let inputs = {
+                let owner = state.owner();
+                if let Err(error) = owner.ensure_available() {
+                    tracing::error!(%error, "daemon durable state is unavailable; shutting down");
+                    cancellation.cancel();
+                    return;
+                }
+                owner.pollable_worker_inputs()
+            };
+            let controller = inputs.controller();
+            state.session_manager.update_model_policies(&controller);
+            let config = controller.config;
+            if auth_profiles.as_ref() != Some(&config.profiles) {
+                let mut cache = auth.clone();
+                let profiles = config.profiles.clone();
+                match tokio::task::spawn_blocking(move || {
+                    cache.refresh(&config);
+                    cache
+                })
+                .await
+                {
+                    Ok(cache) => {
+                        auth = cache;
+                        auth_profiles = Some(profiles);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "provider refresh task stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
+            }
+            if !installed
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &inputs))
+            {
+                let preparation = inputs.clone();
+                let refreshed =
+                    match tokio::task::spawn_blocking(move || preparation.prepare()).await {
+                        Ok(targets) => targets,
+                        Err(error) => {
+                            tracing::error!(%error, "worker target preparation failed");
+                            cancellation.cancel();
+                            return;
+                        }
+                    };
+                let retained = refreshed
+                    .iter()
+                    .map(|target| target.session_id.clone())
+                    .collect::<BTreeSet<_>>();
+                let views_dropped = {
+                    let mut owner = state.owner();
+                    // A lifecycle may have claimed a target while its commands
+                    // were being prepared. Only the owner can authorize install.
+                    if !Arc::ptr_eq(&owner.pollable_worker_inputs(), &inputs) {
+                        continue;
+                    }
+                    targets.send_if_modified(|current| {
+                        if *current == refreshed {
+                            false
+                        } else {
+                            *current = refreshed;
+                            true
+                        }
+                    });
+                    // Same lock as the install, so a view is published only
+                    // while its actor is still wanted.
+                    state
+                        .rejected_logins
+                        .lock()
+                        .expect("rejected logins poisoned")
+                        .retain_held_logins(|id| retained.contains(id));
+                    owner.install_relay_sessions(retained.clone())
+                };
+                if views_dropped {
+                    state.publish_revision();
+                }
+                state.review_host().retain_sessions(retained);
+                installed = Some(inputs.clone());
+            }
+            let closing = state.owner().close_requested.clone();
+            if !staged_sources
+                .as_ref()
+                .is_some_and(|(current, _)| Arc::ptr_eq(current, &inputs))
+            {
+                let staging = inputs.clone();
+                match tokio::task::spawn_blocking(move || staging.staged_credentials()).await {
+                    Ok(staged) => staged_sources = Some((inputs.clone(), staged)),
+                    Err(error) => {
+                        tracing::error!(%error, "credential staging observation stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
+            }
+            let staged = &staged_sources
+                .as_ref()
+                .expect("credential sources observed")
+                .1;
+            let credential_key = (
+                inputs.clone(),
+                auth.schemes.clone(),
+                closing.clone(),
+                staged.clone(),
+            );
+            if !credential_installed.as_ref().is_some_and(
+                |(current, schemes, closed, previous_staged)| {
+                    Arc::ptr_eq(current, &inputs)
+                        && *schemes == auth.schemes
+                        && *closed == closing
+                        && previous_staged == staged
+                },
+            ) {
+                let preparation = inputs.clone();
+                let schemes = auth.schemes.clone();
+                let staged = staged.clone();
+                let prepared = match tokio::task::spawn_blocking(move || {
+                    preparation.prepare_credentials(&schemes, &staged)
+                })
+                .await
+                {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        tracing::error!(%error, "credential target preparation stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                };
+                if !state.owner().install_credentials(
+                    &inputs,
+                    &closing,
+                    prepared,
+                    &state.credential_targets,
+                    Some(&state.worker_background_gate()),
+                ) {
+                    continue;
+                }
+                credential_installed = Some(credential_key);
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                changed = committed.changed() => {
+                    if changed.is_err() {
+                        tracing::error!("database publication feed stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                    state.publish_revision();
+                }
+                changed = revisions.changed() => {
+                    if changed.is_err() { return; }
+                }
+                _ = refresh.tick() => {
+                    let mut inactivity = state.config_mutation.lock().await;
+                    let mut cache = auth.clone();
+                    let staging = inputs.clone();
+                    let preference_owner = state.clone();
+                    let refreshed = tokio::task::spawn_blocking(move || {
+                        let config = Config::load()?;
+                        let recent_changed = {
+                            // Serialize the cache refresh with create's persisted write so
+                            // a refresh cannot reinstall an older file snapshot.
+                            let _preferences_update = preference_owner.recent_launch_update.lock().unwrap_or_else(PoisonError::into_inner);
+                            let recent = mj_core::go::GoPreferences::load(&mj_core::go::GoPreferences::path())?.recent;
+                            preference_owner.recent_launch.send_if_modified(|held| {
+                                if *held == recent { return false; }
+                                *held = recent;
+                                true
+                            })
+                        };
+                        cache.refresh(&config);
+                        let staged = staging.staged_credentials();
+                        Ok::<_, anyhow::Error>((config, cache, staged, recent_changed))
+                    }).await;
+                    match refreshed {
+                        Ok(Ok((config, cache, staged, recent_changed))) => {
+                            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+                            staged_sources = Some((inputs.clone(), staged));
+                            auth = cache;
+                            auth_profiles = Some(config.profiles.clone());
+                            state.review_config.lock().unwrap_or_else(PoisonError::into_inner)
+                                .clone_from(&config.review);
+                            let changed = {
+                                let mut owner = state.owner();
+                                let changed = owner.controller().config != config;
+                                owner.install_config(config);
+                                changed
+                            };
+                            if changed || recent_changed { state.publish_revision(); }
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(error = format!("{error:#}"), "could not refresh daemon configuration");
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "daemon configuration reader failed");
+                            cancellation.cancel();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        } => {}
+        }
+    })
+}
+
+/// Store compatibility is a mandatory guard, independent of optional profile,
+/// target and credential preparation. A mismatch owns daemon cancellation.
+fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                _ = interval.tick() => {}
+            }
+            let check =
+                tokio::task::spawn_blocking(mj_controller::database::check_read_compatibility);
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return,
+                result = check => result,
+            };
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error))
+                    if error
+                        .chain()
+                        .any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) =>
+                {
+                    tracing::error!(%error, "daemon store schema diverged underneath the daemon; shutting down");
+                    cancellation.cancel();
+                    return;
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not check daemon store compatibility"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, "daemon store compatibility reader failed");
+                    cancellation.cancel();
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// Start Apple's container service when a configured Apple target makes it
+/// useful. This runs beside daemon startup so a slow launchd registration or
+/// first health check cannot hold the daemon's event loop or serving phase.
+fn spawn_apple_container_startup(
+    state: Arc<RuntimeState>,
+    cancellation: CancellationToken,
+    settled: CancellationToken,
+    apple_target_configured: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !cfg!(target_os = "macos") || !apple_target_configured {
+        settled.cancel();
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        // Every way out of this task, a panic included, settles the start.
+        let _settled = settled.drop_guard();
+        let command_cancelled = Arc::new(AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(command_cancelled.clone())
+            .with_deadline(Duration::from_secs(90));
+        let mut startup = tokio::task::spawn_blocking(move || {
+            if !mj_controller::targets::program_on_path(
+                "container",
+                std::env::var_os("PATH").as_deref(),
+            ) {
+                return Ok(None);
+            }
+            mj_controller::targets::ensure_apple_container_runtime(&executor).map(Some)
+        });
+        let result = tokio::select! {
+            result = &mut startup => result
+                .context("Apple container startup task panicked")
+                .and_then(std::convert::identity),
+            () = cancellation.cancelled() => {
+                command_cancelled.store(true, Ordering::Release);
+                let _ = startup.await;
+                tracing::debug!("Apple container startup cancelled with the daemon");
+                return;
+            }
+        };
+        match result {
+            Ok(None) | Ok(Some(mj_controller::targets::AppleContainerRuntime::Running)) => {}
+            Ok(Some(mj_controller::targets::AppleContainerRuntime::Started)) => {
+                state.push_notice("", "Started the Apple container runtime.");
+            }
+            Err(error) if cancellation.is_cancelled() => {
+                tracing::debug!(
+                    error = format!("{error:#}"),
+                    "Apple container startup stopped with the daemon"
+                );
+            }
+            Err(error) if mj_controller::controller::is_missing_command(&error) => {
+                tracing::debug!(
+                    error = format!("{error:#}"),
+                    "Apple container is not installed; skipping runtime startup"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not start the Apple container runtime during daemon startup"
+                );
+                state.push_notice(
+                    "",
+                    format!(
+                        "Could not start the Apple container runtime: {error:#}. \
+                         Run `container system start` manually."
+                    ),
+                );
+            }
+        }
+    }))
+}
+
+pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {
+    if let Err(error) = state.reload_controller().await {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            "could not refresh daemon controller state"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: #1383: a service finishing on cancellation made clean daemon shutdown fail.
+    #[tokio::test]
+    async fn service_completion_selected_before_shutdown_is_not_unexpected() {
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let mut task = tokio::spawn(async move {
+            stop.cancelled().await;
+            Ok(())
+        });
+        cancellation.cancel();
+        // Both select branches must be ready. Force the service branch to win,
+        // reproducing the daemon's losing order without scheduler timing.
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut outcome = None;
+        tokio::select! {
+            biased;
+            result = supervise_service(&mut task, &mut outcome, &cancellation, "GitHub watch service") => result.unwrap(),
+            () = cancellation.cancelled() => panic!("service completion must win"),
+        }
+        outcome.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_completion_while_serving_is_unexpected() {
+        let cancellation = CancellationToken::new();
+        let mut task = tokio::spawn(async { Ok(()) });
+        let mut outcome = None;
+        let error = supervise_service(
+            &mut task,
+            &mut outcome,
+            &cancellation,
+            "GitHub watch service",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GitHub watch service stopped unexpectedly"
+        );
+        outcome.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_failure_during_shutdown_is_preserved_for_cleanup() {
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let mut task = tokio::spawn(async move {
+            stop.cancelled().await;
+            anyhow::bail!("service cleanup failed")
+        });
+        cancellation.cancel();
+        let mut outcome = None;
+        supervise_service(
+            &mut task,
+            &mut outcome,
+            &cancellation,
+            "GitHub watch service",
+        )
+        .await
+        .unwrap();
+        let mut daemon_outcome = Ok(());
+        record_daemon_cleanup(
+            &mut daemon_outcome,
+            "join GitHub watch service",
+            outcome.unwrap(),
+        );
+        assert!(format!("{:#}", daemon_outcome.unwrap_err()).contains("service cleanup failed"));
+    }
+}

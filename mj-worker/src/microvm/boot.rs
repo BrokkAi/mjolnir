@@ -28,7 +28,7 @@ fn current_tag() -> Result<String> {
     Ok(format!(
         "{}-{}",
         sys::kernel_release()?,
-        mj_core::worker_build::WORKER_BUILD_ID
+        mj_core::worker_build::worker_build_id()
     ))
 }
 
@@ -89,7 +89,7 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
     let kernel_version = sys::kernel_release()?;
     let tag = format!(
         "{kernel_version}-{}",
-        mj_core::worker_build::WORKER_BUILD_ID
+        mj_core::worker_build::worker_build_id()
     );
     let directory = layout.boot().join(&tag);
     layout.ensure()?;

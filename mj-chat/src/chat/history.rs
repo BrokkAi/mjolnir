@@ -137,6 +137,12 @@ impl ChatState {
         }
     }
 
+    /// Whether this composer has ever asked for its session's history.
+    /// Generations start at zero and only advance on a request.
+    pub(super) fn session_history_requested(&self) -> bool {
+        self.session_history_generation != 0
+    }
+
     pub fn request_session_history(&mut self) {
         self.session_history_generation = self.session_history_generation.wrapping_add(1);
         self.composer_requests

@@ -50,8 +50,8 @@ class ScoringInterfaces(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0, r.stdout)
         return r
 
-    def reviews(self, bug="bug-one", count=3):
-        for arm in ("A", "BT"):
+    def reviews(self, bug="bug-one", count=3, arms=("A", "BT")):
+        for arm in arms:
             reviewers = []
             for n in range(count):
                 sid = hashlib.sha256(f"{bug}/{arm}/{n}".encode()).hexdigest()[:32]
@@ -117,6 +117,84 @@ class ScoringInterfaces(unittest.TestCase):
                      {"P": [], "S": [], "C": []}):
             self.save("sets.json", sets)
             self.assertIn("REVIEW_ARMS_SETS", self.score_build(ok=False).stderr)
+
+    def test_registered_oracle_outcome_boundaries(self):
+        # Boundary regressions protect the registered precedence and use raw rational values.
+        code = ("from fractions import Fraction; import brief_score as s; "
+                "assert s.oracle_outcome(Fraction(17,100), Fraction(0), Fraction(1)) == 'Inconclusive'; "
+                "assert s.oracle_outcome(Fraction(17,100), Fraction(1,100), Fraction(2,10)) == 'Facts carry'; "
+                "assert s.oracle_outcome(Fraction(16,100), Fraction(1,100), Fraction(9,100)) == 'Partly'; "
+                "assert s.oracle_outcome(Fraction(1,100), Fraction(0), Fraction(10,100)) == 'Inconclusive'; "
+                "assert s.oracle_outcome(Fraction(1,100), Fraction(-1,100), Fraction(9,100)) == \"Facts don't carry\"")
+        env = {**self.env, "PYTHONPATH": str(SCRIPTS)}
+        result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_oracle_round_serialization_and_same_session_reference(self):
+        bugs = [f"relation-{i:02}" for i in range(17)]
+        commit = self.records[0]["intro_commit"]
+        rows = [{"id": b, "intro_commit": commit, "base_commit": commit,
+                 **{k: "fixture" for k in ("defect", "location", "trigger", "match_rule",
+                                             "near_misses", "why_findable", "fix_commit")}} for b in bugs]
+        self.write("corpus.jsonl", "".join(json.dumps(r) + "\n" for r in rows))
+        self.save("sets.json", {"P": bugs, "S": [], "C": []})
+        self.save("jobs.json", [{"bug": b, "arm": a} for b in bugs for a in ("OT", "BT")])
+        for bug in bugs:
+            self.reviews(bug, arms=("A", "BT", "OT"))
+
+        def materialize_round(name, output_key, choose_label):
+            verdicts = []
+            decisions = {}
+            for oid, row in output_key.items():
+                label = choose_label(row)
+                verdicts.extend(dict(output_id=oid, bug=row["bug"], judge=j, label=label)
+                                for j in ("A", "B"))
+                decisions[oid] = label
+            self.save(f"{name}/workflow-out.json", {"missing": [], "verdicts": verdicts})
+            self.run_script("brief_score.py", "collect", "--name", name)
+            self.save(f"{name}/handcheck-decisions.json", decisions)
+
+        # The stored reference round exists before the oracle round is built; build checks it.
+        self.run_script("brief_score.py", "build", "--arms", "BT", "--models", "gpt-6.1-terra",
+                        "--bugs-from", self.root / "jobs.json", "--name", "bifrost-judge-relation")
+        reference_round = json.loads((self.root / "private/key-bifrost-judge-relation.json").read_text())
+        reference_key = reference_round["outputs"]
+        materialize_round("bifrost-judge-relation", reference_key,
+                          lambda row: "caught" if row["arm"] == "A" else "missed")
+        # A reference that does not exist is refused before the round's key is frozen.
+        self.assertNotEqual(self.run_script(
+            "brief_score.py", "build", "--arms", "OT,BT", "--models", "gpt-6.1-terra",
+            "--bugs-from", self.root / "jobs.json", "--reading", "bifrost-oracle",
+            "--reference-round", "no-such-round", "--name", "oracle", ok=False).returncode, 0)
+        self.assertFalse((self.root / "private/key-oracle.json").exists())
+        self.run_script("brief_score.py", "build", "--arms", "OT,BT", "--models", "gpt-6.1-terra",
+                        "--bugs-from", self.root / "jobs.json", "--reading", "bifrost-oracle",
+                        "--reference-round", "bifrost-judge-relation", "--name", "oracle")
+        key_path = self.root / "private/key-oracle.json"
+        key = json.loads(key_path.read_text())
+        self.assertEqual((key["reading"], key["reference_round"]),
+                         ("bifrost-oracle", "bifrost-judge-relation"))
+        self.assertEqual(len(key["outputs"]), 153)
+
+        materialize_round("oracle", key["outputs"], lambda row: "caught" if row["arm"] == "OT" else "missed")
+        self.run_script("brief_score.py", "score", "--name", "oracle")
+        report = json.loads((self.root / "oracle/score.json").read_text())
+        self.assertEqual(report["bifrost_oracle"]["per_diff"][bugs[0]]["OT"]["caught"], 3)
+        self.assertEqual(report["bifrost_oracle"]["OT_minus_A"]["difference"], 1.0)
+        self.assertEqual(report["label_consistency"]["arms"]["A"]["sessions"], 51)
+        self.assertEqual(report["label_consistency"]["arms"]["A"]["changed_labels"], 51)
+        # Wrong same-session reference and missing required handcheck decisions must refuse scoring.
+        decisions_path = self.root / "oracle/handcheck-decisions.json"
+        decisions = json.loads(decisions_path.read_text())
+        complete_decisions = dict(decisions)
+        required = next(oid for oid, row in key["outputs"].items() if row["arm"] == "OT")
+        decisions.pop(required)
+        decisions_path.write_text(json.dumps(decisions))
+        self.assertNotEqual(self.run_script("brief_score.py", "score", "--name", "oracle", ok=False).returncode, 0)
+        decisions_path.write_text(json.dumps(complete_decisions))
+        reference_key[next(iter(reference_key))]["session"] = "wrong-session"
+        self.save("private/key-bifrost-judge-relation.json", {**reference_round, "outputs": reference_key})
+        self.assertNotEqual(self.run_script("brief_score.py", "score", "--name", "oracle", ok=False).returncode, 0)
 
     def test_leak_subset_names_hash_binding_and_single_rewrite_recheck(self):
         brief = "## Affected callers\n- caller.rs:1 calls callee.rs:2.\n## Paths\n- None\n## Value flow\n- None\n"

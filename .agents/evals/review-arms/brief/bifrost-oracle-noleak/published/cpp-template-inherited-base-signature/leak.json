@@ -1,0 +1,28 @@
+{
+  "id": "cpp-template-inherited-base-signature",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "44f07cfeceac1a77a1158891f1b63f43f1c4f0fcc252b499657e75cddd002ee6",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": "cpp_direct_base_types ... prefers unit.signature() over source text ... returns the <...> template parameter list",
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It puts the exact cause side by side (the inherited walk reads bases from signature(), which holds only the template parameter list for class templates) but never claims the base is lost or that lookup fails. That is why the label is missed and not partial.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": "The inherited traversal calls `cpp_direct_base_types`, which prefers `unit.signature()` over source text... returns the `<...>` template parameter list",
+          "rationale": "The output lays out the mechanism: the inherited walk reads bases from signature(), and template classes store the template parameter list there. It is stated only as value-flow fact, though, with no claim that the base clause is lost or that inherited-member lookup fails, so there is no finding. Picked the lower label.",
+          "confidence": "low"
+        }
+      ]
+    }
+  ]
+}

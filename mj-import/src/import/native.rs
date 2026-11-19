@@ -1,0 +1,362 @@
+use super::*;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// What one scanned native session file parsed into, keyed by the file itself.
+#[derive(Debug, Clone)]
+enum CachedNativeMetadata {
+    /// `claude_native_metadata`, including its "filtered out" verdict.
+    Claude(Option<(String, PathBuf, String)>),
+    /// `codex_session_metadata`, including its "not interactive" verdict.
+    Codex(Option<CodexSessionMetadata>),
+    IndexEligible(bool),
+}
+
+#[derive(Debug)]
+struct CachedNativeEntry {
+    modified_at: SystemTime,
+    size_bytes: u64,
+    metadata: CachedNativeMetadata,
+}
+
+#[derive(Debug, Default)]
+struct NativeScanCacheInner {
+    entries: HashMap<PathBuf, CachedNativeEntry>,
+    parsed_files: u64,
+}
+
+/// Remembers what each native session file parsed into, keyed by its path,
+/// modified time and size. The parsers are pure functions of a file's content,
+/// so an unchanged file never has to be opened again. One cache lives for the
+/// process, so reopening the resume dialog reparses only what changed.
+#[derive(Debug, Clone, Default)]
+pub struct NativeScanCache {
+    inner: Arc<Mutex<NativeScanCacheInner>>,
+}
+
+impl NativeScanCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The cache shared by index discovery and Mjolnir's SessionWiki reads.
+    pub fn shared() -> Self {
+        static CACHE: std::sync::OnceLock<NativeScanCache> = std::sync::OnceLock::new();
+        CACHE.get_or_init(Self::new).clone()
+    }
+
+    /// How many files this cache has actually parsed, for tests and diagnostics.
+    pub fn parsed_files(&self) -> u64 {
+        self.lock().parsed_files
+    }
+
+    /// Index discovery excludes identified children, preserving parents even
+    /// when their entrypoint or missing working directory prevents importing.
+    pub fn index_eligible(&self, kind: HarnessKind, path: &Path) -> Result<bool> {
+        if kind == HarnessKind::Claude
+            && path
+                .components()
+                .any(|component| component.as_os_str() == "subagents")
+        {
+            return Ok(false);
+        }
+        let metadata = fs::metadata(path)?;
+        let modified_at = metadata.modified()?;
+        let size_bytes = metadata.len();
+        if let Some(CachedNativeMetadata::IndexEligible(eligible)) =
+            self.cached(path, modified_at, size_bytes)
+        {
+            return Ok(eligible);
+        }
+        let eligible = match kind {
+            HarnessKind::Codex => !codex::codex_session_summary(path)?.subagent,
+            HarnessKind::Claude => !claude::claude_native_summary(path)?.subagent,
+            other => bail!("{other:?} has its own top-level source enumeration"),
+        };
+        self.store(
+            path,
+            modified_at,
+            size_bytes,
+            CachedNativeMetadata::IndexEligible(eligible),
+        );
+        Ok(eligible)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, NativeScanCacheInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn cached(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+    ) -> Option<CachedNativeMetadata> {
+        let inner = self.lock();
+        let entry = inner.entries.get(path)?;
+        (entry.modified_at == modified_at && entry.size_bytes == size_bytes)
+            .then(|| entry.metadata.clone())
+    }
+
+    fn store(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+        metadata: CachedNativeMetadata,
+    ) {
+        let mut inner = self.lock();
+        inner.parsed_files = inner.parsed_files.saturating_add(1);
+        inner.entries.insert(
+            path.to_owned(),
+            CachedNativeEntry {
+                modified_at,
+                size_bytes,
+                metadata,
+            },
+        );
+    }
+
+    /// Claude metadata for one transcript, parsing only on a cache miss.
+    /// Errors are returned to the caller and never cached.
+    pub(super) fn claude_metadata(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+        parse: impl FnOnce() -> Result<Option<(String, PathBuf, String)>>,
+    ) -> Result<Option<(String, PathBuf, String)>> {
+        if let Some(CachedNativeMetadata::Claude(metadata)) =
+            self.cached(path, modified_at, size_bytes)
+        {
+            return Ok(metadata);
+        }
+        let metadata = parse()?;
+        self.store(
+            path,
+            modified_at,
+            size_bytes,
+            CachedNativeMetadata::Claude(metadata.clone()),
+        );
+        Ok(metadata)
+    }
+
+    /// Codex metadata for one rollout, parsing only on a cache miss.
+    pub(super) fn codex_metadata(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+        parse: impl FnOnce() -> Result<Option<CodexSessionMetadata>>,
+    ) -> Result<Option<CodexSessionMetadata>> {
+        if let Some(CachedNativeMetadata::Codex(metadata)) =
+            self.cached(path, modified_at, size_bytes)
+        {
+            return Ok(metadata);
+        }
+        let metadata = parse()?;
+        self.store(
+            path,
+            modified_at,
+            size_bytes,
+            CachedNativeMetadata::Codex(metadata.clone()),
+        );
+        Ok(metadata)
+    }
+}
+
+/// One native session located on disk, normalized across harnesses: the id
+/// `session/load` takes and the file or directory its transcript is read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedNativeSession {
+    pub native_session_id: String,
+    pub source_path: PathBuf,
+}
+
+/// One native session as a picker lists it, normalized across harnesses.
+#[derive(Debug, Clone)]
+pub struct NativeSessionListing {
+    pub native_session_id: String,
+    pub title: String,
+    pub modified_at: SystemTime,
+    pub git_branch: String,
+    pub size_bytes: u64,
+    pub cwd: PathBuf,
+    /// Why this session cannot be imported, when it cannot be.
+    pub unavailable_reason: Option<&'static str>,
+    /// Archived inside the harness itself. Only Codex reports this today.
+    pub natively_archived: bool,
+}
+
+/// Locate one native session for any harness.
+pub fn locate_native_session(
+    harness: HarnessKind,
+    home: &Path,
+    selection: &ClaudeSessionSelection,
+) -> Result<LocatedNativeSession> {
+    let (native_session_id, source_path) = match harness {
+        HarnessKind::Muse => {
+            return muse::locate(&mj_checkpoint::native::muse_sessions_root(home)?, selection);
+        }
+        HarnessKind::Codex => {
+            let located = locate_codex_session(home, selection)?;
+            (located.native_session_id, located.jsonl_path)
+        }
+        HarnessKind::Claude => {
+            let located = locate_claude_session(home, selection)?;
+            (located.native_session_id, located.jsonl_path)
+        }
+        HarnessKind::Kimi => {
+            let located = locate_kimi_session(home, selection)?;
+            (located.native_session_id, located.session_path)
+        }
+        HarnessKind::Grok => {
+            let located = locate_grok_session(home, selection)?;
+            (located.native_session_id, located.session_path)
+        }
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
+        ),
+        HarnessKind::Antigravity => bail!("Mjolnir cannot import Antigravity sessions yet"),
+        HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
+    };
+    Ok(LocatedNativeSession {
+        native_session_id,
+        source_path,
+    })
+}
+
+/// The id [`locate_native_session`] takes, read back from the path that
+/// locator produced. `None` when the path has no readable name.
+///
+/// The inverse of the locators above, so every caller that has only a
+/// transcript path — the SessionWiki index stores one per row — names the
+/// session the same way `mj import` does. Each harness keeps its id in a
+/// different part of the path: Claude Code names the file after the session,
+/// Codex appends the thread UUID to a `rollout-` prefix, Kimi and Grok name
+/// the session's own directory, and Muse names the directory above
+/// `session.jsonl`.
+pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<String> {
+    match harness {
+        HarnessKind::Claude => path.file_stem()?.to_str().map(str::to_owned),
+        HarnessKind::Codex => codex_rollout_id_from_path(path).map(str::to_owned),
+        HarnessKind::Kimi | HarnessKind::Grok => path.file_name()?.to_str().map(str::to_owned),
+        HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
+        // OpenCode sessions live in SQLite rows, not files, so no transcript
+        // path carries their id; DSH sessions are not imported.
+        HarnessKind::OpenCode | HarnessKind::Dsh | HarnessKind::Antigravity => None,
+    }
+}
+
+/// Project one native session into the canonical transcript, for any harness.
+pub fn read_native_transcript(
+    harness: HarnessKind,
+    source_path: &Path,
+) -> Result<ClaudeTranscript> {
+    match harness {
+        HarnessKind::Muse => muse::read_transcript(source_path),
+        HarnessKind::Codex => read_codex_transcript(source_path),
+        HarnessKind::Claude => read_claude_transcript(source_path),
+        HarnessKind::Kimi => read_kimi_transcript(source_path),
+        HarnessKind::Grok => read_grok_transcript(source_path),
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
+        ),
+        HarnessKind::Antigravity => bail!("Mjolnir cannot import Antigravity sessions yet"),
+        HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
+    }
+}
+
+/// Whether Mjolnir can list this harness's native sessions at all. The
+/// harnesses that keep sessions in a database, and DSH, cannot be scanned yet;
+/// callers skip them instead of reporting the scan as a failure.
+pub fn native_sessions_enumerable(harness: HarnessKind) -> bool {
+    !matches!(
+        harness,
+        HarnessKind::OpenCode | HarnessKind::Dsh | HarnessKind::Antigravity
+    )
+}
+
+/// Scan a harness home newest first, reporting after every candidate.
+pub fn scan_native_sessions(
+    harness: HarnessKind,
+    home: &Path,
+    cache: &NativeScanCache,
+    mut report: impl FnMut(SessionScanProgress<NativeSessionListing>),
+) -> Result<()> {
+    let mut forward = |scanned, total, session| {
+        report(SessionScanProgress {
+            scanned,
+            total,
+            session,
+        });
+    };
+    match harness {
+        HarnessKind::Muse => muse::scan(
+            &mj_checkpoint::native::muse_sessions_root(home)?,
+            |progress| {
+                forward(progress.scanned, progress.total, progress.session);
+            },
+        ),
+        HarnessKind::Codex => scan_codex_sessions(home, cache, |progress| {
+            let session = progress.session.map(|session| NativeSessionListing {
+                unavailable_reason: session.history_mode.import_issue(),
+                native_session_id: session.native_session_id,
+                title: session.title,
+                modified_at: session.modified_at,
+                git_branch: session.git_branch,
+                size_bytes: session.size_bytes,
+                cwd: session.cwd,
+                natively_archived: session.natively_archived,
+            });
+            forward(progress.scanned, progress.total, session);
+        }),
+        HarnessKind::Claude => scan_claude_sessions(home, cache, |progress| {
+            let session = progress.session.map(|session| NativeSessionListing {
+                native_session_id: session.native_session_id,
+                title: session.title,
+                modified_at: session.modified_at,
+                git_branch: session.git_branch,
+                size_bytes: session.size_bytes,
+                cwd: session.cwd,
+                unavailable_reason: None,
+                natively_archived: false,
+            });
+            forward(progress.scanned, progress.total, session);
+        }),
+        HarnessKind::Kimi => scan_kimi_sessions(home, |progress| {
+            let session = progress.session.map(|session| NativeSessionListing {
+                native_session_id: session.native_session_id,
+                title: session.title,
+                modified_at: session.modified_at,
+                git_branch: session.git_branch,
+                size_bytes: session.size_bytes,
+                cwd: session.cwd,
+                unavailable_reason: None,
+                natively_archived: false,
+            });
+            forward(progress.scanned, progress.total, session);
+        }),
+        HarnessKind::Grok => scan_grok_sessions(home, |progress| {
+            let session = progress.session.map(|session| NativeSessionListing {
+                native_session_id: session.native_session_id,
+                title: session.title,
+                modified_at: session.modified_at,
+                git_branch: session.git_branch,
+                size_bytes: session.size_bytes,
+                cwd: session.cwd,
+                unavailable_reason: None,
+                natively_archived: false,
+            });
+            forward(progress.scanned, progress.total, session);
+        }),
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
+        ),
+        HarnessKind::Antigravity => bail!("Mjolnir cannot enumerate Antigravity sessions yet"),
+        HarnessKind::Dsh => bail!("Mjolnir cannot enumerate DSH sessions yet"),
+    }
+}

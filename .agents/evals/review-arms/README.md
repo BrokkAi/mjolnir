@@ -1101,3 +1101,92 @@ judging and control2, while tool-call audits and latency are unavailable.
 No transcript capture is added, and a missing audit is never called clean.
 Existing repository-inventory checks still apply; their coverage and the
 prompt-based access restrictions retain the blinding limits described above.
+
+## Bifrost-dev oracle arm: does the decisive fact lift reviewers?
+
+Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
+(round L judged by Opus/high on claude7). Readout:
+`brief/bifrost-oracle/READOUT.md`.
+
+- **Facts carry, as an upper bound.** On the 17 bifrost-dev relation diffs,
+  Terra/high caught 17.6% with no brief, 7.8% with the blind Sol brief and
+  45.1% with an oracle brief. OT − A is +27.5 points (+11.8 to +45.1), and
+  OT − BT is +37.3 (+17.6 to +58.8).
+- 15 of the 17 oracle briefs still read as caught (8) or partial (7) to the
+  leak judges after the rewrite, so the lift may partly come from the brief
+  naming the defect. The caught-leak diffs gain +37.5 points and the
+  partial-leak diffs +23.8. The two missed-leak diffs don't move.
+- All 17 OT carriers ran on a different Podman image from the stored A and BT
+  carriers, so the brief and the image changed together; the lift is an
+  observed cohort difference.
+- The lift is on 8 diffs; 9 don't move. It is an observed cohort difference;
+  reading it as a benefit of the supplied fact assumes the image change was
+  immaterial. It does not show that Bifrost queries can find the fact.
+- Round L's final A and BT labels equal the stored Sol labels. That is partly
+  by construction: the parent applied the stored round's transient-failure
+  precedent to three retained-fill rows. The assessor's unadjusted labels
+  differ by 3.9 points on A, still under the 10-point caveat, and give
+  OT − A of +25.5 (+9.8 to +43.1), still Facts carry. The recorded new spend
+  is $10.56 or more at API-equivalent rates; carrier cost coverage is
+  incomplete, so the full cost is unknown.
+
+## Bifrost-dev non-leaking oracle arm (ON)
+
+Registration: `brief/PLAN-bifrost-oracle-noleak.md` and its amendments.
+Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
+
+- Quota exception: 11 reviewers ran on codex4 below the 25% floor, an
+  exception the supervisor accepted. Holding strictly to the floor leaves 6
+  ON/AF pairs, too few to classify.
+- **Facts carry** for the whole neutral brief against no brief; the arm
+  doesn't isolate the decisive fact from the brief's other relations.
+  With the decisive fact stated so that both Opus and Sol
+  leak judges read every brief as `missed` (all 17 retained after one
+  wording round), Terra/high caught 45.1% against 7.8% for a fresh
+  no-brief arm run in the same window on the same image. ON − AF is
+  +37.3 points (+17.6 to +58.8).
+- ON and round L's leaking OT caught the same share (45.1% each; ON − OT
+  0.0, −11.8 to +11.8). This doesn't show that round L's lift was free of
+  the leak: the interval allows about 12 points either way, and ON − OT
+  spans two review windows and two images.
+- The fresh no-brief arm caught less than the stored one (AF − A −9.8,
+  −19.6 to −2.0), a cohort/image effect that the same-window control
+  removes from the primary reading.
+- The rewording replaced explicit absence and contrast clauses with literal
+  descriptions in 13 of 17 briefs, so some relations reached reviewers less
+  explicitly; the blind fact checker still found the decisive fact in each.
+- Under the registered construction rules applied strictly (no relation
+  dropped, the fact stated in the quoted item), 7 diffs remain at +47.6
+  (+14.3 to +81.0), below the 8-diff minimum, so a classification is not
+  established. A lenient reading leaves 9 diffs at +44.4 (+18.5 to +70.4),
+  Facts carry.
+- Unchanged with the hand-check assessor's labels (ON − AF +41.2). Recorded
+  new spend is $18.81 or more at API-equivalent rates. It shows that
+  supplying the whole neutral brief lifts reviewers, not which of its
+  relations drove the catches, and not that Bifrost queries can find the
+  fact. Six briefs passed the leak check only at low judge confidence;
+  without them ON − AF is +24.2 (+6.1 to +45.5), still Facts carry. Those
+  six carry 11 of the 19 net extra catches, and on cpp-template both judges
+  said the brief lays out the cause. Excluding those six and some of the
+  briefs whose edits dropped a stated relation leaves 8 or 9 diffs, where
+  the classification turns on single diffs: Inconclusive at 9 (+18.5, 0.0
+  to +37.0) and Facts carry at 8 (+20.8, +4.2 to +41.7). Excluding them
+  and all seven relation-dropping edits leaves 6 diffs (+16.7, 0.0 to
+  +38.9), below the 8-diff minimum. Removing every documented concern
+  together leaves 2 diffs, too few to classify.
+
+## Bifrost-dev strict-construction oracle arm (OS, run as OX)
+
+Registration: `brief/PLAN-bifrost-oracle-strict.md` and its amendments.
+Readout: `brief/bifrost-oracle-strict/READOUT.md`.
+
+- **Inconclusive by retention.** Only 1 of 17 diffs yielded a brief that kept the complete decisive
+  fact (blind fidelity check) and passed one Opus and one Sol leak judge, both `missed` at high
+  confidence, plus a blind cause check. Reviewers and round N were skipped as uninformative.
+- 10 of 17 were excluded at the leak gate (no editor candidate in three rounds stated the complete
+  fact without being flagged; other wordings untested), and 6 as editor failures (fidelity or
+  lint). On bifrost-dev relation bugs, supplying the complete fact is close to supplying the bug, so
+  the earlier OT and ON lifts can't be credited to a non-leaking decisive fact. Five of the 6
+  editor failures were also flagged caught or partial in earlier rounds; python-module-mutation got
+  only unresolved medium-confidence misses.
+- Recorded cost: $23.72 at API-equivalent rates.

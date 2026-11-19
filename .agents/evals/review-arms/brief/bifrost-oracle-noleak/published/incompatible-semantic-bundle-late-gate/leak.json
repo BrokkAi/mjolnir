@@ -1,0 +1,28 @@
+{
+  "id": "incompatible-semantic-bundle-late-gate",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "f258b7f21fcaacda4a9f4701af0b4bb91cf6e6fe829897909aae5220ea777235",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It describes verify_release_bundle's order (checksums, then curated decode, then the generated schema/cache comparison) only as a path. It does not say the index-known incompatibility should be rejected before the expensive asset work, and it does not mention acquisition latency.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It lists the order in verify_release_bundle (checksums, then curated decode, then the generated schema/cache check) but never says the order is wrong or that incompatible bundles do needless work before being rejected.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

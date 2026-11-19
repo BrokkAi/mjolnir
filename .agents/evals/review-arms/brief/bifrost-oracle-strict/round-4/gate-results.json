@@ -1,0 +1,65 @@
+{
+  "round": 4,
+  "results": {
+    "cpp-template-inherited-base-signature": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "a5d746a6e6dd833237160bc1e016de6f6f27f50747745f4dd15bb5573030d697"
+    },
+    "go-nilness-ignores-modeled-nonreturn": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "f7225a4d510172691506e68a29596cbc68414aeabbfd9ceb20e11579575628db"
+    },
+    "go-receiver-poisons-package-result-contract-discovery": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "be70692b6d5e490db65af719712d47aa10731e1ae0ed4bae9fb6bb1964a81310"
+    },
+    "java-static-getter-drops-incomplete-route": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "1a0f6773fa636bf3ba5f72b84eefb53ef902de5e7622681abd51863e620a3eb9"
+    },
+    "js-synthetic-owner-leaks-file-summary": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "cc305362a974fda1ac40fc39f12efa1e7a9813489a0dc97504810b24cd3afa57"
+    },
+    "jvm-protected-unindexed-hierarchy-denied": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "b86f37de5980fa16085f7b9891e4e8234b602040528f9aed3fcb3c701d546d02"
+    },
+    "kotlin-value-class-this-loses-underlying-projection": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "9a2ff210e413bccf62cb25a62d39051df41cb063f34ab233c9b630d61696d2cc"
+    },
+    "mcp-default-advisory-reported-clean": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "876fe42cbd7bf94ac2b3a77265b2622597183c8e14c3a96408c7882fc940d811"
+    },
+    "python-module-binding-representative-after-event": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "9a5ed9f6687e89ae93ccd382276c44d7aa17067219e1aa23e92e36d3a72ddb0e"
+    },
+    "retained-fill-java-memo-loses-gap": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "6fe0f756ef8fa74187cf5e5b5bae897cc576cd148be28d3dff84da7d2897599f"
+    }
+  }
+}

@@ -5,7 +5,7 @@ use std::time::Duration;
 impl Controller {
     /// Historical recreation may have started a replacement before publishing
     /// Running. A live journal wins over every older checkpoint.
-    pub(crate) async fn reconnect_legacy_restart(
+    pub async fn reconnect_legacy_restart(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -30,7 +30,7 @@ impl Controller {
     /// reservation. The private journal and profile are transferred separately from retained
     /// workspace/cache mounts; no checkpoint or worker-root reset is involved.
     #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
-    pub(crate) async fn upgrade_container_worker(
+    pub async fn upgrade_container_worker(
         &self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
@@ -122,7 +122,7 @@ impl Controller {
                         executor.end_resumable_work("start container worker")?;
                         install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)?;
                         replace_installed_worker_launch_config(executor, &backend, session_id, &launch)?;
-                        owner.begin_restart(target, mj_core::worker_build::WORKER_BUILD_ID.into())?;
+                        owner.begin_restart(target, mj_core::worker_build::worker_build_id().into())?;
                         start_worker_durably(&owner, target, executor, &backend, &root, &self.config.github)?;
                     }
                     executor.begin_resumable_work()?;
@@ -147,7 +147,7 @@ impl Controller {
         }
     }
 
-    pub(crate) async fn recover_removed_restart_container(
+    pub async fn recover_removed_restart_container(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -337,7 +337,7 @@ impl Controller {
                 .await
         }
     }
-    pub(crate) fn plan_container_upgrade(
+    pub fn plan_container_upgrade(
         &self,
         session_id: &str,
         operation_id: &str,
@@ -388,7 +388,7 @@ impl Controller {
         Ok(plan)
     }
 
-    pub(crate) fn record_container_upgrade(&mut self, session_id: &str, image: &str) -> Result<()> {
+    pub fn record_container_upgrade(&mut self, session_id: &str, image: &str) -> Result<()> {
         let record = self
             .state
             .sessions

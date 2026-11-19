@@ -1,0 +1,28 @@
+{
+  "id": "dependency-failure-drops-independent-model-evidence",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "missed",
+      "brief_sha256": "01796fa62a60ce1802b58021aa50a3e35267b609f99ff2aee2527a600bb821cd",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it mentions the lifecycle cloning the activation request but nothing about early runtime=None returns on Go discovery failure discarding independently valid evidence.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output notes cloned caller activation evidence and a working independently activated Go fixture, but never identifies the new Go discovery/preparation failure returns or loss of that independent evidence. Its other publication and diagnostic observations concern different behavior.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

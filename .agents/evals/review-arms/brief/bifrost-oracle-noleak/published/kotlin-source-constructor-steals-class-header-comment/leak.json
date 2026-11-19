@@ -1,0 +1,28 @@
+{
+  "id": "kotlin-source-constructor-steals-class-header-comment",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "ab34944bfa9b4893e29c7be26da616cdaa1c8d3b2a3289cdb62d02138c5da8e0",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": "Comment-density collection pushes each code unit's direct_children ... includes the source primary constructor ... enclosing_declaration attributes a comment to the containing declaration of greatest depth",
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It chains the relevant facts (the primary constructor is now a non-synthetic child, comment ranges are expanded, and the deepest owner wins) but never states that the constructor takes the class header comment or that the class density becomes wrong.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It chains comment density over direct_children (which now includes the source primary constructor), expanded_comment_start and the greatest-depth owner, but never says the class header comment is assigned to the constructor.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

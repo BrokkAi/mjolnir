@@ -16,7 +16,7 @@ use super::worktree::{managed_git_command, managed_network_git_command};
 
 /// A failed remote check is evidence of uncertainty, never permission to age
 /// away the only checkpoint. The checkpoint itself has already been verified.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn assess_clone_checkpoint(
     session: &SessionRecord,
     checkpoint: &CheckpointMetadata,
@@ -246,7 +246,7 @@ fn assess_network_checkpoint_inner(
     Ok(())
 }
 
-pub(crate) fn refresh_stopped_clone_publication_for_worktree(
+pub fn refresh_stopped_clone_publication_for_worktree(
     session: &SessionRecord,
     checkout: &ManagedWorktree,
 ) -> Option<PublicationAssessment> {

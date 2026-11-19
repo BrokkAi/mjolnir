@@ -36,11 +36,7 @@ impl ControllerRelayLease {
         }
     }
 
-    pub(super) async fn submit(
-        &mut self,
-        command_id: String,
-        command: RelayCommand,
-    ) -> Result<u64> {
+    pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {
         match self {
             Self::Managed {
                 lease: Some(lease), ..

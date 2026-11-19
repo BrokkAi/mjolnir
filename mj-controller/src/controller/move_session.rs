@@ -4,7 +4,13 @@ mod destination;
 pub(in crate::controller) use destination::destroy_prepared_environment;
 #[cfg(test)]
 mod tests;
+// Shared with mj-daemon's move tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_fixtures;
 mod transfer;
+mod viewer_recovery;
+pub use viewer_recovery::ViewerMoveRecovery;
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;
@@ -14,7 +20,7 @@ use super::lifecycle::SourceTargetDisposition;
 use super::{Controller, SessionResumeOptions, now};
 
 /// Static Move safety refusals that may be written to the worker's quota journal.
-pub(crate) const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
+pub const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
 
 /// Execution and retained queue admission are phases of one ownership record.
 #[derive(Clone, Copy)]
@@ -56,7 +62,7 @@ pub fn move_has_pending_queue(session_id: &str) -> bool {
 
 /// Preserve a restored destination's readiness when close replaces Running
 /// with Closing. The caller saves this intent and the session in one transaction.
-pub(crate) fn move_destination_before_close(
+pub fn move_destination_before_close(
     session: &mj_core::state::SessionRecord,
 ) -> Result<Option<MoveOperation>> {
     if session.state != SessionState::Running {
@@ -368,7 +374,7 @@ pub(crate) fn record_missing_move_archives(
 }
 
 /// Refresh recovery guidance when a durable background cleanup changes it.
-pub(crate) fn record_finished_move_recovery(
+pub fn record_finished_move_recovery(
     state: &mj_core::state::State,
     operation: &mut MoveOperation,
 ) -> Result<()> {
@@ -505,7 +511,7 @@ impl Drop for MoveMutationGuard {
     }
 }
 
-pub(crate) fn move_refuses_command(session_id: &str, command: &RelayCommand) -> bool {
+pub fn move_refuses_command(session_id: &str, command: &RelayCommand) -> bool {
     move_owns_session(session_id)
         && matches!(
             command,
@@ -533,7 +539,7 @@ use crate::targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayCommand;
 
 /// Bind automatic Move confirmation to the turn that stopped for quota.
-pub(crate) fn quota_move_fingerprint(
+pub fn quota_move_fingerprint(
     base: &str,
     operational: &mj_core::relay::RelayOperationalState,
 ) -> Result<String> {
@@ -587,7 +593,7 @@ pub async fn refresh_move_source(
 /// was confirmed against is the state it interrupts. Dropping it hands the
 /// connection back to the actor.
 #[derive(Default)]
-pub(in crate::controller) struct MoveSourceRelay(
+pub struct MoveSourceRelay(
     Option<super::checkpoint::ControllerRelayLease>,
     Option<crate::worker_lifecycle::WorkerPermit>,
     Option<crate::recovery_gate::SessionAdmission>,
@@ -943,7 +949,7 @@ fn replace_queued_images_with_placeholders(
 impl Controller {
     /// Close takes over only after the Move owner has actually stopped. A
     /// placement published during cloning is not a destination worker.
-    pub(crate) async fn settle_superseded_move_for_close(
+    pub async fn settle_superseded_move_for_close(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -1263,9 +1269,9 @@ impl Controller {
         validate_preserved_configuration(profile_id, &accepted, &choices)
     }
 
-    pub(crate) async fn prepare_move_session_controlled(
+    pub async fn prepare_move_session_controlled(
         &self,
-        catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
+        catalog: &std::sync::Arc<crate::profile_catalog::ProfileCatalog>,
         mut selection: MoveSelection,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MovePreparation> {
@@ -1626,10 +1632,10 @@ impl Controller {
 
     /// Publish acceptance only after the existing Move intent is committed.
     #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
-    pub(crate) async fn move_session_managed_controlled_with_admission(
+    pub async fn move_session_managed_controlled_with_admission(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
-        catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
+        catalog: &std::sync::Arc<crate::profile_catalog::ProfileCatalog>,
         request: MoveSessionRequest,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
         executor: &(impl CommandExecutor + Sync),
@@ -1885,7 +1891,7 @@ impl Controller {
         }).await
     }
 
-    fn finish_move_result(
+    pub fn finish_move_result(
         &mut self,
         operation: &mut MoveOperation,
         result: Result<()>,
@@ -2047,7 +2053,7 @@ impl Controller {
 
     /// Whether the session's worker exposes the durable sub-agent request
     /// queue, which every top-level session does.
-    pub(crate) fn source_has_request_queue(&self, id: &str) -> bool {
+    pub fn source_has_request_queue(&self, id: &str) -> bool {
         self.state.sessions.get(id).is_some_and(|session| {
             worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
@@ -2448,7 +2454,7 @@ impl Controller {
 
     /// `source_relay` is the source connection the Move confirmed against,
     /// held until the checkpoint that seals the source takes it over.
-    async fn execute_move(
+    pub async fn execute_move(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         operation: &mut MoveOperation,
@@ -3116,7 +3122,7 @@ fn should_stop_move_subagents(in_place: bool, destination_has_parent_role: bool)
 
 /// Whether a source worker at this relay protocol can close sub-agent
 /// admission, which an in-place Move needs to keep the parent's children.
-pub(crate) fn worker_drains_subagent_requests(protocol_version: u32) -> bool {
+pub fn worker_drains_subagent_requests(protocol_version: u32) -> bool {
     mj_core::relay::RelayRequest::SetSubagentAdmission { open: false }
         .supported_at(protocol_version)
 }
@@ -3142,7 +3148,7 @@ fn subagent_mutations_pending(
 /// continue an in-place Move that sealed it and still holds its restore
 /// archive; if the environment no longer matches what that Move kept, the
 /// Move is refused, never turned into a transfer of the checkout.
-pub(crate) fn move_in_place_for_record(
+pub fn move_in_place_for_record(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,

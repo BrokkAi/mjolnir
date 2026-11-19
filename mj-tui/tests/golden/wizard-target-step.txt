@@ -730,8 +730,8 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │   TARGET     KIND       CPU     MEM (GiB)     STATUS                             │                           │
 │                           │   localhost  localhost  —       —                                                │                           │
 │                           │                                                                                  │                           │
-│                           │ Machine nas has no runtime: it did not answer. `ssh nas true` failed:            │                           │
-│                           │ Connection timed out. Check that nas is up.                                      │                           │
+│                           │ nas did not answer.                                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │

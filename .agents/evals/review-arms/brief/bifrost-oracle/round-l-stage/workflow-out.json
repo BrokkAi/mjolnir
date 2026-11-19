@@ -1,0 +1,3065 @@
+{
+  "verdicts": [
+    {
+      "output_id": "7c8d03981545bf38",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "00e4a78fe09267de",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "cae026e74480e192",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3b4984ed687f6c56",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f9ad8789cf91b4ef",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "fa99367309713055",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1c929ac65667b863",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "dae05cf153a02c8f",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5f3c615b0a7e8754",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No finding addresses the Go route of activate_dependency_packs in workspace.rs returning runtime=None before caller-supplied Go activation evidence can activate; findings concern Java diagnostics and runtime publication ordering.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "9cc686e6998f847d",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern class-body shadowing and lambda branch ancestry, not repeated module assignments sharing one declaration whose representative range lies after the earlier event.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "fcd3c5fc649c64b0",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the declaration collector retains only the last assignment's range ... so `y` now reports `no_indexed_definition`",
+      "rationale": "Connects the new end-before-activation filter to repeated assignments retaining only the final range, causing the earlier read to lose its indexed target.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8b2fb92452cb5513",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the declaration index retains only the last assignment's range ... now returns `no_indexed_definition`",
+      "rationale": "Identifies the same repeated-assignment representative-range mechanism and the resulting no_indexed_definition for an intervening read.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7d109d7d61560f17",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding is about deferred lambda bodies and opposing-branch contamination, a listed near miss.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a172241d58d22018",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the only indexed range for `x` ends after the first binding event, so this filter returns no candidates",
+      "rationale": "Same mechanism: replaced declaration range with last assignment makes the event filter return no candidates for an earlier read.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3dcb091b42c11e5e",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "uses `replace_code_unit` for the second field and retains only its later range. The first binding event therefore has no range ending before its activation",
+      "rationale": "Explains the repeated-binding shared declaration with later range causing the event filter to drop the earlier visible binding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ab42e388ae7a1173",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "only the later assignment's range remains indexed ... turning the previously resolved reference into `no_indexed_definition`",
+      "rationale": "Directly matches the defect mechanism and symptom.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "0cbf5b2519fee528",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "efd880433d09cc3b",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the declaration collector replaces the first field CodeUnit with the second one, so its only stored range ends after the first binding event",
+      "rationale": "Same repeated-assignment range mechanism causing the intermediate read to lose its target.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8e17b176604e8790",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern qualified visibility, companion access and private[this]; none treats an exhausted subtype walk without closed hierarchy inventory as a definitive denial.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "fc4ae0d065046e52",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualifiers, companions and missing endpoints (allowed rather than denied); not the false-negative from incomplete hierarchy proof.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ffb18ab0a5af8760",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualifiers, companions and Kotlin endpoints; none addresses missing hierarchy proof turning into Denied.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "09217d360520c446",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Receiver-check and companion findings touch the protected-access code but describe different problems; no finding about incomplete hierarchy evidence yielding definitive false.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c57d4d6265c6c955",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Qualifier, companion and receiver findings only; no incomplete-hierarchy denial.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8806a921a63dfd97",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Java empty enclosing_templates finding is about missing endpoints (near miss: arbitrary missing endpoints), not exhausted hierarchy walk without closed inventories.",
+      "finding_count": 4,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "59fb6b1997e41710",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "caught",
+      "matching_finding": "`jvm_type_is_subtype` examines only returned edges and therefore returns `Some(false)` for that empty inventory, causing this code to deny a potentially valid protected access as complete",
+      "rationale": "Identifies that missing supertype hierarchy evidence makes the subtype walk return a definitive false, which the new protected-access consumer turns into a denial instead of retaining uncertainty.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "fccd7a43253f2ad1",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern qualifiers, companions and missing package metadata; none concern incomplete hierarchy evidence producing denial.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c12176522f3f544c",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only qualifier and companion findings.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ddf76bff2df3812e",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8b3bc4990196986c",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ebfd86c787e61461",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "505a2e2c66c80391",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "08de221328825c76",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3d2e2fab398029ce",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ee20237f6367fabd",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "536cade7ae44ac2f",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c86c60d765d02e64",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard and address aliases; none mention modeled nonreturn calls such as testing.T.Fatal leaving a nil path reachable.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "2fd9a79b6315df39",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b7c1274254b1c501",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "62c79a93467c1116",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "e0f0599840870d71",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d97019f1c297409d",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7ab124283ff16b29",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5200daf513048d08",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c977db342ef023ac",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "170625cf12e73ebc",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, concurrent acquisition, cancellation or duplicate warnings; none identify the generated-production compatibility gate running after full checksum/decoding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1f84957e3387467a",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding is about callback parameter reassignment, not the self-reentrant indexed assignment.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "37d530f81002a706",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "`$items[] = $items[0]`, resolving the right-hand subscript scans indexed writes before the collection read, includes the enclosing assignment, and resolves that same right-hand subscript again indefinitely",
+      "rationale": "Connects the new subscript receiver inference to accepting the in-progress enclosing assignment, causing same-RHS recursion and stack overflow.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "123f6eaecb4ab697",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are callback reassignment and case-insensitive names; no recursion finding.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8eaa74161fbf9bfd",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "scans indexed writes whose start precedes the read, including the enclosing assignment itself ... Exclude writes that have not completed before the read",
+      "rationale": "Names the start-precedes-read acceptance of the unfinished assignment and the resulting self-recursion overflow, with the expected fix.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "6d01ce13d5606c98",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "The right-hand subscript starts after the assignment, so inference sees the same assignment again and recurses indefinitely",
+      "rationale": "Identifies re-entering the same assignment because its start precedes the RHS read, causing stack overflow.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c22cfd2123fba1dc",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "scans indexed writes whose start precedes the read, including the enclosing assignment itself",
+      "rationale": "Same mechanism and stack-overflow consequence.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "04454c963fb41121",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "resolving a later `$items[0]->method()` scans that assignment and resolves its right-hand subscript, which scans the same assignment again",
+      "rationale": "Identifies the same-RHS re-entry through the indexed-write scan leading to stack overflow; the start-vs-end cause is implied by re-entering the enclosing assignment.",
+      "finding_count": 2,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "ef27cfa7287be58d",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern typed callback parameters and reassignment, not the recursion.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "165cd9b410b0651d",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callback reassignment and case-insensitivity, not the recursion.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "db0c964224ee421f",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callable shadowing and non-null assertion carriers, not the member this receiver projection.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8a1a7b90783a93f1",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "caught",
+      "matching_finding": "Inside a value-class member such as `fun rawValue() = this.raw`, `this` is not classified as a carrier, so the underlying property is lowered as a heap field read",
+      "rationale": "Connects the unclassified this receiver in a value-class member to the underlying projection being lowered as an ordinary field load.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7b0ebe55abf79559",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callable shadowing, ordinary call results and !!; none mention the member this receiver.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3743fff698a96a3c",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Callable shadowing and incomplete-boundary identity findings only.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a53df1c6bedf4852",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Callable shadowing and scope-unaware type lookup findings only.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3b5ea40736e1c8fd",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Callable shadowing and type-name scope findings only.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "0891db5ba2c23f6b",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Callable shadowing, type scope and incomplete adaptation findings; no this-receiver projection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "cadc10368c38c245",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "caught",
+      "matching_finding": "Inside a value-class method, `this.amount` has a `this_expression` receiver, which always falls through to `Unrelated`. The underlying projection therefore remains a heap field load",
+      "rationale": "Names the omitted this_expression carrier classification and its consequence of a generic field load losing underlying-value dependence.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "954c4d2b545a4d8f",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Callable resolution and type-name scope findings only.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "58951c0c80107a36",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "31cf6d3d72d8e441",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "223a2a94c932b02c",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "47c2d20a42140510",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "0e413288d0b2755a",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ddac59b2154af1bb",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "4342629ba83910ef",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "39a0ac873eeecfff",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "afb239443160d395",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7c8d03981545bf38",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "00e4a78fe09267de",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "cae026e74480e192",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3b4984ed687f6c56",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f9ad8789cf91b4ef",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "fa99367309713055",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1c929ac65667b863",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "dae05cf153a02c8f",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5f3c615b0a7e8754",
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover Java diagnostics overlay checks, JVM discovery in diagnostics, persistent-activation ordering, and evidence replacement; none addresses the Go activate_dependency_packs early runtime=None return that drops independently valid activation evidence.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "9cc686e6998f847d",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern class-body shadowing and deferred lambda branch ancestry, not repeated module assignments sharing one later-ranged declaration so earlier reads lose their target.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "fcd3c5fc649c64b0",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the declaration collector retains only the last assignment's range... `y` now reports `no_indexed_definition`",
+      "rationale": "Connects the new end-before-event filter at 1771-1778 with repeated assignments sharing one declaration whose range is the last assignment, causing earlier reads to return no_indexed_definition.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8b2fb92452cb5513",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the declaration index retains only the last assignment's range... now returns `no_indexed_definition`",
+      "rationale": "Identifies the new filter, the shared last-range declaration for repeated assignments, and the resulting lost earlier lookup.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7d109d7d61560f17",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding is about deferred lambdas and opposing-branch bindings, a listed near miss.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a172241d58d22018",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the only indexed range for `x` ends after the first binding event, so this filter returns no candidates",
+      "rationale": "Same mechanism and symptom as the known defect: repeated assignment replaces the range and the new filter vetoes the earlier visible binding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3dcb091b42c11e5e",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "uses `replace_code_unit` for the second field and retains only its later range... the intervening reference stops resolving",
+      "rationale": "Ties replaced-range repeated assignments to the new event cutoff returning no candidates for an intervening read.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ab42e388ae7a1173",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "only the later assignment's range remains indexed... turning the previously resolved reference into `no_indexed_definition`",
+      "rationale": "Exactly matches: shared code unit with later range, empty latest_end, no_indexed_definition.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "0cbf5b2519fee528",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "efd880433d09cc3b",
+      "bug": "python-module-binding-representative-after-event",
+      "label": "caught",
+      "matching_finding": "the declaration collector replaces the first field CodeUnit with the second one... This filter therefore returns no candidate for `print(x)`",
+      "rationale": "Identifies the repeated-binding range replacement and the new filter dropping the earlier visible binding.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8e17b176604e8790",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "fc4ae0d065046e52",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ffb18ab0a5af8760",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "09217d360520c446",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c57d4d6265c6c955",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "fccd7a43253f2ad1",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c12176522f3f544c",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover qualified Scala visibility, companion access, receiver restrictions, or missing caller endpoints; none identifies an exhausted subtype walk without hierarchy proof being treated as a definitive Denied.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8806a921a63dfd97",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Closest finding is Java caller endpoints with empty enclosing_templates causing a false subclass denial; that is missing endpoint data, a listed near miss, not unavailable hierarchy proof turned into a negative by the subtype walk.",
+      "finding_count": 4,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "59fb6b1997e41710",
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "caught",
+      "matching_finding": "`jvm_type_is_subtype` examines only returned edges and therefore returns `Some(false)` for that empty inventory, causing this code to deny a potentially valid protected access as complete",
+      "rationale": "Points at the protected-access consumer of the subtype walk and explains that missing hierarchy evidence yields a definitive false and a Denied result instead of preserved uncertainty.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ddf76bff2df3812e",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8b3bc4990196986c",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ebfd86c787e61461",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "505a2e2c66c80391",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "08de221328825c76",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3d2e2fab398029ce",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ee20237f6367fabd",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "536cade7ae44ac2f",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c86c60d765d02e64",
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern conditional writes without a direct guard (errors.As) and address-alias invalidation; none mentions modeled nonreturning calls like testing.T.Fatal being ignored by nilness reachability.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "2fd9a79b6315df39",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b7c1274254b1c501",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "62c79a93467c1116",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "e0f0599840870d71",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d97019f1c297409d",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7ab124283ff16b29",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5200daf513048d08",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c977db342ef023ac",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "170625cf12e73ebc",
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern installing unrelated curated packs, in-flight acquisition coordination, cancellation, or repeated warnings; none identifies the generated-production compatibility gate running after full checksum and decode work.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1f84957e3387467a",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callback parameter reassignment, typed-callback fallback, or case-insensitive builtin names; no finding identifies the enclosing indexed assignment re-entering its own RHS.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "37d530f81002a706",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "resolving the right-hand subscript scans indexed writes before the collection read, includes the enclosing assignment, and resolves that same right-hand subscript again indefinitely",
+      "rationale": "Connects the new subscript arm to indexed-write inference accepting the in-progress enclosing assignment, causing same-RHS recursion and stack overflow.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "123f6eaecb4ab697",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callback parameter reassignment, typed-callback fallback, or case-insensitive builtin names; no finding identifies the enclosing indexed assignment re-entering its own RHS.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8eaa74161fbf9bfd",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "scans indexed writes whose start precedes the read, including the enclosing assignment itself... Exclude writes that have not completed before the read",
+      "rationale": "Names the start-precedes-read mechanism, the self-recursion, and the completed-write fix.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6d01ce13d5606c98",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "The right-hand subscript starts after the assignment, so inference sees the same assignment again and recurses indefinitely",
+      "rationale": "Explains that the in-progress assignment is accepted for its own RHS read, producing non-progressing recursion.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c22cfd2123fba1dc",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "scans indexed writes whose start precedes the read, including the enclosing assignment itself",
+      "rationale": "Same mechanism (start-before-read admits the enclosing assignment) and same stack-overflow symptom.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "04454c963fb41121",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "caught",
+      "matching_finding": "resolving a later `$items[0]->method()` scans that assignment and resolves its right-hand subscript, which scans the same assignment again",
+      "rationale": "Identifies the same-RHS re-entry cycle through the enclosing indexed assignment causing stack overflow; it does not name the start-vs-end comparison explicitly but the cycle described is the defect's cause.",
+      "finding_count": 2,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "ef27cfa7287be58d",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callback parameter reassignment, typed-callback fallback, or case-insensitive builtin names; no finding identifies the enclosing indexed assignment re-entering its own RHS.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "165cd9b410b0651d",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern callback parameter reassignment, typed-callback fallback, or case-insensitive builtin names; no finding identifies the enclosing indexed assignment re-entering its own RHS.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "db0c964224ee421f",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8a1a7b90783a93f1",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "caught",
+      "matching_finding": "Inside a value-class member such as `fun rawValue() = this.raw`, `this` is not classified as a carrier, so the underlying property is lowered as a heap field read",
+      "rationale": "Connects the omitted this/receiver carrier classification to a member's own underlying-property read lowering as a field load.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7b0ebe55abf79559",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3743fff698a96a3c",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a53df1c6bedf4852",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3b5ea40736e1c8fd",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "0891db5ba2c23f6b",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "cadc10368c38c245",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "caught",
+      "matching_finding": "Inside a value-class method, `this.amount` has a `this_expression` receiver, which always falls through to `Unrelated`. The underlying projection therefore remains a heap field load",
+      "rationale": "Exactly identifies the missing this_expression carrier and the resulting field load losing underlying-value dependence.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "954c4d2b545a4d8f",
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern constructor-name shadowing, call results, not-null assertions, lexical type scope, or incomplete-adaptation identity; none addresses `this` in a value-class member missing the underlying projection.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "58951c0c80107a36",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "31cf6d3d72d8e441",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "223a2a94c932b02c",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "47c2d20a42140510",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "0e413288d0b2755a",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ddac59b2154af1bb",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "4342629ba83910ef",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "39a0ac873eeecfff",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "afb239443160d395",
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings reported.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5e86ac2f7001e244",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance branch search, recursion depth, aliases, diamond bases, or namespace scope of base names; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b5ec036c372968b0",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance branch search, recursion depth, aliases, diamond bases, or namespace scope of base names; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "83d0b53b0f02d9cb",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "caught",
+      "matching_finding": "When the derived class is a template, its indexed signature contains only the template parameter head, so `cpp_direct_base_types` prefers that signature",
+      "rationale": "States the exact mechanism (signature holds only the template head, preferred over source) and the consequence that nondependent inherited members of a class template never resolve.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5553e8bce3c6db90",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance branch search, recursion depth, aliases, diamond bases, or namespace scope of base names; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "e62bbeb6e1849a8f",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "caught",
+      "matching_finding": "its indexed signature contains only the template parameter list, so `cpp_direct_base_types` prefers that signature over the class source and never sees the base clause",
+      "rationale": "Names the template-signature cause and the lost inherited-member lookup for template derived classes.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d9198c165b3795c6",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "caught",
+      "matching_finding": "its indexed signature contains only the template parameter head, so `cpp_direct_base_types` prefers that signature over the class source and never sees the base clause",
+      "rationale": "Same mechanism and consequence as the known defect.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "79660d92c9a15177",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance branch search, recursion depth, aliases, diamond bases, or namespace scope of base names; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3ed6e272ca583f5a",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance branch search, recursion depth, aliases, diamond bases, or namespace scope of base names; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "650464e453335cfb",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance branch search, recursion depth, aliases, diamond bases, or namespace scope of base names; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c7fee25c62d29b1a",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "the module code unit already spans the tree root, so its range commonly has exactly the same span as the new file scope. The minimum is then chosen by hash-set iteration order",
+      "rationale": "Identifies the equal-span tie between the Python module and new FileScope, hash-order selection of the synthetic owner, and asks to prefer the semantic declaration.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7a888858aaffd88e",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5a85816caa18f5b0",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ca3dea5f0ea32a07",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "the new file scope has exactly the same span. The minimum-span lookup now chooses between them according to hash-set iteration order",
+      "rationale": "Same tie, unordered selection, and wrong (synthetic) enclosing unit for top-level Python references.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "46503aae480f0530",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ad9e7ebc28f39315",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "the real module and the new file scope both span the entire source, so the existing minimum-span selection can choose either one according to hash-set iteration order",
+      "rationale": "Names the tie, the hash-order choice of the synthetic owner, and the fix of preferring the semantic declaration.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ebda566048be5ebb",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "In Python files the real module and the new file scope both span the entire source, so this selection picks whichever happens to appear first in the hash set",
+      "rationale": "Identifies the equal-span tie and nondeterministic selection of the synthetic owner over the module.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a860c2eb1e761760",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3a275ee4204179c1",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "4a576ff2c8d2a7d4",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "034830369a2b79ff",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ccbfc9bfe0128f26",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5e6ac535c0df7b0d",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "fb5a9c58a5d1c4cb",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "839be1b90b0beb8b",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5a728d379fc9f5b1",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "9ef7fd4489d8d52f",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f26f28ff9d21b9a8",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is a missing golden expected.txt; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "657e2f8273c17105",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "partial",
+      "matching_finding": "Avoid counting the primary constructor twice in class density ... Making the primary constructor a source child causes it to enter the comment-density declaration tree",
+      "rationale": "Connects the nonsynthetic primary constructor to wrong class comment density, but attributes it to double-counted spans and comments inside the constructor, not to the constructor taking the class header KDoc through expanded comment start and deepest-owner selection. Choosing the lower label because the stated mechanism differs.",
+      "finding_count": 3,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "64784c9792fdecfe",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3b30f59efd9fd6e1",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "abd5ec672b725dca",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "99e2d340771b344a",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f5efce48db55aaee",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "9358baf273ec3526",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ea0c110a5f39001b",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "721b038e02ef1c04",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comments around Kotlin defaults; none links the nonsynthetic primary constructor to comment-density ownership of the class header KDoc.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "adedc6727addd8d1",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is that a name-keyed indexed_static_import_members set suppresses external boundaries of other owners; it does not identify the namespace/kind filter skipping a static getter alias before found_alias/open-import tracking.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "6cee2b470ac279d7",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b90993bfc36c3959",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is that a name-keyed indexed_static_import_members set suppresses external boundaries of other owners; it does not identify the namespace/kind filter skipping a static getter alias before found_alias/open-import tracking.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "9a54e0e0a7cdc0a9",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is that a name-keyed indexed_static_import_members set suppresses external boundaries of other owners; it does not identify the namespace/kind filter skipping a static getter alias before found_alias/open-import tracking.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b552a6d4b41d5044",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is that a name-keyed indexed_static_import_members set suppresses external boundaries of other owners; it does not identify the namespace/kind filter skipping a static getter alias before found_alias/open-import tracking.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "72af4f2cc0b56fb2",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b39376d151821d6b",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is that a name-keyed indexed_static_import_members set suppresses external boundaries of other owners; it does not identify the namespace/kind filter skipping a static getter alias before found_alias/open-import tracking.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "40c06ac5d825c692",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is that a name-keyed indexed_static_import_members set suppresses external boundaries of other owners; it does not identify the namespace/kind filter skipping a static getter alias before found_alias/open-import tracking.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f6d56c43f8f51371",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f623db379e3ec472",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`JavaFileClassIndexMemo` still caches the resulting index without its failure evidence. A later retained fill in the same request now reuses that index",
+      "rationale": "Second finding ties the shared retained-fill domain to the Java memo caching an incomplete build without its gap, letting a later fill publish a clean receipt for a missing class.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "454dbf9021f6652b",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "682e0e05192c6389",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still caches the empty index ... a later sibling fill now reuses that index without repeating the failed read or inheriting its incompleteness",
+      "rationale": "Connects the shared domain to the Java file-class memo caching a failed build and a later fill retaining a false missing-class result; framing the failure as transient does not change the mechanism.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8b21d10241683070",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still caches the resulting partial or empty file index in the request memo. The shared domain lets a later sibling fill reuse that index",
+      "rationale": "Same mechanism: incomplete Java index memoized without its gap and reused by a later fill as a complete absence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "e1a7ab9a9e9601d8",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "Java's `unique_class_by_fqn_in_file` unconditionally caches the index built from `declarations(file)`, even when that read records a store failure; a later fill now hits that index",
+      "rationale": "First finding names the shared domain, the Java memo caching an incomplete build, and a later fill persisting it as successful.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1a69c17f92f8b830",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only describes outer-fill incompleteness being inherited into nested fills (the listed near miss about unrelated gaps poisoning fills), not the Java memo losing its gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "53705ae8d1625a10",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f0a966840b299213",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still memoizes the resulting empty declaration index without its failure; a later fill now reuses that index",
+      "rationale": "Identifies the memo storing an incomplete build without its failure and a later fill retaining the missing-class result as complete.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3868208735f20ea3",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still memoizes the resulting empty `JavaFileClassIndex` without retaining the failure. A later fill in the same request now reuses that index",
+      "rationale": "Matches the shared-domain reuse of an incomplete Java index without replaying its gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c123099593fdc45d",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "16a52c1ff299eca5",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "025796b1a11641ce",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "58e8c9d5d1195309",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1dc15d72cc52b639",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1143ade9e4e6f682",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "28e5fa9ffea8f8ef",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "875b739b7090514a",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1820628cf1ed49a3",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern the scan command lacking --on-inconclusive, baseline acceptance on inconclusive runs, or cached-base reuse; none connects the advisory exit-zero gate to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "491b2ba3f35292db",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())` as well as for a proven empty family",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "2f5f1fb566daf8f2",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "When member-family analysis is unproven, `virtual_dispatch_implementor_targets` returns `Some(Vec::new())`",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f62d9f2010b32a87",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(empty)` rather than `None`. This branch therefore discharges the dynamic-dispatch gap",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7d6a3dc73c8ab9cd",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "returns `Some(Vec::new())`, the same value it returns for a proven empty family. This arm therefore discharges the dynamic-dispatch gap",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b7189f11a71df9fe",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "This branch therefore treats an unproven hierarchy as proof that no overrides exist and removes the dynamic-dispatch gap",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "11b79671cb7e2b6c",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` converts it to `Some(Vec::new())`, so this arm treats the unknown hierarchy as proof that no overrides exist",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5f0749563831251a",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())` as well. This branch therefore discharges the dynamic-dispatch gap",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a051061261a9f9bd",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "returns `Some(Vec::new())`, exactly as it does for a proven empty family. This arm therefore discharges the dynamic-dispatch gap",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "786cf25ae54fac80",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "returns `Some(Vec::new())` rather than `None`. This arm therefore treats those unproven answers as proof that no overrides exist",
+      "rationale": "Identifies that virtual_dispatch_implementor_targets returns Some(empty) for unproven families as well as proven-empty ones, so the new discharge falsely closes the dynamic-dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5e86ac2f7001e244",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance early return, recursion depth, and similar issues; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b5ec036c372968b0",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multiple-inheritance early return, recursion depth, and similar issues; none identifies that class-template signatures hold only the template head so the base clause is lost.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "83d0b53b0f02d9cb",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "caught",
+      "matching_finding": "When the derived class is a template, its indexed signature contains only the template parameter head, so `cpp_direct_base_types` prefers that signature over the class source and finds no base clause",
+      "rationale": "Names the exact mechanism (template signature is only the parameter head, preferred over source) and the consequence for a nondependent base.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5553e8bce3c6db90",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern multi-branch lookup, alias bases, and recursion; the template-signature base-clause loss is not mentioned.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "e62bbeb6e1849a8f",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "caught",
+      "matching_finding": "When a derived class is a template, its indexed signature contains only the template parameter list, so `cpp_direct_base_types` prefers that signature over the class source and never sees the base clause",
+      "rationale": "Identifies the signature-vs-source mismatch for class templates and the lost inherited-member resolution.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d9198c165b3795c6",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "caught",
+      "matching_finding": "When the derived class is a template, its indexed signature contains only the template parameter head, so `cpp_direct_base_types` prefers that signature over the class source and never sees the base clause",
+      "rationale": "Same mechanism and consequence as the known defect.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "79660d92c9a15177",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multi-branch lookup, member vs free-function precedence, and recursion; nothing about template signatures losing the base clause.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3ed6e272ca583f5a",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multi-branch lookup, alias bases, and recursion; the template-signature defect is absent.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "650464e453335cfb",
+      "bug": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover multi-branch lookup, namespace-relative base lookup (a listed near miss), aliases, and recursion; no template-signature finding.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c7fee25c62d29b1a",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "the module code unit already spans the tree root, so its range commonly has exactly the same span as the new file scope. The minimum is then chosen by hash-set iteration order",
+      "rationale": "Identifies the equal-span tie between Python module and synthetic file scope, hash-order selection, wrong owner, and a tie-break preferring the real declaration.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7a888858aaffd88e",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and/or Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5a85816caa18f5b0",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and/or Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ca3dea5f0ea32a07",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "Python registers its module with the root node's full-file range, so the new file scope has exactly the same span. The minimum-span lookup now chooses between them according to hash-set iteration order",
+      "rationale": "Same tie mechanism and consequence (wrong enclosing unit) as the known defect.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "46503aae480f0530",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and/or Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ad9e7ebc28f39315",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "the real module and the new file scope both span the entire source, so the existing minimum-span selection can choose either one according to hash-set iteration order",
+      "rationale": "Names the equal-span tie, nondeterministic synthetic owner, and the prefer-semantic-declaration fix.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ebda566048be5ebb",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "caught",
+      "matching_finding": "In Python files the real module and the new file scope both span the entire source, so this selection picks whichever happens to appear first in the hash set",
+      "rationale": "Identifies the tie and hash-order selection of the synthetic owner over the Python module.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a860c2eb1e761760",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and/or Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3a275ee4204179c1",
+      "bug": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings concern Rust use-path matching and/or Java import hits counting toward the usage limit; nothing about the FileScope/module equal-span tie in enclosing lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "4a576ff2c8d2a7d4",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "034830369a2b79ff",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ccbfc9bfe0128f26",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5e6ac535c0df7b0d",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "fb5a9c58a5d1c4cb",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "839be1b90b0beb8b",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5a728d379fc9f5b1",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "9ef7fd4489d8d52f",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f26f28ff9d21b9a8",
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding is the missing expected.txt for the new golden test; it says nothing about repeated whole-module mutation scans exhausting the shared hierarchy budget.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "657e2f8273c17105",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "partial",
+      "matching_finding": "Making the primary constructor a source child causes it to enter the comment-density declaration tree ... Comments inside the constructor also move from the class's own counts to the new child.",
+      "rationale": "Connects the nonsynthetic primary constructor to the comment-density tree, but names double-counted span and inner comments, not the backward KDoc expansion that gives the class header comment to the deeper constructor. An author might not fix the header-ownership bug from it, so partial rather than caught.",
+      "finding_count": 3,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "64784c9792fdecfe",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3b30f59efd9fd6e1",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "abd5ec672b725dca",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "99e2d340771b344a",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f5efce48db55aaee",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "9358baf273ec3526",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ea0c110a5f39001b",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "721b038e02ef1c04",
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings cover same-named method/constructor identity, overload range selection, vararg arity, or comment-skipping in default parsing; none connects the nonsynthetic primary constructor to comment-density header ownership.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "adedc6727addd8d1",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is about name-only suppression of an unrelated external owner's boundary, not the kind/namespace filter that skips a static getter alias before recording found_alias/open-import evidence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6cee2b470ac279d7",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b90993bfc36c3959",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is about name-only suppression of an unrelated external owner's boundary, not the kind/namespace filter that skips a static getter alias before recording found_alias/open-import evidence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "9a54e0e0a7cdc0a9",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is about name-only suppression of an unrelated external owner's boundary, not the kind/namespace filter that skips a static getter alias before recording found_alias/open-import evidence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b552a6d4b41d5044",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is about name-only suppression of an unrelated external owner's boundary, not the kind/namespace filter that skips a static getter alias before recording found_alias/open-import evidence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "72af4f2cc0b56fb2",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b39376d151821d6b",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is about name-only suppression of an unrelated external owner's boundary, not the kind/namespace filter that skips a static getter alias before recording found_alias/open-import evidence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "40c06ac5d825c692",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding is about name-only suppression of an unrelated external owner's boundary, not the kind/namespace filter that skips a static getter alias before recording found_alias/open-import evidence.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f6d56c43f8f51371",
+      "bug": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f623db379e3ec472",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`JavaFileClassIndexMemo` still caches the resulting index without its failure evidence. A later retained fill in the same request now reuses that index without repeating the failed read",
+      "rationale": "The second finding ties the shared retained-fill domain to JavaFileClassIndexMemo caching an incomplete build with no failure evidence, which a later fill then reuses as a clean result. The first finding is the stable-gap inheritance near miss.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "454dbf9021f6652b",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "682e0e05192c6389",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still caches the empty index built from `declarations()` in its request memo ... a later sibling fill now reuses that index without repeating the failed read or inheriting its incompleteness",
+      "rationale": "Same mechanism: the shared domain lets a later fill reuse a memoized index whose build was incomplete, giving a false missing-class result. It frames the failure as transient rather than stable, but the cause and fix are the same.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8b21d10241683070",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still caches the resulting partial or empty file index in the request memo. The shared domain lets a later sibling fill reuse that index without ... propagating its failure",
+      "rationale": "Connects the shared retained domain to the Java memo caching an incomplete build and the later fill publishing a false-complete receipt.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "e1a7ab9a9e9601d8",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "Java's `unique_class_by_fqn_in_file` unconditionally caches the index built from `declarations(file)`, even when that read records a store failure; a later fill now hits that index without ... recording its incompleteness",
+      "rationale": "Identifies the memo caching an incomplete build and the later shared-domain fill persisting it as complete.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1a69c17f92f8b830",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only describes outer-fill stable failures being inherited into nested fills, which is the listed near miss; does not mention the Java memo losing a gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "53705ae8d1625a10",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "No findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f0a966840b299213",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still memoizes the resulting empty declaration index without its failure; a later fill now reuses that index without repeating the read or recording the failure",
+      "rationale": "Same mechanism and consequence (retained false-complete missing-class result).",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3868208735f20ea3",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "label": "caught",
+      "matching_finding": "`unique_class_by_fqn_in_file` still memoizes the resulting empty `JavaFileClassIndex` without retaining the failure. A later fill in the same request now reuses that index",
+      "rationale": "Same mechanism and consequence as the known defect.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c123099593fdc45d",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding is that `bifrost scan` cannot accept --on-inconclusive; it does not mention MCP run_policy mapping exit 0 to status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "16a52c1ff299eca5",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are about --accept-current overwriting the baseline after an inconclusive run (and/or scan CLI options or cache reuse). That is a different consumer of the exit-zero gate; none connects it to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "025796b1a11641ce",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding is that `bifrost scan` cannot accept --on-inconclusive; it does not mention MCP run_policy mapping exit 0 to status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "58e8c9d5d1195309",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are about --accept-current overwriting the baseline after an inconclusive run (and/or scan CLI options or cache reuse). That is a different consumer of the exit-zero gate; none connects it to MCP run_policy reporting status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1dc15d72cc52b639",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are about --accept-current overwriting the baseline after an inconclusive run (and/or scan CLI options or cache reuse). That is a different consumer of the exit-zero gate; none connects it to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1143ade9e4e6f682",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are about --accept-current overwriting the baseline after an inconclusive run (and/or scan CLI options or cache reuse). That is a different consumer of the exit-zero gate; none connects it to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "28e5fa9ffea8f8ef",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are about --accept-current overwriting the baseline after an inconclusive run (and/or scan CLI options or cache reuse). That is a different consumer of the exit-zero gate; none connects it to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "875b739b7090514a",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding is that `bifrost scan` cannot accept --on-inconclusive; it does not mention MCP run_policy mapping exit 0 to status clean.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1820628cf1ed49a3",
+      "bug": "mcp-default-advisory-reported-clean",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Findings are about --accept-current overwriting the baseline after an inconclusive run (and/or scan CLI options or cache reuse). That is a different consumer of the exit-zero gate; none connects it to MCP run_policy reporting status clean.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "491b2ba3f35292db",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())` as well as for a proven empty family.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "2f5f1fb566daf8f2",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())`, the same value it returns for a proven empty family.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f62d9f2010b32a87",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(empty)` rather than `None`.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7d6a3dc73c8ab9cd",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())`, the same value it returns for a proven empty family.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b7189f11a71df9fe",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())` rather than `None`.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "11b79671cb7e2b6c",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` converts it to `Some(Vec::new())`, so this arm treats the unknown hierarchy as proof that no overrides exist.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5f0749563831251a",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())` as well.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a051061261a9f9bd",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())`, exactly as it does for a proven empty family.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "786cf25ae54fac80",
+      "bug": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "matching_finding": "`virtual_dispatch_implementor_targets` returns `Some(Vec::new())` rather than `None`.",
+      "rationale": "Says the helper returns Some(empty) for unproven families as well as proven-empty ones, and that the new concrete discharge treats this as proof of no overrides, which unsoundly closes the dispatch gap.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a484f6fe917a566a",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion in searchtools.rs literal-pattern resolution, unrelated to the synthetic JS/TS owner's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c6b2ff3fcdac8076",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "caught",
+      "matching_finding": "registering the root node as the module range causes `signature_elements` to report the import-only signature as spanning the entire file",
+      "rationale": "Names the add_code_unit(root) registration in JS (and TS) and that signature_elements now uses that whole-file span for the import-only signature element. It does not spell out enclosing later declarations, but a whole-file span implies that.",
+      "finding_count": 2,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "c25e9351311d3ed7",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "caught",
+      "matching_finding": "registering the root as the module range makes the import-only summary element span the entire file and start at line 1",
+      "rationale": "Same mechanism: root range registered for the synthetic module in JS/TS makes the import summary element span the whole file. The consequences it lists differ (wrong locations, lost leading comments), but the cause and faulty span match.",
+      "finding_count": 2,
+      "confidence": "medium",
+      "judge": "A"
+    },
+    {
+      "output_id": "ad6b34b53b7c785e",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion in searchtools.rs literal-pattern resolution, unrelated to the synthetic JS/TS owner's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7c210aad9db596e9",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion in searchtools.rs literal-pattern resolution, unrelated to the synthetic JS/TS owner's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d1cf853481eb7808",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "caught",
+      "matching_finding": "registering the root node gives the module a range spanning the entire file ... the import summary claims to cover the whole file and overlaps every other declaration",
+      "rationale": "States the whole-file range on the synthetic module, signature_elements honoring it while the text stays the import signature, and the overlap with real declarations, for both JS and TS.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8e9fd097ea4acfee",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion in searchtools.rs literal-pattern resolution, unrelated to the synthetic JS/TS owner's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "e2e2eec1a1569a1f",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion in searchtools.rs literal-pattern resolution, unrelated to the synthetic JS/TS owner's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1b14e9efaab9b70d",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion in searchtools.rs literal-pattern resolution, unrelated to the synthetic JS/TS owner's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a484f6fe917a566a",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only finding concerns directory expansion of literal patterns in searchtools; nothing about the JS/TS synthetic module's whole-file range in summaries.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c6b2ff3fcdac8076",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "caught",
+      "matching_finding": "registering the root node as the module range causes `signature_elements` to report the import-only signature as spanning the entire file",
+      "rationale": "Names the new root range on the synthetic module, the signature_elements renderer honoring it, and the import-only element spanning a file with additional code (thus enclosing later declarations), for both JS and TS. It frames the impact as a misleading extent rather than explicitly overlapping declarations, but the mechanism and faulty behavior match.",
+      "finding_count": 2,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "c25e9351311d3ed7",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "caught",
+      "matching_finding": "registering the root as the module range makes the import-only summary element span the entire file and start at line 1",
+      "rationale": "Identifies the root-range registration and the resulting import-only summary element spanning the whole file in JS and TS, which is the defect's mechanism. Its stated consequences (wrong import locations, lost preamble comments) are partly inaccurate since the fallback already started at line 1, and it does not mention enclosing later declarations, so confidence is reduced.",
+      "finding_count": 2,
+      "confidence": "medium",
+      "judge": "B"
+    },
+    {
+      "output_id": "ad6b34b53b7c785e",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only reports the searchtools directory-expansion regression; the synthetic owner range issue is not mentioned.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7c210aad9db596e9",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only reports the searchtools directory-expansion regression; the synthetic owner range issue is not mentioned.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d1cf853481eb7808",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "caught",
+      "matching_finding": "registering the root node gives the module a range spanning the entire file, but its signature still contains only the import statements. `signature_elements` uses that range ... overlaps every other declaration",
+      "rationale": "Exactly matches the match rule: whole-file root range on the synthetic module, the unchanged signature_elements honoring that span while text stays the import signature, and the element overlapping every other declaration, in both JS and TS.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8e9fd097ea4acfee",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only reports the searchtools directory-expansion regression; the synthetic owner range issue is not mentioned.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "e2e2eec1a1569a1f",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only reports the searchtools directory-expansion regression; the synthetic owner range issue is not mentioned.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1b14e9efaab9b70d",
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Only reports the searchtools directory-expansion regression; the synthetic owner range issue is not mentioned.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    }
+  ],
+  "missing": []
+}

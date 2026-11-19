@@ -188,7 +188,7 @@ function conversation() {
  */
 async function mockViewerApi(page, initialPending = [], configOptions = [], sessionOverrides = {}) {
   const viewerUrl = 'https://viewer.test/';
-  const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
+  const webRoot = path.resolve(__dirname, '../../../mj-server/src/web');
   await page.addInitScript(() => {
     window.fixtureEventSources = [];
     window.EventSource = class extends EventTarget {

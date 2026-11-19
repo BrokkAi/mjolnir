@@ -11,10 +11,10 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use mj_controller::observe::{
+use mj_daemon::observe::{
     ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool, envelopes_for_transcript,
 };
-use mj_controller::server::api::{ApiSession, TranscriptItemView, TranscriptResponse};
+use mj_daemon::server::api::{ApiSession, TranscriptItemView, TranscriptResponse};
 
 use crate::api_client::ApiClient;
 
@@ -85,7 +85,8 @@ fn status(args: ObserveStatusArgs) -> Result<()> {
     let delivery_enabled = delivery.as_ref().is_ok_and(Option::is_some);
     let delivery_error = delivery.err().map(|error| format!("{error:#}"));
     let configured_parts = configured_parts.unwrap_or_default();
-    let delivery_state = ObserveDeliveryState::load(&paths.state, mj_core::clock::epoch_millis())?;
+    let delivery_state =
+        ObserveDeliveryState::diagnostics(&paths.state, mj_core::clock::epoch_millis())?;
     let status = ObserveStatus {
         url_configured: configured_parts.0,
         token_configured: configured_parts.1,

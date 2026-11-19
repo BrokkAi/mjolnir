@@ -1,0 +1,98 @@
+{
+  "sessions": {
+    "batch-0-A.json": {
+      "session_id": "1a771272ba3900b7333410ae16a22d56",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 6039555000,
+      "tokens": 705700,
+      "missing_cost_turns": 0
+    },
+    "batch-2-A.json": {
+      "session_id": "eb8a8e97b16de25046760c5d4a21f684",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 2365276000,
+      "tokens": 223433,
+      "missing_cost_turns": 0
+    },
+    "batch-1-B.json": {
+      "session_id": "35f40dc0a420f75a0961be0ed098de88",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 5935689000,
+      "tokens": 651420,
+      "missing_cost_turns": 0
+    },
+    "batch-2-B.json": {
+      "session_id": "88c9eb808c0b4515fd6f936b726d1900",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 3406260000,
+      "tokens": 367293,
+      "missing_cost_turns": 0
+    },
+    "batch-0-B.json": {
+      "session_id": "e151960625a39b296790837970f17693",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 5545073000,
+      "tokens": 469222,
+      "missing_cost_turns": 0
+    },
+    "batch-1-A.json": {
+      "session_id": "62f7da4241becde41a90059b2e2ca1ee",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 5790977000,
+      "tokens": 400488,
+      "missing_cost_turns": 0
+    },
+    "batch-handcheck.json": {
+      "session_id": "62d0ab3ae727701c5164edcd7769e976",
+      "profile": "claude7",
+      "config": {
+        "model": "opus",
+        "effort": "high",
+        "fast": "off",
+        "ultracode": "off"
+      },
+      "usd_ticks": 6917682000,
+      "tokens": 1068476,
+      "missing_cost_turns": 0
+    }
+  },
+  "total_usd_ticks": 36000512000,
+  "estimated_usd": 3.6000512,
+  "note": "API-equivalent estimates, 1e10 ticks per dollar; claude7 subscription spend is not dollars"
+}

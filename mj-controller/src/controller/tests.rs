@@ -2137,8 +2137,8 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     let group_id = format!("subagent-spawn-{}", child.request_key);
     let initial = crate::database::load_startup_group(&child_id, &group_id).unwrap();
     assert!(matches!(
-        serde_json::from_str::<crate::daemon::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
-        crate::daemon::StartupStep::ApiPrompt { text } if text == child.initial_prompt
+        serde_json::from_str::<crate::database::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
+        crate::database::StartupStep::ApiPrompt { text } if text == child.initial_prompt
     ));
     // A previous daemon could have committed registration but crashed before
     // writing input. Recovery restores the same brief without rewriting a
@@ -3260,10 +3260,9 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(
         oracle.initial_prompt,
         format!(
-            "Your report directory is /reports/{}.\n\n{} Your answer may contain up to {} characters.\n\nQuestion:\nWhich option?",
+            "Your report directory is /reports/{}.\n\n{}\n\nQuestion:\nWhich option?",
             oracle.child_session_id,
-            super::subagents::ORACLE_INSTRUCTIONS,
-            mj_core::subagent::SubagentKind::Oracle.max_handback_chars()
+            mj_core::subagent::READ_ONLY_TASK_SCOPE,
         )
     );
     assert_eq!(oracle.model.as_deref(), Some("oracle-model"));
@@ -3329,11 +3328,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         })
         .unwrap();
     assert!(!muse_oracle.handback_tool);
-    assert!(
-        muse_oracle
-            .initial_prompt
-            .contains("Send each answer as your last message")
-    );
+    assert!(muse_oracle.initial_prompt.ends_with("Question:\nWhy?"));
     assert!(
         muse_oracle
             .initial_prompt
@@ -3575,4 +3570,138 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
         !disabled_launch.review_tools(),
         "explicitly disabled parent review disables child review tools"
     );
+}
+
+/// Where a session's harness profile lives on each kind of target.
+mod profile_homes {
+    use crate::targets::*;
+
+    const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+
+    /// Which profile directory belongs to one session, and so may be deleted when
+    /// its harness is replaced in place. Every session owns one, on every target.
+    #[test]
+    fn removable_profile_root_names_a_per_session_profile_directory_for_every_harness() {
+        use crate::controller::removable_profile_root;
+        use mj_core::config::{HarnessKind, HarnessProfile};
+
+        let profile = |kind: HarnessKind, home: &str| HarnessProfile {
+            enabled: true,
+            environment: Default::default(),
+            context_window_bytes: None,
+            models: Default::default(),
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
+        };
+        let worker_root = format!("/var/lib/hel/workers/{SESSION}");
+        let local = TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        };
+        let container = TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: resource_name(SESSION).unwrap(),
+            workspace_storage: Default::default(),
+        };
+
+        // Every harness without a nested home runs from a staged copy under the
+        // worker root on this machine, macOS included, and never from the profile
+        // home itself.
+        for (kind, home) in [
+            (HarnessKind::Claude, "/home/dev/.claude"),
+            (HarnessKind::Codex, "/home/dev/.codex"),
+            (HarnessKind::Kimi, "/home/dev/.kimi-code"),
+            (HarnessKind::Grok, "/home/dev/.grok"),
+        ] {
+            assert_eq!(
+                removable_profile_root(&local, SESSION, &profile(kind, home)),
+                format!("{worker_root}/profile"),
+                "{kind:?}"
+            );
+        }
+        // A harness with an XDG-nested home owns a per-session root under the
+        // data directory, and the whole root is removable, not just the named
+        // directory inside it.
+        for (kind, home) in [
+            (HarnessKind::Muse, "/home/dev/.muse"),
+            (HarnessKind::OpenCode, "/home/dev/.config/opencode"),
+        ] {
+            let root = removable_profile_root(&local, SESSION, &profile(kind, home));
+            assert_eq!(
+                root,
+                mj_core::config::data_dir()
+                    .join("profiles")
+                    .join(SESSION)
+                    .to_string_lossy()
+                    .into_owned(),
+                "{kind:?}"
+            );
+            assert!(!root.ends_with(kind.id()), "{kind:?}: {root}");
+        }
+
+        for kind in [
+            HarnessKind::Claude,
+            HarnessKind::Codex,
+            HarnessKind::Muse,
+            HarnessKind::OpenCode,
+        ] {
+            assert_eq!(
+                removable_profile_root(&container, SESSION, &profile(kind, "/home/dev/.codex")),
+                format!("/var/lib/hel/profiles/{SESSION}"),
+                "{kind:?} stages its own profile home inside a container"
+            );
+        }
+    }
+
+    /// Installing a staged profile copies it over `target_profile_home`, so that
+    /// home must never be the profile home itself: the files would land on the
+    /// user's own harness configuration, and teardown, which removes only what
+    /// `removable_profile_root` names, would leave them there.
+    #[test]
+    fn a_session_never_runs_from_the_profile_home_itself() {
+        use crate::targets::target_profile_home;
+        use mj_core::config::{HarnessKind, HarnessProfile};
+
+        let profile = |kind: HarnessKind, home: &str| HarnessProfile {
+            enabled: true,
+            environment: Default::default(),
+            context_window_bytes: None,
+            models: Default::default(),
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_muse_auto_review: None,
+            load_balancing_may_consume_credits: false,
+            claude_permission_mode: None,
+            aws: None,
+            ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
+        };
+        let local = TargetLocator::LocalBare {
+            worker_root: format!("/var/lib/hel/workers/{SESSION}"),
+        };
+        let container = TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: resource_name(SESSION).unwrap(),
+            workspace_storage: Default::default(),
+        };
+
+        for locator in [&local, &container] {
+            for (kind, home) in [
+                (HarnessKind::Claude, "/home/dev/.claude"),
+                (HarnessKind::Codex, "/home/dev/.codex"),
+                (HarnessKind::Kimi, "/home/dev/.kimi-code"),
+                (HarnessKind::Grok, "/home/dev/.grok"),
+                (HarnessKind::Muse, "/home/dev/.config/muse"),
+                (HarnessKind::OpenCode, "/home/dev/.config/opencode"),
+            ] {
+                let target = target_profile_home(locator, SESSION, &profile(kind, home));
+                assert_ne!(target, home, "{kind:?} on {}", locator.kind_name());
+            }
+        }
+    }
 }

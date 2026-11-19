@@ -1,0 +1,341 @@
+use super::*;
+
+/// Hand a Claude worker the profile's long-lived setup token, when it has one.
+///
+/// Claude Code reads `CLAUDE_CODE_OAUTH_TOKEN` ahead of the `/login`
+/// credentials file, and a setup token does not rotate, so a container copy
+/// cannot lose the single-use refresh race with the host. A profile that sets
+/// the variable itself stays authoritative.
+pub fn apply_claude_setup_token(
+    environment: &mut std::collections::BTreeMap<String, String>,
+    kind: mj_core::config::HarnessKind,
+    token_path: &Path,
+) -> bool {
+    use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
+
+    if kind != mj_core::config::HarnessKind::Claude {
+        return false;
+    }
+    if environment
+        .get(CLAUDE_OAUTH_TOKEN_ENV)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    environment.remove(CLAUDE_OAUTH_TOKEN_ENV);
+    match mj_core::credentials::read_claude_oauth_token(token_path) {
+        Ok(Some(token)) => {
+            environment.insert(CLAUDE_OAUTH_TOKEN_ENV.to_owned(), token);
+            true
+        }
+        Ok(None) => false,
+        // A stored token Hel cannot read is worth reporting, but the session
+        // still starts on the synced credentials file.
+        Err(error) => {
+            tracing::warn!(
+                path = %token_path.display(),
+                %error,
+                "ignoring an unreadable Claude setup token"
+            );
+            false
+        }
+    }
+}
+
+/// Whether Claude is authenticated by a non-blank launch variable. A blank
+/// value is absent, matching how the profile model interprets API keys.
+pub fn claude_environment_login_present(
+    profile: &mj_core::config::HarnessProfile,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    profile.kind == mj_core::config::HarnessKind::Claude
+        && [
+            mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+        ]
+        .into_iter()
+        .any(|name| {
+            environment
+                .get(name)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
+/// Make a session's staged `.credentials.json` exactly the host's Claude login
+/// when the host keeps it in the macOS Keychain
+/// ([`mj_core::config::HarnessKind::login_store`]), or remove it when there is
+/// none.
+///
+/// Every session runs with `CLAUDE_CONFIG_DIR` set to its staged home, so
+/// Claude Code looks in a Keychain item named after that directory, which
+/// never exists, and then in the home's `.credentials.json`. That file is
+/// where the login reaches every target, local ones included. On a Mac the
+/// Keychain item is the only login: a `.credentials.json` that `stage_profile`
+/// copied from the profile home (earlier releases left session copies there)
+/// is replaced by the Keychain login or removed, never staged as a login. The
+/// copy omits the refresh token like every other copy: the daemon renews the
+/// Keychain login and the credential sync pushes the result
+/// (`copies_omit_refresh_token`). A Keychain that cannot be read (locked)
+/// stages no login, as Claude Code would see none; the sync pushes it once the
+/// Keychain opens.
+///
+/// The setup token takes precedence: when that environment variable is
+/// present, Claude never reads this file.
+pub fn stage_claude_keychain_login(
+    profile: &mj_core::config::HarnessProfile,
+    host: mj_core::config::HarnessHost,
+    destination: &Path,
+    environment_login_present: bool,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    if profile.kind != mj_core::config::HarnessKind::Claude
+        || !profile.auth_scheme().uses_native_login_file()
+        || environment_login_present
+        || !matches!(
+            profile.kind.login_store(host, &profile.home),
+            mj_core::config::HarnessLoginStore::MacKeychain
+        )
+    {
+        return Ok(());
+    }
+    let path = destination.join(profile.kind.credential_file_name());
+    match crate::harness_auth::claude_keychain_credentials(executor)? {
+        Some(credentials) => {
+            let copy =
+                mj_core::credentials::credential_copy_for_harness(profile.kind, &credentials);
+            mj_core::credentials::write_credential_file(profile.kind, &path, &copy).with_context(
+                || format!("stage Claude's macOS Keychain login at {}", path.display()),
+            )
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "remove a leftover Claude login from the staged home {}",
+                    path.display()
+                )
+            }),
+        },
+    }
+}
+
+/// Kimi's runtime-aware engine cannot infer a runtime identity from an ACP
+/// stdio server. Add Hel's history server to the session-private profile
+/// instead, where Kimi's native schema can bind it to the target's local runtime.
+pub fn configure_kimi_history_mcp(
+    profile_stage: &Path,
+    worker_root: &str,
+    history_socket: Option<&Path>,
+) -> Result<()> {
+    let path = profile_stage.join("mcp.json");
+    edit_staged_json_object(&path, "staged Kimi MCP configuration", |root| {
+        let servers = root
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "mcpServers in staged Kimi MCP configuration {} must be a JSON object",
+                    path.display()
+                )
+            })?;
+
+        // The worker root and the socket are paths on the target, which is
+        // POSIX even when the controller runs on Windows.
+        let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+        let socket_is_absolute = history_socket.is_none_or(mj_core::target_path::is_absolute);
+        let server = if mj_core::target_path::is_absolute(&worker) && socket_is_absolute {
+            let mut args = vec!["worker".to_owned(), "memory-mcp".into()];
+            if let Some(socket) = history_socket {
+                args.extend([
+                    "--history-socket".into(),
+                    mj_core::target_path::text(socket),
+                ]);
+            }
+            serde_json::json!({
+                "transport": "stdio",
+                "command": mj_core::target_path::text(&worker),
+                "args": args,
+                "runtime_id": "local"
+            })
+        } else {
+            let worker = mj_core::target_path::text(&worker);
+            let worker_expression = if mj_core::target_path::is_absolute(Path::new(&worker)) {
+                "\"$1\""
+            } else {
+                "\"$HOME/$1\""
+            };
+            let mut args = vec![
+                "-c".to_owned(),
+                format!("exec {worker_expression} worker memory-mcp"),
+                "mj-memory".into(),
+                worker,
+            ];
+            if let Some(socket) = history_socket {
+                args[1].push_str(if mj_core::target_path::is_absolute(socket) {
+                    " --history-socket \"$2\""
+                } else {
+                    " --history-socket \"$HOME/$2\""
+                });
+                args.push(mj_core::target_path::text(socket));
+            }
+            serde_json::json!({
+                "transport": "stdio",
+                "command": "sh",
+                "args": args,
+                "runtime_id": "local"
+            })
+        };
+        servers.insert("mj-memory".into(), server);
+        Ok(())
+    })
+}
+
+/// Add the worker-owned mailbox drain to Claude's session-private settings.
+/// The command is finalized on the worker because remote worker roots are
+/// home-relative while staging runs on the controller.
+pub fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &str) -> Result<()> {
+    let path = profile_stage.join("settings.json");
+    let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+    let socket = mj_core::target_path::join(Path::new(worker_root), Path::new("control.sock"));
+    let command = format!(
+        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
+        mj_core::targets::posix_quote(&mj_core::target_path::text(&worker)),
+        mj_core::targets::posix_quote(&mj_core::target_path::text(&socket))
+    );
+    edit_staged_json_object(&path, "staged Claude settings", |root| {
+        let groups = root
+            .entry("hooks")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "hooks in staged Claude settings {} must be a JSON object",
+                    path.display()
+                )
+            })?
+            .entry("PostToolBatch")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| {
+                format!(
+                    "hooks.PostToolBatch in staged Claude settings {} must be a JSON array",
+                    path.display()
+                )
+            })?;
+        let existing = groups.iter_mut().find_map(|group| {
+            group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|hooks| {
+                    hooks.iter_mut().find(|hook| {
+                        hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+                            && hook
+                                .get("command")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|existing| {
+                                    existing.starts_with("MJOLNIR_MAILBOX_HOOK=1 ")
+                                })
+                    })
+                })
+        });
+        if let Some(existing) = existing {
+            existing["command"] = serde_json::Value::String(command);
+            existing["timeout"] = serde_json::json!(mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
+        } else {
+            groups.push(serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": command,
+                    "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
+                }]
+            }));
+        }
+        Ok(())
+    })
+}
+
+/// Write Mjolnir's managed skills into a staged profile home.
+///
+/// Reserve the same directory and honor the same target scope as
+/// [`mj_core::skills::session_skills`], so later sync preserves this tree.
+pub fn stage_managed_skills(
+    kind: mj_core::config::HarnessKind,
+    profile_stage: &Path,
+    scope: mj_core::skills::SkillsScope,
+) -> Result<()> {
+    let directory = profile_stage.join(mj_core::skills::mj_skill_directory(kind));
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("remove staged mj skill {}", directory.display()));
+        }
+    }
+    if scope == mj_core::skills::SkillsScope::Isolated {
+        return Ok(());
+    }
+    for entry in mj_core::skills::managed_skills(kind) {
+        let path = profile_stage.join(&entry.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create staged skills directory {}", parent.display()))?;
+        }
+        atomic_write(&path, &entry.bytes)
+            .with_context(|| format!("write managed skill {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Write the enforcement table's staged setting, if the harness has one. Muse
+/// composes a session's permission profile from its settings file and nothing
+/// on the ACP wire overrides that choice, so the profile has to be staged.
+pub fn apply_staged_execution_setting(
+    kind: mj_core::config::HarnessKind,
+    policy: mj_core::config::ExecutionPolicy,
+    profile_stage: &Path,
+) -> Result<()> {
+    let Some(setting) = kind
+        .execution_enforcement(policy)
+        .and_then(mj_core::config::ExecutionEnforcement::staged_setting)
+    else {
+        return Ok(());
+    };
+    let path = profile_stage.join(setting.file);
+    let label = format!("staged {} settings", kind.display_name());
+    edit_staged_json_object(&path, &label, |root| {
+        setting
+            .apply(root)
+            .with_context(|| format!("{label} {}", path.display()))
+    })
+}
+
+/// Read a staged JSON settings file (treating a missing file as an empty
+/// object), let `edit` change its root object, and write it back atomically.
+/// `label` names the file in every error message.
+pub fn edit_staged_json_object(
+    path: &Path,
+    label: &str,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,
+) -> Result<()> {
+    let mut document = match std::fs::read(path) {
+        Ok(body) => serde_json::from_slice::<serde_json::Value>(&body)
+            .with_context(|| format!("parse {label} {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {label} {}", path.display()));
+        }
+    };
+    let root = document
+        .as_object_mut()
+        .with_context(|| format!("{label} {} must contain a JSON object", path.display()))?;
+    edit(root)?;
+    let mut body = serde_json::to_vec_pretty(&document)?;
+    body.push(b'\n');
+    atomic_write(path, &body).with_context(|| format!("write {label} {}", path.display()))
+}

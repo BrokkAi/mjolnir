@@ -326,7 +326,7 @@ fn same_release_build(revision: char, commit_offset: Option<i64>) -> String {
         revision.to_string().repeat(40)
     );
     if let Some(offset) = commit_offset {
-        let commit: i64 = mj_core::worker_build::BUILD_COMMIT_TIME
+        let commit: i64 = mj_build_id::BUILD_COMMIT_TIME
             .parse()
             .expect("this test build knows its commit time");
         published.push_str(&format!(".c{}", commit + offset));
@@ -871,9 +871,7 @@ fn a_record_whose_daemon_died_does_not_block_the_upgrade() {
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
         assert_ne!(started.token, stale.token, "{version}/{protocol}");
         assert!(
-            started
-                .build_version
-                .starts_with(mj_core::worker_build::BUILD_ID),
+            started.build_version.starts_with(mj_build_id::BUILD_ID),
             "{}",
             started.build_version
         );
@@ -1081,9 +1079,7 @@ fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
         assert_ne!(metadata.pid, old.0.id());
         assert!(
-            metadata
-                .build_version
-                .starts_with(mj_core::worker_build::BUILD_ID),
+            metadata.build_version.starts_with(mj_build_id::BUILD_ID),
             "{}",
             metadata.build_version
         );
@@ -1200,10 +1196,7 @@ fn older_same_release_clients_keep_a_newer_or_unordered_daemon() {
             assert!(log.contains(expected), "{daemon_build}: {log}");
             // Both builds are named.
             assert!(log.contains(&daemon_build[..15]), "{log}");
-            assert!(
-                log.contains(&mj_core::worker_build::BUILD_ID[..15]),
-                "{log}"
-            );
+            assert!(log.contains(&mj_build_id::BUILD_ID[..15]), "{log}");
         }
         let kept: mj_client::daemon::DaemonMetadata =
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
@@ -1882,7 +1875,10 @@ open({output:?}, 'w').write('helper survived cancellation')
                         .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
                         .await
                         .unwrap();
-                    assert!(matches!(reply, mj_client::daemon::DaemonReply::Done));
+                    assert!(
+                        matches!(reply, mj_client::daemon::DaemonReply::Done),
+                        "upgrade preparation was not admitted: {reply:?}"
+                    );
                     drop(terminal);
                 } else {
                     // Simulate daemon death: all duplicated masters close in

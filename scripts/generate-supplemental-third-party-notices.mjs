@@ -144,7 +144,7 @@ async function checkStandaloneNoticeInventory(metadata) {
 }
 
 async function checkFontInventory() {
-  const fontDirectory = path.join(repositoryRoot, "mj-controller", "src", "fonts");
+  const fontDirectory = path.join(repositoryRoot, "mj-server", "src", "fonts");
   const discovered = (await readdir(fontDirectory))
     .filter((filename) => filename.endsWith(".woff2"))
     .sort();
@@ -217,7 +217,7 @@ async function embeddedFontsNotice() {
   await checkedInLegalFile("licenses/OFL-1.1.md");
   return {
     component: "Embedded web fonts",
-    source: "mj-controller/src/fonts/*.woff2",
+    source: "mj-server/src/fonts/*.woff2",
     scope: "embedded in the Mjolnir binary and served by the remote viewer",
     text: [
       "The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.",
@@ -309,7 +309,7 @@ async function main() {
     ),
     {
       component: "Downloaded GitHub relevance inference runtime",
-      source: "mj-controller/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
+      source: "mj-github-relevance/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
       scope: "downloaded, verified and atomically cached at first preparation; not bundled in release archives",
       text: [
         "ONNX Runtime 1.23.0 is MIT licensed. Its LICENSE and ThirdPartyNotices.txt accompany the verified native library in the Mjolnir data-directory cache.",

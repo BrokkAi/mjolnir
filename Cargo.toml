@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -35,18 +35,31 @@ mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", versi
 mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.71.0" }
 anvil-client = { package = "brokk-anvil-client", version = "0.28.6" }
 mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.71.0", default-features = false }
-mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.71.0" }
+mj-build-id = { path = "mj-build-id", package = "brokk-mj-build-id", version = "2.71.0" }
+mj-worker = { path = "mj-worker", package = "brokk-mj-worker-runtime", version = "2.71.0" }
 mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.71.0" }
+mj-targets = { path = "mj-targets", package = "brokk-mj-targets", version = "2.71.0" }
+mj-session-types = { path = "mj-session-types", package = "brokk-mj-session-types", version = "2.71.0" }
+mj-store = { path = "mj-store", package = "brokk-mj-store", version = "2.71.0" }
+mj-accounts = { path = "mj-accounts", package = "brokk-mj-accounts", version = "2.71.0" }
+mj-github-relevance = { path = "mj-github-relevance", package = "brokk-mj-github-relevance", version = "2.71.0" }
+mj-import = { path = "mj-import", package = "brokk-mj-import", version = "2.71.0" }
+mj-sessionwiki = { path = "mj-sessionwiki", package = "brokk-mj-sessionwiki", version = "2.71.0" }
+mj-build-cache = { path = "mj-build-cache", package = "brokk-mj-build-cache", version = "2.71.0" }
+mj-worker-staging = { path = "mj-worker-staging", package = "brokk-mj-worker-staging", version = "2.71.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.71.0" }
+mj-setup = { path = "mj-setup", package = "brokk-mj-setup", version = "2.71.0" }
+mj-server = { path = "mj-server", package = "brokk-mj-server", version = "2.71.0" }
+mj-daemon = { path = "mj-daemon", package = "brokk-mj-daemon", version = "2.71.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.71.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.71.0" }
-sessionwiki = { package = "brokk-sessionwiki", version = "0.34.25" }
+sessionwiki = { package = "brokk-sessionwiki", version = "0.34.27" }
 
 # Every external dependency that two or more crates share is declared once
 # here, so a version can only be raised in one place. Each entry carries the
 # features every user of it needs; a crate that needs more adds them beside
 # `workspace = true`, which unions them with these.
-agent-client-protocol = { version = "5", features = ["unstable_session_fork", "unstable_end_turn_token_usage"] }
+agent-client-protocol = { version = "5", features = ["unstable_session_fork", "unstable_session_system_prompt", "unstable_end_turn_token_usage"] }
 anyhow = "1"
 axum = "0.8"
 # Use the ring provider already pulled by reqwest instead of aws-lc-rs, which
@@ -74,7 +87,7 @@ rayon = "1"
 # `rustls-no-provider` takes the process-wide rustls provider instead of
 # pulling aws-lc-rs, which needs a C toolchain and complicates
 # cross-compilation. Every executable installs the ring provider at startup
-# through `mj_controller::server::install_rustls_crypto_provider`.
+# through `mj_server::server::install_rustls_crypto_provider`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 ring = "0.17"
 rusqlite = { version = "0.41", features = ["backup", "bundled", "fallible_uint", "functions"] }

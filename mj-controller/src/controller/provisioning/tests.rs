@@ -467,7 +467,7 @@ fn stale_worker_fails_before_any_container_is_created() {
         "{detail}"
     );
     assert!(
-        detail.contains(mj_core::worker_build::WORKER_BUILD_ID),
+        detail.contains(mj_core::worker_build::worker_build_id()),
         "{detail}"
     );
     assert!(executor.commands().is_empty(), "{:?}", executor.commands());
@@ -714,7 +714,7 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
             .unwrap()
             .contains("fixture launch failed")
     );
-    assert!(!crate::pollers::session_target_is_pollable(child));
+    assert!(!crate::session_manager::session_target_is_pollable(child));
     assert!(
         recovered
             .ensure_subagent_slot_available(PROVISIONED_SESSION, None)

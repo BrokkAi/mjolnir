@@ -1,0 +1,180 @@
+{
+  "per_diff": [
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "leak": "partial",
+      "A": 1,
+      "BT": 0,
+      "OT": 3,
+      "OT_partial": 0,
+      "OT_minus_A_points": 66.7
+    },
+    {
+      "bug": "cpp-template-inherited-base-signature",
+      "leak": "caught",
+      "A": 0,
+      "BT": 0,
+      "OT": 3,
+      "OT_partial": 0,
+      "OT_minus_A_points": 100.0
+    },
+    {
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "leak": "partial",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "retained-fill-java-memo-loses-gap",
+      "leak": "caught",
+      "A": 1,
+      "BT": 0,
+      "OT": 2,
+      "OT_partial": 1,
+      "OT_minus_A_points": 33.3
+    },
+    {
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "leak": "partial",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 1,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "mcp-default-advisory-reported-clean",
+      "leak": "caught",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "leak": "caught",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "python-module-binding-representative-after-event",
+      "leak": "caught",
+      "A": 2,
+      "BT": 1,
+      "OT": 3,
+      "OT_partial": 0,
+      "OT_minus_A_points": 33.3
+    },
+    {
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "leak": "partial",
+      "A": 0,
+      "BT": 0,
+      "OT": 1,
+      "OT_partial": 0,
+      "OT_minus_A_points": 33.3
+    },
+    {
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "leak": "missed",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "leak": "missed",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "leak": "caught",
+      "A": 2,
+      "BT": 0,
+      "OT": 3,
+      "OT_partial": 0,
+      "OT_minus_A_points": 33.3
+    },
+    {
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "leak": "partial",
+      "A": 0,
+      "BT": 0,
+      "OT": 2,
+      "OT_partial": 0,
+      "OT_minus_A_points": 66.7
+    },
+    {
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "leak": "partial",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "java-static-getter-drops-incomplete-route",
+      "leak": "partial",
+      "A": 0,
+      "BT": 0,
+      "OT": 0,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "unproven-override-family-certifies-empty",
+      "leak": "caught",
+      "A": 3,
+      "BT": 3,
+      "OT": 3,
+      "OT_partial": 0,
+      "OT_minus_A_points": 0.0
+    },
+    {
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "leak": "caught",
+      "A": 0,
+      "BT": 0,
+      "OT": 3,
+      "OT_partial": 0,
+      "OT_minus_A_points": 100.0
+    }
+  ],
+  "leak_groups": {
+    "caught": {
+      "n": 8,
+      "A": 33.3,
+      "BT": 16.7,
+      "OT": 70.8,
+      "OT_minus_A": 37.5
+    },
+    "partial": {
+      "n": 7,
+      "A": 4.8,
+      "BT": 0.0,
+      "OT": 28.6,
+      "OT_minus_A": 23.8
+    },
+    "missed": {
+      "n": 2,
+      "A": 0.0,
+      "BT": 0.0,
+      "OT": 0.0,
+      "OT_minus_A": 0.0
+    }
+  }
+}

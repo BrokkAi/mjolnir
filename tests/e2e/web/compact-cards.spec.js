@@ -4,7 +4,7 @@ const { viewerWireSnapshot, viewerDetailResponse, viewerDelta, dispatchRuntimeFr
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block', timezoneId: 'UTC' });
 
-const WEB_ROOT = path.resolve(__dirname, '../../../mj-controller/src/web');
+const WEB_ROOT = path.resolve(__dirname, '../../../mj-server/src/web');
 const WORKSPACE_ID = 'workspace-1';
 const OTHER_WORKSPACE_ID = 'workspace-2';
 const SERVER_TIME_MS = Date.parse('2030-06-15T15:00:00Z');

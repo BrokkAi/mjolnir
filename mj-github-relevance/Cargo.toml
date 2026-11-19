@@ -1,0 +1,54 @@
+[package]
+name = "brokk-mj-github-relevance"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "On-device classifier that decides which GitHub events matter to a Mjolnir session"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_github_relevance"
+# The crate has no doc tests; looking for them makes rustdoc compile it again.
+doctest = false
+
+[features]
+default = []
+test-hooks = ["mj-core/test-hooks"]
+# Exposes the shared test fixtures to the tests of the crates above.
+test-support = ["mj-core/test-hooks"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+mj-transcript = { workspace = true, features = ["github-history"] }
+anyhow.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+futures = "0.3"
+half = "2"
+libloading = "0.9"
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-23", "directml", "coreml", "cuda", "half"] }
+reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
+rustls.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+sha2.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["compat", "io"] }
+tracing.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+mj-targets = { workspace = true, features = ["test-support"] }
+axum.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

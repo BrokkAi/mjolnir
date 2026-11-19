@@ -25,17 +25,21 @@ judges are told not to open.
 import argparse
 import collections
 import json
+import pathlib
 import random
 import secrets
 import statistics
 import sys
+from fractions import Fraction
 
 import brief_oracle
 from driver import ARMS, CORPUS, BRIEF_ARMS, QUERY_ARMS, ROOT, SCRIPTS, save
 
 # The condition each judged arm stands for: its brief kind, or "site-tool" for the query arms
 # (brief/PLAN-oz.md), which carry no brief but a site_context tool.
-CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS}}
+CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS},
+             # A fresh no-brief cohort is its own condition, never pooled with the stored no-brief arms.
+             "AF": "no-brief-fresh", "AF2": "no-brief-fresh-2"}
 
 BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
@@ -46,6 +50,9 @@ BUGS = None
 SELECTED_MODELS = MODELS
 EXACT_BASELINE = False
 ROUND_SETS = None
+READING = None
+REFERENCE_ROUND = None
+IMAGE_CHECK = {}  # the no-leak build's single-image evidence, saved in the round key
 
 
 def scoped_sets():
@@ -73,11 +80,16 @@ def latency(session_dir):
     return round((done - prompt) / 1000, 1) if done and prompt else None
 
 
+def baseline_on():
+    """Whether the round includes the stored no-brief baseline arms (a reading can exclude them)."""
+    return READING is None or READINGS[READING].get("baseline", True)
+
+
 def sessions(arms):
     """Every finished high-effort Terra or Sol session with output on the 30 Hard-won diffs."""
     out = []
     for bug in sum(scoped_sets().values(), []):
-        for arm in (*BASELINE_ARMS, *arms):
+        for arm in (*(BASELINE_ARMS if baseline_on() else ()), *arms):
             done = ROOT / "runs" / bug / arm / "done.json"
             if not done.exists():
                 continue
@@ -98,12 +110,12 @@ def sessions(arms):
 
 def conditions(arms):
     """no-brief, then each brief kind (oracle, blind) the arms carry; kinds are never pooled."""
-    return ["no-brief", *sorted({CONDITION[a] for a in arms})]
+    return [*(["no-brief"] if baseline_on() else []), *sorted({CONDITION[a] for a in arms})]
 
 
 def planned_cells(arms):
     """Required sessions per diff: baseline minima and selected brief-arm counts."""
-    planned = collections.Counter({("no-brief", model): 3 for model in SELECTED_MODELS})
+    planned = collections.Counter({("no-brief", model): 3 for model in SELECTED_MODELS} if baseline_on() else {})
     for arm in arms:
         for spec in ARMS[arm]:
             model, effort = spec.rsplit(":", 1)
@@ -145,11 +157,61 @@ def build(arms, per_batch):
     if KEY.exists():
         # New output IDs would orphan any verdicts already returned for this round.
         raise SystemExit(f"{KEY} exists: round {J.name} is already built; use another --name")
-    J.mkdir(parents=True, exist_ok=True)
-    KEY.parent.mkdir(parents=True, exist_ok=True)
     corpus = CORPUS
     rows = sessions(arms)
     require_complete(rows, arms)
+    paired = READINGS[READING].get("same_image") if READING else None
+    if paired:
+        # The paired brief/no-brief arms read a brief effect only if both ran on one image.
+        # Carriers, and every reviewer whose runtime was observed (its own container or the carrier's).
+        images = {json.loads((ROOT / "runs" / r["bug"] / r["arm"] / "placement.json").read_text())["image"]
+                  for r in rows if r["arm"] in paired}
+        unobserved = 0
+        for r in rows:
+            if r["arm"] not in paired:
+                continue
+            runtime = pathlib.Path(r["dir"]) / "runtime.json"
+            image = json.loads(runtime.read_text()).get("image") if runtime.exists() else None
+            if image:
+                images.add(image)
+            else:
+                unobserved += 1
+        if len(images) != 1:
+            raise SystemExit(f"{' and '.join(paired)} ran on more than one image: {sorted(images)}")
+        # Each arm's review activity, from review start to its last status poll, for the readout's
+        # overlap caveat (provisioning and carrier teardown are excluded).
+        window = {}
+        for arm in paired:
+            spans = []
+            for b in {r["bug"] for r in rows if r["arm"] == arm}:
+                run = ROOT / "runs" / b / arm
+                # The last poll that still showed the review: a later poll (after a resumed driver)
+                # would stretch the window past the review's end.
+                polls = [p["time_ns"] for p in (json.loads(line) for line in
+                         (run / "review-status.jsonl").read_text().splitlines() if line.strip())
+                         if (p.get("status") or {}).get("review")]
+                spans.append((json.loads((run / "review-start-intent.json").read_text())["time_ns"], max(polls)))
+            window[arm] = {"first_review_start_ns": min(s for s, _ in spans), "last_status_poll_ns": max(e for _, e in spans)}
+        IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved,
+                            "review_window": window})
+    if REFERENCE_ROUND:
+        # Check the reference before freezing the round: score compares the same sessions, and
+        # finding a mismatch only then would orphan completed verdicts.
+        ref_path = ROOT / "private" / f"key-{REFERENCE_ROUND}.json"
+        if not ref_path.exists():
+            raise SystemExit(f"reference round {REFERENCE_ROUND} has no key")
+        import brief_writer_terra
+        brief_writer_terra.judged_round(REFERENCE_ROUND)  # final, hand-checked labels must already exist
+        ref = json.loads(ref_path.read_text())["outputs"].values()
+        ref_arms = READINGS[READING]["reference_arms"]
+        bugs = {r["bug"] for r in rows}
+        want = {(r["bug"], r["arm"], r["session"]) for r in rows if r["arm"] in ref_arms}
+        have = {(k["bug"], k["arm"], k["session"]) for k in ref if k["bug"] in bugs and k["arm"] in ref_arms}
+        if want != have:
+            raise SystemExit(f"reference round {REFERENCE_ROUND} does not hold the same {ref_arms} sessions: "
+                             f"{len(want - have)} only here, {len(have - want)} only there")
+    J.mkdir(parents=True, exist_ok=True)
+    KEY.parent.mkdir(parents=True, exist_ok=True)
     key = {}
     by_bug = collections.defaultdict(list)
     for r in rows:
@@ -173,6 +235,8 @@ def build(arms, per_batch):
     (J / "SPEC.md").write_text((SCRIPTS / "judge/SPEC.md").read_text())
     save(KEY, {"arms": list(arms), "outputs": key, "sets": scoped_sets(),
                "models": list(SELECTED_MODELS), "exact_baseline": EXACT_BASELINE,
+               **({"reading": READING, "reference_round": REFERENCE_ROUND} if READING else {}),
+               **({"image_check": IMAGE_CHECK} if IMAGE_CHECK else {}),
                **({"bugs": sorted(BUGS)} if BUGS is not None else {})})
     print(json.dumps({"dir": str(J), "batches": batches}))
     print(json.dumps({"outputs": len(key), "by_condition_model": collections.Counter(
@@ -180,8 +244,10 @@ def build(arms, per_batch):
 
 
 def load_round():
-    global BUGS, SELECTED_MODELS, EXACT_BASELINE, ROUND_SETS
+    global BUGS, SELECTED_MODELS, EXACT_BASELINE, ROUND_SETS, READING, REFERENCE_ROUND
     saved = json.loads(KEY.read_text())
+    READING = saved.get("reading")
+    REFERENCE_ROUND = saved.get("reference_round")
     BUGS = set(saved["bugs"]) if "bugs" in saved else None
     SELECTED_MODELS = tuple(saved.get("models", MODELS))
     if not SELECTED_MODELS or len(set(SELECTED_MODELS)) != len(SELECTED_MODELS) or set(SELECTED_MODELS) - set(MODELS):
@@ -311,6 +377,56 @@ def boot(diff_values, n=10000):
     return round(means[int(0.025 * n)], 3), round(means[int(0.975 * n)], 3)
 
 
+def boot_exact(diff_values, n=10000):
+    """Exact paired bootstrap quantiles, converted only after strict decisions."""
+    rng = random.Random(1)
+    means = sorted(sum((diff_values[i] for i in rng.choices(range(len(diff_values)), k=len(diff_values))),
+                       Fraction()) / len(diff_values) for _ in range(n))
+    return means[int(.025 * n)], means[int(.975 * n)]
+
+
+# Registered Terra-only paired readings: the subject arm against no brief (A) and the other arm.
+READINGS = {
+    # brief/PLAN-bifrost-oracle.md: OT against A and BT on all 17 relation diffs; reference round is
+    # the stored A/BT judging.
+    "bifrost-oracle": {"subject": "OT", "arms": ("OT", "BT"), "others": ("A", "BT"), "primary": "A", "diffs": 17,
+                       "diffs_rule": "exactly 17", "min_diffs": 0, "report_key": "bifrost_oracle",
+                       "reference_arms": ("A", "BT")},
+    # brief/PLAN-bifrost-oracle-noleak.md and its AF amendment: ON against the same-image fresh
+    # no-brief AF (primary), stored A and OT; AF - A is the image/cohort effect. Fewer than 8
+    # retained diffs reads Inconclusive; the reference is round L's A/OT labels.
+    "bifrost-oracle-noleak": {"subject": "ON", "arms": ("ON", "AF", "OT"), "others": ("AF", "A", "OT"),
+                              "primary": "AF", "extra": (("AF", "A"),), "diffs": None,
+                              "diffs_rule": "1 to 17", "min_diffs": 8,
+                              "report_key": "bifrost_oracle_noleak", "reference_arms": ("A", "OT"),
+                              "same_image": ("ON", "AF")},
+    # brief/PLAN-bifrost-oracle-strict.md: OS against its same-image fresh no-brief AF2 (primary), and
+    # round M's ON and AF; AF2 - AF compares the two fresh no-brief cohorts. No stored A. Fewer than 8
+    # retained diffs reads Inconclusive; the reference is round M's ON/AF labels.
+    # The plan's "OS" arm is OX here: OS already names stage A's Sol oracle arm.
+    "bifrost-oracle-strict": {"subject": "OX", "arms": ("OX", "AF2", "ON", "AF"), "others": ("AF2", "ON", "AF"),
+                              "primary": "AF2", "extra": (("AF2", "AF"),), "diffs": None,
+                              "diffs_rule": "1 to 17", "min_diffs": 8, "baseline": False,
+                              "report_key": "bifrost_oracle_strict", "reference_arms": ("ON", "AF"),
+                              "same_image": ("OX", "AF2")},
+}
+
+
+def reading_diffs_ok(n):
+    want = READINGS[READING]["diffs"]
+    return n == want if want is not None else 1 <= n <= 17
+
+
+def oracle_outcome(estimate, low, high):
+    if estimate >= Fraction(17, 100) and low > 0:
+        return "Facts carry"
+    if low > 0 and estimate < Fraction(17, 100):
+        return "Partly"
+    if high < Fraction(10, 100):
+        return "Facts don't carry"
+    return "Inconclusive"
+
+
 def score():
     saved = load_round()
     key = saved["outputs"]
@@ -347,7 +463,7 @@ def score():
                                 "sessions": sum(v[2] for v in per.values()),
                                 "catch_rate": round(statistics.fmean(caught), 3), "ci95": boot(caught),
                                 "partial_rate": round(statistics.fmean(v[1] for v in per.values()), 3)})
-    for kind, model in planned:
+    for kind, model in (planned if baseline_on() else ()):
         if kind == "no-brief":
             continue
         for group in sets:
@@ -367,6 +483,47 @@ def score():
                                   "median_tokens": statistics.median(k["total_tokens"] for k in ks),
                                   "median_latency_s": statistics.median(lat) if lat else None,
                                   "median_tool_calls": (statistics.median(t) if (t := [k["tool_calls"] for k in ks if k["tool_calls"] is not None]) else None)})
+    if READING in READINGS:
+        import brief_writer_terra
+        reading = READINGS[READING]
+        subject, others = reading["subject"], reading["others"]
+        if set(sets) != {"P"} or not reading_diffs_ok(len(sets["P"])) or SELECTED_MODELS != ("gpt-6.1-terra",):
+            raise SystemExit(f"{READING} requires {reading['diffs_rule']} P diffs and Terra only")
+        bugs = sets["P"]
+        per_diff = {}
+        for bug in bugs:
+            per_diff[bug] = {}
+            for arm in ((("A",) if baseline_on() else ()) + reading["arms"]):
+                entries = [(oid, k) for oid, k in key.items() if k["bug"] == bug and k["arm"] == arm]
+                if len(entries) != 3 or any(k["model"] != "gpt-6.1-terra" for _, k in entries):
+                    raise SystemExit(f"{bug} {arm}: requires exactly three Terra sessions")
+                labels = [final[oid] for oid, _ in entries]
+                per_diff[bug][arm] = {"sessions": 3, "caught": labels.count("caught"),
+                                      "partial": labels.count("partial"), "catch_rate": labels.count("caught") / 3,
+                                      "partial_rate": labels.count("partial") / 3}
+        pairs = [(subject, arm) for arm in others] + list(reading.get("extra", ()))
+        contrasts, raw_contrasts = {}, {}
+        for x, y in pairs:
+            values = [Fraction(per_diff[b][x]["caught"], 3) - Fraction(per_diff[b][y]["caught"], 3) for b in bugs]
+            estimate = sum(values, Fraction()) / len(values)
+            low, high = boot_exact(values)
+            raw_contrasts[(x, y)] = (estimate, low, high)
+            contrasts[f"{x}_minus_{y}"] = {"difference": float(estimate), "ci95": [float(low), float(high)]}
+        estimate, low, high = raw_contrasts[(subject, reading["primary"])]
+        outcome = oracle_outcome(estimate, low, high)
+        if len(bugs) < reading["min_diffs"]:
+            outcome = "Inconclusive"  # registered: too few retained diffs to read
+        report["expected_catches_per_reviewer"] = report.pop("expected_catches_of_30")
+        report[reading["report_key"]] = {"outcome": outcome, "diffs": len(bugs),
+                                         "primary": f"{subject}_minus_{reading['primary']}",
+                                         "bootstrap": {"seed": 1, "draws": 10000, "unit": "paired diff",
+                                                       "classification_uses_unrounded_rational_bounds": True},
+                                         **contrasts, "per_diff": per_diff}
+        report["label_consistency"] = brief_writer_terra.compare_same_sessions(
+            J.name, REFERENCE_ROUND, bugs, arms=reading["reference_arms"], model="gpt-6.1-terra")
+        save(J / "score.json", report)
+        print(json.dumps(report, indent=1))
+        return
     if "oracle" in conds:
         report["stage_a"] = decide(rate)
     if "bifrost" in conds and "blind" in conds:
@@ -383,7 +540,11 @@ if __name__ == "__main__":
     p.add_argument("--bugs-per-batch", type=int, default=3)
     p.add_argument("--bugs-from", help="build: jobs file ([{bug, arm}]) whose diffs the round covers")
     p.add_argument("--name", default="brief-judge", help="judging round: batches in <name>/, key in private/")
+    p.add_argument("--reading", choices=sorted(READINGS), help="registered reading (build only)")
+    p.add_argument("--reference-round", help="stored-label round for same-session comparison (build only)")
     a = p.parse_args()
+    if a.step != "build" and (a.reading or a.reference_round):
+        raise SystemExit("--reading and --reference-round apply to build only; values are persisted in the key")
     J, KEY = ROOT / a.name, ROOT / "private" / f"key-{a.name}.json"
     if a.bugs_from:
         if a.step != "build":
@@ -397,6 +558,16 @@ if __name__ == "__main__":
             raise SystemExit(f"--models must select distinct supported models: {MODELS}")
         EXACT_BASELINE = True
     if a.step == "build":
+        if bool(a.reading) != bool(a.reference_round):
+            raise SystemExit("--reading and --reference-round must be supplied together")
+        READING, REFERENCE_ROUND = a.reading, a.reference_round
+        if REFERENCE_ROUND is not None and REFERENCE_ROUND == a.name:
+            # The consistency check compares against a separate stored round, never this one.
+            raise SystemExit("--reference-round must name a different, already judged round")
+        if READING and (tuple(a.arms.split(",")) != READINGS[READING]["arms"] or
+                        SELECTED_MODELS != ("gpt-6.1-terra",) or not reading_diffs_ok(len(scoped_sets().get("P", [])))):
+            raise SystemExit(f"{READING} build requires --arms {','.join(READINGS[READING]['arms'])}, "
+                             f"Terra only, and {READINGS[READING]['diffs_rule']} P diffs")
         if a.bugs_per_batch < 1:
             raise SystemExit("--bugs-per-batch must be positive")
         build(tuple(a.arms.split(",")), a.bugs_per_batch)

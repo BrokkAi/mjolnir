@@ -1,0 +1,62 @@
+{
+  "round 1 editors": {
+    "sessions": 17,
+    "usd": 4.21,
+    "missing_cost_turns": 0
+  },
+  "round 1 fidelity": {
+    "sessions": 1,
+    "usd": 0.9,
+    "missing_cost_turns": 0
+  },
+  "round 2 editors": {
+    "sessions": 17,
+    "usd": 4.32,
+    "missing_cost_turns": 0
+  },
+  "round 2 fidelity": {
+    "sessions": 1,
+    "usd": 0.84,
+    "missing_cost_turns": 0
+  },
+  "round 2 cause": {
+    "sessions": 1,
+    "usd": 0.16,
+    "missing_cost_turns": 0
+  },
+  "round 3 editors": {
+    "sessions": 16,
+    "usd": 4.03,
+    "missing_cost_turns": 0
+  },
+  "round 3 fidelity": {
+    "sessions": 1,
+    "usd": 1.26,
+    "missing_cost_turns": 0
+  },
+  "round 4 editors": {
+    "sessions": 16,
+    "usd": 4.12,
+    "missing_cost_turns": 0
+  },
+  "round 4 fidelity": {
+    "sessions": 1,
+    "usd": 1.22,
+    "missing_cost_turns": 0
+  },
+  "round 2 leak judges": {
+    "sessions": 2,
+    "usd": 0.95,
+    "missing_cost_turns": 0
+  },
+  "round 3 leak judges": {
+    "sessions": 2,
+    "usd": 0.81,
+    "missing_cost_turns": 0
+  },
+  "round 4 leak judges": {
+    "sessions": 2,
+    "usd": 0.9,
+    "missing_cost_turns": 0
+  }
+}

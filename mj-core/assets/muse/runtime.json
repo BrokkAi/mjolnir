@@ -1,9 +1,9 @@
 {
-  "muse_version": "1.4.14-R7309.1",
+  "muse_version": "1.4.23-R8977.1",
   "platforms": {
-    "linux-x86_64": {"muse_target":"x86-linux","muse_sha256":"0809aac7cb58d18f5022b6d05e02aa1974683c0ec430e5f04d25b60ed17de2da"},
-    "linux-aarch64": {"muse_target":"aarch64-linux","muse_sha256":"3dc39b8fa26f9963cc2038f2966c0932ed5a39f0f9efb39cc0266a261cbbcf76"},
-    "macos-x86_64": {"muse_target":"x86-macos","muse_sha256":"6da5a12d3298afba45afec929fc385b516084ed28e9504ae29354dbcdfc4089d"},
-    "macos-aarch64": {"muse_target":"aarch64-macos","muse_sha256":"1c96114408acbeade9a8fb79e3b4425e5b64d50425938568aef01bdc04ce2e03"}
+    "linux-x86_64": {"muse_target":"x86-linux","muse_sha256":"7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4"},
+    "linux-aarch64": {"muse_target":"aarch64-linux","muse_sha256":"e06646f5e59bac21c1ae44c14bd361ed5375df6ac1f0637f03004a713fb85a33"},
+    "macos-x86_64": {"muse_target":"x86-macos","muse_sha256":"d8a29bc2b5c44ac00372d4151bad9aec7f7e3f0985455530b6abd7807b4a6e40"},
+    "macos-aarch64": {"muse_target":"aarch64-macos","muse_sha256":"215a6eaac150f5855edc5a1df3b14ddfa504eb03690a4d65449887b396522fa8"}
   }
 }

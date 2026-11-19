@@ -1,6 +1,8 @@
+pub(crate) use super::stand_in::*;
 use super::*;
 #[cfg(unix)]
 use crate::controller::test_support::{IsolatedTest, test_name};
+use crate::targets::{CommandPlan, TargetRecoveryPlan};
 use mj_core::hex::lower_hex;
 
 /// I1-12: a relay's final rejection reaches the user as the relay's reason
@@ -81,6 +83,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
         harness_failure: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
+        launches: mpsc::unbounded_channel().0,
         session_cpu: watch::channel(SessionCpuTable::new()).1,
     };
     let request = tokio::spawn(async move {
@@ -617,7 +620,11 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     // Still full by measurement: still no restart.
     let now = chrono::Utc::now().timestamp() as u64;
     crate::target_storage::record_samples(
-        &[crate::target_storage::tests::sample(host, 0, 40 << 30)],
+        &[crate::target_storage::test_storage_sample(
+            host,
+            0,
+            40 << 30,
+        )],
         now,
     );
     assert!(matches!(
@@ -629,7 +636,7 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     // Space was freed. The old exit record predates this measurement, so it
     // no longer holds recovery back.
     crate::target_storage::record_samples(
-        &[crate::target_storage::tests::sample(
+        &[crate::target_storage::test_storage_sample(
             host,
             40 << 30,
             40 << 30,
@@ -658,7 +665,7 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
     let restarted = directory.path().join("worker-restarted");
     let bytes = format!(
         "current worker binary{}",
-        mj_core::worker_build::WORKER_BUILD_STAMP
+        mj_core::worker_build::worker_build_stamp()
     );
     std::fs::write(&source, &bytes).unwrap();
     let current_digest = lower_hex(sha2::Sha256::digest(bytes.as_bytes()));
@@ -1360,7 +1367,6 @@ async fn connecting_to_an_absent_worker_never_reads_the_projection() {
     );
 }
 
-const LEASED_RELAY_ROOT: &str = "MJ_TEST_LEASED_RELAY_ROOT";
 #[cfg(unix)]
 const AUTO_RESTART_TEST_CHILD: &str = "MJ_TEST_AUTO_RESTART_CHILD";
 #[cfg(unix)]
@@ -1381,469 +1387,6 @@ const MANAGER_SHUTDOWN_TEST_CHILD: &str = "MJ_TEST_MANAGER_SHUTDOWN_CHILD";
 const SYNC_CADENCE_TEST_CHILD: &str = "MJ_TEST_SYNC_CADENCE_CHILD";
 #[cfg(unix)]
 const FULL_DISK_RECOVERY_TEST_CHILD: &str = "MJ_TEST_FULL_DISK_RECOVERY_CHILD";
-pub(crate) const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
-/// File in the relay root where the stdio relay child logs each request.
-pub(super) const RELAY_REQUEST_LOG: &str = "requests.log";
-/// Makes the stdio relay child report an open harness session.
-const RELAY_SESSION_CONFIGURED: &str = "MJ_TEST_RELAY_SESSION_CONFIGURED";
-const CLEAR_MAILBOX_CONTROL: &str = "MJ_TEST_CLEAR_MAILBOX_CONTROL";
-
-/// Relay server half of the leased-submission tests. It does nothing unless
-/// a parent test points it at a relay journal root.
-#[test]
-fn leased_relay_child_serves_stdio() {
-    let Some(root) = std::env::var_os(LEASED_RELAY_ROOT) else {
-        return;
-    };
-    let memory_protocol = {
-        let path = PathBuf::from(&root).join("memory-sync-protocol");
-        path.exists().then(|| {
-            std::fs::read_to_string(path)
-                .unwrap()
-                .parse::<u32>()
-                .unwrap()
-        })
-    };
-    // With `--nocapture` libtest writes `test <name> ... ` without a
-    // trailing newline before the body runs. End that line first so it
-    // cannot glue itself onto the first protocol frame.
-    println!();
-    let mut relay = None;
-    {
-        let marker = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER");
-        let mut input = std::io::stdin().lock();
-        let mut output = std::io::stdout().lock();
-        let mut subagent_known_ids = std::collections::BTreeSet::new();
-        // The queue files this connection last reported to a change wait.
-        let mut reported_queue: Option<[Option<Vec<u8>>; 2]> = None;
-        while let Some(request) = mj_core::relay::read_relay_frame(&mut input).unwrap() {
-            use mj_core::relay::{
-                RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
-            };
-            if matches!(request.request, RelayRequest::PollSubagentQueue { .. })
-                && PathBuf::from(&root)
-                    .join("disconnect-subagent-queue")
-                    .exists()
-            {
-                return;
-            }
-            // One line per request, so a parent test can count round trips.
-            {
-                use std::io::Write as _;
-                let mut log = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(PathBuf::from(&root).join(RELAY_REQUEST_LOG))
-                    .unwrap();
-                writeln!(log, "{}", request.request.method_name()).unwrap();
-            }
-            if PathBuf::from(&root).join("worker-unreachable").exists() {
-                return;
-            }
-            if request.request.method_name() == "project_memory_transfer"
-                && PathBuf::from(&root).join("drop-project-memory").exists()
-            {
-                return;
-            }
-            if matches!(
-                &request.request,
-                RelayRequest::Submit {
-                    command: RelayCommand::SetQuotaRecovery { .. },
-                    ..
-                }
-            ) {
-                let blocked = PathBuf::from(&root).join("block-quota-submit");
-                if blocked.exists() {
-                    std::fs::write(
-                        PathBuf::from(&root).join("quota-submit-waiting"),
-                        b"waiting",
-                    )
-                    .unwrap();
-                    while blocked.exists() {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                }
-            }
-            let preparation: Option<mj_core::relay::HarnessPreparation> =
-                std::fs::read(PathBuf::from(&root).join("preparation.json"))
-                    .ok()
-                    .map(|body| serde_json::from_slice(&body).unwrap());
-            if preparation.is_some()
-                && matches!(request.request, RelayRequest::SetSubagentAdmission { .. })
-            {
-                mj_core::relay::write_relay_frame(
-                    &mut output,
-                    &RelayResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version: request.protocol_version,
-                        body: RelayResponseBody::Error {
-                            error: mj_core::relay::relay_protocol_error(
-                                mj_core::relay::RelayErrorCode::InvalidState,
-                                "harness preparation failed at harness-profile: missing staged Claude delegation server",
-                                false,
-                                None,
-                            ),
-                        },
-                    },
-                )
-                .unwrap();
-                continue;
-            }
-            if let RelayRequest::WaitForChange {
-                after_ordinal,
-                state_digest,
-            } = &request.request
-            {
-                let blocked = PathBuf::from(&root).join("block-change-wait");
-                while blocked.exists() {
-                    if PathBuf::from(&root).join("worker-unreachable").exists() {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                // Each connection to this fake is its own process, and only the
-                // session's own connection may open the relay journal. So this
-                // wait reports the relay as the controller named it and holds,
-                // like the real worker, until the queue files it rereads change.
-                let queue_files = || {
-                    ["subagent-request.json", "subagent-result.json"]
-                        .map(|name| std::fs::read(PathBuf::from(&root).join(name)).ok())
-                };
-                let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                let queue_changed = loop {
-                    if PathBuf::from(&root).join("worker-unreachable").exists() {
-                        return;
-                    }
-                    let queue = queue_files();
-                    if reported_queue.as_ref() != Some(&queue) {
-                        reported_queue = Some(queue);
-                        break true;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        break false;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                };
-                mj_core::relay::write_relay_frame(
-                    &mut output,
-                    &RelayResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version: request.protocol_version,
-                        body: RelayResponseBody::Ok {
-                            payload: RelayResponsePayload::ChangeObserved {
-                                latest_ordinal: *after_ordinal,
-                                state_digest: state_digest.clone().unwrap_or_default(),
-                                subagent_queue_changed: queue_changed,
-                            },
-                        },
-                    },
-                )
-                .unwrap();
-                continue;
-            }
-            let history = match &request.request {
-                RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
-                    negotiated: memory_protocol.unwrap_or(mj_core::relay::RELAY_PROTOCOL_VERSION),
-                    relay_version: "1.0.0".into(),
-                    session_id: LEASED_RELAY_SESSION.into(),
-                    worker_build: None,
-                }),
-                RelayRequest::CpuUsage => {
-                    let path = PathBuf::from(&root).join("cpu-usage.json");
-                    let usage = if path.exists() {
-                        Some(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
-                    } else {
-                        None
-                    };
-                    Some(RelayResponsePayload::CpuUsage { usage })
-                }
-                RelayRequest::SubagentRequests | RelayRequest::PollSubagentQueue { .. } => {
-                    let path = PathBuf::from(&root).join("subagent-request.json");
-                    let requests = if path.exists() {
-                        vec![serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()]
-                    } else {
-                        Vec::new()
-                    };
-                    let path = PathBuf::from(&root).join("subagent-result.json");
-                    let results = if path.exists() {
-                        vec![serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()]
-                    } else {
-                        Vec::new()
-                    };
-                    if let RelayRequest::PollSubagentQueue { acknowledged } = &request.request {
-                        use mj_core::subagent::{
-                            SubagentCompletion, SubagentQueueChange, SubagentQueuePage,
-                        };
-                        let mut changes = requests
-                            .into_iter()
-                            .map(SubagentQueueChange::Request)
-                            .chain(results.iter().map(|r| {
-                                SubagentQueueChange::Completed(SubagentCompletion::from(r))
-                            }))
-                            .collect::<Vec<_>>();
-                        let ids = changes
-                            .iter()
-                            .map(|c| c.request_id().to_owned())
-                            .collect::<std::collections::BTreeSet<_>>();
-                        changes.extend(subagent_known_ids.difference(&ids).map(|id| {
-                            SubagentQueueChange::Retired {
-                                request_id: id.clone(),
-                            }
-                        }));
-                        subagent_known_ids = ids;
-                        Some(RelayResponsePayload::SubagentQueue {
-                            page: SubagentQueuePage {
-                                sequence: acknowledged.unwrap_or(0) + 1,
-                                changes,
-                                has_more: false,
-                            },
-                        })
-                    } else {
-                        Some(RelayResponsePayload::SubagentRequests { requests, results })
-                    }
-                }
-                RelayRequest::CompleteSubagentRequest { result } => {
-                    if PathBuf::from(&root)
-                        .join("slow-delegation-delivery")
-                        .exists()
-                    {
-                        std::thread::sleep(Duration::from_secs(6));
-                    }
-                    std::fs::write(
-                        PathBuf::from(&root).join("subagent-result.json"),
-                        serde_json::to_vec(result).unwrap(),
-                    )
-                    .unwrap();
-                    let path = PathBuf::from(&root).join("subagent-request.json");
-                    if path.exists() {
-                        std::fs::remove_file(path).unwrap();
-                    }
-                    Some(RelayResponsePayload::SubagentRequestCompleted)
-                }
-                RelayRequest::HistoryRequests => {
-                    let path = PathBuf::from(&root).join("history-request.json");
-                    let requests = if path.exists() {
-                        vec![
-                            serde_json::from_slice::<mj_core::history::HistoryRequest>(
-                                &std::fs::read(path).unwrap(),
-                            )
-                            .unwrap(),
-                        ]
-                    } else {
-                        Vec::new()
-                    };
-                    Some(RelayResponsePayload::HistoryRequests { requests })
-                }
-                RelayRequest::SetSubagentAdmission { open } => {
-                    let admission = PathBuf::from(&root).join("subagent-admission.json");
-                    let mut state: serde_json::Value = std::fs::read(&admission)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                        .unwrap_or_else(|| serde_json::json!({"open": true, "calls": 0}));
-                    state["open"] = serde_json::Value::Bool(*open);
-                    state["calls"] =
-                        serde_json::Value::from(state["calls"].as_u64().unwrap_or_default() + 1);
-                    std::fs::write(&admission, serde_json::to_vec(&state).unwrap()).unwrap();
-                    let marker = PathBuf::from(&root).join("drop-admission-open-reply-once");
-                    if *open
-                        && std::env::var_os(DROP_ADMISSION_OPEN_REPLY).is_some()
-                        && !marker.exists()
-                    {
-                        std::fs::write(marker, b"dropped").unwrap();
-                        return;
-                    }
-                    Some(RelayResponsePayload::SubagentAdmissionChanged { open: *open })
-                }
-                RelayRequest::CompleteHistoryRequest { result } => {
-                    std::fs::write(
-                        PathBuf::from(&root).join("history-result.json"),
-                        serde_json::to_vec(result).unwrap(),
-                    )
-                    .unwrap();
-                    std::fs::remove_file(PathBuf::from(&root).join("history-request.json"))
-                        .unwrap();
-                    Some(RelayResponsePayload::HistoryRequestCompleted)
-                }
-                _ => None,
-            };
-            if let Some(payload) = history {
-                let protocol_version = match &payload {
-                    RelayResponsePayload::Hello { negotiated, .. } => *negotiated,
-                    _ => request.protocol_version,
-                };
-                mj_core::relay::write_relay_frame(
-                    &mut output,
-                    &RelayResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version,
-                        body: RelayResponseBody::Ok { payload },
-                    },
-                )
-                .unwrap();
-                continue;
-            }
-            let relay = relay.get_or_insert_with(|| {
-                let mut relay = mj_worker::relay::DurableRelay::open(
-                    std::path::Path::new(&root),
-                    LEASED_RELAY_SESSION,
-                    "1.0.0",
-                )
-                .expect("open the test relay journal");
-                if std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() {
-                    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
-                    if relay.operational_state().native_session_id.is_none() {
-                        relay
-                            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
-                                native_session_id: "original".into(),
-                                resumed: false,
-                                native_continuity_lost: false,
-                                replaced_unused_native_session_id: None,
-                            })
-                            .unwrap();
-                    }
-                }
-                if PathBuf::from(&root)
-                    .join("disconnect-subagent-queue")
-                    .exists()
-                {
-                    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
-                }
-                if std::env::var_os(RELAY_SESSION_CONFIGURED).is_some() {
-                    // What a worker records once its harness session is open, so the
-                    // relay reports no work in flight.
-                    relay
-                        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
-                            config_options: if std::env::var_os("MJ_TEST_MODEL_POLICY").is_some() {
-                                policy_test_options()
-                            } else {
-                                vec![]
-                            },
-                        })
-                        .expect("record the configured harness session");
-                    if std::env::var_os("MJ_TEST_MODEL_POLICY").is_some() {
-                        relay
-                            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
-                                native_session_id: "policy-native".into(),
-                                resumed: false,
-                                native_continuity_lost: false,
-                                replaced_unused_native_session_id: None,
-                            })
-                            .unwrap();
-                    }
-                }
-                relay
-            });
-            let complete_clear = PathBuf::from(&root).join("complete-clear");
-            if std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() && complete_clear.exists() {
-                std::fs::remove_file(complete_clear).unwrap();
-                relay
-                    .record_command_completed(
-                        "clear-request",
-                        mj_core::relay::RelayCommandOutcome::ContextCleared {
-                            native_session_id: "replacement".into(),
-                            memory: None,
-                        },
-                    )
-                    .unwrap();
-            }
-            let starts_clear = matches!(
-                &request.request,
-                RelayRequest::Submit {
-                    command: RelayCommand::ClearContext,
-                    ..
-                }
-            );
-            // This fake edits the state below, after the relay digested it, so
-            // it cannot vouch for a digest: every attach gets the whole state.
-            let mut request = request;
-            if preparation.is_some()
-                && let RelayRequest::Attach {
-                    known_state_digest, ..
-                } = &mut request.request
-            {
-                *known_state_digest = None;
-            }
-            let mut response =
-                if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
-                    if let Some(marker) = &marker
-                        && role.as_deref() == Some("slow")
-                    {
-                        std::fs::write(marker, b"started").unwrap();
-                        std::io::copy(&mut input, &mut std::io::sink()).unwrap();
-                        std::fs::write(marker, b"disconnected").unwrap();
-                        return;
-                    }
-                    mj_core::relay::RelayResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version: request.protocol_version,
-                        body: mj_core::relay::RelayResponseBody::Ok {
-                            payload: mj_core::relay::RelayResponsePayload::ReviewBaselineAdvanced,
-                        },
-                    }
-                } else if let RelayRequest::SetOperatorAway { away, revision } = &request.request {
-                    use std::io::Write as _;
-                    let mut log = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(PathBuf::from(&root).join("operator-presence.log"))
-                        .unwrap();
-                    writeln!(log, "{revision} {away}").unwrap();
-                    mj_core::relay::RelayResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version: request.protocol_version,
-                        body: RelayResponseBody::Ok {
-                            payload: RelayResponsePayload::Status(relay.operational_state()),
-                        },
-                    }
-                } else {
-                    let wire_protocol = request.protocol_version;
-                    let mut request = request;
-                    if memory_protocol.is_some() {
-                        // This scoped peer speaks its advertised wire version,
-                        // while the in-process relay retains its strict current protocol.
-                        request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
-                    }
-                    let mut response = relay.handle(request);
-                    if memory_protocol.is_some() {
-                        response.protocol_version = wire_protocol;
-                    }
-                    response
-                };
-            if starts_clear && std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() {
-                relay.claim_pending_commands(true).unwrap();
-            }
-            if let Some(preparation) = preparation {
-                relay.dispatch_preparation_lifecycle().unwrap();
-                let state = match &mut response.body {
-                    RelayResponseBody::Ok {
-                        payload: RelayResponsePayload::Status(state),
-                    } => Some(state),
-                    RelayResponseBody::Ok {
-                        payload:
-                            RelayResponsePayload::Attached {
-                                state,
-                                state_digest,
-                                ..
-                            },
-                    } => {
-                        *state_digest = None;
-                        Some(state)
-                    }
-                    _ => None,
-                };
-                if let Some(state) = state {
-                    state.harness_preparation = Some(preparation);
-                    if let Ok(shell) =
-                        std::fs::read(PathBuf::from(&root).join("active-user-shell.json"))
-                    {
-                        state.active_user_shells = vec![serde_json::from_slice(&shell).unwrap()];
-                    }
-                }
-            }
-            mj_core::relay::write_relay_frame(&mut output, &response).unwrap();
-        }
-    }
-}
 
 #[cfg(unix)]
 #[tokio::test]
@@ -2436,7 +1979,7 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
     let script = format!(
         "if [ ! -f \"${AUTO_RESTART_MARKER}\" ]; then IFS= read -r _; exit 0; fi; \
          \"$0\" --exact {} --nocapture | grep --line-buffered '^{{'",
-        exact_test_name("leased_relay_child_serves_stdio")
+        CHILD_TEST.to_owned()
     );
     let mut spec = CommandSpec::new(
         "sh",
@@ -2567,7 +2110,7 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     let script = format!(
         "if [ ! -f \"${AUTO_RESTART_MARKER}\" ]; then IFS= read -r _; exit 0; fi; \
          \"$0\" --exact {} --nocapture | grep --line-buffered '^{{'",
-        exact_test_name("leased_relay_child_serves_stdio")
+        CHILD_TEST.to_owned()
     );
     let mut spec = CommandSpec::new(
         "sh",
@@ -2667,7 +2210,7 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     // Space is freed: the storage owner's next measurement wakes the actor.
     let now = chrono::Utc::now().timestamp() as u64;
     crate::target_storage::record_samples(
-        &[crate::target_storage::tests::sample(
+        &[crate::target_storage::test_storage_sample(
             host,
             40 << 30,
             40 << 30,
@@ -2698,47 +2241,6 @@ fn fail_if_the_actor_stalls(reason: &'static str) {
         std::process::exit(101);
     });
 }
-
-/// A relay target served by this test binary over stdio.
-#[cfg(unix)]
-pub(crate) fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
-    // `RelayClient` parses every stdout line as JSON, so libtest's own
-    // progress lines are dropped before they reach the protocol reader.
-    let script = format!(
-        "\"$0\" --exact {} --nocapture | grep --line-buffered '^{{'",
-        exact_test_name("leased_relay_child_serves_stdio")
-    );
-    let mut spec = CommandSpec::new(
-        "sh",
-        [
-            "-c".to_owned(),
-            script,
-            std::env::current_exe()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        ],
-    )
-    .purpose("test leased relay");
-    spec.env.insert(
-        LEASED_RELAY_ROOT.to_owned(),
-        relay_root.to_string_lossy().into_owned(),
-    );
-    if let Some(value) = std::env::var_os(DROP_ADMISSION_OPEN_REPLY) {
-        spec.env.insert(
-            DROP_ADMISSION_OPEN_REPLY.into(),
-            value.to_string_lossy().into_owned(),
-        );
-    }
-    RelaySessionTarget {
-        session_id: LEASED_RELAY_SESSION.to_owned(),
-        spec,
-        worker_recovery: None,
-        project_memory: None,
-    }
-}
-
-const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
 
 #[cfg(unix)]
 // Hard-won: 2b74434f9: stale delivery batches and reconnects could restore pre-clear mailbox messages.
@@ -3330,58 +2832,6 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
     .unwrap();
     assert_eq!(state["open"], true, "{state}");
     assert_eq!(state["calls"], 2, "{state}");
-}
-
-/// Register the session the projection writes to. `apply_projection_event`
-/// rejects events for sessions the controller database does not know.
-#[cfg(unix)]
-pub(crate) fn register_leased_relay_session() {
-    crate::database::save_session(&mj_core::state::SessionRecord {
-        oracle_choice: None,
-        oracle: true,
-        notifications_ignored: false,
-        project: None,
-        target_runtime: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
-        publication: None,
-        build_cache: None,
-        container_workspace: None,
-        subagents: None,
-        create_managed_worktree: None,
-        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-        archived: false,
-        id: LEASED_RELAY_SESSION.into(),
-        title: "leased relay".into(),
-        harness_kind: mj_core::config::HarnessKind::Codex,
-        last_profile: "codex".into(),
-        bundle_id: "project".into(),
-        project_directory: None,
-        managed_worktree: None,
-        review: None,
-        no_project_memory: false,
-        no_github_events: false,
-        no_github_credentials: false,
-        target_template_id: "podman".into(),
-        resource_allocation: None,
-        additional_mounts: Vec::new(),
-        state: mj_core::state::SessionState::Running,
-        target: None,
-        native_session_id: None,
-        acp_session_title: None,
-        session_title_override: None,
-        created_at: "2026-08-12T00:00:00Z".into(),
-        updated_at: "2026-08-12T00:00:00Z".into(),
-        viewed_through_event_ordinal: 0,
-        draft_input: String::new(),
-        last_error: None,
-        dismissed_failure: None,
-        failure_generation: 0,
-        last_checkpoint_error: None,
-        checkpoint: None,
-    })
-    .expect("register the test session");
 }
 
 #[cfg(unix)]
@@ -4267,194 +3717,6 @@ async fn delegation_coalesces_fairly_and_ignores_replaced_actor_publications() {
     assert!(observations.recv().await.unwrap().1.is_none());
 }
 
-#[cfg(unix)]
-// Hard-won: ec2-m8id16-b move stall: slow durable replies must finish once without a delivery deadline.
-#[tokio::test]
-async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
-    const CHILD: &str = "MJ_TEST_DELEGATION_NO_DASHBOARD";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(exact_test_name(
-            "delegation_completes_with_web_disabled_and_dashboard_unconsumed",
-        ))
-        .env(CHILD, "1")
-        .env("MJ_INSTANCE", "delegation-1171-unit")
-        .isolated_store(directory.path())
-        .run();
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    register_leased_relay_session();
-    let relay_root = tempfile::tempdir().unwrap();
-    let mut parent = crate::database::load_state()
-        .unwrap()
-        .sessions
-        .remove(LEASED_RELAY_SESSION)
-        .unwrap();
-    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: relay_root.path().join(LEASED_RELAY_SESSION),
-    }));
-    crate::database::save_session(&parent).unwrap();
-    let (feed, observations) = delegation_channel();
-    let mut manager = spawn_session_manager_observed(Some(feed)).unwrap();
-    manager
-        .targets
-        .send_replace(vec![leased_relay_target(relay_root.path())]);
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        manager.control.clone(),
-        &recovery.observer(),
-    );
-    let mut controller = crate::controller::Controller::load().unwrap();
-    controller.config.phone.enabled = false;
-    controller.config.profiles.clear();
-    let state = Arc::new(crate::daemon::RuntimeState::new(
-        manager.control.clone(),
-        controller,
-        recovery.observer(),
-        upgrades.observer(),
-        Vec::new(),
-    ));
-    let stop = tokio_util::sync::CancellationToken::new();
-    let (_services, task) = crate::daemon::delegation::spawn(
-        state.clone(),
-        manager.control.clone(),
-        observations,
-        stop.clone(),
-    );
-    let handle = manager
-        .control
-        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(10))
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while handle.view().snapshot.is_none() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let before = handle
-        .view()
-        .snapshot
-        .unwrap()
-        .materialized
-        .applied_event_ordinal;
-    std::fs::write(relay_root.path().join("slow-delegation-delivery"), "").unwrap();
-    // The worker's request changes without a transcript event. No reader ever
-    // consumes manager.updates and no web server or remote facade exists.
-    let request = mj_core::subagent::SubagentToolRequest {
-        originating_command_id: None,
-        request_id: "list-without-dashboard".into(),
-        created_at_ms: chrono::Utc::now().timestamp_millis(),
-        action: mj_core::subagent::SubagentToolAction::ListAgents,
-    };
-    std::fs::write(
-        relay_root.path().join("subagent-request.json"),
-        serde_json::to_vec(&request).unwrap(),
-    )
-    .unwrap();
-    let path = relay_root.path().join("subagent-result.json");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !path.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("delegation completes without a dashboard consumer");
-    let result: mj_core::subagent::SubagentToolResult =
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(result.request_id, request.request_id);
-    assert!(!result.is_error, "{}", result.message);
-    assert_eq!(
-        handle
-            .view()
-            .snapshot
-            .unwrap()
-            .materialized
-            .applied_event_ordinal,
-        before
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while crate::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
-            .unwrap()
-            .is_some()
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("delivery must acknowledge the durable result");
-    let log = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
-    assert_eq!(
-        log.lines()
-            .filter(|line| *line == "complete_subagent_request")
-            .count(),
-        1,
-        "a slow result must have only one delivery attempt"
-    );
-    // A second slow reply is safe to cancel during handoff: the result is
-    // persisted before delivery, and must remain available to the next daemon.
-    let request = mj_core::subagent::SubagentToolRequest {
-        request_id: "slow-reply-at-handoff".into(),
-        ..request
-    };
-    std::fs::write(
-        relay_root.path().join("subagent-request.json"),
-        serde_json::to_vec(&request).unwrap(),
-    )
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let log = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
-            if log
-                .lines()
-                .filter(|line| *line == "complete_subagent_request")
-                .count()
-                == 2
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the second reply reaches the slow exchange");
-    // The original check deliberately left dashboard updates unconsumed.
-    // For handoff, consume them as the daemon does: each queued update holds
-    // admission until its reader advances. Delivery itself must hold none.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            while manager.updates.try_recv().is_ok() {}
-            if crate::upgrade::gate().try_close() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "durable delivery blocked handoff: {:?}",
-            crate::upgrade::active_labels()
-        )
-    });
-    stop.cancel();
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .expect("handoff cancels delivery without waiting for the slow relay")
-        .unwrap()
-        .unwrap();
-    assert!(
-        crate::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
-            .unwrap()
-            .unwrap()
-            .1
-            .is_some()
-    );
-    manager.shutdown.shutdown().await.unwrap();
-}
-
 #[test]
 fn replaced_actors_cannot_publish_or_leave_a_queued_observation() {
     let (sender, mut receiver) = coalesced_update_channel();
@@ -4821,23 +4083,6 @@ fn retired_cpu_producers_cannot_erase_or_overwrite_their_replacement() {
     assert_eq!(updates.cpu.borrow().get("session"), Some(&expected));
     drop(current);
     assert!(updates.cpu.borrow().is_empty());
-}
-
-fn policy_test_options() -> Vec<agent_client_protocol::v1::schema::SessionConfigOption> {
-    use agent_client_protocol::v1::schema::*;
-    vec![
-        SessionConfigOption::select(
-            "provider-model",
-            "Model",
-            "current",
-            SessionConfigSelectOptions::Ungrouped(
-                ["current", "allowed", "hidden"]
-                    .map(|value| SessionConfigSelectOption::new(value, value))
-                    .to_vec(),
-            ),
-        )
-        .category(SessionConfigOptionCategory::Model),
-    ]
 }
 
 // Hard-won: a2afafcb3: live model selectors bypassed the profile allowlist.

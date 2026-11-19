@@ -1,0 +1,342 @@
+{
+  "go-receiver-poisons-package-result-contract-discovery": {
+    "label": "caught",
+    "brief_sha256": "18993fcf1e19231c99e3063e2677b68431eb7aabdb3f35b75ac191b9c14e4a81",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "may_name_result_contract, whose inventory insertion and lookup use (language, member, parameter_count), without summary.target.has_receiver or call receiver applicability; receiverless summaries and receiver calls with the same tuple share an inventory entry",
+        "rationale": "Identifies that the new empty-open-lookup check matches on name and arity without receiver applicability, and separately notes that this branch emits an Incomplete diagnostic. Together these give the false-incompleteness mechanism.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "whose inventory insertion and lookup use `(language, member, parameter_count)`, without `summary.target.has_receiver` or call receiver applicability; receiverless summaries and receiver calls with the same tuple share an inventory entry",
+        "rationale": "Names the new empty-open-lookup check in may_name_result_contract, which keys only on name and arity and ignores receiver applicability. Elsewhere the output notes this branch records an Incomplete diagnostic that sets query completion. Together these give the false-incompleteness mechanism.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "retained-fill-java-memo-loses-gap": {
+    "label": "caught",
+    "brief_sha256": "8b7b7555c697acb9ad10b22d7308cdad1af015c0b417fe6a8535c6222eefc763",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "it inserts indexes built from declarations(file) without a completion check and returns memo hits without replaying their build gaps",
+        "rationale": "Ties the newly shared retained-fill domain to JavaFileClassIndexMemo, which caches builds without a completion check and replays no gaps on hits. That is the match_rule mechanism; the false-complete consequence is implicit.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "inserts indexes built from `declarations(file)` without a completion check and returns memo hits without replaying their build gaps",
+        "rationale": "Lists JavaFileClassIndexMemo among users of the newly shared retained-fill domain and says it caches indexes without a completion check and replays no build gaps on hits. That is the mechanism by which a later fill sees a complete absence.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "php-indexed-write-reenters-current-rhs": {
+    "label": "caught",
+    "brief_sha256": "ed7a2f88f92cab2688f02ec7c0c1c0794817c91f4c9fce24b2fe1e9d5f1b6745",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "filters nodes by start byte but does not check assignment end bytes ... and calls resolve_value(right) for matching indexed writes even when the assignment encloses the current collection read",
+        "rationale": "Pinpoints the start-only prior-write test that accepts the in-progress assignment and re-resolves its own RHS, which is the self-recursion cause. Stack overflow is not named but follows directly.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "filters nodes by start byte but does not check assignment end bytes ..., and calls `resolve_value(right)` for matching indexed writes even when the assignment encloses the current collection read",
+        "rationale": "Ties the new subscript branch's collection_element_type_fq_name to infer_indexed_local_element_type, which accepts an unfinished enclosing assignment and resolves its RHS. That is the self-re-entry cause. The stack overflow itself is not named.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "incompatible-semantic-bundle-late-gate": {
+    "label": "partial",
+    "brief_sha256": "3fa68a1d8ccad7dc5fb165dc0bc799369851b641a5dcba5f4513c5f94ec3e6a6",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "partial",
+        "matching_finding": "verify_release_bundle hashes every asset ... then decodes each curated manifest and shard ... before calling verify_generated_production, which checks generated schema and cache versions",
+        "rationale": "Lays out the exact ordering of the late schema/cache gate after full checksum and decode, but presents it neutrally and never says an index-known incompatible bundle pays for avoidable asset work before rejection.",
+        "confidence": "low"
+      },
+      {
+        "judge": "B",
+        "label": "partial",
+        "matching_finding": "hashes every asset ... then decodes each curated manifest and shard ... before calling `verify_generated_production`, which checks generated schema and cache versions",
+        "rationale": "Describes the ordering accurately: checksums and decodes come before the generated schema/cache check. It doesn't say an index-known incompatible bundle wastes this work or blocks acquisition, so the defect is only visible by inference.",
+        "confidence": "low"
+      }
+    ]
+  },
+  "go-nilness-ignores-modeled-nonreturn": {
+    "label": "partial",
+    "brief_sha256": "8d8cd655626f2e5bf024c58b8d41c58dfe60c6dbecc31fbf3cd79dec1f3a6de1",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "partial",
+        "matching_finding": "complete_modeled_call_facts requires complete: true; proves_normal_continuation_absent evaluates exact active-model agreement independently of summary completeness, including testing.T.Fatal's partial summary",
+        "rationale": "Points at the nilness call-fact gate and T.Fatal's nonreturn fact, hinting that the fact is excluded, but never says scalar reachability keeps the normal continuation after the nonreturning call or that this yields a false nil-dereference.",
+        "confidence": "low"
+      },
+      {
+        "judge": "B",
+        "label": "partial",
+        "matching_finding": "`complete_modeled_call_facts` requires `complete: true`; `proves_normal_continuation_absent` evaluates exact active-model agreement independently of summary completeness, including `testing.T.Fatal`'s partial summary",
+        "rationale": "Juxtaposes the completeness-gated modeled-call facts used by nilness with Fatal's partial summary, which proves normal continuation is absent. It never says scalar reachability keeps the post-Fatal edge or that a false nil dereference follows, so the cause is only hinted.",
+        "confidence": "low"
+      }
+    ]
+  },
+  "mcp-default-advisory-reported-clean": {
+    "label": "caught",
+    "brief_sha256": "251366e31ac638d3df55d7911f93469db9f89f8cb1bdc05dd4c47e8943692d32",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "MCP constructs evaluation options without an inconclusive override ..., inheriting Pass ...; run_policy maps outcome.exit_status() to the public status, with POLICY_EXIT_CLEAN becoming clean",
+        "rationale": "Connects the new default Pass inconclusive treatment in MCP with run_policy's projection of exit status 0 to 'clean'. That is the match_rule chain, though stated as an observation rather than as a flagged defect.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "MCP constructs evaluation options without an inconclusive override ..., inheriting `Pass`; `run_policy` maps `outcome.exit_status()` to the public status, with `POLICY_EXIT_CLEAN` becoming `clean`",
+        "rationale": "Connects the new default Pass inconclusive treatment to MCP run_policy mapping exit status 0 to 'clean', which is the projection the match rule requires. It doesn't explicitly say an inconclusive run is labelled clean.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "js-synthetic-owner-leaks-file-summary": {
+    "label": "caught",
+    "brief_sha256": "bc35e4cfbd944008184cf68b7dad2e3d700f575bedcbdbb1e47eb5b0667c9957",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "signature_elements ... sets each element extent to the maximum of its signature line count and matching range line count, retaining the signature text; the JS/TS registrations supply the root range alongside the import signature",
+        "rationale": "Connects the new whole-file root range on the synthetic module to the summary renderer extending the element to that range while keeping the signature text, which is the match_rule mechanism. Enclosing later declarations is implied.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "sets each element extent to the maximum of its signature line count and matching range line count, retaining the signature text ...; the JS/TS registrations supply the root range alongside the import signature",
+        "rationale": "Connects the new root-range registration of the synthetic module to signature_elements taking the larger of the signature and range extents. The import-signature element therefore spans the whole file. Correctly notes the text stays the signature.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "kotlin-value-class-this-loses-underlying-projection": {
+    "label": "caught",
+    "brief_sha256": "c1d62c6d3b25b28e1b1aac3e61968b6338d9ce5536d5c03d0867cac79107abcc",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "dispatch receiver creation ... sets self.receiver without the bind_carrier call used for formal slots",
+        "rationale": "Identifies that this_expression reads a receiver that is never carrier-bound, unlike formal slots, which is the missing receiver binding in match_rule. The resulting loss of the member's this.amount projection is implied rather than stated.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "dispatch receiver creation ... sets `self.receiver` without the `bind_carrier` call used for formal slots",
+        "rationale": "Says this_expression reads the dispatch receiver, which is never bound as a value-class carrier, and points at the underlying-projection branch in property loads. That is the missing receiver binding the match rule names. The generic field load it causes is implied.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "python-module-mutation-repeated-scan-budget": {
+    "label": "missed",
+    "brief_sha256": "f2e666da81e245336362ef8686909d3ecd8a2a0b58aa32ed417f1df78ffe3a4b",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": "runtime_source_bases receives the same budget for each workspace owner ... and calls python_class_object_base_candidate with budget.provider for each base, including its module-binding guard",
+        "rationale": "Mentions only the shared budget passed to each per-base guard. It says nothing about each guard rescanning the whole module or about exhausting the budget into an incomplete hierarchy, so it names the functions without the defect.",
+        "confidence": "low"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "Notes that class_hierarchy shares one bounded session and that python_class_object_base_candidate's module-binding guard runs per base. It never says each guard rescans the whole module or that the shared budget is exhausted, giving false incompleteness.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "python-filescope-enclosing-tie": {
+    "label": "partial",
+    "brief_sha256": "983d46c6a6eee0550cd263e27365847f0d0bdd58bc753b79cc0a5261494578c0",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "partial",
+        "matching_finding": "PythonAdapter::parse_file registers the real module with the tree root range ... that range has the same byte span as the synthetic FileScope range 0..source.len()",
+        "rationale": "Notes the equal span between the Python module and the synthetic FileScope and that byte-based enclosing lookup takes the smallest containing range from the raw set, but never says the tie is broken arbitrarily or that picking FileScope loses module-scope lookup facts.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "partial",
+        "matching_finding": "for a whole-file root, that range has the same byte span as the synthetic `FileScope` range",
+        "rationale": "Notes that the Python module and the synthetic FileScope have equal spans and that byte-based lookup takes the smallest containing range from the raw set. It never says the tie is resolved arbitrarily or that module-scope lookups then fail, and it doesn't frame this as a defect. It points at the mechanism but not the faulty behavior, so caught would be too generous.",
+        "confidence": "low"
+      }
+    ]
+  },
+  "unproven-override-family-certifies-empty": {
+    "label": "caught",
+    "brief_sha256": "513c3242a07f7ce632a4b7d3f79caaaa545a780d5a9f081e2e4b457175c1e7c1",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "otherwise constructs an empty vector, and returns Some(targets) in both cases. Both empty-vector routes enter the Some(overrides) if overrides.is_empty() arm",
+        "rationale": "States the exact mismatch: an unproven family yields Some(empty), and the new concrete branch treats it as proven absence, then traces how the excluded gap stops counting toward completeness.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "otherwise constructs an empty vector, and returns `Some(targets)` in both cases. Both empty-vector routes enter the `Some(overrides) if overrides.is_empty()` arm",
+        "rationale": "Explicitly states the helper returns Some(empty) for both proven and unproven families. It also says both cases hit the new concrete-override-absent arm, which leads to gap filtering and complete status. That is the mismatch in the match rule.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "python-module-binding-representative-after-event": {
+    "label": "caught",
+    "brief_sha256": "5599e04c3bebd8c4d305c5200a15f50967dbcdcdad6f7e9fe6203d7fb752f18d",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "Repeated module assignments to the same name ... retaining the last assignment's declaration range, not a range for each binding event",
+        "rationale": "Combines the new selector's max-declaration-end-before-event filter, the single last-assignment range kept for repeated assignments, and the empty-result path to no_indexed_definition. That is the defect mechanism and its consequence.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "Repeated module assignments to the same name construct the same `Field` CodeUnit and call `replace_code_unit`, retaining the last assignment's declaration range, not a range for each binding event",
+        "rationale": "Notes that repeated assignments share one declaration that keeps the last range. Event-visible bounds select the maximum eligible declaration end, and an empty result returns no_indexed_definition. Together these are the full mechanism by which an earlier read loses its target.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "dependency-failure-drops-independent-model-evidence": {
+    "label": "missed",
+    "brief_sha256": "d1eff1980fcf51245f1d25fbabb0a7f27bd9937f5416cbf7f997e6411d9e0962",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "Mentions only that the lifecycle clones the caller's activation request. Nothing addresses the early runtime=None return on Go discovery failure that drops independently valid activation evidence.",
+        "confidence": "high"
+      },
+      {
+        "judge": "B",
+        "label": "missed",
+        "matching_finding": null,
+        "rationale": "Only mentions that the workspace lifecycle clones the caller's activation request. It says nothing about activate_dependency_packs returning runtime=None on Go discovery failure, or about the lost independent model evidence.",
+        "confidence": "high"
+      }
+    ]
+  },
+  "jvm-protected-unindexed-hierarchy-denied": {
+    "label": "caught",
+    "brief_sha256": "25308a33e036d3918a520a4763fc0a8ba09103c8caac10ab54d7b18ac0bb7e4d",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "for distinct types with an empty supertype inventory, it returns Some(false) without checking hierarchy closure",
+        "rationale": "Traces Scala protected access through jvm_subclass_access_decision into jvm_type_is_subtype and notes that it returns a definitive false without a hierarchy-closure proof. It does not explicitly say the target is dropped as Denied.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "for distinct types with an empty supertype inventory, it returns `Some(false)` without checking hierarchy closure",
+        "rationale": "Traces Scala protected access through jvm_subclass_access_decision into jvm_type_is_subtype. It says that function returns a definite false without checking hierarchy closure. That is the false-negative cause; that the target is then dropped as Denied is implied by the contextual-visibility path it lists.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "kotlin-source-constructor-steals-class-header-comment": {
+    "label": "caught",
+    "brief_sha256": "06eaf4eaac3bffb8a7f8488f096359505ff68463ffea72c1b2a381e0af91f576",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "The source primary constructor registered as a class child enters comment-density traversal ... without a primary-constructor exclusion ... enclosing_declaration assigns overlapping comments to the deepest declaration",
+        "rationale": "Connects the now-nonsynthetic primary constructor entering comment density with deepest-owner attribution of overlapping comments. That is the mechanism by which the constructor takes the class header; the zero-header count is not spelled out.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "collection expands every child's ranges without a primary-constructor exclusion ... `enclosing_declaration` assigns overlapping comments to the deepest declaration",
+        "rationale": "Connects the now-nonsynthetic primary constructor, registered as a class child, to comment-density traversal: ranges expand without excluding the primary constructor, and overlapping comments go to the deepest declaration. That is the header-stealing mechanism. The zero-count symptom is implied.",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "java-static-getter-drops-incomplete-route": {
+    "label": "partial",
+    "brief_sha256": "75a880f45ab02ecc29654f4887d7bddc43765e284789862f801b0918bc7edbb4",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "partial",
+        "matching_finding": "found_alias is set after owner/static/namespace matching and before status and accessibility checks",
+        "rationale": "Notes that the namespace match runs before found_alias is recorded and that Kotlin getter aliases sit in the Value namespace. It does not conclude that the getter alias is skipped, which turns the result into a false complete absence or unindexed owner.",
+        "confidence": "low"
+      },
+      {
+        "judge": "B",
+        "label": "partial",
+        "matching_finding": "`found_alias` is set after owner/static/namespace matching and before status and accessibility checks",
+        "rationale": "Gives the pieces: Kotlin getter aliases sit in the Value namespace, the reader filters by demand namespace, and found_alias is set only after namespace matching. It never concludes that a Java static getter import is skipped before found_alias, giving false absence or an unindexed-owner diagnosis.",
+        "confidence": "low"
+      }
+    ]
+  },
+  "cpp-template-inherited-base-signature": {
+    "label": "caught",
+    "brief_sha256": "cf69c3b9605690c9e56d247bedd30a010fb7b752d15d89d238814be5f67dbece",
+    "verdicts": [
+      {
+        "judge": "A",
+        "label": "caught",
+        "matching_finding": "The inherited traversal calls cpp_direct_base_types, which prefers unit.signature() ... cpp_template_signature supplies the template parameter head, not the class base clause",
+        "rationale": "Names the exact mechanism: the new inherited-member walk reads bases from signature(), which for class templates is the template head rather than the base clause. The lost lookup is not stated but follows directly.",
+        "confidence": "medium"
+      },
+      {
+        "judge": "B",
+        "label": "caught",
+        "matching_finding": "`cpp_template_signature` supplies the template parameter head, not the class base clause",
+        "rationale": "Ties the new inherited traversal to cpp_direct_base_types preferring unit.signature(), and says class templates store only the template head there, not the base clause. That is the exact cause. The lost inherited lookup is implied rather than stated.",
+        "confidence": "medium"
+      }
+    ]
+  }
+}

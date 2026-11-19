@@ -1,0 +1,80 @@
+{
+  "recorded_at": "2026-11-18T04:18:26.918577+00:00",
+  "round": 1,
+  "reviewer": "parent (290e45f2)",
+  "edit_results_sha256": "78e4fafcbd6bf85f8247cdc08c15b7fc43559f470a72958f0fd3ef07c7b3399e",
+  "decisions": {
+    "python-filescope-enclosing-tie": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "cpp-template-inherited-base-signature": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "incompatible-semantic-bundle-late-gate": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "retained-fill-java-memo-loses-gap": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "kotlin-source-constructor-steals-class-header-comment": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "mcp-default-advisory-reported-clean": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "go-receiver-poisons-package-result-contract-discovery": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "python-module-binding-representative-after-event": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "jvm-protected-unindexed-hierarchy-denied": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "python-module-mutation-repeated-scan-budget": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "dependency-failure-drops-independent-model-evidence": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "php-indexed-write-reenters-current-rhs": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "kotlin-value-class-this-loses-underlying-projection": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "go-nilness-ignores-modeled-nonreturn": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "java-static-getter-drops-incomplete-route": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "unproven-override-family-certifies-empty": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    },
+    "js-synthetic-owner-leaks-file-summary": {
+      "scope": "accepted",
+      "why": "declared before/after pairs reword only the carrying item or items the stored OT leak judges cited; same anchors and relations, stated literally; no other line changed"
+    }
+  },
+  "notes": {
+    "go-receiver-poisons-package-result-contract-discovery": "the edit states the inventory key tuple rather than naming the omitted has_receiver; whether that still carries the fact is the blind fact checker's decision",
+    "php-indexed-write-reenters-current-rhs": "adds that visited nodes include the collection node's ancestors, a literal restatement of the start-byte filter relation"
+  }
+}

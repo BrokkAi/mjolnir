@@ -529,7 +529,10 @@ impl DurableRelay {
                 snapshot.config.extend(restored.accepted_config);
                 snapshot.restored_native_session_unused = restored.native_session_unused;
                 for queued in restored.queued_prompts {
-                    validate_identifier(&queued.command_id, "restored queued command ID")?;
+                    anyhow::ensure!(
+                        mj_core::continuation::valid_command_id(&queued.command_id),
+                        "invalid restored queued command ID"
+                    );
                     if queued.content.is_empty() {
                         bail!("restored queued command {} is empty", queued.command_id);
                     }
@@ -648,7 +651,7 @@ impl DurableRelay {
             operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),
-            worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),
+            worker_build: Some(mj_core::worker_build::worker_build_id().to_owned()),
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
             session_setup: false,
             checkpoint_only,

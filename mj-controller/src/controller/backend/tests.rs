@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::targets::image_refresh_plan;
+
 use crate::controller::Controller;
 use mj_core::config::{
     Config, ContainerTemplate as ConfigContainer, ProjectBundle, ProjectRepository, SshConnection,
@@ -12,7 +14,7 @@ use mj_core::config::{
 };
 use mj_core::state::State;
 
-use crate::targets::tests::unwrapped_remote_line;
+use crate::targets::unwrapped_remote_line;
 use crate::targets::{
     self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost, RefreshWhen,
 };

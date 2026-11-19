@@ -1,0 +1,27 @@
+{
+  "recorded_at": "2026-11-18T03:51:07.070688+00:00",
+  "sealed_before_arm_join": true,
+  "assessor": "Opus/high claude7, one task session",
+  "parent": "Opus (this session), every one of 40 rows read",
+  "proposal_sha256": "dd21b9fd29526b295f3bd5fdc76fc91f551a05549d7a082d296e20c801537a33",
+  "decisions_sha256": "9ea4f7220c8e862f26a935329bf80c8fdedd595fd74c51cf2c53bb99ef1e9fe3",
+  "parent_overrides_of_assessor": {
+    "682e0e05192c6389": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "explicit 'transient store or source-read failure' trigger; text identical to stored 07f60e503e05d025 (partial)"
+    },
+    "e1a7ab9a9e9601d8": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "concrete trigger is a declaration read that 'records a store failure'; text identical to stored 7d69459eea839714 (partial)"
+    },
+    "f0a966840b299213": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "trigger is a failed file-state read and it names 'the original transient failure'"
+    }
+  },
+  "override_standard": "Stored-round precedent (bifrost-judge-relation parent-accepted hand check, outputs 07f60e503e05d025 and 7d69459eea839714): a finding that attributes the cached failed Java index build only to a transient store/source-read failure, not StructureUnavailable or equivalent stable source incompleteness, is partial under this match rule. HANDCHECK.md: same claim on the same bug gets the same label; when unsure, lower label.",
+  "sensitivity": "score also computed with the assessor's labels unchanged"
+}

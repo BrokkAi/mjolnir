@@ -1,0 +1,72 @@
+{
+  "id": "cpp-template-inherited-base-signature",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "caught",
+      "brief_sha256": "b6472d8eeed09e26c154949c658fd39c2d5280d3564464c50b5ddcc6a06a9a87",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "Class `CodeUnit`s are constructed with `scope.template_signature` as that identity signature ... does not include the class base clause",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it states the exact cause (inherited walk reads bases from signature(), which for class templates is only the template head) but never says template-derived classes lose inherited-member lookup; unsure between caught and partial, so lower.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "whose value is the template parameter head and does not include the class base clause",
+          "rationale": "The inherited traversal is explicitly connected to a helper that prefers signature metadata, and that metadata is identified as a template head lacking the base clause. Together with the described empty-member lookup failure, this identifies the template-base discovery defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "831e94dd4666111ba6622eafbe36f15e340f04fec6d48e2ea6ecd5105317a199",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "The inherited traversal calls cpp_direct_base_types, which reads unit.signature() ... whose value consists of the template parameter head, without the class base clause",
+          "rationale": "It states the exact cause: the inherited walk reads bases from a template-head signature that has no base clause. It never says that this is wrong or that template-derived classes lose inherited-member lookup. Without a stated faulty behavior I'm unsure between caught and partial, so I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "whose value consists of the template parameter head, without the class base clause",
+          "rationale": "The output connects inherited traversal to signature-first base discovery and notes that template signatures omit the base clause. It leaves the resulting failed inherited-member lookup for template-derived owners unstated, so it supplies only a partial defect identification.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "6369b4dcd66af236fdb4b9f0a71950a2caa2d20d4439c99b3768fa9df1e3ca2d",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "The inherited traversal calls `cpp_direct_base_types`, which reads `unit.signature()` ... Class `CodeUnit`s are constructed with `scope.template_signature` as their identity `signature` ... returns the template parameter head; the class base clause is not part of its text",
+          "rationale": "The output is a list of observations, not defect claims, but this bullet gives the exact cause: the new inherited walk reads bases from signature(), and for class templates that is the template head with no base clause. It does not spell out the lost lookup, but that follows directly.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "which reads `unit.signature()`, or source text when `unit.signature()` is `None`",
+          "rationale": "The output connects the new inherited traversal to signature-first base discovery and explicitly identifies class-template signatures as only the template parameter head, excluding the base clause. Together these observations identify why the inherited lookup loses an ordinary base for a template owner.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

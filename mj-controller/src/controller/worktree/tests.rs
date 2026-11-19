@@ -18,7 +18,7 @@ use mj_core::config::{Config, ProjectBundle, ProjectRepository, TargetTemplate};
 use mj_core::repository::{ProjectBundleSnapshot, RepositoryIdentity};
 use mj_core::state::{ManagedWorktree, ManagedWorktreeTarget, SessionState, State};
 
-use crate::targets::tests::unwrapped_remote_line;
+use crate::targets::unwrapped_remote_line;
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
 };

@@ -1,6 +1,5 @@
 //! GitHub App JWTs and installation access tokens owned by the controller.
 
-use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +19,8 @@ use mj_core::config::{
 };
 use mj_core::remote_git::{github_owner_repo, resolve_repository};
 
+use super::worker_binary::configured_session_github_token;
+pub use super::worker_binary::install_configured_session_github_token;
 use super::{Controller, controller_github_token};
 use crate::targets::{CommandExecutor, ProcessExecutor};
 
@@ -32,7 +33,7 @@ type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
 /// One controller process shares this cache between provisioning, resume,
 /// periodic worker reconciliation, and the token API.
-pub(crate) struct GithubAppTokenProvider {
+pub struct GithubAppTokenProvider {
     config: GithubAppConfig,
     http: reqwest::Client,
     api_base: Url,
@@ -108,7 +109,7 @@ impl GithubAppTokenProvider {
 
     /// Reuse one provider for the current App configuration so token calls
     /// made by separate controller operations still share a cache.
-    pub(crate) fn shared(config: &GithubAppConfig) -> Result<Arc<Self>> {
+    pub fn shared(config: &GithubAppConfig) -> Result<Arc<Self>> {
         static PROVIDERS: OnceLock<Mutex<BTreeMap<GithubAppConfig, Arc<GithubAppTokenProvider>>>> =
             OnceLock::new();
         let providers = PROVIDERS.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -123,7 +124,7 @@ impl GithubAppTokenProvider {
         Ok(provider)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn with_test_transport(
         config: GithubAppConfig,
         http: reqwest::Client,
@@ -141,13 +142,13 @@ impl GithubAppTokenProvider {
         }
     }
 
-    pub(crate) async fn token_for_owner(&self, owner: &str) -> Result<String> {
+    pub async fn token_for_owner(&self, owner: &str) -> Result<String> {
         let installation_id = self.installation_for_owner(owner, None).await?;
         self.token_for_installation(installation_id, &[], self.config.token_permissions.as_ref())
             .await
     }
 
-    pub(crate) async fn token_for_repositories(
+    pub async fn token_for_repositories(
         &self,
         repositories: &[(String, String)],
     ) -> Result<String> {
@@ -686,7 +687,7 @@ impl std::fmt::Display for GithubBundleSelectionError {
 impl std::error::Error for GithubBundleSelectionError {}
 
 impl GithubBundleSelectionError {
-    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+    pub fn into_anyhow(self) -> anyhow::Error {
         match self {
             Self::UnknownBundle(message) => anyhow!("{message}"),
             Self::MultipleInstallations(message) => anyhow!("{message}"),
@@ -698,7 +699,7 @@ impl GithubBundleSelectionError {
 impl Controller {
     /// Reject a new bundle before admitting its session when its repositories
     /// resolve to more than one App installation.
-    pub(crate) async fn validate_github_bundle_installations(
+    pub async fn validate_github_bundle_installations(
         &self,
         bundle_id: &str,
     ) -> std::result::Result<(), GithubBundleSelectionError> {
@@ -731,10 +732,7 @@ impl Controller {
 
     /// Resolve this session's GitHub credential, using the App installation
     /// selected by its accepted repository bundle.
-    pub(crate) async fn github_token_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>> {
+    pub async fn github_token_for_session(&self, session_id: &str) -> Result<Option<String>> {
         if let Some(token) = session_token_override(&self.config.github).await? {
             return Ok(Some(token));
         }
@@ -812,7 +810,7 @@ impl Controller {
     }
 }
 
-pub(crate) async fn github_token_for_session(
+pub async fn github_token_for_session(
     session_id: String,
     github: GithubConfig,
 ) -> Result<Option<String>> {
@@ -828,7 +826,7 @@ pub(crate) async fn github_token_for_session(
     controller.github_token_for_session(&session_id).await
 }
 
-pub(crate) async fn renew_session_github_app_token(session_id: String) -> Result<Option<String>> {
+pub async fn renew_session_github_app_token(session_id: String) -> Result<Option<String>> {
     let controller = tokio::task::spawn_blocking(Controller::load)
         .await
         .context("load controller for GitHub App export token")??;
@@ -839,31 +837,6 @@ pub(crate) async fn renew_session_github_app_token(session_id: String) -> Result
     controller.github_app_token_for_session(&session_id).await
 }
 
-/// Read the controller-side override afresh; missing is an error when configured.
-pub(super) fn configured_session_github_token(github: &GithubConfig) -> Result<Option<String>> {
-    use std::io::Read;
-
-    let Some(path) = &github.session_token_path else {
-        return Ok(None);
-    };
-    let path =
-        mj_core::path_input::expand_local(path).context("resolve [github] session_token_path")?;
-    let read = || -> Result<String> {
-        ensure!(
-            fs::metadata(&path)?.is_file(),
-            "session token must be a regular file"
-        );
-        let file = fs::File::open(&path)?;
-        let mut bytes = Vec::new();
-        file.take(mj_core::credentials::MAX_GITHUB_TOKEN_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        Ok(mj_core::credentials::validate_github_token(&bytes)?.to_owned())
-    };
-    read()
-        .map(Some)
-        .with_context(|| format!("read [github] session_token_path {}", path.display()))
-}
-
 async fn session_token_override(github: &GithubConfig) -> Result<Option<String>> {
     if github.session_token_path.is_none() {
         return Ok(None);
@@ -872,50 +845,6 @@ async fn session_token_override(github: &GithubConfig) -> Result<Option<String>>
     tokio::task::spawn_blocking(move || configured_session_github_token(&github))
         .await
         .context("read session GitHub token task stopped")?
-}
-
-/// Refresh the override before a worker starts, including retained workers.
-/// Lifecycle ownership excludes periodic reconciliation while this runs.
-pub(crate) fn install_configured_session_github_token(
-    github: &GithubConfig,
-    executor: &impl CommandExecutor,
-    locator: &mj_core::targets::TargetLocator,
-    worker_root: &str,
-) -> Result<()> {
-    let Some(token) = configured_session_github_token(github)? else {
-        return Ok(());
-    };
-    const INSTALL: &str = r#"set -eu
-umask 077
-root=$1
-path=$root/github-token
-if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
-    echo 'session GitHub token is not a regular file' >&2; exit 1
-fi
-temporary=$(mktemp "$root/github-token.XXXXXXXX")
-trap 'rm -f -- "$temporary"' EXIT
-cat > "$temporary"
-mv -f -- "$temporary" "$path"
-"#;
-    let mut bytes = token.into_bytes();
-    bytes.push(b'\n');
-    // A token is a few bytes and a session waits on it, so it must not queue
-    // behind bulk transfers to the same target.
-    let command = crate::targets::locator_command(
-        SshTrafficClass::Control,
-        locator,
-        vec![
-            "sh".into(),
-            "-c".into(),
-            INSTALL.into(),
-            "mj-session-github-token".into(),
-            worker_root.into(),
-        ],
-    )
-    .purpose("install configured session GitHub token")
-    .with_sensitive_stdin(bytes);
-    super::execute_checked(executor, command)?;
-    Ok(())
 }
 
 pub(super) fn github_repositories(

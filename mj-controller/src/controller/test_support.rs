@@ -8,69 +8,24 @@ use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, SessionManifest, TargetManifest, write_archive_atomic,
 };
 use mj_core::config::{
-    Config, ContainerTemplate as ConfigContainer, ProjectBundle, ProjectRepository, SshConnection,
-    TargetTemplate,
+    Config, ContainerTemplate as ConfigContainer, SshConnection, TargetTemplate,
 };
 use mj_core::state::{
     CheckpointMetadata, ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget, SessionRecord,
     SessionState,
 };
 
+pub use crate::database::test_fixtures::{
+    checkpoint_test_session, local_bundle, worker_test_gate, worker_test_permit,
+};
 use crate::targets::ProcessExecutor;
+pub use crate::test_isolation::{IsolatedTest, test_name};
 
 use super::worktree::{
     PrimaryCheckoutRequirement, create_managed_worktree, managed_worktree_target,
 };
 
-pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
-    SessionRecord {
-        oracle_choice: None,
-        oracle: true,
-        notifications_ignored: false,
-        project: None,
-        target_runtime: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
-        publication: None,
-        build_cache: None,
-        container_workspace: None,
-        subagents: None,
-        create_managed_worktree: None,
-        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-        archived: false,
-        id: session_id.into(),
-        title: "checkpoint transition".into(),
-        harness_kind: mj_core::config::HarnessKind::Codex,
-        last_profile: "codex".into(),
-        bundle_id: "project".into(),
-        project_directory: None,
-        managed_worktree: None,
-        review: None,
-        no_project_memory: false,
-        no_github_events: false,
-        no_github_credentials: false,
-        target_template_id: "podman".into(),
-        resource_allocation: None,
-        additional_mounts: Vec::new(),
-        state: SessionState::Running,
-        target: None,
-        native_session_id: Some("native-session".into()),
-        acp_session_title: None,
-        session_title_override: None,
-        created_at: "2026-08-12T00:00:00Z".into(),
-        updated_at: "2026-08-12T00:00:00Z".into(),
-        viewed_through_event_ordinal: 0,
-        draft_input: String::new(),
-        last_error: None,
-        dismissed_failure: None,
-        failure_generation: 0,
-        last_checkpoint_error: None,
-        checkpoint: None,
-    }
-}
-
-pub(crate) fn write_checkpoint_gate_archive(
+pub fn write_checkpoint_gate_archive(
     directory: &Path,
     session_id: &str,
     event_frontier: u64,
@@ -104,7 +59,7 @@ pub(super) fn write_checkpoint_gate_archive_for_harness(
 
 /// A raw session's archive with native harness state in it, which is what a
 /// conversion has to carry across unchanged.
-pub(super) fn write_checkpoint_archive_with_native_state(
+pub fn write_checkpoint_archive_with_native_state(
     directory: &Path,
     session_id: &str,
     event_frontier: u64,
@@ -173,7 +128,7 @@ fn write_checkpoint_archive(
     write_checkpoint_archive_input(directory, session_id, &input)
 }
 
-pub(crate) fn write_checkpoint_archive_input(
+pub fn write_checkpoint_archive_input(
     directory: &Path,
     session_id: &str,
     input: &ArchiveInput,
@@ -188,7 +143,7 @@ pub(crate) fn write_checkpoint_archive_input(
     }
 }
 
-pub(crate) fn checkpoint_archive_input(
+pub fn checkpoint_archive_input(
     session_id: &str,
     event_frontier: u64,
     repositories: Vec<mj_checkpoint::archive::RepositorySnapshot>,
@@ -256,7 +211,7 @@ pub(crate) fn checkpoint_archive_input(
 
 /// Config with one container target, one local bare target, and one SSH
 /// bare target, which is every shape `resume_compatibility` distinguishes.
-pub(super) fn resume_compatibility_config() -> Config {
+pub fn resume_compatibility_config() -> Config {
     let mut config = Config::default();
     config.targets.insert(
         "podman".into(),
@@ -292,7 +247,7 @@ pub(super) fn resume_compatibility_config() -> Config {
     config
 }
 
-pub(super) fn raw_session_on(target_template_id: &str, directory: &str) -> SessionRecord {
+pub fn raw_session_on(target_template_id: &str, directory: &str) -> SessionRecord {
     let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
     session.state = SessionState::Stopped;
     session.bundle_id = "remote-project-abcdef".into();
@@ -301,7 +256,7 @@ pub(super) fn raw_session_on(target_template_id: &str, directory: &str) -> Sessi
     session
 }
 
-pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecord {
+pub fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecord {
     let session_id = "0123456789abcdef0123456789abcdef";
     let repository = PathBuf::from("/home/dev/project");
     let worktree_root = repository.join(".mj").join("worktrees").join(session_id);
@@ -324,24 +279,11 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
     session
 }
 
-pub(super) fn ssh_worktree_target() -> ManagedWorktreeTarget {
+pub fn ssh_worktree_target() -> ManagedWorktreeTarget {
     managed_worktree_target(&resume_compatibility_config().targets["ssh-bare"]).unwrap()
 }
 
-pub(super) fn local_bundle(repository: &Path) -> ProjectBundle {
-    ProjectBundle {
-        primary_repo: "project".into(),
-        repositories: vec![ProjectRepository {
-            id: "project".into(),
-            github: None,
-            local: Some(repository.to_path_buf()),
-            destination: PathBuf::from("project"),
-            git_ref: None,
-        }],
-    }
-}
-
-pub(crate) fn test_git(directory: &Path, args: &[&str]) -> String {
+pub fn test_git(directory: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(directory)
@@ -357,7 +299,7 @@ pub(crate) fn test_git(directory: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-pub(crate) fn committed_repository() -> tempfile::TempDir {
+pub fn committed_repository() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     test_git(directory.path(), &["init", "--initial-branch=master"]);
     test_git(directory.path(), &["config", "user.name", "Hel Tests"]);
@@ -375,18 +317,18 @@ pub(crate) fn committed_repository() -> tempfile::TempDir {
 /// The network URL a fixture checkout records for its remote. Git reaches the
 /// bare repository on disk through `insteadOf`, so the code under test sees
 /// real network provenance without a network.
-pub(super) const FIXTURE_FETCH_URL: &str = "https://fetch.example.test/repo.git";
+pub const FIXTURE_FETCH_URL: &str = "https://fetch.example.test/repo.git";
 
 /// A committed checkout whose `origin` is a bare repository on disk behind
 /// [`FIXTURE_FETCH_URL`], with `master` already pushed.
-pub(super) fn checkout_with_network_remote() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+pub fn checkout_with_network_remote() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
     let checkout = committed_repository();
     let (remote_parent, remote) = network_remote_for(checkout.path());
     (checkout, remote_parent, remote)
 }
 
 /// Give an existing checkout the pushed network remote a conversion requires.
-pub(super) fn network_remote_for(checkout: &Path) -> (tempfile::TempDir, PathBuf) {
+pub fn network_remote_for(checkout: &Path) -> (tempfile::TempDir, PathBuf) {
     let remote_parent = tempfile::tempdir().unwrap();
     let remote = remote_parent.path().join("remote.git");
     let output = Command::new("git")
@@ -413,7 +355,7 @@ pub(super) fn network_remote_for(checkout: &Path) -> (tempfile::TempDir, PathBuf
 
 /// Rewrites the fixture's network URL for the steps that really contact a
 /// remote, the way `FixtureTransport` does in `network_git`.
-pub(super) struct FixtureRemoteExecutor {
+pub struct FixtureRemoteExecutor {
     pub(super) remote: PathBuf,
 }
 
@@ -532,14 +474,14 @@ impl crate::targets::CommandExecutor for Git231Executor {
 }
 
 /// A managed raw session whose worktree really exists in `repository`.
-pub(crate) fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
+pub fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
     managed_checkout_session(repository, session_id, ManagedCheckoutKind::Worktree)
 }
 
 /// A managed raw session on an isolated clone of `repository`, created the
 /// way a session's clone is, so its `origin` is the one `repository` has.
 #[cfg(unix)]
-pub(crate) fn managed_clone_session(repository: &Path, session_id: &str) -> SessionRecord {
+pub fn managed_clone_session(repository: &Path, session_id: &str) -> SessionRecord {
     managed_checkout_session(repository, session_id, ManagedCheckoutKind::Clone)
 }
 
@@ -583,7 +525,7 @@ fn managed_checkout_session(
 ///
 /// `reason` names the step that was supposed to avoid running anything, so a
 /// failure says which expectation broke as well as which command ran.
-pub(crate) struct RefusingExecutor(pub(crate) &'static str);
+pub struct RefusingExecutor(pub &'static str);
 
 impl crate::targets::CommandExecutor for RefusingExecutor {
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
@@ -620,115 +562,8 @@ impl crate::targets::CommandExecutor for RefusingExecutor {
     }
 }
 
-/// The `--exact` name of a test in this binary, given its `module_path!()`.
-///
-/// `module_path!()` carries the crate name, which libtest's filter does not.
-pub(crate) fn test_name(module_path: &str, test: &str) -> String {
-    let module = module_path
-        .strip_prefix("mj_controller::")
-        .unwrap_or(module_path);
-    format!("{module}::{test}")
-}
-
-/// Re-run one test alone, in a child of this test binary.
-///
-/// The data directory, the installed database writer, the tracing subscriber
-/// and the process working directory are all process-global, so a test that
-/// needs its own has to be the only test in its process. The child runs the
-/// named test with `--exact`, and [`IsolatedTest::run`] fails the parent with
-/// the child's own output when it does not pass.
-///
-/// Build the name with [`test_name`], which strips the crate prefix that
-/// `module_path!()` carries and libtest's filter does not accept.
-pub(crate) struct IsolatedTest {
-    name: String,
-    command: Command,
-}
-
-impl IsolatedTest {
-    /// A child runs one whole flow on one test thread. An in-place Move, for
-    /// example, polls the checkpoint and provisioning chain inline, whose
-    /// debug-build frames are tens of kilobytes each; at the 8 MiB default
-    /// that sits within a few pages of the limit, so an unrelated change can
-    /// overflow a child that passed before. Give the child room instead of
-    /// leaving every isolated test to the edge of its stack.
-    const CHILD_STACK_BYTES: &'static str = "33554432";
-
-    pub(crate) fn new(name: impl Into<String>) -> Self {
-        let name = name.into();
-        let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-        command
-            .args(["--exact", &name, "--nocapture"])
-            .env("RUST_MIN_STACK", Self::CHILD_STACK_BYTES)
-            // The instance name selects the default viewer port and the
-            // store layout, so a child owns it: an inherited one changes
-            // output the child's goldens pin. A test that needs an instance
-            // sets it with `env`.
-            .env_remove("MJ_INSTANCE");
-        // Control commands run a staged current worker, so a child that
-        // exercises them needs a worker source. A test names its own with
-        // `env`, which replaces this one.
-        #[cfg(unix)]
-        command.env(
-            "MJ_WORKER_BINARY",
-            mj_core::test_hooks::fake_worker_dispatcher(),
-        );
-        Self { name, command }
-    }
-
-    /// Set a variable for the child. The marker a test uses to tell the child
-    /// apart from the parent goes here too.
-    pub(crate) fn env(
-        mut self,
-        key: impl AsRef<std::ffi::OsStr>,
-        value: impl AsRef<std::ffi::OsStr>,
-    ) -> Self {
-        self.command.env(key, value);
-        self
-    }
-
-    /// Remove a variable from the child, such as the default worker source.
-    pub(crate) fn env_remove(mut self, key: impl AsRef<std::ffi::OsStr>) -> Self {
-        self.command.env_remove(key);
-        self
-    }
-
-    /// Include an ignored integration case in the isolated child process.
-    #[cfg(unix)]
-    pub(crate) fn include_ignored(mut self) -> Self {
-        self.command.arg("--ignored");
-        self
-    }
-
-    /// Give the child its own configuration and data directories under `root`.
-    pub(crate) fn isolated_store(self, root: &Path) -> Self {
-        self.env("MJ_DATA_DIR", root.join("data"))
-            .env("MJ_CONFIG_DIR", root.join("config"))
-    }
-
-    /// Run the child and return its output without judging it.
-    pub(crate) fn output(mut self) -> std::process::Output {
-        self.command
-            .output()
-            .unwrap_or_else(|error| panic!("run isolated {}: {error}", self.name))
-    }
-
-    /// Run the child and fail this test with its output if it did not pass.
-    pub(crate) fn run(self) -> std::process::Output {
-        let name = self.name.clone();
-        let output = self.output();
-        assert!(
-            output.status.success(),
-            "isolated {name} failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
-    }
-}
-
 /// Explicit owner capability for controller fixtures that run without a daemon.
-pub(crate) fn session_admission(session_id: &str) -> crate::recovery_gate::SessionAdmission {
+pub fn session_admission(session_id: &str) -> crate::recovery_gate::SessionAdmission {
     let gate = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
     crate::recovery_gate::SessionAdmission::Foreground(
         futures::executor::block_on(gate.enter_foreground(
@@ -746,35 +581,6 @@ pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLe
 }
 
 /// Shared owner for fixtures exercising process mutation without a daemon.
-pub(crate) fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    static GATES: OnceLock<
-        Mutex<
-            std::collections::BTreeMap<std::path::PathBuf, Arc<crate::recovery_gate::RecoveryGate>>,
-        >,
-    > = OnceLock::new();
-    GATES
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap()
-        .entry(mj_core::config::data_dir())
-        .or_default()
-        .clone()
-}
-pub(crate) fn worker_test_permit(
-    id: &str,
-    _reason: &'static str,
-) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
-    if let Some(owner) = crate::worker_lifecycle::current(id) {
-        return Ok(Some(owner));
-    }
-    let Ok(admission) =
-        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerReplacement)
-    else {
-        return Ok(None);
-    };
-    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
-}
 pub(crate) fn worker_test_observation(
     id: &str,
 ) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
@@ -787,7 +593,7 @@ pub(crate) fn worker_test_observation(
 }
 
 /// Enter a fixture's operation exactly as the daemon registry does.
-pub(crate) fn worker_test_scope<T>(id: &str, work: impl FnOnce() -> T) -> T {
+pub fn worker_test_scope<T>(id: &str, work: impl FnOnce() -> T) -> T {
     if let Some(owner) = crate::worker_lifecycle::current(id) {
         return owner.scope_blocking(work);
     }
@@ -814,10 +620,7 @@ pub(crate) fn worker_test_scope<T>(id: &str, work: impl FnOnce() -> T) -> T {
         .unwrap()
         .scope_blocking(work)
 }
-pub(crate) async fn worker_test_scope_async<T>(
-    id: &str,
-    work: impl std::future::Future<Output = T>,
-) -> T {
+pub async fn worker_test_scope_async<T>(id: &str, work: impl std::future::Future<Output = T>) -> T {
     if let Some(owner) = crate::worker_lifecycle::current(id) {
         return owner.scope(work).await;
     }

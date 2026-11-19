@@ -1,0 +1,28 @@
+{
+  "id": "js-synthetic-owner-leaks-file-summary",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "5a41fe58a86e59598f3e1f2da4dfbc21beba7af19dfdb95fbb80c0c13bf8a8cc",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": "takes start_line from the range start and line_count as signature_line_count.max(range_line_count) ... its inputs include the root-node module range and import signature",
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It shows that the summary renderer stretches the synthetic module's import signature over the whole-file root range, but it never says this encloses or duplicates real declarations.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It notes that signature_elements takes line_count from the declaration range, including the root-node module range, but never says the synthetic summary element now spans the whole file and encloses real declarations.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

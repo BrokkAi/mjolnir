@@ -376,7 +376,7 @@ fn utility(
         }
         WorkerInstall::Host(binary) => {
             let root = targets::worker_root(backend, id)?;
-            let name = format!("move-helper-{}", mj_core::worker_build::WORKER_BUILD_ID);
+            let name = format!("move-helper-{}", mj_core::worker_build::worker_build_id());
             let helper = format!("{root}/{name}");
             let probe = executor.execute(&targets::command_on_locator(
                 SshTrafficClass::Control,
@@ -1325,7 +1325,7 @@ impl Controller {
                 id,
                 "stop sealed Move source worker, retaining workspace",
             )?
-            .execute(executor)?;
+            .execute(executor, &crate::controller::ControlWorker)?;
             operation.workspace_transfer.as_mut().unwrap().phase =
                 WorkspaceTransferPhase::SourceStopped;
             crate::database::save_move_operation(operation)?;
@@ -1957,7 +1957,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let binary = directory.path().join("binary");
         let mut body = vec![0x5a; 512 * 1024 + 17];
-        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
         std::fs::write(&binary, &body).unwrap();
         let backend = targets::TargetLocator::LocalBare {
             worker_root: root.to_string_lossy().into_owned(),

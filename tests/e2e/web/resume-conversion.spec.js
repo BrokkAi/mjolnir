@@ -61,7 +61,7 @@ async function mount(page, { answer = { kind: 'converting-raw-checkout', preview
     answer,
     holdPreflight: null,
   };
-  const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
+  const webRoot = path.resolve(__dirname, '../../../mj-server/src/web');
   await page.addInitScript(() => {
     window.EventSource = class extends EventTarget {
       constructor() {

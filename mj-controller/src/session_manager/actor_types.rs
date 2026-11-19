@@ -7,6 +7,29 @@ pub(super) enum ManagerCommand {
     },
 }
 
+pub(super) enum StartingEvent {
+    Restore {
+        session_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Register {
+        session_id: String,
+        launches: mpsc::UnboundedSender<StartingEvent>,
+        reply: oneshot::Sender<Result<StartingSessionRegistration>>,
+    },
+    Published {
+        session_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Aborted {
+        session_id: String,
+    },
+    Route {
+        session_id: String,
+        reply: oneshot::Sender<mj_client::session::ParentMessageRoute>,
+    },
+}
+
 #[allow(clippy::large_enum_variant)] // Submit owns its relay command; the other requests are small.
 pub(super) enum ActorCommand {
     Submit {
@@ -91,7 +114,7 @@ impl RelayJobDeferred {
 }
 
 impl ActorCommand {
-    pub(super) fn operation_name(&self) -> &'static str {
+    pub fn operation_name(&self) -> &'static str {
         match self {
             Self::Submit { .. } => "submit",
             Self::Sync { .. } => "sync",
@@ -104,7 +127,7 @@ impl ActorCommand {
         }
     }
 
-    pub(super) fn reject(self, session_id: &str, message: &str) {
+    pub fn reject(self, session_id: &str, message: &str) {
         match self {
             Self::Submit { reply, .. } => {
                 if reply.send(Err(message.to_owned().into())).is_err() {

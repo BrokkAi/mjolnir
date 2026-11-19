@@ -1,0 +1,17 @@
+{"id": "cpp-template-inherited-base-signature", "group": "P", "contains": "partial", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "dependency-failure-drops-independent-model-evidence", "group": "P", "contains": "no", "leak_first": "missed", "leak_final": "missed", "rewritten": false, "problems": 0}
+{"id": "go-nilness-ignores-modeled-nonreturn", "group": "P", "contains": "no", "leak_first": "partial", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "go-receiver-poisons-package-result-contract-discovery", "group": "P", "contains": "partial", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "incompatible-semantic-bundle-late-gate", "group": "P", "contains": "no", "leak_first": "partial", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "java-static-getter-drops-incomplete-route", "group": "P", "contains": "no", "leak_first": "partial", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "js-synthetic-owner-leaks-file-summary", "group": "P", "contains": "no", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "jvm-protected-unindexed-hierarchy-denied", "group": "P", "contains": "partial", "leak_first": "caught", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "kotlin-source-constructor-steals-class-header-comment", "group": "P", "contains": "no", "leak_first": "caught", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "kotlin-value-class-this-loses-underlying-projection", "group": "P", "contains": "no", "leak_first": "partial", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "mcp-default-advisory-reported-clean", "group": "P", "contains": "partial", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "php-indexed-write-reenters-current-rhs", "group": "P", "contains": "partial", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "python-filescope-enclosing-tie", "group": "P", "contains": "no", "leak_first": "partial", "leak_final": "partial", "rewritten": true, "problems": 0}
+{"id": "python-module-binding-representative-after-event", "group": "P", "contains": "no", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "python-module-mutation-repeated-scan-budget", "group": "P", "contains": "partial", "leak_first": "missed", "leak_final": "missed", "rewritten": false, "problems": 0}
+{"id": "retained-fill-java-memo-loses-gap", "group": "P", "contains": "no", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}
+{"id": "unproven-override-family-certifies-empty", "group": "P", "contains": "yes", "leak_first": "caught", "leak_final": "caught", "rewritten": true, "problems": 0}

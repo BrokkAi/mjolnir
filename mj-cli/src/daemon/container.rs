@@ -278,7 +278,7 @@ pub(super) fn remove_metadata() -> Result<()> {
 
 /// This client's Git revision, which the daemon image's label must carry.
 fn this_revision() -> Option<&'static str> {
-    mj_core::worker_build::BUILD_ID
+    mj_core::worker_build::build_id()
         .rsplit_once('+')
         .map(|(_, revision)| revision)
 }

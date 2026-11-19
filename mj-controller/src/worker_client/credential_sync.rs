@@ -15,7 +15,7 @@ pub(super) enum SessionRelays {
     /// of its own to a live worker.
     Actors(SessionManagerControl),
     /// A connection of its own per session, for tests against fixture workers.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Direct,
 }
 
@@ -34,8 +34,30 @@ pub(super) enum HostSlopcopLogin {
     SignedIn(mj_core::slopcop::SlopcopLogin),
 }
 
+/// What credential sync asks the daemon. The daemon owns its session records
+/// and configuration, so sync reads these facts from it when it acts and
+/// keeps no copy. Tests run sync without a daemon.
+pub trait CredentialSyncRuntime: Send + Sync {
+    /// The published list of sessions to keep supplied.
+    fn credential_targets(&self) -> Arc<watch::Sender<Vec<CredentialSyncTarget>>>;
+    fn credential_session_ids(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord>;
+    fn credential_session_ended(&self, session_id: &str) -> bool;
+    fn credential_profile_source_is_current(&self, target: &CredentialSyncTarget) -> bool;
+    fn credential_target_is_current(&self, target: &CredentialSyncTarget) -> Result<bool>;
+    /// The sessions a sync of `profile_id` leaves out, each with the reason.
+    fn credential_sync_skips(
+        &self,
+        profile_id: &str,
+        fanout: bool,
+        caused_by: Option<&str>,
+        present: &dyn Fn(&str) -> bool,
+    ) -> Vec<(String, &'static str)>;
+}
+
 /// A test reader: the host's login is never known, so no session copy changes.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
     bail!("tests do not read the host's slopcop login")
 }
@@ -62,7 +84,7 @@ struct HoldState {
     phase: std::sync::Mutex<HoldPhase>,
     /// The admission's cancellation flag; `None` without a gate.
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    runtime: Option<Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<Arc<dyn CredentialSyncRuntime>>,
 }
 
 enum HoldPhase {
@@ -84,7 +106,7 @@ impl JobHold {
         admission: Option<crate::recovery_gate::RecoveryAttempt>,
         turn: Option<SessionTurn>,
         installing: Option<SessionTurn>,
-        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<Arc<dyn CredentialSyncRuntime>>,
     ) -> Self {
         Self(Arc::new(HoldState {
             cancellation: admission.as_ref().map(|admission| admission.cancellation()),
@@ -230,7 +252,7 @@ impl Drop for SessionTurn {
 
 impl SessionSteps {
     /// How many sessions the lock map has an entry for.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn tracked(&self) -> usize {
         self.0
             .lock()
@@ -238,7 +260,7 @@ impl SessionSteps {
             .len()
     }
 
-    pub(super) async fn enter(&self, session_id: &str) -> SessionTurn {
+    pub async fn enter(&self, session_id: &str) -> SessionTurn {
         let lock = {
             let mut locks = self
                 .0
@@ -274,7 +296,7 @@ impl SessionSteps {
 pub(super) struct SessionAccess<'a> {
     pub(super) relays: &'a SessionRelays,
     pub(super) gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
-    pub(super) runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
+    pub(super) runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
     pub(super) steps: &'a SessionSteps,
 }
 
@@ -293,7 +315,7 @@ pub struct CredentialSyncCoordinator {
 }
 
 impl CredentialSyncCoordinator {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn spawn() -> Self {
         Self::spawn_inner(
             SessionRelays::Direct,
@@ -306,7 +328,7 @@ impl CredentialSyncCoordinator {
 
     /// A coordinator that retries a role-scoped session's AWS renewal after
     /// `retry` instead of after the sync interval.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_with_renewal_retry(retry: Duration) -> Self {
         Self::spawn_inner(
             SessionRelays::Direct,
@@ -320,7 +342,7 @@ impl CredentialSyncCoordinator {
     pub fn spawn_guarded(
         manager: SessionManagerControl,
         gate: Arc<crate::recovery_gate::RecoveryGate>,
-        runtime: Arc<crate::daemon::RuntimeState>,
+        runtime: Arc<dyn CredentialSyncRuntime>,
         rejected: DeliveryRegistry,
     ) -> Self {
         Self::spawn_with_registry(
@@ -333,11 +355,11 @@ impl CredentialSyncCoordinator {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
     ) -> Self {
@@ -354,14 +376,14 @@ impl CredentialSyncCoordinator {
     pub(super) fn spawn_with_registry(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
         rejected: DeliveryRegistry,
     ) -> Self {
         let targets_tx = runtime
             .as_ref()
-            .map(|runtime| runtime.credential_targets.clone())
+            .map(|runtime| runtime.credential_targets())
             .unwrap_or_else(|| Arc::new(watch::channel(Vec::new()).0));
         let mut targets_rx = targets_tx.subscribe();
         let handle_targets = targets_tx.clone();
@@ -444,7 +466,10 @@ impl CredentialSyncCoordinator {
                         if changed.is_err() { break; }
                         // Compare the publication we consume, not its order.
                         // Removed sessions have nothing left to reconcile.
-                        let targets = targets_rx.borrow_and_update();
+                        // Copy out of the borrow: the loop below takes the
+                        // runtime owner lock, and the owner publishes to this
+                        // channel while holding it, so a held borrow deadlocks.
+                        let targets = targets_rx.borrow_and_update().clone();
                         renewals.sync(&targets, &renewals_env);
                         let next: BTreeMap<_, _> = targets.iter()
                             .map(|target| (target.session_id.clone(), target.clone()))
@@ -707,7 +732,7 @@ impl CredentialSyncCoordinator {
 
 /// What the coordinator does over time, once: the profile's pass, and one AWS
 /// cycle for each role-scoped session.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
@@ -798,7 +823,7 @@ fn queue_session(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn reconcile_profile_guarded(
     access: &SessionAccess<'_>,
     targets: &[CredentialSyncTarget],
@@ -871,7 +896,7 @@ impl OwnedSyncLog {
 }
 
 fn log_missing_targets(
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     profile_id: &str,
     targets: &[CredentialSyncTarget],
     log: SyncLog<'_>,
@@ -882,7 +907,7 @@ fn log_missing_targets(
             profile_id,
             log.fanout && !log.targeted,
             log.cause.map(|cause| cause.session_id.as_str()),
-            present,
+            &present,
         );
         for (session_id, reason) in skipped {
             log.record(profile_id, &session_id, reason);
@@ -1323,7 +1348,7 @@ impl ScopeExpectation {
 struct PassContext<'a> {
     relays: &'a SessionRelays,
     gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     login: &'a PassLogin,
@@ -1358,7 +1383,7 @@ fn joined_failures(failures: &[StepFailure]) -> Option<String> {
 
 // Lets a test run the gated path without a daemon to say which sessions are
 // current: every session is, on the thread that sets this.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub(super) static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -1366,10 +1391,10 @@ thread_local! {
 /// Whether the session is still the one this target describes. A lifecycle
 /// may have completed since the dashboard published its target list.
 async fn target_is_current(
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
 ) -> Result<bool> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if SESSIONS_ARE_CURRENT.with(std::cell::Cell::get) {
         return Ok(true);
     }
@@ -1384,7 +1409,7 @@ async fn target_is_current(
             config: mj_core::config::Config::load()?,
             state: crate::database::load_state()?,
         };
-        Ok::<_, anyhow::Error>(crate::pollers::credential_sync_target_is_current(
+        Ok::<_, anyhow::Error>(super::credential_sync_target_is_current(
             controller, &candidate,
         ))
     })
@@ -1398,7 +1423,7 @@ async fn target_is_current(
 /// whatever outlives this future.
 async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
     turn: SessionTurn,
     installing: Option<SessionTurn>,
@@ -1431,10 +1456,10 @@ async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T
 }
 
 // Callers outside the login pass only need to distinguish a deferral from failure.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
     turn: SessionTurn,
     installing: Option<SessionTurn>,
@@ -1882,7 +1907,7 @@ async fn aws_job(
 pub(super) struct RenewalEnv {
     pub(super) relays: SessionRelays,
     pub(super) gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-    pub(super) runtime: Option<Arc<crate::daemon::RuntimeState>>,
+    pub(super) runtime: Option<Arc<dyn CredentialSyncRuntime>>,
     pub(super) steps: SessionSteps,
     /// Orders one session's renewals, so a replaced task's cycle finishes
     /// before its successor's begins.
@@ -1893,7 +1918,7 @@ pub(super) struct RenewalEnv {
 }
 
 impl RenewalEnv {
-    pub(super) fn access(&self) -> SessionAccess<'_> {
+    pub fn access(&self) -> SessionAccess<'_> {
         SessionAccess {
             relays: &self.relays,
             gate: self.gate.as_ref(),
@@ -1925,7 +1950,7 @@ pub(super) struct RenewalTasks(BTreeMap<String, RenewalTask>);
 impl RenewalTasks {
     /// A task standing in for the session's renewal, as one that had been
     /// started for `target`.
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(super) fn with_task(
         target: &CredentialSyncTarget,
         handle: tokio::task::JoinHandle<()>,
@@ -1942,14 +1967,14 @@ impl RenewalTasks {
     }
 
     /// Whether the session has a renewal task that has not ended.
-    #[cfg(all(test, unix))]
-    pub(super) fn is_running(&self, session_id: &str) -> bool {
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub fn is_running(&self, session_id: &str) -> bool {
         self.0
             .get(session_id)
             .is_some_and(|task| !task.handle.is_finished())
     }
 
-    pub(super) fn sync(&mut self, targets: &[CredentialSyncTarget], env: &RenewalEnv) {
+    pub fn sync(&mut self, targets: &[CredentialSyncTarget], env: &RenewalEnv) {
         let wanted = targets
             .iter()
             .filter(|target| {
@@ -2302,7 +2327,7 @@ pub(super) struct CanonicalSkills {
 }
 
 impl CanonicalSkills {
-    pub(super) fn collect(target: &CredentialSyncTarget) -> Self {
+    pub fn collect(target: &CredentialSyncTarget) -> Self {
         let mut base = target.clone();
         base.skills_scope = mj_core::skills::SkillsScope::Isolated;
         let collect = |format| {
@@ -2364,7 +2389,7 @@ pub(super) struct CanonicalLogin {
 }
 
 /// A login as read from where its store keeps it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
 
 /// How the controller reads and writes a profile's login: its store
@@ -2391,7 +2416,7 @@ impl LoginAccess {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(super) fn with_lock_marker(mut self, marker: std::path::PathBuf) -> Self {
         self.lock_marker = Some(marker);
         self
@@ -2403,7 +2428,7 @@ impl LoginAccess {
         Self::new(
             store,
             Arc::new(crate::targets::BoundedProcessExecutor::new(
-                crate::setup::KEYCHAIN_READ_TIMEOUT,
+                crate::harness_auth::KEYCHAIN_READ_TIMEOUT,
             )),
         )
     }
@@ -2422,14 +2447,14 @@ impl LoginAccess {
                 // A locked Keychain is an error here: treating it as "no
                 // login" would let the sync act on a login that merely could
                 // not be read.
-                match crate::setup::read_claude_keychain_login(&*self.security)? {
-                    crate::setup::KeychainLogin::Present(bytes) => {
+                match crate::harness_auth::read_claude_keychain_login(&*self.security)? {
+                    crate::harness_auth::KeychainLogin::Present(bytes) => {
                         Ok((CredentialSnapshot::of(kind, &bytes), bytes))
                     }
-                    crate::setup::KeychainLogin::Missing => {
+                    crate::harness_auth::KeychainLogin::Missing => {
                         Ok((CredentialSnapshot::absent(), Vec::new()))
                     }
-                    crate::setup::KeychainLogin::Unreadable { status } => Err(anyhow!(
+                    crate::harness_auth::KeychainLogin::Unreadable { status } => Err(anyhow!(
                         "the macOS Keychain could not be read (security exited with status {status})"
                     )),
                 }
@@ -2495,7 +2520,7 @@ pub(super) enum PassLogin {
     /// is reached is harmless: a pull rereads under the locks and installs
     /// only a strictly newer login, and a push of an older login is refused by
     /// the session for being older.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Keychain {
         read: Arc<LoginRead>,
         access: LoginAccess,
@@ -2548,7 +2573,7 @@ impl ProfileLogin {
 
     async fn refresh(
         &self,
-        runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
     ) -> bool {
         let _decision = self.decide.lock().await;
@@ -2602,7 +2627,7 @@ impl ProfileLogin {
 
     fn begin_delivery(
         &self,
-        runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
     ) {
         if runtime.is_some_and(|runtime| runtime.credential_session_ended(&target.session_id)) {
@@ -2654,7 +2679,7 @@ fn read_canonical_login(
     let kind = target.harness;
     let (access, credential, bytes) = match login {
         PassLogin::Shared(owner) => return owner.for_target(target),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         PassLogin::Keychain { read, access } => {
             let (credential, bytes) = read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
             (access.clone(), credential, bytes)
@@ -2700,7 +2725,7 @@ pub(super) struct SessionCanonical {
 }
 
 impl SessionCanonical {
-    pub(super) fn read(
+    pub fn read(
         target: &CredentialSyncTarget,
         skills: Arc<CanonicalSkills>,
         github: GithubSync,
@@ -2780,7 +2805,7 @@ pub(super) async fn run_on_session(
                 Err(error) => Err(error),
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         SessionRelays::Direct => {
             let _queued = QueuedJob(hold);
             let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;

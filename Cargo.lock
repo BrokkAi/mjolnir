@@ -614,6 +614,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-accounts"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "brokk-anvil-client",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "chrono",
+ "chrono-tz",
+ "futures",
+ "getrandom 0.3.4",
+ "libc",
+ "portable-pty",
+ "rayon",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-build-cache"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-core",
+ "brokk-mj-import",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "dirs 6.0.0",
+ "flate2",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "brokk-mj-build-id"
+version = "2.71.0"
+dependencies = [
+ "brokk-mj-core",
+ "serde_json",
+]
+
+[[package]]
 name = "brokk-mj-chat"
 version = "2.71.0"
 dependencies = [
@@ -624,7 +687,7 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-transcript",
- "brokk-mj-worker",
+ "brokk-mj-worker-runtime",
  "chrono",
  "crossterm",
  "linkify",
@@ -676,7 +739,7 @@ dependencies = [
  "base64 0.22.1",
  "brokk-mj-core",
  "brokk-mj-transcript",
- "brokk-mj-worker",
+ "brokk-mj-worker-runtime",
  "chrono",
  "getrandom 0.3.4",
  "hmac",
@@ -700,52 +763,41 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "axum",
- "axum-server",
  "base64 0.22.1",
- "brokk-anvil-client",
+ "brokk-mj-accounts",
+ "brokk-mj-build-cache",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
- "brokk-mj-review",
+ "brokk-mj-import",
+ "brokk-mj-session-types",
+ "brokk-mj-sessionwiki",
+ "brokk-mj-store",
+ "brokk-mj-targets",
  "brokk-mj-transcript",
- "brokk-mj-worker",
- "brokk-sessionwiki",
+ "brokk-mj-worker-runtime",
+ "brokk-mj-worker-staging",
  "chrono",
- "chrono-tz",
- "dirs 6.0.0",
  "flate2",
  "futures",
  "getrandom 0.3.4",
- "half",
- "hmac",
  "http-body-util",
  "libc",
- "libloading 0.9.0",
- "ort",
- "portable-pty",
  "rayon",
  "reedline",
  "reqwest",
  "ring",
  "rusqlite",
- "rustls",
- "ruzstd",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "signal-hook",
  "sysinfo",
  "tar",
  "tempfile",
- "tokenizers",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "toml",
- "toml_edit 0.20.2",
- "tower",
- "tower-http",
  "tracing",
  "url",
  "zip",
@@ -794,11 +846,249 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-daemon"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "axum",
+ "axum-server",
+ "brokk-anvil-client",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-controller",
+ "brokk-mj-core",
+ "brokk-mj-github-relevance",
+ "brokk-mj-review",
+ "brokk-mj-server",
+ "brokk-mj-setup",
+ "brokk-mj-transcript",
+ "brokk-mj-worker-runtime",
+ "brokk-sessionwiki",
+ "chrono",
+ "futures",
+ "getrandom 0.3.4",
+ "hmac",
+ "http-body-util",
+ "libc",
+ "portable-pty",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-github-relevance"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "brokk-mj-core",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "chrono",
+ "flate2",
+ "futures",
+ "half",
+ "libloading 0.9.0",
+ "ort",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "tokenizers",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zip",
+]
+
+[[package]]
+name = "brokk-mj-import"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "brokk-anvil-client",
+ "brokk-mj-accounts",
+ "brokk-mj-checkpoint",
+ "brokk-mj-core",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "chrono",
+ "futures",
+ "rayon",
+ "reqwest",
+ "rusqlite",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "brokk-mj-review"
 version = "2.71.0"
 dependencies = [
  "brokk-mj-core",
  "serde_json",
+]
+
+[[package]]
+name = "brokk-mj-server"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "axum",
+ "axum-server",
+ "base64 0.22.1",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-controller",
+ "brokk-mj-core",
+ "brokk-mj-github-relevance",
+ "brokk-mj-review",
+ "brokk-mj-transcript",
+ "brokk-mj-worker-runtime",
+ "chrono",
+ "futures",
+ "getrandom 0.3.4",
+ "hmac",
+ "http-body-util",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-session-types"
+version = "2.71.0"
+dependencies = [
+ "brokk-mj-core",
+ "brokk-mj-targets",
+]
+
+[[package]]
+name = "brokk-mj-sessionwiki"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-import",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "brokk-sessionwiki",
+ "chrono",
+ "rusqlite",
+ "ruzstd",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "brokk-mj-setup"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-accounts",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-controller",
+ "brokk-mj-core",
+ "brokk-mj-import",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "brokk-mj-store"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "base64 0.22.1",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-review",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "chrono",
+ "futures",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-targets"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "chrono",
+ "getrandom 0.3.4",
+ "hmac",
+ "libc",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "signal-hook",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -863,6 +1153,28 @@ version = "2.71.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "brokk-mj-build-id",
+ "brokk-mj-checkpoint",
+ "brokk-mj-controller",
+ "brokk-mj-core",
+ "brokk-mj-worker-runtime",
+ "clap",
+ "libc",
+ "mimalloc",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "brokk-mj-worker-runtime"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
  "base64 0.22.1",
  "brokk-mj-checkpoint",
  "brokk-mj-controller",
@@ -876,7 +1188,6 @@ dependencies = [
  "jsonc-parser",
  "libc",
  "mach2",
- "mimalloc",
  "proptest",
  "reqwest",
  "rusqlite",
@@ -896,6 +1207,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-worker-staging"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-accounts",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-session-types",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-worker-runtime",
+ "chrono",
+ "flate2",
+ "getrandom 0.3.4",
+ "rayon",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml",
+ "toml_edit 0.20.2",
+ "tracing",
+]
+
+[[package]]
 name = "brokk-mjolnir"
 version = "2.71.0"
 dependencies = [
@@ -904,11 +1244,14 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "brokk-mj-build-id",
  "brokk-mj-chat",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-controller",
  "brokk-mj-core",
+ "brokk-mj-daemon",
+ "brokk-mj-setup",
  "brokk-mj-tui",
  "chrono",
  "clap",
@@ -940,9 +1283,9 @@ dependencies = [
 
 [[package]]
 name = "brokk-sessionwiki"
-version = "0.34.25"
+version = "0.34.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd795451e3a68781f9a3d1174675ab025382b73686f948f64b9afe09e7668670"
+checksum = "b45392edba21c82a3f86755cced8180f93fb623bdce8cbe2509169da234ed4e7"
 dependencies = [
  "anyhow",
  "chrono",

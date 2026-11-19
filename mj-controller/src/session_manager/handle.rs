@@ -2,11 +2,58 @@ use super::*;
 
 #[derive(Clone)]
 pub struct SessionManagerControl {
-    pub(crate) session_gate: Arc<crate::recovery_gate::RecoveryGate>,
+    pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
     pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
-    pub(crate) session_cpu: watch::Receiver<SessionCpuTable>,
+    pub session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
+    pub(super) launches: mpsc::UnboundedSender<StartingEvent>,
+}
+
+/// Owns a pre-commit launch registration. Publication hands it to the durable
+/// state feed; every earlier exit releases it through the manager's channel.
+pub struct StartingSessionRegistration {
+    pub(super) session_id: Option<String>,
+    pub(super) launches: mpsc::UnboundedSender<StartingEvent>,
+}
+
+impl StartingSessionRegistration {
+    pub fn publish(mut self) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.launches
+            .send(StartingEvent::Published {
+                session_id: self
+                    .session_id
+                    .as_ref()
+                    .expect("registration is held")
+                    .clone(),
+                reply,
+            })
+            .context("session manager stopped")?;
+        response
+            .blocking_recv()
+            .context("session manager stopped")??;
+        self.session_id = None;
+        Ok(())
+    }
+}
+
+impl Drop for StartingSessionRegistration {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id.take()
+            && self
+                .launches
+                .send(StartingEvent::Aborted {
+                    session_id: session_id.clone(),
+                })
+                .is_err()
+        {
+            tracing::debug!(
+                session_id,
+                "session manager already stopped before launch registration release"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -18,7 +65,7 @@ pub struct ManagedSessionHandle {
 }
 
 impl SessionManagerControl {
-    pub(crate) fn install_harness_failure_handler(&self, handler: HarnessFailureHandler) {
+    pub fn install_harness_failure_handler(&self, handler: HarnessFailureHandler) {
         assert!(
             self.harness_failure.set(handler).is_ok(),
             "readiness failure handler installed once"
@@ -145,7 +192,7 @@ impl ManagedSessionHandle {
 
     /// Mailbox submissions share ordinary actor admission and command-ID
     /// retries, but expose terminal outbox disposition to their delivery owner.
-    pub(crate) async fn deliver_mailbox_event(
+    pub async fn deliver_mailbox_event(
         &self,
         event: mj_core::mailbox::MailboxEvent,
     ) -> Result<crate::mailbox_outbox::MailboxEventDelivery> {
@@ -427,7 +474,7 @@ impl PendingRelaySync {
 
 /// In-process refusal detail; the client failure's wire representation is unchanged.
 #[derive(Debug)]
-pub(crate) struct SubmitRefusalCode(pub mj_core::relay::RelayErrorCode);
+pub struct SubmitRefusalCode(pub mj_core::relay::RelayErrorCode);
 impl std::fmt::Display for SubmitRefusalCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "relay refusal ({:?})", self.0)

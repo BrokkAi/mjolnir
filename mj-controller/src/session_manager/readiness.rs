@@ -7,16 +7,16 @@ pub(super) const HARNESS_READINESS_TIMEOUT: Duration =
     crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 #[derive(Debug, Clone)]
-pub(crate) struct HarnessStartupFailure {
+pub struct HarnessStartupFailure {
     pub(crate) cause: String,
-    pub(crate) observed_updated_at: String,
+    pub observed_updated_at: String,
 }
 impl HarnessStartupFailure {
-    pub(crate) fn cause(&self) -> String {
+    pub fn cause(&self) -> String {
         self.cause.clone()
     }
 }
-pub(crate) type HarnessFailureHandler = std::sync::Arc<
+pub type HarnessFailureHandler = std::sync::Arc<
     dyn Fn(
             String,
             HarnessStartupFailure,

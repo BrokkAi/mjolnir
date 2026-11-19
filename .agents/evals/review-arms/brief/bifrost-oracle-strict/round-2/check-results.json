@@ -1,0 +1,148 @@
+{
+  "round": 2,
+  "decisions": {
+    "cpp-template-inherited-base-signature": {
+      "decision": "carries",
+      "item": "- The inherited traversal calls `cpp_direct_base_types` (`src/analyzer/usages/get_definition.rs:3023`), which reads `unit.signature()` and uses source text when that is absent (`src/analyzer/usages/get_definition.rs:3211`). Class `CodeUnit`s are constructed with `scope.template_signature` as that identity signature (`src/analyzer/cpp/declarations.rs:317`, `src/analyzer/model.rs:355`). That field is assigned from `cpp_template_signature` (`src/analyzer/cpp/declarations.rs:207`), whose value is the template parameter head and does not include the class base clause (`src/analyzer/cpp/declarations.rs:1317`).",
+      "why": "All elements kept; the fallback to source text only when signature is absent restates the preference, and the line states the census fact.",
+      "brief_sha256": "b6472d8eeed09e26c154949c658fd39c2d5280d3564464c50b5ddcc6a06a9a87",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "dependency-failure-drops-independent-model-evidence": {
+      "decision": "carries",
+      "item": "- The workspace lifecycle clones the caller's activation request (crates/bifrost-analysis/src/analyzer/workspace.rs:273). In the Go overlay fixture, the activation evidence names module `fixture.invalid` and the registered `fixture.go.reader` and `fixture.go.consumer` session packs are enabled (tests/suite_semantic/semantic_model_overlay.rs:337, tests/suite_semantic/semantic_model_overlay.rs:348) before the fixture's runtime acquisition, which has no dependency discovery step and yields a `Ready` runtime (tests/suite_semantic/semantic_model_overlay.rs:377).",
+      "why": "All elements kept, including the before-acquisition order and the absence of dependency discovery.",
+      "brief_sha256": "01796fa62a60ce1802b58021aa50a3e35267b609f99ff2aee2527a600bb821cd",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "go-nilness-ignores-modeled-nonreturn": {
+      "decision": "does not carry",
+      "item": null,
+      "why": "'Independently of summary completeness' became 'takes no summary-completeness input', which only describes the parameters; the function reads summaries that carry completeness, so the independence is not stated and the census fact needs inference.",
+      "brief_sha256": "fc28efc2996b59282af372cee72934331ced56dc0fda85a9232b2a6386b195d1",
+      "elements_not_kept": [
+        "rule: that evaluation is independent of summary completeness",
+        "added: the function takes no summary-completeness input (a signature fact, not the original independence claim)"
+      ],
+      "fact_inferred": true
+    },
+    "go-receiver-poisons-package-result-contract-discovery": {
+      "decision": "carries",
+      "item": "- `may_name_result_contract` keys its inventory by `(language, member, parameter_count)` at insertion and at lookup; neither key includes `summary.target.has_receiver` or call receiver applicability, and a receiverless summary and a receiver call with the same tuple have one shared inventory entry; the empty-open-lookup check calls it (crates/bifrost-rql/src/structural/search/effects.rs:263; crates/bifrost-rql/src/structural/search/effects.rs:283; crates/bifrost-rql/src/structural/search/effects.rs:492).",
+      "why": "All elements of both pairs kept; pair 1 states the census fact.",
+      "brief_sha256": "503aa97444b337767c87df877792be3195a8fbb8204eff461f81f000e318fb57",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "incompatible-semantic-bundle-late-gate": {
+      "decision": "carries",
+      "item": "- `verify_release_bundle` contains these steps in this order: `verify_checksums` hashing each asset listed in `SHA256SUMS` (`crates/bifrost-semantic-packs/src/release_bundle.rs:1728`, `crates/bifrost-semantic-packs/src/release_bundle.rs:2382`); decoding of each curated manifest and shard (`crates/bifrost-semantic-packs/src/release_bundle.rs:1733`, `crates/bifrost-semantic-packs/src/release_bundle.rs:1777`); the call to `verify_generated_production` (`crates/bifrost-semantic-packs/src/release_bundle.rs:1793`). `verify_generated_production` checks generated schema and cache versions (`crates/bifrost-semantic-packs/src/release_bundle.rs:2059`, `crates/bifrost-semantic-packs/src/release_bundle.rs:2065`).",
+      "why": "All elements and the three-step order are kept.",
+      "brief_sha256": "f3fcb3717319d01686da6297c6e314a810179144698294bbbc9ff179caa8351c",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "java-static-getter-drops-incomplete-route": {
+      "decision": "carries",
+      "item": "- Kotlin property extraction emits a `ResolutionJvmAliasKind::Getter` alias whose `is_static` value is `top_level` (crates/bifrost-jvm/src/kotlin/resolution.rs:2309) and whose target is the property declaration in the Value namespace (crates/bifrost-jvm/src/kotlin/resolution.rs:1487); the alias reader compares each alias row's kind and static flag with the import demand namespace (crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:2339).",
+      "why": "All elements kept; 'the kinds it admits are' preserves the per-demand restriction, and pair 1 states the census fact.",
+      "brief_sha256": "0890678a9009a8eb6fb9361fff33947a312520e163382a042be4693f99c96543",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "js-synthetic-owner-leaks-file-summary": {
+      "decision": "carries",
+      "item": "- `signature_elements` reads declaration ranges (`src/searchtools.rs:1162`); each element's extent is the maximum of the signature line count and the matching range line count (`src/searchtools.rs:1176`, `src/searchtools.rs:1190`), and each element's text is the signature (`src/searchtools.rs:1198`). The JS/TS registrations supply the root range and the import signature (`src/analyzer/javascript/mod.rs:123`, `src/analyzer/typescript/mod.rs:131`).",
+      "why": "All elements kept and the line states the census fact.",
+      "brief_sha256": "95f8724a8b8b2788693d9617ace7eec3c3eac773fd22b706b81d97ea6e5b6174",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "jvm-protected-unindexed-hierarchy-denied": {
+      "decision": "carries",
+      "item": "- `jvm_type_is_subtype` starts with `uncertain` set to false (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26549), and every assignment to `uncertain` is inside the loop over returned supertype edges (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26562); for distinct types with an empty supertype inventory, the function's return value is `Some(false)` (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26597), and the function contains no hierarchy-closure check.",
+      "why": "All elements kept; the absence of a hierarchy-closure check is restated for the function, which covers the empty-inventory return.",
+      "brief_sha256": "5ba756714af55d007c0d1a51ad1a823fd3d95db91294f0a721d51cb7667f4bea",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "kotlin-source-constructor-steals-class-header-comment": {
+      "decision": "does not carry",
+      "item": "- The source primary constructor is registered as a class child (crates/bifrost-jvm/src/kotlin/declarations.rs:409); comment-density traversal reads children through Kotlin's child filter, which excludes synthetic units (crates/bifrost-analysis/src/analyzer/kotlin/mod.rs:675); collection expands the ranges of every child and has no primary-constructor exclusion (crates/bifrost-analysis/src/analyzer/comment_density.rs:162, crates/bifrost-analysis/src/analyzer/comment_density.rs:181); `enclosing_declaration` assigns overlapping comments to the deepest declaration (crates/bifrost-analysis/src/analyzer/comment_density.rs:248).",
+      "why": "The edit no longer states that the source primary constructor enters comment-density traversal; it says only that traversal reads children through a filter excluding synthetic units, leaving the constructor's passage to inference.",
+      "brief_sha256": "a4097cf4b10070a13bb4a3dce91a58e049f7a3815ea9b8f835aa58f1a0d0da70",
+      "elements_not_kept": [
+        "relation: the source primary constructor enters comment-density traversal through the Kotlin child filter"
+      ],
+      "fact_inferred": false
+    },
+    "kotlin-value-class-this-loses-underlying-projection": {
+      "decision": "carries",
+      "item": "- The `this_expression` flow at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:316` reads `captured_receiver` or `self.receiver`; dispatch receiver creation at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:279` sets `self.receiver` and does not call `bind_carrier`; formal slots call `bind_carrier` at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:241`.",
+      "why": "All elements kept and the census fact is stated in the line.",
+      "brief_sha256": "08fdb63bae03c65fe93106e0e9e7147045fec421dc314dee6be0db9d0617d671",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "mcp-default-advisory-reported-clean": {
+      "decision": "does not carry",
+      "item": "- MCP builds its evaluation options with no inconclusive override (`crates/bifrost-mcp/src/searchtools_service.rs:3619`) and takes the default `Pass` (`crates/bifrost-policy/src/coordinator.rs:326`); `run_policy` translates `outcome.exit_status()` into the public status string, `POLICY_EXIT_CLEAN` to `clean`, and returns `outcome.into_report()` in the same result (`crates/bifrost-mcp/src/searchtools_service.rs:7024`, `crates/bifrost-mcp/src/searchtools_service.rs:7039`).",
+      "why": "All original elements are kept, but pair 1 adds that the exit-0 acceptance is a SARIF check, a new fact not in the original line.",
+      "brief_sha256": "5e3e4a4a4f5056b4b1dcfb781d715a3827ff66e3d8f95a2d2265305a96ee85a7",
+      "elements_not_kept": [
+        "added: the exit-0 acceptance is performed by a SARIF check (new mechanism/site not in the original 'the gate accepts')"
+      ],
+      "fact_inferred": false
+    },
+    "php-indexed-write-reenters-current-rhs": {
+      "decision": "carries",
+      "item": "- `collection_element_type_fq_name` passes `collection.start_byte()` as `before_byte` and a callback to `instance_receiver_type_fq_name_inner` (`crates/bifrost-php/src/graph/syntax.rs:1548`, `crates/bifrost-php/src/graph/syntax.rs:1553`). `infer_indexed_local_element_type` walks the enclosing scope (`crates/bifrost-php/src/graph/syntax.rs:1393`), filters nodes by start byte and has no assignment end-byte check (`crates/bifrost-php/src/graph/syntax.rs:1401`), and calls `resolve_value(right)` for matching indexed writes, including an assignment that encloses the current collection read (`crates/bifrost-php/src/graph/syntax.rs:1421`).",
+      "why": "All elements kept and the census fact is stated.",
+      "brief_sha256": "23682521e1e04d296b24f1996b1d324623752c67221ef7aac54b6eb0a1811e37",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "python-filescope-enclosing-tie": {
+      "decision": "carries",
+      "item": "- `PythonAdapter::parse_file` registers the real module with the tree root range (`src/analyzer/python/adapter.rs:78`, `src/analyzer/python/adapter.rs:84`); the synthetic `FileScope` range is `0..source.len()` (`src/analyzer/tree_sitter_analyzer.rs:327`), and the two byte spans are equal when the root covers the whole source.",
+      "why": "All elements kept, including the whole-file condition for equal spans.",
+      "brief_sha256": "29d36d6966d1eb866cee23da6f577c0daf9310a2bda75fefad7e796004768b44",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "python-module-binding-representative-after-event": {
+      "decision": "carries",
+      "item": "- Repeated module assignments to the same name construct the same `Field` CodeUnit and each call `replace_code_unit`, which removes the unit's prior ranges before adding the current declaration; the unit's stored declaration range is the last assignment's, and no range is recorded per binding event (`crates/bifrost-python/src/declarations.rs:551`, `crates/bifrost-python/src/declarations.rs:569`, `crates/bifrost-core/src/analyzer/parsed_file.rs:274`, `crates/bifrost-core/src/analyzer/parsed_file.rs:425`); `analyzer.ranges(candidate)` in the event selector reads these ranges (`crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1773`).",
+      "why": "All elements of the three pairs kept; pair 2 states the census fact.",
+      "brief_sha256": "162b28b9bc241ba87a49b6a343d795217aec6b8755a26821a14c2dd1f10787dd",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "python-module-mutation-repeated-scan-budget": {
+      "decision": "carries",
+      "item": "- `class_hierarchy` creates one bounded `ResolutionSession` and `PythonDefinitionProvider` for the ancestry traversal (`crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:373`); `runtime_source_bases` is passed that budget for each workspace owner (`crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:441`) and, per base, calls `python_class_object_base_candidate` with `budget.provider` (`crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:711`), which reaches its module-binding guard (`crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1963`).",
+      "why": "All elements kept and the census fact is stated.",
+      "brief_sha256": "d26ea07d2cadc69238e9332175790aad34f2add18cebd0f2b802436e7945baec",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "retained-fill-java-memo-loses-gap": {
+      "decision": "carries",
+      "item": "- `JavaSource::unique_class_by_fqn_in_file` reads and writes the request-domain `JavaFileClassIndexMemo`, whose values are `Arc<JavaFileClassIndex>` (`crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:787`, `crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:695`); a memo hit returns the stored index with no build-gap replay, and otherwise it builds an index from `declarations(file)` and inserts it with no completion check (`crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:799`, `crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:801`, `crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:803`).",
+      "why": "All elements kept; the line states the census fact.",
+      "brief_sha256": "483bbb727cc16fd4617e9dd79e73e802b81d15f3b0136e3ae79f1c8765c5d853",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    },
+    "unproven-override-family-certifies-empty": {
+      "decision": "carries",
+      "item": "- `MemberFamilyAnswer::is_proven` compares the outcome with `Proven` (`crates/bifrost-analysis/src/analyzer/usages/member_family.rs:146`). The hierarchy helper collects `ImplementedBy`/`OverriddenBy` targets when `is_proven` is true, constructs an empty vector when it is false, and then returns `Some(targets)` (`crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:945`). The `Some(overrides) if overrides.is_empty()` arm matches an empty vector from either `is_proven` value (`crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:554`).",
+      "why": "All elements kept; the line states that the unproven case returns Some of an empty vector.",
+      "brief_sha256": "aa03db4578eb9c1931840ca07ef77e65adc22f1544d8b869eac93a4ca35b1f35",
+      "elements_not_kept": [],
+      "fact_inferred": false
+    }
+  }
+}

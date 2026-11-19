@@ -1,0 +1,357 @@
+use super::*;
+use mj_core::targets::SshTrafficClass;
+
+/// Load the account's login exports, then interpret our script as POSIX sh.
+/// User shells such as zsh have reserved variables and different syntax.
+pub fn ssh_login_script(ssh: &SshTarget, script: &str) -> CommandSpec {
+    let login_command = format!("exec /bin/sh -c {}", posix_quote(script));
+    ssh_command(
+        SshTrafficClass::Control,
+        ssh,
+        [
+            "sh",
+            "-c",
+            "exec \"$SHELL\" -lc \"$1\"",
+            "mj-login",
+            &login_command,
+        ],
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionBoundary<'a> {
+    Direct,
+    Container {
+        engine: &'a str,
+        container_id: &'a str,
+    },
+    Ssh(&'a SshTarget),
+    SshContainer {
+        engine: &'a str,
+        ssh: &'a SshTarget,
+        container_id: &'a str,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessProbe<'a> {
+    pub executable: &'a str,
+    pub version_args: &'a [&'a str],
+    pub bridge_executable: Option<&'a str>,
+}
+
+/// Compatibility is intentionally interpreted by the controller. A successful
+/// probe permits an image-baked tool to be reused; a missing/incompatible tool
+/// causes the controller to upload/install its release-owned copy.
+pub fn bootstrap_probe_plan(
+    boundary: ExecutionBoundary<'_>,
+    harness: HarnessProbe<'_>,
+) -> Result<CommandPlan> {
+    validate_executable(harness.executable)?;
+    let mut commands = vec![
+        at_boundary(
+            SshTrafficClass::Control,
+            boundary,
+            std::iter::once(harness.executable)
+                .chain(harness.version_args.iter().copied())
+                .map(str::to_owned)
+                .collect(),
+        )
+        .purpose("probe harness version"),
+    ];
+    if let Some(bridge) = harness.bridge_executable {
+        validate_executable(bridge)?;
+        commands.push(
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec![bridge.to_owned(), "--version".to_owned()],
+            )
+            .purpose("probe ACP bridge version"),
+        );
+    }
+    commands.push(
+        at_boundary(
+            SshTrafficClass::Control,
+            boundary,
+            vec!["git".to_owned(), "--version".to_owned()],
+        )
+        .purpose("probe Git"),
+    );
+    Ok(CommandPlan {
+        description: "probe reusable target tools".to_owned(),
+        commands,
+    })
+}
+
+/// Complete container creation before clone/profile staging can write HOME.
+/// Query as the configured container user, then create/chown as container root.
+/// This also handles images whose non-root user's home is missing.
+pub fn initialize_container_home(
+    locator: &TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let (engine, container, ssh) = match locator {
+        TargetLocator::LocalPodman { container_id, .. }
+        | TargetLocator::LocalDocker { container_id, .. }
+        | TargetLocator::AppleContainer { container_id, .. } => (
+            locator.container_engine().expect("container target"),
+            container_id,
+            None,
+        ),
+        TargetLocator::SshPodman {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshDocker {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshAppleContainer {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshNitro {
+            container_id, ssh, ..
+        } => (
+            locator.container_engine().expect("container target"),
+            container_id,
+            Some(ssh),
+        ),
+        _ => return Ok(()),
+    };
+    let script = format!(
+        r#"set -eu
+mj_home_engine() {{ {} "$@"; }}
+container=$1
+owner=$(mj_home_engine exec "$container" sh -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')
+# The slash sentinel preserves even a HOME ending with newlines through $().
+home=$(mj_home_engine exec "$container" sh -c 'printf "%s/" "${{HOME:?container HOME is unset}}"')
+home=${{home%/}}
+mj_home_engine exec --user 0 "$container" sh -c 'set -eu; mkdir -p -- "$1"; chown -- "$2" "$1"' mj-home "$home" "$owner"
+"#,
+        engine_shell_words(engine)
+    );
+    let command = CommandSpec::new("sh", ["-c", &script, "mj-container-home", container]);
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
+        None => command,
+    }
+    .purpose("initialize session container home")
+    .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "initialize session container home failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Thin Linux Git bootstrap. Managed containers also receive GitHub CLI and
+/// its HTTPS credential helper so an injected `GH_TOKEN` works before clone.
+pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
+    let managed_container = matches!(
+        boundary,
+        ExecutionBoundary::Container { .. } | ExecutionBoundary::SshContainer { .. }
+    );
+    let script = if managed_container {
+        "set -eu; if ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1; then SUDO=''; if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'Git and GitHub CLI installation requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update; $SUDO apt-get install -y git gh ca-certificates curl; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y git gh ca-certificates curl; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y git gh ca-certificates curl; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache git github-cli ca-certificates curl; else echo 'Unsupported package manager; install Git and GitHub CLI in the image' >&2; exit 1; fi; fi; git config --global credential.https://github.com.helper '!gh auth git-credential'; git config --global credential.https://gist.github.com.helper '!gh auth git-credential'"
+    } else {
+        "set -eu; if command -v git >/dev/null 2>&1; then exit 0; fi; SUDO=''; if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'Git installation requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update; $SUDO apt-get install -y git ca-certificates curl; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y git ca-certificates curl; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y git ca-certificates curl; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache git ca-certificates curl; else echo 'Unsupported package manager; install Git manually' >&2; exit 1; fi"
+    };
+    CommandPlan {
+        description: "install missing Git".to_owned(),
+        commands: vec![
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            )
+            .purpose("install Git")
+            .stage(ProvisionStage::Cloning),
+        ],
+    }
+}
+
+/// Shared [`CommandSpec::parallel_group`] marker for one bundle's per-repository
+/// clone/init commands. Every `clone_commands` call builds its own
+/// [`CommandPlan`], so a single fixed marker never mixes batches across plans.
+pub(super) const BUNDLE_REPOSITORIES_PARALLEL_GROUP: u32 = 1;
+
+pub fn clone_commands(
+    bundle: &ProjectBundleSpec,
+    workspace: &str,
+    github_token: Option<&str>,
+    wrap: impl Fn(Vec<String>) -> CommandSpec,
+) -> Vec<CommandSpec> {
+    let mut commands = vec![
+        wrap(vec![
+            "mkdir".to_owned(),
+            "-p".to_owned(),
+            workspace.to_owned(),
+        ])
+        .purpose("create bundle workspace")
+        .stage(ProvisionStage::Cloning),
+    ];
+    for repository in &bundle.repositories {
+        let destination = format!("{workspace}/{}", repository.destination);
+        let url = repository
+            .url
+            .as_ref()
+            .expect("validated network repository");
+        let wrap_fetch = |args: Vec<String>| {
+            if let Some(token) = github_token
+                && mj_core::remote_git::is_github_https_url(url)
+                && fetches_repository(&args)
+            {
+                let (args, input) = clone_with_github_token(args, token);
+                wrap(args).with_sensitive_stdin(input)
+            } else {
+                wrap(args)
+            }
+        };
+        if let Some(cutoff) = &repository.history_cutoff {
+            commands.extend(
+                cutoff_checkout_commands(&destination, url, repository, cutoff)
+                    .into_iter()
+                    .map(|(args, purpose)| {
+                        wrap_fetch(args)
+                            .purpose(purpose)
+                            .stage(ProvisionStage::Cloning)
+                    }),
+            );
+            continue;
+        }
+        let mut args = vec!["git".to_owned(), "clone".to_owned()];
+        for push_url in &repository.push_urls {
+            args.extend([
+                "--config".into(),
+                format!("remote.origin.pushurl={push_url}"),
+            ]);
+        }
+        if let Some(reference) = &repository.reference {
+            args.extend(["--reference-if-able".to_owned(), reference.clone()]);
+        }
+        args.push("--".to_owned());
+        args.push(url.clone());
+        args.push(destination);
+        commands.push(
+            wrap_fetch(args)
+                .purpose(format!("clone {}", repository.destination))
+                .stage(ProvisionStage::Cloning)
+                .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP),
+        );
+    }
+    commands
+}
+
+/// Create a checkout that holds the cutoff commits and their ancestors and
+/// nothing else. A clone would copy every branch and tag, and a clone-cache
+/// reference would lend it the whole mirror through `objects/info/alternates`,
+/// so the checkout starts empty and fetches only these object IDs, from the
+/// cache's cutoff bundle when one was prepared and from the network otherwise.
+/// It has no `origin` remote. The commands run in order: each needs the last.
+fn cutoff_checkout_commands(
+    destination: &str,
+    url: &str,
+    repository: &RepositorySpec,
+    cutoff: &HistoryCutoff,
+) -> Vec<(Vec<String>, String)> {
+    let git = |arguments: &[&str]| {
+        ["git", "-C", destination]
+            .iter()
+            .chain(arguments)
+            .map(|argument| (*argument).to_owned())
+            .collect::<Vec<_>>()
+    };
+    // A bundle is fetched from by its ref names, which every Git version
+    // accepts; fetching an object ID it does not advertise is newer. The
+    // network serves the object IDs themselves.
+    let (source, head, base) = match &repository.reference {
+        Some(bundle) => (
+            bundle.as_str(),
+            HistoryCutoff::BUNDLE_HEAD_REF,
+            HistoryCutoff::BASE_REF,
+        ),
+        None => (
+            url,
+            cutoff.head.as_str(),
+            cutoff.base.as_deref().unwrap_or_default(),
+        ),
+    };
+    let mut fetch = git(&["fetch", "--quiet", "--no-tags", "--", source, head]);
+    if cutoff.base.is_some() {
+        fetch.push(format!("{base}:{}", HistoryCutoff::BASE_REF));
+    }
+    vec![
+        (
+            vec![
+                "git".to_owned(),
+                "init".to_owned(),
+                "--quiet".to_owned(),
+                "--".to_owned(),
+                destination.to_owned(),
+            ],
+            format!(
+                "initialize {} without later history",
+                repository.destination
+            ),
+        ),
+        (
+            fetch,
+            format!(
+                "fetch {} history up to {}",
+                repository.destination, cutoff.head
+            ),
+        ),
+        (
+            git(&["checkout", "--quiet", "--detach", &cutoff.head]),
+            format!("check out {} at {}", repository.destination, cutoff.head),
+        ),
+    ]
+}
+
+/// Whether a command from [`clone_commands`] reaches the repository's server:
+/// a clone, or the fetch of a checkout without later history.
+pub(super) fn fetches_repository(args: &[String]) -> bool {
+    match args.get(1).map(String::as_str) {
+        Some("clone") => true,
+        Some("-C") => args.get(3).is_some_and(|argument| argument == "fetch"),
+        _ => false,
+    }
+}
+
+/// Run one checkout fetch with a GitHub token that only that process sees.
+/// This also provisions private repositories for workers without credentials.
+/// The token arrives on stdin, so it stays out of argv and Git configuration.
+pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<String>, Vec<u8>) {
+    let mut wrapped = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "IFS= read -r GH_TOKEN || exit 1; export GH_TOKEN GIT_TERMINAL_PROMPT=0; exec \"$@\""
+            .to_owned(),
+        "mj-github-token".to_owned(),
+        "git".to_owned(),
+    ];
+    wrapped.extend(mj_core::remote_git::github_token_credential_config());
+    debug_assert_eq!(args.first().map(String::as_str), Some("git"));
+    wrapped.extend(args.into_iter().skip(1));
+    let mut input = token.as_bytes().to_vec();
+    input.push(b'\n');
+    (wrapped, input)
+}
+
+/// Install Move transport on newly provisioned Linux instances.
+pub fn install_rsync_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
+    let script = "set -eu; if rsync --recursive --times --perms --partial --partial-dir=.move-partial --version >/dev/null 2>&1; then exit 0; fi; SUDO=''; if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'rsync installation requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update; $SUDO apt-get install -y rsync; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y rsync; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y rsync; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache rsync; else echo 'Unsupported package manager; install rsync with recursive, permissions, timestamps and partial-dir support in the image' >&2; exit 1; fi; rsync --recursive --times --perms --partial --partial-dir=.move-partial --version >/dev/null";
+    CommandPlan {
+        description: "install EC2 Move transport".into(),
+        commands: vec![
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec!["sh".into(), "-c".into(), script.into()],
+            )
+            .purpose("install supported rsync")
+            .stage(ProvisionStage::Provisioning),
+        ],
+    }
+}

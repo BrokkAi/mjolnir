@@ -15,7 +15,7 @@ fn slow_operation_warning_after(request: &RelayRequest) -> Duration {
 }
 
 impl RelayClient {
-    pub(super) async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
+    pub async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
         // Memory RPCs include filesystem work and worker-side queueing. Neither
         // has a measured deadline; lifecycle cancellation still interrupts them.
         let timeout = match &request {

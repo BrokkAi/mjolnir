@@ -94,6 +94,20 @@ impl DashboardContext {
         {
             self.capture_composer_draft(&session);
             self.save_question_draft(&session);
+            let parked = self.dashboard.standby_question_drafts(&session);
+            if !parked.is_empty() {
+                let ordinal = self
+                    .chats
+                    .get(&session)
+                    .map_or(0, |chat| chat.latest_event_ordinal());
+                self.question_drafts
+                    .entry(session.clone())
+                    .or_default()
+                    .extend(parked.into_iter().map(|draft| CachedQuestionDraft {
+                        draft,
+                        captured_event_ordinal: ordinal,
+                    }));
+            }
             if let Some(text) = self.dashboard.take_standby_prompt_draft(&session) {
                 self.composer_drafts.capture(
                     &session,

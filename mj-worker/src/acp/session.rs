@@ -1,5 +1,10 @@
 use super::*;
 
+/// The name the worker gives an agent as its ACP client. It is the name of
+/// the package that ships the worker program, which this library was once
+/// part of; agents and their logs have always seen this name.
+const CLIENT_NAME: &str = "brokk-mj-worker";
+
 /// Record possible native history only when the prompt is ready to be sent.
 async fn record_prompt_use(
     opened: &Arc<Mutex<Option<OpenedSession>>>,
@@ -172,8 +177,7 @@ pub(super) async fn serve_session(
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1)
                 .client_info(
-                    Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-                        .title("Mjolnir"),
+                    Implementation::new(CLIENT_NAME, env!("CARGO_PKG_VERSION")).title("Mjolnir"),
                 )
                 .client_capabilities(capabilities),
         )
@@ -241,6 +245,21 @@ pub(super) async fn serve_session(
             agent_info: initialized.agent_info.clone(),
             steering_supported: Some(steering_supported),
         },
+    )
+    .await?;
+
+    let mcp_available = !spec.harness.mcp_servers_need_advertised_http()
+        || initialized.agent_capabilities.mcp_capabilities.http;
+    let instructions = instructions::compose(spec, mcp_available, events).await?;
+    let system_prompt = instructions::deliver(
+        spec,
+        &initialized.agent_capabilities,
+        initialized
+            .agent_info
+            .as_ref()
+            .map(|info| info.version.as_str()),
+        instructions,
+        events,
     )
     .await?;
 
@@ -339,7 +358,12 @@ pub(super) async fn serve_session(
         {
             // `session/resume` does not replay, so everything it sends is live.
             accept_live_history(live_history_enabled);
-            let request = resume_session_request(spec, &directories.accepted, session_id.clone());
+            let request = resume_session_request(
+                spec,
+                &directories.accepted,
+                session_id.clone(),
+                system_prompt.clone(),
+            );
             offered_mcp_servers = request.mcp_servers.len();
             let resumed = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -347,7 +371,12 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("resume ACP session {existing}"))
                 .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
-            let request = load_session_request(spec, &directories.accepted, session_id.clone());
+            let request = load_session_request(
+                spec,
+                &directories.accepted,
+                session_id.clone(),
+                system_prompt.clone(),
+            );
             offered_mcp_servers = request.mcp_servers.len();
             let loaded = load_at_replay_boundary(
                 connection,
@@ -431,39 +460,40 @@ pub(super) async fn serve_session(
     } else {
         None
     };
-    let (session_id, config_options, modes, resumed) =
-        if let Some((id, options, modes)) = loaded_session {
-            (id, options, modes, true)
-        } else {
-            // A new native session has no history to replay, whether this is a
-            // first launch or a resume that replaced an unused session. Without
-            // this, a fallback from a failed reload dropped every reply the new
-            // session sent for the rest of the worker's life (R8-1).
-            accept_live_history(live_history_enabled);
-            let request = new_session_request(spec, &directories.accepted, true);
-            offered_mcp_servers = request.mcp_servers.len();
-            let created = connection.send_request(request).block_task().await;
-            spec.acp_activity.mark();
-            let created = created.context("create ACP session")?;
-            if capability.is_some()
-                && let Some(meta) = created.meta.as_ref()
-            {
-                goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
-            }
-            // A session may open on a different model than the agent-wide
-            // default, so a fresher catalogue on the session wins.
-            if let Some(state) = grok_models.as_mut()
-                && let Some(fresh) = grok::model_state(created.meta.as_ref())
-            {
-                *state = fresh;
-            }
-            (
-                created.session_id,
-                created.config_options,
-                created.modes,
-                false,
-            )
-        };
+    let (session_id, config_options, modes, resumed) = if let Some((id, options, modes)) =
+        loaded_session
+    {
+        (id, options, modes, true)
+    } else {
+        // A new native session has no history to replay, whether this is a
+        // first launch or a resume that replaced an unused session. Without
+        // this, a fallback from a failed reload dropped every reply the new
+        // session sent for the rest of the worker's life (R8-1).
+        accept_live_history(live_history_enabled);
+        let request = new_session_request(spec, &directories.accepted, true, system_prompt.clone());
+        offered_mcp_servers = request.mcp_servers.len();
+        let created = connection.send_request(request).block_task().await;
+        spec.acp_activity.mark();
+        let created = created.context("create ACP session")?;
+        if capability.is_some()
+            && let Some(meta) = created.meta.as_ref()
+        {
+            goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
+        }
+        // A session may open on a different model than the agent-wide
+        // default, so a fresher catalogue on the session wins.
+        if let Some(state) = grok_models.as_mut()
+            && let Some(fresh) = grok::model_state(created.meta.as_ref())
+        {
+            *state = fresh;
+        }
+        (
+            created.session_id,
+            created.config_options,
+            created.modes,
+            false,
+        )
+    };
     // OpenCode before 2.2.6 reloads its tool registry on a 100 ms debounce
     // after an MCP server connects, and signals nobody when it is done. A
     // prompt that starts a turn inside that window misses the `mj-agents` and
@@ -488,10 +518,7 @@ pub(super) async fn serve_session(
     // reviewer does not: it is told to inspect the change with its analyzer
     // tools, and reviewing without them is the degraded review the review
     // design refuses.
-    if offered_mcp_servers > 0
-        && spec.harness.mcp_servers_need_advertised_http()
-        && !initialized.agent_capabilities.mcp_capabilities.http
-    {
+    if offered_mcp_servers > 0 && !mcp_available {
         let remedy = format!(
             "Managed targets install muse-acp {}; on a container target, suspend and resume the session once its agent-dev image has updated",
             mj_core::harness_runtime::MUSE_ACP_VERSION
@@ -717,24 +744,6 @@ pub(super) async fn serve_session(
         };
         emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
     }
-    let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
-        if let Some(memory) = spec.project_memory.clone() {
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    mj_core::project_memory::startup_prompt_context(
-                        &mj_core::project_memory::ProjectMemoryStore::new(&memory.root),
-                        &memory.repository_roots,
-                    )
-                })
-                .await
-                .context("load project memory after clear")??,
-            )
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     // Startup failures must retain their cause rather than being classified
     // as a dead running bridge and retried with the same invalid settings.
     *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
@@ -765,7 +774,7 @@ pub(super) async fn serve_session(
             RuntimeEvent::ContextCleared {
                 request_id: reset.request_id.clone(),
                 native_session_id: session_id.to_string(),
-                memory,
+                memory: None,
             },
         )
         .await?;
@@ -1482,7 +1491,7 @@ pub(super) async fn serve_session(
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
                                     let outcome = cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
                                         .map_err(|error| format!("cancel ACP prompt: {error}"));
-                                    drop(permission);
+                                    permission.cancel();
                                     if outcome.is_ok() && cancel_deadline.is_none() {
                                         cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }

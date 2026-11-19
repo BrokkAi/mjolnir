@@ -5,6 +5,30 @@ use crossterm::event::{Event, MouseEvent};
 use crate::{DashboardAction, DashboardState, Mode};
 
 impl DashboardState {
+    /// Global commands disarm every chat presentation, including warm forms
+    /// whose session differs from the focused conversation.
+    pub fn cancel_all_component_pointers(
+        &mut self,
+        chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+    ) {
+        self.cancel_component_pointer();
+        for chat in chats.values_mut() {
+            chat.cancel_component_pointer();
+        }
+    }
+
+    /// Focus loss is broadcast to every presentation, including warm cards
+    /// outside the focused conversation.
+    pub fn prepare_component_event(
+        &mut self,
+        event: &Event,
+        chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+    ) {
+        if matches!(event, Event::FocusLost) {
+            self.cancel_all_component_pointers(chats);
+        }
+    }
+
     pub(crate) fn dialog_layer_key(&self) -> String {
         let detail = self
             .active_modal()
@@ -44,6 +68,11 @@ impl DashboardState {
     /// Whether the open mode routes events away from the dashboard.
     pub(crate) fn component_modal_open(&self) -> bool {
         self.away_dialog().is_some() || !matches!(self.mode, Mode::Dashboard)
+    }
+
+    /// An already pressed dashboard control owns its drag and release.
+    pub fn component_pointer_captured(&self) -> bool {
+        self.surface_form.borrow().captures_pointer() || self.workspace_scrollbar.is_dragging()
     }
 
     /// Whether a form owns this pointer event, ahead of selectable body text.
@@ -95,6 +124,7 @@ impl DashboardState {
     }
 
     pub(crate) fn reset_component_geometry(&mut self) {
+        self.notifications.form_area = None;
         self.surface_form.get_mut().reset_geometry();
         if let Some(modal) = self.active_modal_mut() {
             modal.reset_geometry();

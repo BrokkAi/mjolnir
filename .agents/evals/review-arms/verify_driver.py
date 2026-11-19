@@ -48,6 +48,9 @@ p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
+# Judge rounds normally run both judges with one model; --judges A (or B) runs one side, so the
+# two judges of a batch can use different models in two invocations (brief/PLAN-bifrost-oracle-strict.md).
+p.add_argument("--judges", default="A,B", help="judge: which of judges A and B this invocation runs")
 p.add_argument("--quota-scope", help="model pool for REVIEW_ARMS_QUOTA_FLOOR (for example gemini)")
 # Any mj target: each session gets SPEC.md and its batch uploaded into its workspace (INPUT), so the
 # session reads nothing of this host's filesystem and cannot reach the eval's results.
@@ -71,24 +74,56 @@ V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
 SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
                                   "rev-parse", "--show-toplevel"], text=True).strip()
-if not REPO.exists():
+def ensure_checkout():
+    """Builds the blinded verifier checkout once. Concurrent drivers (for example the A and B judge
+    sides) serialize on a lock, and the checkout is built in a temporary directory and renamed into
+    place only after the blinding check, so no driver can use a partial or unblinded checkout."""
+    import fcntl
+    import shutil
     REPO.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", "--no-local", SOURCE, str(REPO)], check=True)
-    for cmd in (["checkout", "-q", "--detach", a.repo_commit], ["branch", "-f", "master", a.repo_commit],
-                ["checkout", "-q", "master"], ["remote", "remove", "origin"],
-                ["reflog", "expire", "--expire=now", "--all"], ["gc", "-q", "--prune=now"]):
-        subprocess.run(["git", "-C", str(REPO), *cmd], check=True)
-    assert subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", "HEAD:.agents/evals"],
-                          capture_output=True).returncode != 0, "verifier checkout contains the eval results"
+    with open(REPO.parent / ".repo-setup.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        if REPO.exists():
+            return
+        tmp = REPO.with_name(REPO.name + f".building.{os.getpid()}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        subprocess.run(["git", "clone", "-q", "--no-local", SOURCE, str(tmp)], check=True)
+        for cmd in (["checkout", "-q", "--detach", a.repo_commit], ["branch", "-f", "master", a.repo_commit],
+                    ["checkout", "-q", "master"], ["remote", "remove", "origin"],
+                    ["reflog", "expire", "--expire=now", "--all"], ["gc", "-q", "--prune=now"]):
+            subprocess.run(["git", "-C", str(tmp), *cmd], check=True)
+        if subprocess.run(["git", "-C", str(tmp), "cat-file", "-e", "HEAD:.agents/evals"],
+                          capture_output=True).returncode == 0:
+            raise SystemExit("verifier checkout contains the eval results")
+        tmp.rename(REPO)
+
+
+ensure_checkout()
 for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
     (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
 WORKSPACE_RECORD = ROOT / "default-instance/verify/workspace.json"
-if not WORKSPACE_RECORD.exists():  # creates the workspace, or selects one with this name
-    WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
-    WORKSPACE_RECORD.write_bytes(r.stdout)
+
+
+def ensure_workspace():
+    """Creates or selects the verifier workspace once, under the same lock as the checkout, and
+    publishes its record atomically so a concurrent driver never reads a partial file."""
+    import fcntl
+    REPO.parent.mkdir(parents=True, exist_ok=True)
+    with open(REPO.parent / ".repo-setup.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        if WORKSPACE_RECORD.exists():
+            return
+        WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"],
+                           capture_output=True, check=True)
+        tmp = WORKSPACE_RECORD.with_name(f"workspace.{os.getpid()}.tmp")
+        tmp.write_bytes(r.stdout)
+        os.replace(tmp, WORKSPACE_RECORD)
+
+
+ensure_workspace()
 WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
 
 
@@ -210,16 +245,57 @@ def fetch_output(sid):
 
 
 def run(batch_path, judge=None):
+    """One unit (a task, or one judge side of a batch), owned by exactly one invocation at a time."""
+    import fcntl
+    n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
+    tag = n if judge is None else f"{n}-{judge}"
+    with open(V / "sessions" / f"unit-{tag}.lock", "w") as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(f"unit {tag} is being run by another invocation") from None
+        return run_unit(batch_path, judge)
+
+
+def run_unit(batch_path, judge=None):
     n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
     tag = n if judge is None else f"{n}-{judge}"
     out_path = V / "out" / (f"task-{n}.json" if a.kind == "task" else
                             f"verify-out-{n}.json" if judge is None else f"verdicts-{tag}.json")
     rec_path = V / "sessions" / f"batch-{tag}.json"
     if out_path.exists():
+        # An existing output from another model is not this invocation's result: say so rather than
+        # republish it (for example judge B first run on Opus, then rerun with --model gpt-6.1-sol).
+        producer = json.loads(out_path.read_text()).get("producer") or {}
+        made_by = (producer.get("config") or {}).get("model")
+        made_on = producer.get("profile")
+        # A split-judge invocation pins one side's model, so an output that predates producer records
+        # cannot show it matches. Unknown and mismatched producers are both ineligible.
+        unknown = not producer and a.kind == "judge" and len(JUDGES) == 1
+        if unknown or (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
+            # Mark the unit ineligible and retire any aggregate in one serialized step, so no collector
+            # reads verdicts this check rejects.
+            import fcntl
+            with open(V / "workflow-out.lock", "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by] if producer else None,
+                                                                      "requested": [PROFILES, a.model]}})
+                (V / "workflow-out.json").unlink(missing_ok=True)
+            raise RuntimeError(f"unit {tag} already has output from "
+                               f"{f'{made_on}/{made_by}' if producer else 'an unrecorded producer'}, not "
+                               f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
+                               f"sessions/batch-{tag}.json aside to rerun it")
+        # The cached output matches this invocation, so any earlier invalid marker for it is stale.
+        (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
         return tag, "done"
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
         sid = rec["session_id"]
+        # A session set up for another model or profile is not this invocation's unit to resume.
+        recorded_model = (rec.get("config") or {}).get("model")
+        if (recorded_model is not None and recorded_model != a.model) or rec.get("profile") not in PROFILES:
+            raise RuntimeError(f"unit {tag} has a session for {rec.get('profile')}/{recorded_model}, not "
+                               f"{','.join(PROFILES)}/{a.model}; move sessions/batch-{tag}.json aside to rerun it")
     else:
         profile = pick_profile()
         if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
@@ -255,6 +331,10 @@ def run(batch_path, judge=None):
                     time.sleep(10)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
         assert cfg.get("model") == a.model and cfg.get("effort") == "high", cfg
+        # Record the model before sending the prompt: a turn accepted before an interruption keeps
+        # its true model, and the resume guard above then compares against it.
+        rec = {**rec, "config": cfg}
+        save(rec_path, rec)
         upload_inputs(sid, batch_path)
         # A stable command ID makes a resend after an interrupted run the same request,
         # which mj accepts once, instead of a second verifier turn.
@@ -262,15 +342,17 @@ def run(batch_path, judge=None):
         if len(cid) > 64:  # mj accepts 1-64 characters (mj-core config::loading::validate_id)
             cid = f"review-arms-{hashlib.sha256(cid.encode()).hexdigest()[:24]}-{sid[:12]}"
         mj("message", "--session", sid, "--command-id", cid, "--prompt-file", prompt)
-        rec = {**rec, "config": cfg, "prompted": time.time_ns()}
+        rec = {**rec, "prompted": time.time_ns()}
         save(rec_path, rec)
         time.sleep(30)
     while True:
         s = session(sid)
-        if s.get("attention") == "needs_input":
-            raise RuntimeError(f"verifier {sid} is waiting for input (permission request?)")
+        # A finished turn is done even if the end-of-turn attention classifier marks it needs_input
+        # (it does for a closing summary); only an open turn waiting for input blocks.
         if s.get("is_idle") and s.get("last_turn_outcome"):
             break
+        if s.get("attention") == "needs_input":
+            raise RuntimeError(f"verifier {sid} is waiting for input (permission request?)")
         time.sleep(60)
     if ((s["last_turn_outcome"].get("outcome") or {}).get("stop_reason")) == "QuotaLimit":
         # The provider stopped the turn; a partial pass is not a verification. Set the
@@ -281,17 +363,34 @@ def run(batch_path, judge=None):
         mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
         rec_path.rename(V / "sessions" / f"quota-batch-{tag}-{sid[:12]}.json")
         print(json.dumps({"batch": tag, "state": "quota", "session": sid, "profile": s.get("profile_id")}), flush=True)
-        return run(batch_path, judge)
+        return run_unit(batch_path, judge)
     out = fetch_output(sid)
     problems = {} if a.kind == "task" else check(batch_path, out)
     if any(problems.values()):
         save(V / "out" / f"invalid-{tag}.json", {"session_id": sid, "problems": problems})
         raise RuntimeError(f"batch {tag} output does not cover its items exactly once: "
                            f"{ {k: len(v) for k, v in problems.items()} }")
+    # Check who produced the result before exposing it anywhere a collector reads: the profile the
+    # session was on when its turn completed (quota recovery can move it) and the recorded model.
+    producer = {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
+                "launch_profile": rec.get("profile"), "config": rec.get("config")}
+    made_on, made_by = producer["profile"], (rec.get("config") or {}).get("model")
+    if made_on not in PROFILES or made_by != a.model:
+        import fcntl
+        with open(V / "workflow-out.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
+                                                                  "requested": [PROFILES, a.model]},
+                                                     "session_id": sid})
+            (V / "workflow-out.json").unlink(missing_ok=True)
+        raise RuntimeError(f"unit {tag} finished on {made_on}/{made_by}, not {','.join(PROFILES)}/{a.model}")
     if a.kind == "task":
         (batch_path / a.output).write_text(out["text"])
         out = {"output": str(batch_path / a.output), "session_id": sid}
+    out = {**out, "producer": producer}
     save(out_path, out)
+    # A valid replacement makes the unit eligible again.
+    (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
     mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
     return tag, "done"
 
@@ -300,7 +399,20 @@ if a.kind == "task":
     batches = sorted(d for d in V.iterdir() if d.is_dir() and (d / "INSTRUCTIONS.md").exists())
 else:
     batches = sorted(V.glob("batch-*.json"), key=lambda f: int(f.stem.split("-")[1]))
-units = [(b, j) for b in batches for j in (["A", "B"] if a.kind == "judge" else [None])]
+JUDGES = a.judges.split(",")
+if a.kind == "judge" and (not JUDGES or set(JUDGES) - {"A", "B"} or len(set(JUDGES)) != len(JUDGES)):
+    p.error("--judges must name A, B or both")
+units = [(b, j) for b in batches for j in (JUDGES if a.kind == "judge" else [None])]
+if a.kind == "judge":
+    import fcntl
+    # A judge output that is absent (never run, or moved aside for a rejudge) makes the combined
+    # aggregate stale: retire it under the aggregate lock so no collector reads the old round.
+    with open(V / "workflow-out.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        if not all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
+                   and not (V / "out" / f"invalid-{b.stem.split('-')[1]}-{j}.json").exists()
+                   for b in batches for j in ("A", "B")):
+            (V / "workflow-out.json").unlink(missing_ok=True)
 failed = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
     futures = {pool.submit(run, b, j): (b, j) for b, j in units}
@@ -311,11 +423,26 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
         except Exception as e:  # report every failure with its batch
             failed += 1
             b, j = futures[f]
-            print(json.dumps({"batch": b.stem + (f"-{j}" if j else ""), "state": "failed", "error": str(e)}),
-                  flush=True)
+            import traceback
+            print(json.dumps({"batch": b.stem + (f"-{j}" if j else ""), "state": "failed", "error": str(e),
+                              "traceback": "".join(traceback.format_exception(e))[-2000:]}), flush=True)
+both = [(b, j) for b in batches for j in ("A", "B")]
 if a.kind == "judge" and not failed:
-    # The input brief_score.py collect reads (it was written by brief/workflow-judge.js before).
-    verdicts = [{**v, "judge": j} for b, j in units
-                for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").read_text())["verdicts"]]
-    save(V / "workflow-out.json", {"verdicts": verdicts, "missing": []})
+    import fcntl
+    # One serialized decision point: under an exclusive lock, check that both judges' verdicts are
+    # present, read them, and replace the aggregate. A concurrent A or B invocation (or a rejudge)
+    # therefore publishes from the verdict files as they are when it holds the lock, never a stale
+    # read taken before another invocation's publication.
+    with open(V / "workflow-out.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        # Publish only when both sides have output and neither side is marked ineligible.
+        if all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
+               and not (V / "out" / f"invalid-{b.stem.split('-')[1]}-{j}.json").exists() for b, j in both):
+            verdicts = [{**v, "judge": j} for b, j in both
+                        for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json")
+                                            .read_text())["verdicts"]]
+            target = V / "workflow-out.json"
+            tmp = target.with_name(f"workflow-out.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"verdicts": verdicts, "missing": []}, indent=2) + "\n")
+            os.replace(tmp, target)
 raise SystemExit(1 if failed else 0)

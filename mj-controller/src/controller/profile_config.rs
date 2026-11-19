@@ -48,8 +48,8 @@ pub(crate) async fn discover_for(
 /// Validate the session's straightforward choice, and its subtle choice when
 /// it has one, against enabled profiles. Subtle is optional; straightforward
 /// is not. A YOLO target reads its own set of choices.
-pub(crate) async fn validate_session_subagent_policy(
-    catalog: &Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
+pub async fn validate_session_subagent_policy(
+    catalog: &Arc<crate::profile_catalog::ProfileCatalog>,
     config: &Config,
     profile_id: &str,
     policy: &mj_core::subagent::SubagentPolicy,
@@ -134,7 +134,7 @@ pub(crate) async fn validate_session_subagent_policy(
     Ok(())
 }
 
-pub(crate) async fn subagent_options_with<F, Fut>(
+pub async fn subagent_options_with<F, Fut>(
     config: &Config,
     parent: &str,
     model: Option<String>,
@@ -335,7 +335,7 @@ where
 
 /// What a session's worker must show before its observed choices are cached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ObservationCheck {
+pub enum ObservationCheck {
     /// Its build matches the local probe binary, so it reports what a probe
     /// would.
     ProbeBuild,
@@ -347,9 +347,7 @@ pub(crate) enum ObservationCheck {
 /// The one decision of whose observations may fill the profile cache. Where
 /// a probe can run, only a managed bare worker that matches it may;
 /// container and ambient installations cannot establish that match.
-pub(crate) fn observation_check(
-    target: &mj_core::state::TargetLocator,
-) -> Option<ObservationCheck> {
+pub fn observation_check(target: &mj_core::state::TargetLocator) -> Option<ObservationCheck> {
     use mj_core::state::TargetLocator;
     if !mj_core::targets::HOST_RUNS_WORKERS {
         return Some(ObservationCheck::NoProbe);
@@ -365,7 +363,7 @@ pub(crate) fn observation_check(
 
 /// Cache the choices a session's worker reports, when `check` allows it.
 /// Returns whether anything was cached.
-pub(crate) async fn observe(
+pub async fn observe(
     profile_id: String,
     worker_build: String,
     state: mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
@@ -410,7 +408,7 @@ pub(crate) async fn observe(
                     },
                     &executor,
                 )?;
-                if mj_core::worker_build::WORKER_BUILD_ID != worker_build {
+                if mj_core::worker_build::worker_build_id() != worker_build {
                     return Ok(choices);
                 }
             }
@@ -530,7 +528,7 @@ fn is_current_at(choices: &ProfileConfig, now: i64) -> bool {
 /// its last known choices instead of losing them. Production discovery uses
 /// [`resolve_cached_discovery`], which also reports whether the harness ran;
 /// this wrapper remains for its unit tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn resolve_cached(
     refresh: bool,
     current: impl FnOnce(&ProfileConfig) -> bool,
@@ -709,7 +707,7 @@ fn choice_key(profile: &str, model: &Option<String>, fingerprint: &str) -> Choic
 }
 
 /// Each profile's most recently observed model list.
-pub(crate) fn advertised_models() -> BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> {
+pub fn advertised_models() -> BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> {
     let choices = CHOICES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -750,7 +748,7 @@ mod tests {
     // Hard-won: #1534 review: a first-listed older alias hid the newer profile during admission.
     #[tokio::test]
     async fn subagent_options_preserve_versions_sharing_the_same_launch_alias() {
-        let config = crate::server_runtime::profile_catalog::test_config(&[
+        let config = crate::profile_catalog::test_config(&[
             ("a-stale", mj_core::config::HarnessKind::Claude),
             ("newer", mj_core::config::HarnessKind::Claude),
         ]);
@@ -815,7 +813,7 @@ mod tests {
     /// later selection cannot find.
     #[tokio::test]
     async fn subagent_options_offer_only_models_the_profile_list_allows() {
-        let mut config = crate::server_runtime::profile_catalog::test_config(&[(
+        let mut config = crate::profile_catalog::test_config(&[(
             "gateway",
             mj_core::config::HarnessKind::Codex,
         )]);
@@ -1056,9 +1054,7 @@ mod tests {
                 })),
             };
             let result = validate_session_subagent_policy(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                    CancellationToken::new(),
-                ),
+                &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
                 &draft,
                 "unsaved",
                 &policy,
@@ -1076,7 +1072,7 @@ mod tests {
             }
         }
         validate_session_subagent_policy(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
+            &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1092,7 +1088,7 @@ mod tests {
         .unwrap();
         // Subtle is optional: the straightforward choice alone is enough.
         validate_session_subagent_policy(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
+            &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1105,7 +1101,7 @@ mod tests {
         .unwrap();
         draft.subagents.straightforward = None;
         let missing = validate_session_subagent_policy(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
+            &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1127,11 +1123,10 @@ mod tests {
             missing.to_string().contains("[subagents.straightforward]"),
             "subtle alone is never enough: {missing:#}"
         );
-        let options =
-            crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new())
-                .options_for(&draft, "unsaved", Some("chosen".into()))
-                .await
-                .unwrap();
+        let options = crate::profile_catalog::ProfileCatalog::new(CancellationToken::new())
+            .options_for(&draft, "unsaved", Some("chosen".into()))
+            .await
+            .unwrap();
         assert_eq!(options.models, catalog.models);
         assert_eq!(options.efforts, catalog.efforts);
         assert!(options.unavailable.is_empty());
@@ -1743,7 +1738,7 @@ mod tests {
         });
         config.subagents.use_same_on_all_targets = false;
         let error = validate_session_subagent_policy(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
+            &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &config,
             "parent",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1791,9 +1786,7 @@ mod tests {
                 },
             );
             let error = validate_session_subagent_policy(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                    CancellationToken::new(),
-                ),
+                &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1822,9 +1815,7 @@ mod tests {
             // None asks for no Mjolnir sub-agents at all; every harness
             // accepts it, including one without delegation tools (#1284).
             validate_session_subagent_policy(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                    CancellationToken::new(),
-                ),
+                &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::None,
@@ -1835,9 +1826,7 @@ mod tests {
             // Native keeps a harness's own sub-agents; DSH has none, so an
             // explicit Native is refused with the two choices it offers.
             let native = validate_session_subagent_policy(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                    CancellationToken::new(),
-                ),
+                &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Native,
@@ -1857,9 +1846,7 @@ mod tests {
                 );
                 // The default for an omitted policy is accepted.
                 validate_session_subagent_policy(
-                    &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                        CancellationToken::new(),
-                    ),
+                    &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
                     &config,
                     "parent",
                     &mj_core::subagent::SubagentPolicy::default_for(kind),

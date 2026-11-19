@@ -126,6 +126,8 @@ mod transport;
 use transport::*;
 mod credential_sync;
 pub use credential_sync::*;
+mod credential_targets;
+pub use credential_targets::*;
 
 /// Controller-side connection to the durable ACP relay protocol.
 ///
@@ -171,3 +173,7 @@ pub struct RelayClient {
 
 #[cfg(test)]
 mod tests;
+// Shared with mj-daemon's tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_fixtures;

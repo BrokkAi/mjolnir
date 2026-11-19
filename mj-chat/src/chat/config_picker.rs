@@ -346,6 +346,12 @@ impl ChatState {
         }
     }
 
+    pub(super) fn config_picker_pointer_captured(&self) -> bool {
+        self.config_picker
+            .as_ref()
+            .is_some_and(|picker| picker.form.captures_pointer())
+    }
+
     pub(super) fn cancel_config_picker_pointer(&mut self) {
         if let Some(picker) = self.config_picker.as_mut() {
             picker.form.cancel_pointer();

@@ -388,12 +388,78 @@ impl NotificationCard {
     }
 }
 
+/// Form provenance is explicit because harness request IDs are opaque.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardFormSource {
+    /// Older publishers did not distinguish requests from notification projections.
+    #[default]
+    Unknown,
+    Elicitation,
+    Native,
+    ReviewFindings,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardForm {
+    #[serde(default)]
+    pub source: CardFormSource,
     #[serde(default)]
     pub raised_at_ms: i64,
     pub request_id: String,
     pub message: String,
+}
+
+impl CardForm {
+    pub fn elicitation(
+        request: &mj_core::elicitation::ElicitationRequest,
+        raised_at_ms: i64,
+    ) -> Self {
+        Self {
+            source: CardFormSource::Elicitation,
+            raised_at_ms,
+            request_id: request.id.clone(),
+            message: request.message.clone(),
+        }
+    }
+
+    /// Native input is a notification projection served through its owner's
+    /// quick reply, rather than an elicitation on the owner chat.
+    pub fn native(
+        source: &str,
+        generation: u64,
+        request: &str,
+        raised_at_ms: i64,
+        message: String,
+    ) -> Self {
+        Self {
+            source: CardFormSource::Native,
+            raised_at_ms,
+            request_id: format!("native.{}:{source}.{generation}.{request}", source.len()),
+            message,
+        }
+    }
+
+    pub fn review_findings(reviewer: &str, raised_at_ms: i64, message: String) -> Self {
+        Self {
+            source: CardFormSource::ReviewFindings,
+            raised_at_ms,
+            request_id: format!("review-verdict.{reviewer}.findings"),
+            message,
+        }
+    }
+
+    /// Native input and completed findings are notification projections,
+    /// rather than an elicitation that the content session's chat can answer.
+    #[must_use]
+    pub fn requires_elicitation(&self) -> bool {
+        self.source == CardFormSource::Elicitation
+    }
+
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.source == CardFormSource::Native
+    }
 }
 
 /// A notify-once decision persisted alongside the Web Push item identity.
@@ -1041,6 +1107,7 @@ mod tests {
             dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 1 }),
             holder: Some("child".into()),
             form: Some(CardForm {
+                source: CardFormSource::Elicitation,
                 raised_at_ms: 2,
                 request_id: "request".into(),
                 message: "child form".into(),

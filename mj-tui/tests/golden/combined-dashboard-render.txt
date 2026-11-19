@@ -1555,3 +1555,377 @@ action: GoLaunch { recipe: GoRecipe { profile_id: "codex-1", target_id: "podman"
 │                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== notification form attaches in the background (120x44) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Question  podman  codex-1           ││                               ✦  M J O L N I R                               │
+│  │ Choose a path                     ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ Loading form…                                                                │
+│                                      ││ Choose a path                                                                │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?1) · b panes · : / ? palette
+
+=== compact form attachment status (120x8) ===
+╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│ Loading form…                                                                                                        │
+│ Choose a path                                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│ Go to Session   Clear & Next   Skip   Clear all ! (0)                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== notification form attachment fails visibly (120x44) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Question  podman  codex-1           ││                               ✦  M J O L N I R                               │
+│  │ Choose a path                     ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ Could not load form: Worker unavailable. Use Go to Session to answer it      │
+│                                      ││ there.                                                                       │
+│                                      ││ Choose a path                                                                │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?1) · b panes · : / ? palette
+
+=== compact form attachment status (120x8) ===
+╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│ Could not load form: Worker unavailable. Use Go to Session to answer it there.                                       │
+│ Choose a path                                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│ Go to Session   Clear & Next   Skip   Clear all ! (0)                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== notification and conversation share an inline form (120x44) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯│                                                                             ▐│
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                             ▐│
+│ Create   Open   Filter: _____________││                                                                             ▐│
+│hel ──────────────────────────────────││                                                                             ▐│
+│› ? ACP pretty name               ◇ ⋯ ││                                                                             ▐│
+│  Question  podman  codex-1           ││                                                                             ▐│
+│  │ Choose a path                     ││                                                                             ▐│
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│                                      ││Which deployment path should be used?                                         │
+│                                      ││Keep the question visible on short terminals.                                 │
+│                                      ││                                                                              │
+│                                      ││>                                                                             │
+│                                      ││  Answer & Next     Previous     Cancel                                       │
+│                                      ││                                                                              │
+│                                      ││Click to answer                                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
+│                                      ││ │Which deployment path should be used?                                     │ │
+│                                      ││ │Keep the question visible on short terminals.                             │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Choose a path                                                             │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │>                                                                         │ │
+│                                      ││ │  Answer & Next     Previous     Cancel                                   │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ question│ │
+│                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
+
+=== inline form keeps dismissal failure visible (120x44) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯│                                                                             ▐│
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                             ▐│
+│ Create   Open   Filter: _____________││                                                                             ▐│
+│hel ──────────────────────────────────││                                                                             ▐│
+│› ? ACP pretty name               ◇ ⋯ ││                                                                             ▐│
+│  Question  podman  codex-1           ││                                                                             ▐│
+│  │ Choose a path                     ││                                                                             ▐│
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│                                      ││Which deployment path should be used?                                         │
+│                                      ││Keep the question visible on short terminals.                                 │
+│                                      ││                                                                              │
+│                                      ││>                                                                             │
+│                                      ││  Answer & Next     Previous     Cancel                                       │
+│                                      ││                                                                              │
+│                                      ││Click to answer                                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││? ACP pretty name · hel · age unknown 2 of 2 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
+│                                      ││ │Which deployment path should be used?                                     │ │
+│                                      ││ │Keep the question visible on short terminals.                             │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Choose a path                                                             │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │>                                                                         │ │
+│                                      ││ │  Answer & Next     Previous     Cancel                                   │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ question│ │
+│                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰ Could not clear: permission denied ──────────────────────────────────────────╯
+Could not dismiss 1 notification: permission denied
+
+=== short notification form keeps the dashboard usable (120x21) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions ───────────────── ▁   ▄   □ ╮╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│ Create   Open   Filter: _____________││Which deployment path should be used?  >                                      │
+│hel ──────────────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
+│› ? ACP pretty name               ◇ ⋯ │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Question  podman  codex-1           ││  Host / fleet  Targets  CPU  RAM                                             │
+│  │ Choose a path                     │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        ▐
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
+│                                      ││ │Which deployment path should be used?                                     │ │
+│                                      ││ │>                                                                         │ │
+│                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
+
+=== short notification form keeps the dashboard usable (120x25) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions ───────────────── ▁   ▄   □ ╮╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│ Create   Open   Filter: _____________││Which deployment path should be used?  >                                      │
+│hel ──────────────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
+│› ? ACP pretty name               ◇ ⋯ │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Question  podman  codex-1           ││  Host / fleet  Targets  CPU  RAM                                             │
+│  │ Choose a path                     │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        ▐
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
+│                                      ││ │Which deployment path should be used?                                     │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │>                                                                         │ │
+│                                      ││ │  Answer & Next     Previous     Cancel                                   │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt│ │
+│                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
+
+=== standard notification form keeps its question readable (120x31) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯│                                                                             ▐│
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                             ▐│
+│ Create   Open   Filter: _____________│╰──────────────────────────────────────────────────────────────────────────────╯
+│hel ──────────────────────────────────│╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│› ? ACP pretty name               ◇ ⋯ ││Which deployment path should be used?                                         │
+│  Question  podman  codex-1           ││>                                                                             │
+│  │ Choose a path                     │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
+│                                      ││ │Which deployment path should be used?                                     │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │>                                                                         │ │
+│                                      ││ │  Answer & Next     Previous     Cancel                                   │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt│ │
+│                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
+
+=== standard notification form keeps its question readable (120x39) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯│                                                                             ▐│
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                             ▐│
+│ Create   Open   Filter: _____________││                                                                             ▐│
+│hel ──────────────────────────────────││                                                                             ▐│
+│› ? ACP pretty name               ◇ ⋯ ││                                                                             ▐│
+│  Question  podman  codex-1           ││                                                                             ▐│
+│  │ Choose a path                     │╰──────────────────────────────────────────────────────────────────────────────╯
+│  │                                   │╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│                                      ││Which deployment path should be used?                                         │
+│                                      ││                                                                              │
+│                                      ││>                                                                             │
+│                                      ││  Answer & Next     Previous     Cancel                                       │
+│                                      ││                                                                              │
+│                                      ││Click to answer                                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
+│                                      ││ │Which deployment path should be used?                                     │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │>                                                                         │ │
+│                                      ││ │  Answer & Next     Previous     Cancel                                   │ │
+│                                      ││ │                                                                          │ │
+│                                      ││ │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt│ │
+│                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
+
+=== minimized notification measures its warm expanded form (120x44) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Conversation ──────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
+╰──────────────────────────────────────╯│                                                                             ▐│
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                             ▐│
+│ Create   Open   Filter: _____________││                                                                             ▐│
+│hel ──────────────────────────────────││                                                                             ▐│
+│› ? ACP pretty name               ◇ ⋯ ││                                                                             ▐│
+│  Question  podman  codex-1           ││                                                                             ▐│
+│  │ Choose a path                     ││                                                                             ▐│
+│  │                                   ││                                                                             ▐│
+│                                      ││                                                                             ▐│
+│                                      ││                                                                             ▐│
+│                                      ││                                                                             ▐│
+│                                      ││                                                                             ▐│
+│                                      ││                                                                             ▐│
+│                                      ││                                                                             ▐│
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
+│                                      ││Choose a deployment target                                                    │
+│                                      ││                                                                              │
+│                                      ││Choose a path                                                                 │
+│                                      ││● Deployment target 0                                                         │
+│                                      ││    Review this target before deploying                                       │
+│                                      ││○ Deployment target 1                                                         │
+│                                      ││○ Deployment target 2                                                         │
+│                                      ││○ Deployment target 3                                                         │
+│                                      ││○ Deployment target 4                                                         │
+│                                      ││○ Deployment target 5                                                         │
+│                                      ││○ Deployment target 6                                                         │
+│                                      ││  Answer & Next     Previous     Cancel                                       │
+│                                      ││                                                                              │
+│                                      ││Click to answer                                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+╰──────────────────────────────────────╯ Notifications (1) ────────────────────────────────────────────────── ▁   ▄   □
+Alt+g session · Ctrl+Enter send · Alt+s skip · Alt+↑ scroll · Enter send/session · Tab pane │ ctrl+b then : / ? palette

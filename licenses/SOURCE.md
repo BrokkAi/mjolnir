@@ -28,4 +28,4 @@ official pinned upstream artifacts rather than bundled with the application.
 The verified runtime cache contains its upstream license and third-party notice
 texts; Windows also retains the DirectML redistribution licenses beside its DLL.
 The source URLs, versions and checksums are in
-`mj-controller/src/github_student/runtime.json`.
+`mj-github-relevance/src/github_student/runtime.json`.

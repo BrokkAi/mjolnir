@@ -26,85 +26,123 @@ pub(super) fn reconnect_delay(failures: u32) -> Duration {
         .min(RECONNECT_BACKOFF_CEILING)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelaySessionTarget {
-    pub session_id: String,
-    pub spec: CommandSpec,
-    /// Prove the exact worker is absent before restarting it in place. Direct
-    /// relay clients omit recovery; controller-managed sessions self-heal
-    /// without turning a shared transport outage into destructive restarts.
-    pub worker_recovery: Option<WorkerRecoveryPlan>,
-    pub project_memory: Option<ProjectMemorySyncTarget>,
+#[derive(Default)]
+pub(super) struct StartingSessions(BTreeMap<String, StartingSessionPhase>);
+
+enum StartingSessionPhase {
+    Guarded,
+    AwaitingTarget,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectMemorySyncTarget {
-    pub canonical_root: std::path::PathBuf,
-}
+impl StartingSessions {
+    pub(super) fn reconcile_attached(&mut self, protocol: impl Fn(&str) -> Option<u32>) {
+        self.0.retain(|id, phase| {
+            matches!(phase, StartingSessionPhase::Guarded) || protocol(id).is_none()
+        });
+    }
 
-/// The working directory a bare-target worker must be able to enter before it
-/// can serve a relay handshake. Container availability is checked separately
-/// by the target recovery plan; bare targets have no runtime object to inspect.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerWorkspace {
-    pub target: mj_core::state::ManagedWorktreeTarget,
-    pub directory: PathBuf,
-}
+    pub(super) fn reconcile_committed(&mut self, state: &mj_core::state::State) {
+        self.0.retain(|id, phase| {
+            matches!(phase, StartingSessionPhase::Guarded)
+                || state
+                    .sessions
+                    .get(id)
+                    .is_some_and(|record| !record.archived)
+        });
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerRecoveryPlan {
-    /// Durable target identity when this plan was built. A stale actor must
-    /// never recover a resource after the session moves or starts destruction.
-    pub source_target: mj_core::state::TargetLocator,
-    pub target: Option<TargetRecoveryPlan>,
-    pub workspace: Option<WorkerWorkspace>,
-    /// Runs the control worker, so it installs it first.
-    pub liveness_probe: crate::targets::WorkerControlPlan,
-    /// Prints the dead worker's own exit record, read before a restart
-    /// replaces it, so a worker that died of a full disk is not restarted
-    /// onto the same full disk.
-    pub exit_record: Option<CommandSpec>,
-    /// Refresh a stale installed worker before restarting it. The digest is
-    /// computed inside the recovery task so hashing a large binary never
-    /// blocks a controller UI loop.
-    pub binary_refresh: Option<WorkerBinaryRefresh>,
-    /// Keep the worker executable and its launch schema paired. Configuration
-    /// bytes travel through redacted stdin only when their digest is stale.
-    pub launch_refresh: Option<WorkerLaunchRefreshPlan>,
-    pub restart: crate::targets::WorkerControlPlan,
-}
-
-/// How recovery refreshes a stale installed worker binary before restarting.
-///
-/// A caller with a known source can supply a prepared copy plan. Controller
-/// target planning always defers resolution: selecting the right architecture,
-/// downloading and hashing binaries belong in the background recovery task.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerBinaryRefresh {
-    Prepared(WorkerBinaryRefreshPlan),
-    Deferred(DeferredWorkerBinaryRefresh),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerBinaryRefreshPlan {
-    pub source: PathBuf,
-    pub installed_digest: CommandSpec,
-    pub replace: CommandPlan,
-}
-
-/// A worker refresh resolved at recovery time: select the worker binary
-/// for the target's own architecture, compare it to the installed one, and
-/// copy only when they differ.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeferredWorkerBinaryRefresh {
-    pub locator: TargetLocator,
-    pub session_id: String,
-    pub installed_digest: CommandSpec,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerLaunchRefreshPlan {
-    pub expected_sha256: String,
-    pub installed_digest: CommandSpec,
-    pub replace: CommandPlan,
+    pub(super) fn event(
+        &mut self,
+        event: StartingEvent,
+        view: Option<ManagedSessionView>,
+        committed: Option<&crate::database::CommittedState>,
+    ) {
+        use mj_client::session::ParentMessageRoute;
+        if let Some(committed) = committed {
+            self.reconcile_committed(&committed.state);
+        }
+        match event {
+            StartingEvent::Restore { session_id, reply } => {
+                let result = if let Some(committed) = committed {
+                    self.0
+                        .entry(session_id)
+                        .or_insert(StartingSessionPhase::AwaitingTarget);
+                    self.reconcile_committed(&committed.state);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "launch restoration requires the durable state feed"
+                    ))
+                };
+                let _ = reply.send(result);
+            }
+            StartingEvent::Register {
+                session_id,
+                launches,
+                reply,
+            } => {
+                let result = if committed.is_none() {
+                    Err(anyhow::anyhow!(
+                        "launch registration requires the durable state feed"
+                    ))
+                } else if let std::collections::btree_map::Entry::Vacant(entry) =
+                    self.0.entry(session_id)
+                {
+                    let session_id = entry.key().clone();
+                    entry.insert(StartingSessionPhase::Guarded);
+                    // The reply owns the guard until the creator receives it.
+                    // Dropping either side releases an uncommitted entry.
+                    Ok(StartingSessionRegistration {
+                        session_id: Some(session_id),
+                        launches,
+                    })
+                } else {
+                    Err(anyhow::anyhow!("session launch is already registered"))
+                };
+                let _ = reply.send(result);
+            }
+            StartingEvent::Published { session_id, reply } => {
+                let result = match (self.0.get_mut(&session_id), committed) {
+                    (Some(phase), Some(committed)) => {
+                        *phase = StartingSessionPhase::AwaitingTarget;
+                        // The writer publishes before replying to the commit. Read
+                        // its latest state here even if its watch coalesced failure
+                        // and removal before this handover reached the manager.
+                        self.reconcile_committed(&committed.state);
+                        Ok(())
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "session launch registration is unavailable"
+                    )),
+                };
+                let _ = reply.send(result);
+            }
+            StartingEvent::Aborted { session_id } => {
+                if self
+                    .0
+                    .get(&session_id)
+                    .is_some_and(|phase| matches!(phase, StartingSessionPhase::Guarded))
+                {
+                    self.0.remove(&session_id);
+                }
+            }
+            StartingEvent::Route { session_id, reply } => {
+                let protocol = view
+                    .as_ref()
+                    .and_then(|view| view.snapshot.as_ref())
+                    .and_then(|snapshot| snapshot.operational.relay_protocol_version);
+                let route = if let Some(protocol) = protocol {
+                    self.0.remove(&session_id);
+                    ParentMessageRoute::Published(Some(protocol))
+                } else if self.0.contains_key(&session_id) {
+                    ParentMessageRoute::Starting
+                } else if view.is_some() {
+                    ParentMessageRoute::Published(None)
+                } else {
+                    ParentMessageRoute::Unmanaged
+                };
+                let _ = reply.send(route);
+            }
+        }
+    }
 }

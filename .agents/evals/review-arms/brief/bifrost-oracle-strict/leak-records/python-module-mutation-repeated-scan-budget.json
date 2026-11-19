@@ -1,0 +1,50 @@
+{
+  "id": "python-module-mutation-repeated-scan-budget",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "missed",
+      "brief_sha256": "d26ea07d2cadc69238e9332175790aad34f2add18cebd0f2b802436e7945baec",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it notes per-base guard calls share the hierarchy budget, but never mentions repeated whole-module mutation scans or budget exhaustion producing incomplete ancestry.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes guarded hierarchy paths and their shared bounded session, but does not identify repeated full-module mutation scans consuming that budget or causing false incomplete hierarchy answers. Merely naming those guards and budgets does not meet the partial bar.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "missed",
+      "brief_sha256": "e9c09caca52783b41e5cdcf6db966b19ac3cc9297b4a100b455665daeb58e3d1",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "It describes class_hierarchy passing one shared bounded budget through runtime_source_bases to the module-binding guard. It never mentions repeated whole-module mutation scans per base or per name exhausting that budget, or a false incomplete hierarchy. Only the call path is named, with no mechanism or symptom.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces the shared hierarchy budget and module guards but never identifies repeated whole-file mutation scans or their exhaustion of that budget. Those routing facts alone do not describe the known answer-changing performance defect.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

@@ -58,9 +58,9 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use mj_controller::controller::update::StartupUpdateNotice;
-use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
+use mj_setup::setup::run_setup_command;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -564,7 +564,8 @@ enum SetupPlatform {
 fn main() -> Result<()> {
     // First, before any thread or child: every child inherits the limit.
     mj_core::subprocess::raise_open_file_limit();
-    mj_controller::server::install_rustls_crypto_provider();
+    mj_core::worker_build::install(mj_build_id::identity());
+    mj_daemon::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     if let Some(notice) = replacement_notice(cli.command.as_ref()) {
         // Exit 2, the status clap uses for a usage error, which this is.
@@ -705,7 +706,7 @@ fn mj_command(arguments: &str) -> String {
 /// A session as a stop or detach message names it.
 struct ListedSession {
     title: String,
-    lifecycle: mj_controller::server::ViewerLifecycleCategory,
+    lifecycle: mj_daemon::server::ViewerLifecycleCategory,
 }
 
 /// Every session that suspending stands for itself, in every workspace,
@@ -732,7 +733,7 @@ fn session_roots_from_projection(
     records: &mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord>,
     subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
 ) -> BTreeMap<String, ListedSession> {
-    use mj_controller::server::ViewerLifecycleCategory;
+    use mj_daemon::server::ViewerLifecycleCategory;
     let active = |id: &str| {
         records
             .get(id)
@@ -771,7 +772,7 @@ async fn active_sessions(
 /// leave the dashboard, and say how it ended. The daemon owns that operation
 /// and decides when it ends; this only reads its outcome.
 async fn await_stopping_session(session_id: &str) -> Result<&'static str> {
-    use mj_controller::server::ViewerLifecycleCategory;
+    use mj_daemon::server::ViewerLifecycleCategory;
     let mut client = daemon::connect_existing().await?;
     loop {
         let lifecycle = session_roots(&mut client)
@@ -819,20 +820,19 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
         // A suspension answers when it has ended, which takes as long as its
         // recovery copy, so each one has its own connection.
         jobs.spawn(async move {
-            let result = if session.lifecycle
-                == mj_controller::server::ViewerLifecycleCategory::Suspending
-            {
-                await_stopping_session(&id).await
-            } else {
-                async {
-                    daemon::connect_existing()
-                        .await?
-                        .suspend_session_with_ack(id, acknowledge_unpublished_work)
-                        .await
-                }
-                .await
-                .map(|()| "Suspended")
-            };
+            let result =
+                if session.lifecycle == mj_daemon::server::ViewerLifecycleCategory::Suspending {
+                    await_stopping_session(&id).await
+                } else {
+                    async {
+                        daemon::connect_existing()
+                            .await?
+                            .suspend_session_with_ack(id, acknowledge_unpublished_work)
+                            .await
+                    }
+                    .await
+                    .map(|()| "Suspended")
+                };
             (name, result)
         });
     }
@@ -2670,10 +2670,10 @@ fn setup(args: SetupArgs) -> Result<()> {
     match args.command {
         Some(SetupCommand::Instructions { platform }) => {
             let platform = match platform {
-                SetupPlatform::Linux => mj_controller::doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => mj_controller::doctor::InstructionsPlatform::Macos,
+                SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
+                SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
             };
-            print!("{}", mj_controller::doctor::setup_instructions(platform));
+            print!("{}", mj_setup::doctor::setup_instructions(platform));
             Ok(())
         }
         None => run_setup_command(&config_path()),
@@ -2687,9 +2687,9 @@ const CATALOG_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The catalogues each enabled profile advertises, read from a daemon that is
 /// already running. Doctor never starts one: it is a diagnostic, and the
 /// answer "not checked" is accurate when nothing has discovered the models.
-async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doctor::Catalogs {
-    use mj_controller::doctor::Catalogs;
-    let ids = mj_controller::doctor::catalog_profile_ids(config);
+async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_setup::doctor::Catalogs {
+    use mj_setup::doctor::Catalogs;
+    let ids = mj_setup::doctor::catalog_profile_ids(config);
     if ids.is_empty() {
         return Catalogs::Read(Default::default());
     }
@@ -2716,21 +2716,20 @@ async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doc
 }
 
 async fn doctor(args: DoctorArgs) -> Result<()> {
-    let mut checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
-        smoke: args.smoke,
-    });
+    let mut checks =
+        mj_setup::doctor::run_current(mj_setup::doctor::DoctorOptions { smoke: args.smoke });
     // An unreadable configuration is already reported by the checks above.
     if let Ok(config) = mj_core::config::Config::load_from(&mj_core::config::config_path()) {
         let catalogs = doctor_catalogs(&config).await;
-        checks.extend(mj_controller::doctor::catalog_checks(&config, &catalogs));
+        checks.extend(mj_setup::doctor::catalog_checks(&config, &catalogs));
     }
     if let Ok(client) = api_client::ApiClient::connect_running().await {
         match client.profile_login_errors().await {
-            Ok(failures) => checks.extend(mj_controller::doctor::login_checks(&failures)),
-            Err(error) => checks.push(mj_controller::doctor::DoctorCheck {
+            Ok(failures) => checks.extend(mj_setup::doctor::login_checks(&failures)),
+            Err(error) => checks.push(mj_setup::doctor::DoctorCheck {
                 id: "harness.logins".into(),
                 title: "Profile login status".into(),
-                status: mj_controller::doctor::CheckStatus::Warning,
+                status: mj_setup::doctor::CheckStatus::Warning,
                 detail: format!(
                     "The running daemon did not report profile login status: {error:#}"
                 ),
@@ -2741,9 +2740,9 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {
-        mj_controller::doctor::render_human(&checks, &mut io::stdout())?;
+        mj_setup::doctor::render_human(&checks, &mut io::stdout())?;
     }
-    if mj_controller::doctor::all_ready(&checks) {
+    if mj_setup::doctor::all_ready(&checks) {
         Ok(())
     } else {
         Err(doctor_failure(args.json))

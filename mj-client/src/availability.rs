@@ -20,8 +20,15 @@ pub enum MachineFinding {
         /// The runtimes it cannot run, with why.
         rejected: Vec<RejectedRuntime>,
     },
-    /// The machine did not answer, so what it runs is unknown.
-    Unreachable { detail: String, remediation: String },
+    /// The SSH check failed, so what it runs is unknown.
+    Unreachable {
+        detail: String,
+        remediation: String,
+        /// True only when the host answered nothing at all.
+        // Older daemons omit this fact; keep their failures actionable.
+        #[serde(default)]
+        answered_nothing: bool,
+    },
 }
 
 /// One of this computer's container engines, as a check found it.

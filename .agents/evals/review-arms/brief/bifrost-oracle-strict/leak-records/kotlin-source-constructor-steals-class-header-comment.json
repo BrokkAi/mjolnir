@@ -1,0 +1,28 @@
+{
+  "id": "kotlin-source-constructor-steals-class-header-comment",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "be501bceeb5380417aeb22f89054e48f101d0272c912e39a70379ca798fe0364",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "The source primary constructor registered as a class child ... enters comment-density traversal ... has no primary-constructor check ..., and enclosing_declaration picks ... the one of greatest depth",
+          "rationale": "It traces the right mechanism: the now non-synthetic primary constructor enters comment-density traversal, and the deepest owner wins. It does not state the consequence, that the constructor takes the class KDoc and the class header count becomes zero. Boundary case, so I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "the one of greatest depth",
+          "rationale": "The output connects newly ordinary primary-constructor children to expanded ranges and deepest-owner comment attribution. It does not identify the shared class-header KDoc being taken by that constructor or the incorrect class own-header count, leaving the actual ownership collision unstated.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

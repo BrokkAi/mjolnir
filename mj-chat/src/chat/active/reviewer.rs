@@ -7,8 +7,8 @@ impl ActiveChat {
         role: Option<String>,
         elicitation_id: String,
         response: mj_core::elicitation::ElicitationResponse,
+        draft: Option<ChatElicitationDraft>,
     ) {
-        let control = self.session_manager.clone();
         let child = match role.as_ref() {
             Some(child) => {
                 let owns_question = self.state.turn_review().is_some_and(|review| {
@@ -18,30 +18,36 @@ impl ActiveChat {
                         })
                 });
                 if !owns_question {
-                    self.report_review_refusal(
-                        "The reviewer's question is no longer active".to_owned(),
-                    );
+                    let error = "The reviewer's question is no longer active".to_owned();
+                    if let Some(draft) = draft {
+                        self.state
+                            .restore_failed_reviewer_elicitation(draft, error.clone());
+                    }
+                    self.report_review_refusal(error);
                     return;
                 }
                 child.clone()
             }
-            None => return,
-        };
-        let updates = self.chat_io_tx.clone();
-        let automatic = mj_core::acp::is_plan_review_id(&elicitation_id);
-        tokio::spawn(async move {
-            let result = match control.session(child).await {
-                Ok(handle) => handle.respond_elicitation(elicitation_id, response).await,
-                Err(error) => Err(error),
-            }
-            .map_err(|error| format!("{error:#}"));
-            let Some(update) = reviewer_answer_update(result, automatic) else {
+            None => {
+                if let Some(draft) = draft {
+                    let error = "The reviewer for this question is no longer available".to_owned();
+                    self.state
+                        .restore_failed_reviewer_elicitation(draft, error.clone());
+                    self.report_review_refusal(error);
+                }
                 return;
-            };
-            if let Err(error) = updates.send(update) {
-                tracing::debug!(%error, "reviewer form answer result dropped");
             }
-        });
+        };
+        queue_chat_remote_operation(
+            self.remote.operations(),
+            ChatRemoteOperation::ReviewerAnswer {
+                role: child,
+                request_id: elicitation_id,
+                response,
+                draft: draft.map(Box::new),
+            },
+            &mut self.state,
+        );
     }
 
     /// Puts a form the reviewer is waiting on in front of the user, or answers
@@ -60,69 +66,38 @@ impl ActiveChat {
             .unwrap_or_default();
         self.state.reconcile_reviewer_elicitation(&pending);
         for (role, request) in pending {
+            if self
+                .state
+                .reviewer_answer_pending(role.as_deref(), &request)
+            {
+                continue;
+            }
             // A reviewer's plan decision is the reviewer proposing work, not
             // the plan under review. It is never shown as the primary's
             // decision; the reviewer was asked to critique, not to implement,
             // so it is declined and its critique stands as the answer.
             if mj_core::acp::is_plan_review_id(&request.id) {
-                self.answer_reviewer(role, request.id, mj_core::acp::plan_review_keep_planning());
+                self.answer_reviewer(
+                    role,
+                    request.id,
+                    mj_core::acp::plan_review_keep_planning(),
+                    None,
+                );
                 continue;
             }
             if self.state.reviewer_elicitation_open() {
+                self.apply_deferred_elicitation_draft();
+                self.state.apply_deferred_form_results();
                 return;
             }
             if !self.state.show_review_role_elicitation(role, request) {
+                self.apply_deferred_elicitation_draft();
+                self.state.apply_deferred_form_results();
                 return;
             }
+            self.apply_deferred_elicitation_draft();
         }
         self.apply_deferred_elicitation_draft();
-    }
-}
-
-/// What the chat hears about one answer to a reviewer's form.
-///
-/// A request that is no longer pending was answered, withdrawn, or expired
-/// before the answer arrived. That is not a failed review, so it is said as a
-/// notice rather than reported as a review failure; and an answer Mjolnir
-/// sent on its own (a reviewer's plan decision) needs no notice at all
-/// (I2-5).
-fn reviewer_answer_update(
-    result: std::result::Result<(), String>,
-    automatic: bool,
-) -> Option<ChatIoUpdate> {
-    match result {
-        Err(error) if error.contains("is no longer pending") => (!automatic).then(|| {
-            ChatIoUpdate::ReviewerNotice(
-                "The reviewer's request had already ended (answered elsewhere, withdrawn, or \
-                 expired), so this answer was not delivered."
-                    .to_owned(),
-            )
-        }),
-        result => Some(ChatIoUpdate::ReviewerStarted(result)),
-    }
-}
-
-#[cfg(test)]
-mod answer_tests {
-    use super::*;
-
-    // Hard-won: 7c4a57a: late reviewer answers were silently dropped and misreported as review failures
-    #[test]
-    fn a_late_answer_says_why_it_was_not_delivered() {
-        let late = Err(r#"elicitation "tool-permission-2" is no longer pending"#.to_owned());
-        match reviewer_answer_update(late.clone(), false) {
-            Some(ChatIoUpdate::ReviewerNotice(notice)) => {
-                assert!(notice.contains("not delivered"), "{notice}");
-            }
-            _ => panic!("a person's late answer gets a notice"),
-        }
-        assert!(
-            reviewer_answer_update(late, true).is_none(),
-            "Mjolnir's own answer to a plan decision needs no notice"
-        );
-        assert!(matches!(
-            reviewer_answer_update(Err("relay unavailable".into()), false),
-            Some(ChatIoUpdate::ReviewerStarted(Err(_)))
-        ));
+        self.state.apply_deferred_form_results();
     }
 }

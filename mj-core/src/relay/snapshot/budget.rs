@@ -1,11 +1,30 @@
 //! Byte budgets for relay events and snapshots, and the truncation that keeps
 //! a payload inside one.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{RELAY_TRUNCATION_FLOOR, RelayObservation};
+
+/// A measured byte limit, kept typed so callers can react to this failure
+/// without treating filesystem or serialization errors as capacity pressure.
+#[derive(Debug)]
+pub struct RelayBudgetExceeded {
+    pub description: String,
+    pub size: usize,
+    pub budget: usize,
+}
+impl std::fmt::Display for RelayBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is too large ({} bytes; maximum {})",
+            self.description, self.size, self.budget
+        )
+    }
+}
+impl std::error::Error for RelayBudgetExceeded {}
 
 pub fn ensure_serialized_budget(
     value: &impl Serialize,
@@ -20,7 +39,12 @@ pub fn ensure_serialized_budget(
 
 pub fn ensure_byte_budget(size: usize, budget: usize, description: &str) -> Result<()> {
     if size > budget {
-        bail!("{description} is too large ({size} bytes; maximum {budget})");
+        return Err(RelayBudgetExceeded {
+            description: description.to_owned(),
+            size,
+            budget,
+        }
+        .into());
     }
     Ok(())
 }

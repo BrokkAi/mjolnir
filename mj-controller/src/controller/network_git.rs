@@ -4,6 +4,8 @@ use crate::targets::{self, CommandExecutor};
 use anyhow::{Context, Result, ensure};
 use mj_core::targets::SshTrafficClass;
 
+pub(crate) use crate::targets::workspace_root;
+
 use super::Controller;
 
 impl Controller {
@@ -137,29 +139,6 @@ impl Controller {
             )?;
         }
         Ok(())
-    }
-}
-
-/// The directory the session's repositories are checked out under.
-/// `container_workspace` is the session record's recorded container workspace,
-/// which only container locators use.
-pub(crate) fn workspace_root(
-    backend: &targets::TargetLocator,
-    container_workspace: Option<&std::path::Path>,
-) -> String {
-    match backend {
-        targets::TargetLocator::LocalPodman { .. }
-        | targets::TargetLocator::LocalDocker { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. } => {
-            targets::container_workspace_root(container_workspace)
-        }
-        targets::TargetLocator::AwsEc2 { workspace, .. }
-        | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
-        targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
     }
 }
 

@@ -1,0 +1,50 @@
+{
+  "id": "python-module-binding-representative-after-event",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "caught",
+      "brief_sha256": "162b28b9bc241ba87a49b6a343d795217aec6b8755a26821a14c2dd1f10787dd",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "the unit's stored declaration range is the last assignment's, and no range is recorded per binding event",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it gives the pieces (shared declaration ranged at the last assignment, event bound on declaration end, empty result -> no_indexed_definition) without asserting that earlier reads between repeated assignments lose their target.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "the unit's stored declaration range is the last assignment's, and no range is recorded per binding event",
+          "rationale": "The output connects repeated assignments replacing one declaration range with the event-end cutoff, then traces an empty selection to no_indexed_definition before fallback. That is the representative-after-event failure for an otherwise visible module binding.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "7c35a11de9ef1e76a4b3e7f7df44e5b52fb24e5a034cf53e5d8cf6c227516143",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "Repeated module assignments to the same name construct the same `Field` CodeUnit ... after these calls the unit's declaration range is the last assignment's range, and no separate range is recorded for each assignment event; `analyzer.ranges(candidate)` in the event selector reads these ranges",
+          "rationale": "Gives the full chain: the new helper bounds the declaration end by the event offset, repeated assignments share one unit ranged at the last assignment, and an empty result yields no_indexed_definition. The consequence is stated only implicitly.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "after these calls the unit's declaration range is the last assignment's range, and no separate range is recorded for each assignment event",
+          "rationale": "It connects the final representative range for repeated module assignments to the new event-offset eligibility filter and the empty-result no_indexed_definition path. These observations identify why a valid earlier binding loses its target.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

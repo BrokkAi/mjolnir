@@ -1,0 +1,816 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
+use mj_core::config::HarnessKind;
+use mj_core::state::{MaterializedSession, ProjectionWindow, SessionRecord, SessionState};
+
+use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
+
+use mj_controller::session_manager::ViewError;
+
+use super::*;
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn session_record(id: &str) -> SessionRecord {
+    SessionRecord {
+        oracle_choice: None,
+        oracle: true,
+        notifications_ignored: false,
+        project: None,
+        target_runtime: None,
+        launch_base: None,
+        launch_branch: None,
+        checkout: None,
+        publication: None,
+        build_cache: None,
+        container_workspace: None,
+        subagents: None,
+        create_managed_worktree: None,
+        id: id.into(),
+        workspace_id: "workspace-1".into(),
+        title: format!("Session {id}"),
+        harness_kind: HarnessKind::Codex,
+        last_profile: "profile-1".into(),
+        bundle_id: "bundle-1".into(),
+        project_directory: None,
+        managed_worktree: None,
+        review: None,
+        no_project_memory: false,
+        no_github_events: false,
+        no_github_credentials: false,
+        target_template_id: "target-1".into(),
+        resource_allocation: None,
+        state: SessionState::Running,
+        archived: false,
+        target: None,
+        native_session_id: None,
+        acp_session_title: None,
+        session_title_override: None,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        viewed_through_event_ordinal: 0,
+        draft_input: String::new(),
+        last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
+        last_checkpoint_error: None,
+        checkpoint: None,
+        additional_mounts: Vec::new(),
+    }
+}
+
+fn operational(session_id: &str) -> RelayOperationalState {
+    RelayOperationalState {
+        assessment: None,
+        open_request: None,
+        notification_stack: Default::default(),
+        notifications_read_through: 0,
+        person_input_through: 0,
+        work_liveness: None,
+        undelivered_mailbox_event_keys: Vec::new(),
+        assessment_context: None,
+        turn_completion: None,
+        continuation: Default::default(),
+        relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
+        clear_context: false,
+        clear_context_started_at_ms: None,
+        native_agent_count: 0,
+        expected_continuation: None,
+        inferred_idle_since_ms: None,
+        task_settled_at_ms: None,
+        background_needed: None,
+        goal: Default::default(),
+        capacity_retry: None,
+        retry_assessment_pending: false,
+        authentication_retry_waiting: None,
+        held_login_fingerprint: None,
+        authentication_retry_intent: None,
+        activity_turn_started_at_ms: None,
+        idle_since_ms: None,
+        session_id: session_id.into(),
+        execution: RelayExecutionState::Idle,
+        latest_ordinal: 0,
+        latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        acknowledged_through: 0,
+        acknowledged_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        recovery_floor_ordinal: 0,
+        recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        store_id: None,
+        native_session_id: None,
+        native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
+        checkpoint_only: false,
+        acp_ready: None,
+        harness_preparation: None,
+        agent_capabilities: None,
+        agent_info: None,
+        runtime: None,
+        steering_supported: None,
+        mailbox_delivery: None,
+        turn_controls: None,
+        config_options: Vec::new().into(),
+        modes: None,
+        available_commands: Vec::new().into(),
+        config: BTreeMap::new(),
+        active_prompt: None,
+        queued_prompts: Vec::new(),
+        active_user_shells: Vec::new(),
+        active_agent_terminals: Vec::new(),
+        checkpoint_barrier: None,
+        checkpoint_ready: None,
+        last_acp_activity_at_ms: None,
+        current_step_started_at_ms: None,
+        foreground_tool_started_at_ms: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
+        harness_turn: None,
+        last_harness_turn_started_ordinal: None,
+        background_commands: Vec::new(),
+        background_work_known: None,
+    }
+}
+
+fn runtime_view(
+    session_id: &str,
+    projection_ordinal: u64,
+    projection_digest: &str,
+) -> daemon::RuntimeSessionView {
+    daemon::RuntimeSessionView {
+        attention: Default::default(),
+        policy_config_keys: Vec::new(),
+        session_id: session_id.into(),
+        projection_ordinal,
+        projection_digest: projection_digest.into(),
+        operational: Some(operational(session_id).into()),
+        latest_credential_sync_signal: None,
+        connected: true,
+        error: None,
+    }
+}
+
+fn projection(
+    session_id: &str,
+    ordinal: u64,
+    digest: &str,
+) -> (MaterializedSession, ProjectionWindow) {
+    let mut materialized = MaterializedSession::empty(session_id);
+    materialized.applied_event_ordinal = ordinal;
+    materialized.applied_event_digest = digest.into();
+    let window = ProjectionWindow::of(&materialized);
+    (materialized, window)
+}
+
+fn snapshot(
+    revision: u64,
+    sessions: Vec<daemon::RuntimeSessionView>,
+    records: Vec<SessionRecord>,
+) -> mj_client::runtime_feed::RuntimeProjection {
+    mj_client::runtime_feed::RuntimeProjection {
+        revision,
+        records: records.into_iter().map(|r| (r.id.clone(), r)).collect(),
+        sessions: sessions
+            .into_iter()
+            .map(|r| (r.session_id.clone(), r))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+async fn wait_for_drop(flag: &AtomicBool) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !flag.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("aborted feed work was dropped");
+}
+
+#[tokio::test]
+async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
+    type PollRequest = (
+        u64,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
+    );
+    let (poll_started_tx, mut poll_started_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PollRequest>();
+    let poll = move |_workspace_id: String, after_revision: u64| {
+        let poll_started_tx = poll_started_tx.clone();
+        async move {
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            poll_started_tx
+                .send((after_revision, finish_tx))
+                .expect("runtime feed poll receiver remains open");
+            finish_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("poll completion dropped"))?
+        }
+    };
+    let load =
+        move |session_id: String| async move { Ok(Some(projection(&session_id, 4, "digest-4"))) };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    let (after_revision, finish) = poll_started_rx.recv().await.expect("initial poll starts");
+    assert_eq!(after_revision, 0);
+    finish
+        .send(Ok(snapshot(
+            1,
+            vec![runtime_view("session-1", 4, "digest-4")],
+            vec![session_record("session-1")],
+        )))
+        .unwrap();
+
+    let first = feed.updates.recv().await.expect("snapshot update");
+    match first {
+        RuntimeFeedUpdate::Snapshot(snapshot) => {
+            assert_eq!(snapshot.records.len(), 1);
+            assert_eq!(snapshot.records["session-1"].id, "session-1");
+            // Hard-won: b417a7c: the snapshot lost its live views, so chats dropped their policy keys
+            assert!(snapshot.sessions.contains_key("session-1"));
+        }
+        RuntimeFeedUpdate::Session { .. } | RuntimeFeedUpdate::SessionRemoved(_) => {
+            panic!("session projection preceded its snapshot")
+        }
+        RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
+    }
+
+    let second = feed.updates.recv().await.expect("session update");
+    match second {
+        RuntimeFeedUpdate::Session { session_id, view } => {
+            assert_eq!(session_id, "session-1");
+            assert_eq!(view.snapshot.unwrap().materialized.applied_event_ordinal, 4);
+        }
+        RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::SessionRemoved(_) => {
+            panic!("session projection did not follow snapshot")
+        }
+        RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
+    }
+
+    drop(feed);
+}
+
+/// The feed forgets the fingerprint of a session that leaves the daemon's
+/// snapshot, so it must say so: a consumer that kept its own copy would wait
+/// forever for a view this feed treats as already sent. The same unchanged
+/// view is sent again when the session returns.
+#[tokio::test]
+async fn runtime_feed_skips_unchanged_fingerprints_and_loads_changed_projections() {
+    type PollRequest = (
+        u64,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
+    );
+    let (poll_started_tx, mut poll_started_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PollRequest>();
+    let poll = move |_workspace_id: String, after_revision: u64| {
+        let poll_started_tx = poll_started_tx.clone();
+        async move {
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            poll_started_tx
+                .send((after_revision, finish_tx))
+                .expect("runtime feed poll receiver remains open");
+            finish_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("poll completion dropped"))?
+        }
+    };
+    let load_count = Arc::new(AtomicUsize::new(0));
+    let load = {
+        let load_count = Arc::clone(&load_count);
+        move |session_id: String| {
+            let ordinal = match load_count.fetch_add(1, Ordering::SeqCst) {
+                0 => 1,
+                1 => 2,
+                count => panic!("unexpected projection load {count}"),
+            };
+            async move {
+                Ok(Some(projection(
+                    &session_id,
+                    ordinal,
+                    &format!("digest-{ordinal}"),
+                )))
+            }
+        }
+    };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    let (_, finish) = poll_started_rx.recv().await.expect("first poll starts");
+    finish
+        .send(Ok(snapshot(
+            1,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        )))
+        .unwrap();
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Snapshot(_))
+    ));
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Session { .. })
+    ));
+
+    let (after_revision, finish) = poll_started_rx.recv().await.expect("unchanged poll starts");
+    assert_eq!(after_revision, 1);
+    finish
+        .send(Ok(snapshot(
+            2,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        )))
+        .unwrap();
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Snapshot(_))
+    ));
+    assert_eq!(load_count.load(Ordering::SeqCst), 1);
+
+    let (after_revision, finish) = poll_started_rx.recv().await.expect("changed poll starts");
+    assert_eq!(after_revision, 2);
+    finish
+        .send(Ok(snapshot(
+            3,
+            vec![runtime_view("session-1", 2, "digest-2")],
+            Vec::new(),
+        )))
+        .unwrap();
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Snapshot(_))
+    ));
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Session { .. })
+    ));
+    assert_eq!(load_count.load(Ordering::SeqCst), 2);
+
+    drop(feed);
+}
+
+// Hard-won: 8b3a7286: the TUI could not open a session after Move left the runtime snapshot
+#[tokio::test]
+async fn a_session_leaving_the_snapshot_is_announced_and_republished_on_return() {
+    type PollRequest = (
+        u64,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
+    );
+    let (poll_started_tx, mut poll_started_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PollRequest>();
+    let poll = move |_workspace_id: String, _after_revision: u64| {
+        let poll_started_tx = poll_started_tx.clone();
+        async move {
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            poll_started_tx
+                .send((0, finish_tx))
+                .expect("runtime feed poll receiver remains open");
+            finish_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("poll completion dropped"))?
+        }
+    };
+    let load = |session_id: String| async move { Ok(Some(projection(&session_id, 1, "digest-1"))) };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+    let mut answer = async |sessions| {
+        let (_, finish) = poll_started_rx.recv().await.expect("poll starts");
+        finish.send(Ok(snapshot(1, sessions, Vec::new()))).unwrap();
+        assert!(matches!(
+            feed.updates.recv().await,
+            Some(RuntimeFeedUpdate::Snapshot(_))
+        ));
+        feed.updates.recv().await
+    };
+
+    let published = answer(vec![runtime_view("session-1", 1, "digest-1")]).await;
+    assert!(
+        matches!(&published, Some(RuntimeFeedUpdate::Session { session_id, .. }) if session_id == "session-1")
+    );
+    let removed = answer(Vec::new()).await;
+    assert!(
+        matches!(&removed, Some(RuntimeFeedUpdate::SessionRemoved(session_id)) if session_id == "session-1")
+    );
+    let republished = answer(vec![runtime_view("session-1", 1, "digest-1")]).await;
+    assert!(
+        matches!(&republished, Some(RuntimeFeedUpdate::Session { session_id, .. }) if session_id == "session-1")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_feed_reports_poll_failure_and_recovers() {
+    type PollRequest = (
+        u64,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
+    );
+    let (poll_started_tx, mut poll_started_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PollRequest>();
+    let poll = move |_workspace_id: String, after_revision: u64| {
+        let poll_started_tx = poll_started_tx.clone();
+        async move {
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            poll_started_tx
+                .send((after_revision, finish_tx))
+                .expect("runtime feed poll receiver remains open");
+            finish_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("poll completion dropped"))?
+        }
+    };
+    let load = move |_session_id: String| async { Ok(None) };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    let (after_revision, finish) = poll_started_rx.recv().await.expect("failing poll starts");
+    assert_eq!(after_revision, 0);
+    finish
+        .send(Err(anyhow::anyhow!("first poll failed")))
+        .unwrap();
+    match feed.updates.recv().await.expect("poll error update") {
+        RuntimeFeedUpdate::Error(error) => assert!(error.contains("first poll failed"), "{error}"),
+        RuntimeFeedUpdate::Snapshot(_)
+        | RuntimeFeedUpdate::Session { .. }
+        | RuntimeFeedUpdate::SessionRemoved(_) => {
+            panic!("poll failure was not surfaced")
+        }
+    }
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(250)).await;
+    let (after_revision, finish) = poll_started_rx.recv().await.expect("recovery poll starts");
+    assert_eq!(after_revision, 0);
+    finish
+        .send(Ok(snapshot(1, Vec::new(), Vec::new())))
+        .unwrap();
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Snapshot(snapshot)) if snapshot.revision == 1
+    ));
+
+    drop(feed);
+}
+
+#[tokio::test]
+async fn a_worker_without_a_projection_is_not_retried_until_its_view_changes() {
+    let (poll_tx, mut polls) = tokio::sync::mpsc::unbounded_channel::<
+        tokio::sync::oneshot::Sender<Result<mj_client::runtime_feed::RuntimeProjection>>,
+    >();
+    let poll = move |_: String, _: u64| {
+        let poll_tx = poll_tx.clone();
+        async move {
+            let (finish, answer) = tokio::sync::oneshot::channel();
+            poll_tx.send(finish).unwrap();
+            answer.await.unwrap()
+        }
+    };
+    let load = |_: String| async { panic!("a worker without a projection must not read one") };
+    let mut feed = spawn_runtime_feed_with("workspace".into(), poll, load);
+    for revision in 1..=2 {
+        let mut view = runtime_view("session", 0, "");
+        view.operational = None;
+        view.connected = false;
+        polls
+            .recv()
+            .await
+            .unwrap()
+            .send(Ok(snapshot(revision, vec![view], Vec::new())))
+            .unwrap();
+        assert!(matches!(
+            feed.updates.recv().await,
+            Some(RuntimeFeedUpdate::Snapshot(_))
+        ));
+        if revision == 1 {
+            assert!(matches!(
+                feed.updates.recv().await,
+                Some(RuntimeFeedUpdate::Session { .. })
+            ));
+        }
+    }
+    // The next poll starts only after the preceding publication is complete.
+    let _pending_poll = polls.recv().await.unwrap();
+    assert!(matches!(
+        feed.updates.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn dropping_runtime_feed_cancels_a_delayed_poll() {
+    let poll_dropped = Arc::new(AtomicBool::new(false));
+    let (poll_started_tx, mut poll_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let poll = {
+        let poll_dropped = Arc::clone(&poll_dropped);
+        move |_workspace_id: String, _after_revision: u64| {
+            let poll_started_tx = poll_started_tx.clone();
+            let poll_dropped = Arc::clone(&poll_dropped);
+            async move {
+                poll_started_tx.send(()).expect("poll starts");
+                let _guard = DropFlag(poll_dropped);
+                std::future::pending::<Result<mj_client::runtime_feed::RuntimeProjection>>().await
+            }
+        }
+    };
+    let load = move |_session_id: String| async { Ok(None) };
+    let feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+    poll_started_rx.recv().await.expect("delayed poll starts");
+
+    drop(feed);
+    wait_for_drop(&poll_dropped).await;
+}
+
+#[tokio::test]
+async fn dropping_runtime_feed_cancels_a_delayed_projection_load() {
+    let load_dropped = Arc::new(AtomicBool::new(false));
+    let (load_started_tx, mut load_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let poll = move |_workspace_id: String, _after_revision: u64| async {
+        Ok(snapshot(
+            1,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        ))
+    };
+    let load = {
+        let load_dropped = Arc::clone(&load_dropped);
+        move |session_id: String| {
+            let load_started_tx = load_started_tx.clone();
+            let load_dropped = Arc::clone(&load_dropped);
+            async move {
+                load_started_tx.send(()).expect("projection load starts");
+                let _guard = DropFlag(load_dropped);
+                std::future::pending::<()>().await;
+                Ok(Some(projection(&session_id, 1, "digest-1")))
+            }
+        }
+    };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Snapshot(_))
+    ));
+    load_started_rx.recv().await.expect("delayed load starts");
+
+    drop(feed);
+    wait_for_drop(&load_dropped).await;
+}
+
+#[tokio::test]
+async fn a_blocked_session_load_does_not_stop_other_sessions_with_four_workers() {
+    let poll = move |_workspace_id: String, _after_revision: u64| async {
+        Ok(snapshot(
+            1,
+            (1..=5)
+                .map(|id| runtime_view(&format!("session-{id}"), 1, "digest-1"))
+                .collect(),
+            Vec::new(),
+        ))
+    };
+    let (load_started_tx, mut load_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let blocked_dropped = Arc::new(AtomicBool::new(false));
+    let load = {
+        let blocked_dropped = Arc::clone(&blocked_dropped);
+        move |session_id: String| {
+            let load_started_tx = load_started_tx.clone();
+            let blocked_dropped = Arc::clone(&blocked_dropped);
+            async move {
+                load_started_tx
+                    .send(session_id.clone())
+                    .expect("load starts");
+                if session_id == "session-1" {
+                    let _guard = DropFlag(blocked_dropped);
+                    std::future::pending::<()>().await;
+                }
+                Ok(Some(projection(&session_id, 1, "digest-1")))
+            }
+        }
+    };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+    assert!(matches!(
+        feed.updates.recv().await,
+        Some(RuntimeFeedUpdate::Snapshot(_))
+    ));
+
+    let mut session_updates = Vec::new();
+    while session_updates.len() < 4 {
+        match tokio::time::timeout(Duration::from_secs(1), feed.updates.recv())
+            .await
+            .expect("other session projections remain live")
+            .expect("runtime feed remains open")
+        {
+            RuntimeFeedUpdate::Session { session_id, .. } => {
+                if session_id != "session-1" && !session_updates.contains(&session_id) {
+                    session_updates.push(session_id);
+                }
+            }
+            RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::SessionRemoved(_) => {}
+            RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
+        }
+    }
+    session_updates.sort();
+    assert_eq!(
+        session_updates,
+        vec![
+            "session-2".to_owned(),
+            "session-3".to_owned(),
+            "session-4".to_owned(),
+            "session-5".to_owned(),
+        ]
+    );
+
+    let mut starts = Vec::new();
+    while let Ok(session_id) = load_started_rx.try_recv() {
+        starts.push(session_id);
+    }
+    starts.sort();
+    assert_eq!(
+        starts,
+        vec![
+            "session-1".to_owned(),
+            "session-2".to_owned(),
+            "session-3".to_owned(),
+            "session-4".to_owned(),
+            "session-5".to_owned(),
+        ]
+    );
+
+    drop(feed);
+    wait_for_drop(&blocked_dropped).await;
+}
+
+#[test]
+fn runtime_projection_view_reports_a_persistent_mismatch_after_bounded_retries() {
+    let mut convergence = ProjectionConvergence::default();
+    for _ in 0..PROJECTION_CONVERGENCE_RETRIES {
+        let (materialized, window) = projection("session-1", 6, "digest-6");
+        assert!(
+            runtime_projection_view(
+                runtime_view("session-1", 7, "digest-7"),
+                Ok(Some((materialized, window))),
+                &mut convergence,
+            )
+            .is_none()
+        );
+    }
+
+    let (materialized, window) = projection("session-1", 6, "digest-6");
+    let view = runtime_projection_view(
+        runtime_view("session-1", 7, "digest-7"),
+        Ok(Some((materialized, window))),
+        &mut convergence,
+    )
+    .expect("bounded mismatch produces an error view");
+    assert!(!view.connected);
+    assert!(matches!(
+        view.error,
+        Some(ViewError::ProjectionIntegrity(detail)) if detail.contains("contains only 6")
+    ));
+    assert!(view.snapshot.is_none());
+}
+
+fn scripted_polls(
+    snapshots: Vec<mj_client::runtime_feed::RuntimeProjection>,
+) -> impl Fn(
+    String,
+    u64,
+) -> std::pin::Pin<
+    Box<dyn Future<Output = anyhow::Result<mj_client::runtime_feed::RuntimeProjection>> + Send>,
+> + Send
++ 'static {
+    let snapshots = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+        snapshots,
+    )));
+    move |_workspace_id, _after_revision| {
+        let next = snapshots.lock().unwrap().pop_front();
+        Box::pin(async move {
+            match next {
+                Some(snapshot) => Ok(snapshot),
+                None => std::future::pending().await,
+            }
+        })
+    }
+}
+
+async fn next_session_update(feed: &mut RuntimeFeed) -> ManagedSessionView {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), feed.updates.recv())
+            .await
+            .expect("the feed publishes the session")
+            .expect("the feed runs")
+        {
+            RuntimeFeedUpdate::Session { view, .. } => return *view,
+            RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
+            RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::SessionRemoved(_) => {}
+        }
+    }
+}
+
+/// A tail fetched at a cursor the daemon has already let go of is not a
+/// broken session: the feed takes a new snapshot and fetches again.
+#[tokio::test(start_paused = true)]
+async fn an_expired_tail_cursor_is_fetched_again_rather_than_reported() {
+    let poll = scripted_polls(vec![
+        snapshot(
+            1,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        ),
+        snapshot(
+            1,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        ),
+    ]);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let load = move |session_id: String| {
+        let read = reads.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if read == 0 {
+                Err(anyhow::Error::new(TailCursorExpired))
+            } else {
+                Ok(Some(projection(&session_id, 1, "digest-1")))
+            }
+        }
+    };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    let view = next_session_update(&mut feed).await;
+    assert!(view.error.is_none(), "{:?}", view.error);
+    assert!(view.snapshot.is_some());
+}
+
+/// A relay actor reloaded from the store can change an item's content
+/// without moving the session's ordinal. The tail changed, so the session's
+/// view is published again.
+#[tokio::test(start_paused = true)]
+async fn a_tail_that_changed_at_the_same_ordinal_is_published_again() {
+    fn materialized(session_id: &str, text: &str) -> MaterializedSession {
+        let mut materialized = MaterializedSession::empty(session_id);
+        materialized.applied_event_ordinal = 1;
+        materialized.applied_event_digest = "digest-1".into();
+        materialized.transcript = vec![Arc::new(mj_core::transcript::TranscriptItem {
+            stable_id: "agent:1".into(),
+            position: 1,
+            latest_content_event_ordinal: Some(1),
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: mj_core::transcript::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": text}})],
+                streaming: false,
+            },
+        })];
+        materialized
+    }
+    let tail = |text: &str| {
+        let materialized = materialized("session-1", text);
+        mj_client::runtime_feed::SessionTail::of(&materialized, &ProjectionWindow::default(), 16)
+    };
+    let with_tail = |revision, text: &str| {
+        let mut projection = snapshot(
+            revision,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        );
+        projection
+            .transcripts
+            .insert("session-1".into(), tail(text));
+        projection
+    };
+    let poll = scripted_polls(vec![with_tail(1, "full output"), with_tail(2, "compacted")]);
+    let load_index = Arc::new(AtomicUsize::new(0));
+    let load_index_next = load_index.clone();
+    let load = move |session_id: String| {
+        let index = load_index_next.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let text = if index == 0 {
+                "full output"
+            } else {
+                "compacted"
+            };
+            let materialized = materialized(&session_id, text);
+            let window = ProjectionWindow::of(&materialized);
+            Ok(Some((materialized, window)))
+        }
+    };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    let full = next_session_update(&mut feed).await;
+    let full_tail = full.snapshot.unwrap().materialized.transcript;
+    assert!(
+        format!("{full_tail:?}").contains("full output"),
+        "{full_tail:?}"
+    );
+
+    let compacted = next_session_update(&mut feed).await;
+    let compacted_tail = compacted.snapshot.unwrap().materialized.transcript;
+    assert!(
+        format!("{compacted_tail:?}").contains("compacted"),
+        "{compacted_tail:?}"
+    );
+}

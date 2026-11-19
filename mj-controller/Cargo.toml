@@ -10,50 +10,47 @@ publish = true
 
 [lib]
 name = "mj_controller"
+# The crate has no doc tests. Looking for them makes rustdoc compile the whole
+# crate again: 2.5 minutes of every CI run, to run nothing.
+doctest = false
 
 [features]
 default = []
-test-hooks = ["mj-core/test-hooks"]
+test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks", "mj-import/test-hooks", "mj-sessionwiki/test-hooks", "mj-build-cache/test-hooks", "mj-worker-staging/test-hooks"]
+# Exposes the shared test fixtures to the tests of mj-daemon.
+test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support", "mj-import/test-support", "mj-sessionwiki/test-support", "mj-build-cache/test-support", "mj-worker-staging/test-support"]
 
 [lints]
 workspace = true
 
 [dependencies]
-portable-pty = "0.9"
-half = "2"
-libloading = "0.9"
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-23", "directml", "coreml", "cuda", "half"] }
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 sysinfo.workspace = true
-signal-hook = "0.3"
 mj-core.workspace = true
-mj-review.workspace = true
 mj-transcript = { workspace = true, features = ["github-history"] }
 mj-checkpoint.workspace = true
 mj-client.workspace = true
+mj-targets.workspace = true
+mj-store.workspace = true
+mj-worker-staging.workspace = true
+mj-session-types.workspace = true
+mj-build-cache.workspace = true
+mj-sessionwiki.workspace = true
+mj-import.workspace = true
+mj-accounts.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 axum.workspace = true
-axum-server.workspace = true
 base64.workspace = true
 chrono.workspace = true
-chrono-tz = "0.10"
-dirs.workspace = true
 flate2.workspace = true
 futures = "0.3"
 getrandom.workspace = true
-# HMAC-SHA256 signs the stateless remote-viewer session cookie (keyed on a
-# persisted signing key); pairs with the existing `sha2`.
-hmac = "0.13"
 libc.workspace = true
 rayon.workspace = true
 reedline = { version = "0.51", default-features = false }
 reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
 ring.workspace = true
-rustls.workspace = true
 rusqlite.workspace = true
-ruzstd.workspace = true
-sessionwiki.workspace = true
 semver.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
@@ -61,21 +58,23 @@ sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 toml.workspace = true
-toml_edit.workspace = true
 tokio = { workspace = true, features = ["full"] }
-tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["compat", "io"] }
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["compression-br", "compression-gzip"] }
 tracing.workspace = true
 url.workspace = true
 zip.workspace = true
-anvil-client.workspace = true
 
 [dev-dependencies]
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+mj-targets = { workspace = true, features = ["test-support"] }
+mj-store = { workspace = true, features = ["test-support"] }
+mj-worker-staging = { workspace = true, features = ["test-support"] }
+mj-build-cache = { workspace = true, features = ["test-support"] }
+mj-sessionwiki = { workspace = true, features = ["test-support"] }
+mj-import = { workspace = true, features = ["test-support"] }
+mj-accounts = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
 http-body-util = "0.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

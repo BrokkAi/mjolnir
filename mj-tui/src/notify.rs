@@ -582,6 +582,7 @@ mod tests {
                             dismissal: None,
                             holder: None,
                             form: Some(mj_client::runtime_feed::CardForm {
+                                source: mj_client::runtime_feed::CardFormSource::Elicitation,
                                 raised_at_ms: 1,
                                 request_id: "elicitation-1".into(),
                                 message: "Question?".into(),

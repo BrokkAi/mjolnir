@@ -554,6 +554,27 @@ pub fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) ->
     }
 }
 
+/// Fill only missing reset data; fresh usage values always win.
+pub fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[QuotaWindow]) -> bool {
+    let mut restored = false;
+    for old in cached {
+        if let Some(window) = windows
+            .iter_mut()
+            .find(|w| w.label.eq_ignore_ascii_case(&old.label) && w.model_scope == old.model_scope)
+        {
+            if window.resets_at_epoch_seconds.is_none() && old.resets_at_epoch_seconds.is_some() {
+                window.resets_at_epoch_seconds = old.resets_at_epoch_seconds;
+                window.resets = old.resets.clone();
+                restored = true;
+            }
+        } else {
+            windows.push(old.clone());
+            restored |= old.resets_at_epoch_seconds.is_some();
+        }
+    }
+    restored
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

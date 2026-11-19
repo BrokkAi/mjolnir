@@ -105,14 +105,88 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-review`, `brokk-mj-checkpoint`, and `brokk-mj-transcript` live in
   their matching directories. They build on core and share review logic,
   archive handling, and transcript projection across the runtime branches.
-- `brokk-mj-worker` (`mj-worker/`, library `mj_worker`) is the target side. It
-  runs locally, in a container, or on an SSH/EC2 host and owns the harness,
-  durable command queue, and relay journal.
+- `brokk-mj-build-id` (`mj-build-id/`, library `mj_build_id`) holds the build
+  identity: the commit, its time and the worker input digest, read by its build
+  script. Only the two programs depend on it, and they install it at startup
+  (`mj_core::worker_build::install`). It is rebuilt after every commit, so no
+  library may depend on it: that would make a commit recompile the library
+  and everything above it.
+- `brokk-mj-worker-runtime` (`mj-worker/`, library `mj_worker`) is the target
+  side. It runs locally, in a container, or on an SSH/EC2 host and owns the
+  harness, durable command queue, and relay journal.
+- `brokk-mj-worker` (`mj-worker-bin/`) is the `mj-worker` program: argument
+  parsing and the entry point over the runtime library. It is its own package
+  so that what only the program needs, its build stamp, is not a dependency
+  of the library that other crates' tests use.
 - `brokk-mj-client` (`mj-client/`, library `mj_client`) holds client-facing
   contracts and shared presentation helpers. It uses the foundation.
+- `brokk-mj-targets` (`mj-targets/`, library `mj_targets`) is where a
+  session's worker runs (a local directory, a container, an SSH host, an EC2
+  instance) and the commands that provision, control and clean it up. It uses
+  the foundation and client branches and knows nothing of the store or of
+  session lifecycle. `mj_controller` re-exports its modules under their old
+  names.
+- `brokk-mj-session-types` (`mj-session-types/`, library `mj_session_types`)
+  holds types that two crates which must not depend on each other both name:
+  today the plan for recovering a worker, which staging fills in and the
+  session runtime follows, and the harness preparation failure. Add a type
+  here for that reason only, and keep behaviour out of it.
+- `brokk-mj-store` (`mj-store/`, library `mj_store`) is the daemon's
+  database: the SQLite schema and migrations, the session, environment and
+  event records, the single writer, and the gates that order recovery and
+  worker lifecycle against it. It builds on the targets crate.
+  `mj_controller` re-exports its modules under their old names.
+- `brokk-mj-accounts` (`mj-accounts/`, library `mj_accounts`) covers harness
+  profiles' accounts: whether a profile is logged in, the login terminal, and
+  each provider's quota and usage reader with the scheduling and health built
+  on them. It builds on the targets and store crates. `mj_controller`
+  re-exports its modules under their old names.
+- `brokk-mj-import` (`mj-import/`, library `mj_import`) brings work into
+  Mjolnir and carries it between sessions: importing another tool's sessions,
+  the project catalog, transcript compaction with the utility model, and
+  handoff. It builds on the targets, store and accounts crates.
+  `mj_controller` re-exports its modules under their old names.
+- `brokk-mj-sessionwiki` (`mj-sessionwiki/`, library `mj_sessionwiki`) is the
+  index of session history that searches, the resume picker and workers'
+  history queries read: keeping it in sync and answering queries over it. It
+  builds on the targets, store and import crates. `mj_controller` re-exports
+  its module under its old name.
+- `brokk-mj-build-cache` (`mj-build-cache/`, library `mj_build_cache`) is the
+  caches Mjolnir keeps on a session's host: the mbx compiler cache and its
+  installation, the shared clone cache, and the native build-tool caches. It
+  builds on the targets, store and import crates. `mj_controller::controller`
+  re-exports its modules under their old names.
+- `brokk-mj-worker-staging` (`mj-worker-staging/`, library
+  `mj_worker_staging`) puts what a session needs onto its target and keeps it
+  current: selecting, verifying and installing the worker binary, installing
+  the harness, transferring the profile, and the commands that probe, stop
+  and restart a staged worker. It fills in the plans of the session types
+  crate and builds on the targets, store and accounts crates.
+  The methods on `Controller` that orchestrate it stay in the controller.
+- `brokk-mj-github-relevance` (`mj-github-relevance/`, library
+  `mj_github_relevance`) is the on-device classifier that decides which GitHub
+  events matter to a session, with the download of its weights and runtime.
+  It needs only the foundation, and only the daemon uses it, so its inference
+  dependencies stay out of every other crate's build.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
-  daemon side. It owns the database, provisions targets, manages sessions, and serves the web
-  surface. It uses the foundation and client branches.
+  daemon side below the daemon process itself. It owns the database,
+  provisions targets, and manages sessions. It uses the foundation and client
+  branches.
+- `brokk-mj-setup` (`mj-setup/`, library `mj_setup`) is what Mjolnir finds on
+  a machine and what it can say is wrong with it: first-run discovery
+  (`setup`) and the doctor's checks (`doctor`). It sits above the controller,
+  which it inspects and which does not use it.
+- `brokk-mj-server` (`mj-server/`, library `mj_server`) is the daemon's HTTP
+  API and web viewer server: routes, request and response types,
+  authentication, and the embedded viewer assets. It builds on the controller
+  and knows nothing of the daemon's live state; the daemon implements its
+  backend traits.
+- `brokk-mj-daemon` (`mj-daemon/`, library `mj_daemon`) is the daemon process
+  (`mj daemon-run`): its runtime state, the implementation of the HTTP API
+  over that state, and the daemon-owned services and pollers. It builds on the
+  controller and the server and re-exports the server as `mj_daemon::server`.
+  It is a separate crate so an edit to the daemon does not recompile the
+  controller or the server.
 - `brokk-mj-chat` (`mj-chat/`, library `mj_chat`) holds the conversation view
   state that the terminal and web surfaces render. It uses the foundation and
   client branches, in parallel with the controller.
@@ -183,7 +257,7 @@ Add the smallest regression test that would have caught the problem:
   `tests/e2e/run-browser-reliability.sh --seed N <mj binary>`.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
-- Update the embedded guides in `mj-controller/docs/`, `docs/SSH.md`,
+- Update the embedded guides in `mj-targets/docs/`, `docs/SSH.md`,
   `docs/AWS.md`, and the pages in `docs/src/content/docs/` when a user-visible
   command, keyboard action, setup flow, harness, target kind, configuration
   option, or limitation changes; `docs/scripts/sync-podman.mjs` copies the
@@ -229,7 +303,7 @@ include narrow and resized terminals. Also exercise the viewer when shared
 rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI runs workspace lint/tests and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
+CI runs workspace lint, the workspace tests in parallel shards, and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
 tests and the voice worker on macOS. The Windows
 lane (`.github/workflows/windows.yml`) compiles the workspace tests, runs the
 controller-side suites and the installer test on Windows. Both lanes run nightly and on manual dispatch
@@ -240,7 +314,8 @@ compatibility, a deterministic multi-client reliability scenario,
 the Linux voice worker, dependency licenses, and packaged legal files.
 Build caches are isolated by job, OS, architecture, and configuration, with
 per-commit keys that restore compatible prior builds and refresh after success.
-Superseded CI runs for the same event and ref are cancelled. You do not need to reproduce
+The lint and test jobs cache compiled third-party dependencies only, saved from master even when tests fail.
+A newer commit cancels a pull request's superseded run; every commit pushed to master runs to completion. You do not need to reproduce
 every runner locally, but consider terminal capabilities, path syntax,
 filesystem behavior, subprocesses, audio dependencies, and platform-specific
 packaging when changing portable code.

@@ -351,7 +351,7 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
             })
             .collect(),
         slot,
-        engine_build: mj_core::worker_build::WORKER_BUILD_ID.to_owned(),
+        engine_build: mj_core::worker_build::worker_build_id().to_owned(),
         jailed: true,
     })
 }
@@ -1078,7 +1078,7 @@ pub fn info(layout: &Layout) -> Result<Value> {
     Ok(json!({
         "engine": "mj-microvm",
         "engine_version": env!("CARGO_PKG_VERSION"),
-        "engine_build": mj_core::worker_build::WORKER_BUILD_ID,
+        "engine_build": mj_core::worker_build::worker_build_id(),
         "state_format": STATE_FORMAT,
         "protocol_version": super::protocol::PROTOCOL_VERSION,
         "state_root": layout.root(),

@@ -186,6 +186,7 @@ impl DashboardContext {
             dashboard,
             chats,
             opening_chat_sessions,
+            attachments,
             selection,
             selection_text,
             login,
@@ -199,13 +200,24 @@ impl DashboardContext {
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
+        let pane_access: BTreeMap<_, _> = dashboard
+            .pane_sessions()
+            .into_iter()
+            .map(|(pane, session)| {
+                let allowed = attachments
+                    .get(&session)
+                    .is_none_or(|attachment| attachment.pane_can_show(dashboard, pane));
+                (pane, allowed)
+            })
+            .collect();
         terminal.draw(|frame| {
-            drawn = render_combined(
+            drawn = mj_tui::render_combined_with_chat_access(
                 frame,
                 dashboard,
                 chats,
                 opening_chat_sessions,
                 transcript_selected,
+                &|pane, _| pane_access.get(&pane).copied().unwrap_or(true),
             );
             *selection_text = if login_open {
                 None
@@ -294,7 +306,17 @@ impl DashboardContext {
             return Ok(());
         };
         if matches!(surface, SurfaceId::NotificationText(_)) {
-            self.dashboard.autoscroll_notification_selection(direction);
+            if let Some(session) = self.dashboard.notification_form_session()
+                && let Some(chat) = self.chats.get_mut(&session)
+                && chat.has_elicitation()
+            {
+                chat.autoscroll_elicitation_in(
+                    mj_chat::chat::ElicitationSurface::Notification,
+                    direction,
+                );
+            } else {
+                self.dashboard.autoscroll_notification_selection(direction);
+            }
         } else if let Some(chat) = self.focused_chat_mut() {
             chat.autoscroll_selection(surface, direction);
         } else {
@@ -315,9 +337,15 @@ impl DashboardContext {
     pub(super) fn route_selection(&mut self, event: Event) -> SelectionRouting {
         let chat_owns_pointer = !self.dashboard.modal_open()
             && match &event {
-                Event::Mouse(mouse) => self
-                    .visible_chat()
-                    .is_some_and(|chat| chat.component_handles_mouse(*mouse)),
+                Event::Mouse(mouse) => match self
+                    .dashboard
+                    .notification_form_mouse_ownership(&self.chats, *mouse)
+                {
+                    Some(owns) => owns,
+                    None => self
+                        .visible_chat()
+                        .is_some_and(|chat| chat.component_handles_mouse(*mouse)),
+                },
                 _ => false,
             };
         let Self {
@@ -352,9 +380,23 @@ impl DashboardContext {
     ) -> Result<()> {
         self.draw()?;
         let extracted = match surface {
-            SurfaceId::NotificationText(generation) => self
-                .dashboard
-                .notification_selection_text(generation, &range),
+            SurfaceId::NotificationText(generation) => {
+                if !self.dashboard.notification_selection_is_current(generation) {
+                    return Ok(());
+                }
+                if let Some(session) = self.dashboard.notification_form_session()
+                    && let Some(chat) = self.chats.get_mut(&session)
+                    && chat.has_elicitation()
+                {
+                    chat.elicitation_selection_text_in(
+                        mj_chat::chat::ElicitationSurface::Notification,
+                        &range,
+                    )
+                } else {
+                    self.dashboard
+                        .notification_selection_text(generation, &range)
+                }
+            }
             SurfaceId::Transcript => self
                 .focused_chat_mut()
                 .and_then(|chat| chat.transcript_selection_text(&range)),

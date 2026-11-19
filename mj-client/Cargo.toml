@@ -36,7 +36,7 @@ chrono.workspace = true
 
 [dev-dependencies]
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-core = { workspace = true, features = ["golden"] }
-mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
+mj-core = { workspace = true, features = ["golden", "test-identity"] }
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util"] }

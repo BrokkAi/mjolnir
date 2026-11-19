@@ -1,0 +1,1624 @@
+{
+  "sets": {
+    "P": 17
+  },
+  "rates": [
+    {
+      "set": "P",
+      "condition": "no-brief",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "sessions": 51,
+      "catch_rate": 0.176,
+      "ci95": [
+        0.039,
+        0.333
+      ],
+      "partial_rate": 0.039
+    },
+    {
+      "set": "P",
+      "condition": "no-brief-fresh",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "sessions": 51,
+      "catch_rate": 0.078,
+      "ci95": [
+        0.0,
+        0.216
+      ],
+      "partial_rate": 0.02
+    },
+    {
+      "set": "P",
+      "condition": "oracle",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "sessions": 51,
+      "catch_rate": 0.451,
+      "ci95": [
+        0.235,
+        0.667
+      ],
+      "partial_rate": 0.039
+    },
+    {
+      "set": "P",
+      "condition": "oracle-noleak",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "sessions": 51,
+      "catch_rate": 0.451,
+      "ci95": [
+        0.235,
+        0.667
+      ],
+      "partial_rate": 0.059
+    }
+  ],
+  "effects": [
+    {
+      "brief": "oracle-noleak",
+      "set": "P",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "effect_points": 27.5,
+      "ci95_points": [
+        9.8,
+        47.1
+      ]
+    },
+    {
+      "brief": "no-brief-fresh",
+      "set": "P",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "effect_points": -9.8,
+      "ci95_points": [
+        -19.6,
+        -2.0
+      ]
+    },
+    {
+      "brief": "oracle",
+      "set": "P",
+      "model": "gpt-6.1-terra",
+      "diffs": 17,
+      "effect_points": 27.5,
+      "ci95_points": [
+        11.8,
+        45.1
+      ]
+    }
+  ],
+  "per_arm": [
+    {
+      "condition": "no-brief",
+      "model": "gpt-6.1-terra",
+      "sessions": 51,
+      "median_tokens": 255144,
+      "median_latency_s": null,
+      "median_tool_calls": null
+    },
+    {
+      "condition": "oracle-noleak",
+      "model": "gpt-6.1-terra",
+      "sessions": 51,
+      "median_tokens": 227094,
+      "median_latency_s": null,
+      "median_tool_calls": null
+    },
+    {
+      "condition": "no-brief-fresh",
+      "model": "gpt-6.1-terra",
+      "sessions": 51,
+      "median_tokens": 235530,
+      "median_latency_s": null,
+      "median_tool_calls": null
+    },
+    {
+      "condition": "oracle",
+      "model": "gpt-6.1-terra",
+      "sessions": 51,
+      "median_tokens": 226749,
+      "median_latency_s": null,
+      "median_tool_calls": null
+    }
+  ],
+  "expected_catches_per_reviewer": [
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "no-brief",
+      "value": 3.0
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "oracle-noleak",
+      "value": 7.7
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "no-brief-fresh",
+      "value": 1.3
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "condition": "oracle",
+      "value": 7.7
+    }
+  ],
+  "bifrost_oracle_noleak": {
+    "outcome": "Facts carry",
+    "diffs": 17,
+    "primary": "ON_minus_AF",
+    "bootstrap": {
+      "seed": 1,
+      "draws": 10000,
+      "unit": "paired diff",
+      "classification_uses_unrounded_rational_bounds": true
+    },
+    "ON_minus_AF": {
+      "difference": 0.37254901960784315,
+      "ci95": [
+        0.17647058823529413,
+        0.5882352941176471
+      ]
+    },
+    "ON_minus_A": {
+      "difference": 0.27450980392156865,
+      "ci95": [
+        0.09803921568627451,
+        0.47058823529411764
+      ]
+    },
+    "ON_minus_OT": {
+      "difference": 0.0,
+      "ci95": [
+        -0.11764705882352941,
+        0.11764705882352941
+      ]
+    },
+    "AF_minus_A": {
+      "difference": -0.09803921568627451,
+      "ci95": [
+        -0.19607843137254902,
+        -0.0196078431372549
+      ]
+    },
+    "per_diff": {
+      "python-filescope-enclosing-tie": {
+        "A": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      "cpp-template-inherited-base-signature": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      "incompatible-semantic-bundle-late-gate": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "retained-fill-java-memo-loses-gap": {
+        "A": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 2,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.6666666666666666
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 3,
+          "catch_rate": 0.0,
+          "partial_rate": 1.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 1,
+          "catch_rate": 0.0,
+          "partial_rate": 0.3333333333333333
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 1,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.3333333333333333
+        }
+      },
+      "kotlin-source-constructor-steals-class-header-comment": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 1,
+          "catch_rate": 0.0,
+          "partial_rate": 0.3333333333333333
+        }
+      },
+      "mcp-default-advisory-reported-clean": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "go-receiver-poisons-package-result-contract-discovery": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "python-module-binding-representative-after-event": {
+        "A": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      "jvm-protected-unindexed-hierarchy-denied": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        }
+      },
+      "python-module-mutation-repeated-scan-budget": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "dependency-failure-drops-independent-model-evidence": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "php-indexed-write-reenters-current-rhs": {
+        "A": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      "kotlin-value-class-this-loses-underlying-projection": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        }
+      },
+      "go-nilness-ignores-modeled-nonreturn": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "java-static-getter-drops-incomplete-route": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      "unproven-override-family-certifies-empty": {
+        "A": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      "js-synthetic-owner-leaks-file-summary": {
+        "A": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "ON": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "AF": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "OT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      }
+    }
+  },
+  "label_consistency": {
+    "reference_round": "bifrost-judge-l",
+    "reviewer_model": "gpt-6.1-terra",
+    "diffs": 17,
+    "arms": {
+      "A": {
+        "sessions": 51,
+        "difference_points": 0.0,
+        "changed_labels": 0,
+        "differs_over_10_points": false
+      },
+      "OT": {
+        "sessions": 51,
+        "difference_points": 0.0,
+        "changed_labels": 0,
+        "differs_over_10_points": false
+      }
+    },
+    "caveats": [],
+    "per_diff": [
+      {
+        "bug": "python-filescope-enclosing-tie",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "92a2de0b6e4757893ab7dfdd410d26be",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "c9f84785e73cb6f3a4830cf9a0ef7aac",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "f74fcaf04f63a7db1fbd1e3bc053e024",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.3333333333333333,
+              "bifrost-judge-l": 0.3333333333333333
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "2566cee6bbdcb0aeca72ecffdf45e71f",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "ef8eed871b8b889ebedbe75d9f4a716c",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "f58f28d4ecd4dff8c5992ce5e5a6c8eb",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "cpp-template-inherited-base-signature",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "4ed395914380475a9bf76b92268134b9",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "ad1038189f0b2bca667e847c67c33402",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "e5c205a5de3a98ab749bff8af11a3a7c",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "2010e1fa5565f90b98b33b48da308e9d",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "21d8d63ce7ccddbcb3f1bc7d81b4c3ec",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "ac5273793faa9060330a3a3e84ef692f",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "incompatible-semantic-bundle-late-gate",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "21740763c38a05427dd9da38939003f6",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "70275117154d5187e82d6706411e0b2a",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "b4387ae5658386a619e0aed6559840a4",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "107ef98cb9fda82aa09cab5a7aa0933f",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "27816759362abb22491503de7997cdad",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "fc88310a91ea1f395ab48f5fc86a6f31",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "retained-fill-java-memo-loses-gap",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "b09643476feb44ec2bd97f356f2ed167",
+                "round": "partial",
+                "reference": "partial"
+              },
+              {
+                "session": "b93d3c092464be78226755a6cacd4953",
+                "round": "partial",
+                "reference": "partial"
+              },
+              {
+                "session": "dae7c8c19e944ef8ce4be0d6aa89d35a",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.3333333333333333,
+              "bifrost-judge-l": 0.3333333333333333
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "882a91643bdb423ea9cf53ba5a0a8ee1",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "d1bd9567c401022be5bec49f44a6cb64",
+                "round": "partial",
+                "reference": "partial"
+              },
+              {
+                "session": "d70519d80dc0908d78061080a7aee7c5",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.6666666666666666,
+              "bifrost-judge-l": 0.6666666666666666
+            }
+          }
+        }
+      },
+      {
+        "bug": "kotlin-source-constructor-steals-class-header-comment",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "0055d2fa0c2077d3718857ce1992ed40",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "d8f55b7922ca8d4eeb6efa02f5dd56cb",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "f01fedee8cf389368660a0ebcf324aa5",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "07d29253f27753835c44070d8a19b4d8",
+                "round": "partial",
+                "reference": "partial"
+              },
+              {
+                "session": "75fb35ac9da4cc010242a4fb52b87efc",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "9b12c767c35bfd77d526a8d24238efe0",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "mcp-default-advisory-reported-clean",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "23837059547ffe0a53f3ce9f82cd1fd6",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "a30c300e95b2143ec54450bd17f32d9c",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "b59b7970aa8b78909842df16be0a3570",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "22e13d67d2117599a2c54388e839d78f",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "d5cfab70f51c2e56080b43ac840fb037",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "ff5a7e4787141607eadb568bc6366c66",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "go-receiver-poisons-package-result-contract-discovery",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "279d7fda5416dd209ce7635f879b7e2e",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "2dd3f8a3a2c70152dad24e8a7a901537",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "a608585aec807709b584bac2ca428441",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "370d79c64c63690682deb54c56553676",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "3d317fb3be7159c5edf3f7972224b11a",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "88cf0ade1656737b6e0ba62e6e74c4ea",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "python-module-binding-representative-after-event",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "683e69fc4d43312c13db7630815177ba",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "eba18951d3e9edb0c0d6b330f7e7677a",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "f3675a7134631b376541d1351603734d",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.6666666666666666,
+              "bifrost-judge-l": 0.6666666666666666
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "163ce99fdeef445da40ad924560bfe31",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "1bef83d73fe8390b773e22d0d576ec61",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "50799b8e36bdde05a99cb7e61a753264",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "jvm-protected-unindexed-hierarchy-denied",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "4a3c990d4575d9980cf361814827efcc",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "4a97507105d795365ea599394452492d",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "dd1e9069d98a5b5de60d05cc4ab840b0",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "39c92fcc2282f72e339daaea55ca8d9c",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "5e41e4bed94fc30a200c713db4399d32",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "acd134be7f6f3dfaef9aae08894a102f",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.3333333333333333,
+              "bifrost-judge-l": 0.3333333333333333
+            }
+          }
+        }
+      },
+      {
+        "bug": "python-module-mutation-repeated-scan-budget",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "5d7ef76609a17fbffc4b2e6ac102b868",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "9fd7b2876c13928af0e6257d8849d9f8",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "fbb32b55fc4673d2d03909d2363ce065",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "3a7402da9d5320d685b6901a87eae7c7",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "48a222c6ab4aebb11044c1deed43ba4e",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "d19805f8a595151ce035481bef8fcb52",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "dependency-failure-drops-independent-model-evidence",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "363019db3d4f43c2875079ebf69dfa47",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "df919dfa2ceaf0bf8178b2088e508c69",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "efdbe0fa1a7dd5546f9db3feb9670307",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "b9cfafa4bd7804ae970516cd8c0e8958",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "dda0612e8433b32f73bfa618da062867",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "fd88a0931849d07a152118386001e40a",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "php-indexed-write-reenters-current-rhs",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "00ac0a53c9fc4978b0d39e52449b9b82",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "579d448a5d5e861b813c3a70b342956d",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "ea156c7e0ea1edeb0b6da9abe92ab58a",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.6666666666666666,
+              "bifrost-judge-l": 0.6666666666666666
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "5c7ff7799ac9888922250f8c5bb373cc",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "973a8b2a86eaaeda4e285f237e0205e1",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "98b9cd92abb70777f9d9fd666063d839",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "kotlin-value-class-this-loses-underlying-projection",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "28bcd74e062cdd09b84ebfbe64fdf5f8",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "3e21a982849a6d6a393fa8d78b4df34f",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "63c9b3615233cbba6f538be62de086b0",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "665328dc3101d93809f019ae5a587459",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "894d2171c0478e881a9ceb06bf875b2b",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "ad51d22ca243075b7ebaa9d00e1a7642",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.6666666666666666,
+              "bifrost-judge-l": 0.6666666666666666
+            }
+          }
+        }
+      },
+      {
+        "bug": "go-nilness-ignores-modeled-nonreturn",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "0e6d2a52766adecd3b698a84589cc644",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "2972e80d6dfaa09582166fe29fe8eae9",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "e6c090b6d012ff1b2f8451509a07a711",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "7412882e75aace00cc26f60ed5b269dd",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "b10b59d4a36287dd106c608e5170191d",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "c45f5fab2ab496339b8f5f8fd48e9fa4",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "java-static-getter-drops-incomplete-route",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "354fd882785cecc15ca5d61e70c76720",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "79492f37cb95a41f6d10febffc65d1f5",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "a00223c714d76ed866e47dd694092feb",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "089ef74c54cb0a7d64fc5652d422001f",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "47f959eb872552ea43ad8260ff4ca1e3",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "6ab98863bd4066ea258f6cd3b523537b",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "unproven-override-family-certifies-empty",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "b1278d32365b0831d620fb61337d6b4f",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "c7adeddd94afb3165e1df94886aafa34",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "ca23d2791fa129766a93c58692959244",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "7189129d885ac4ff08f0afe9df1ad6da",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "94d329e4eb99bdda8fe58f038ec1ddc6",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "dde0783e4f55465a3e59e6fcdcd0599d",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          }
+        }
+      },
+      {
+        "bug": "js-synthetic-owner-leaks-file-summary",
+        "arms": {
+          "A": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "7ed3b33bc6df94d0b13df2fe736985dc",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "8e59d7828b17ba0e4e5fedadec4d2a66",
+                "round": "missed",
+                "reference": "missed"
+              },
+              {
+                "session": "f39a4b328fd474538b858ad28ae2b857",
+                "round": "missed",
+                "reference": "missed"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 0.0,
+              "bifrost-judge-l": 0.0
+            }
+          },
+          "OT": {
+            "sessions": 3,
+            "labels": [
+              {
+                "session": "1e735d032bb5339f66ff429905fd648d",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "c7c387fe203670ae4d30537b16c32130",
+                "round": "caught",
+                "reference": "caught"
+              },
+              {
+                "session": "d7185545d93abb797a8175c964664bc2",
+                "round": "caught",
+                "reference": "caught"
+              }
+            ],
+            "catch_rate": {
+              "bifrost-judge-m": 1.0,
+              "bifrost-judge-l": 1.0
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const viewerSource = readFileSync(
-  new URL('../../../mj-controller/src/web/viewer.js', import.meta.url),
+  new URL('../../../mj-server/src/web/viewer.js', import.meta.url),
   'utf8',
 );
 
@@ -733,7 +733,7 @@ test('when the draft cannot be checked, or the composer is no longer empty, noth
 });
 
 test('a card without a Quick reply hides its form even though the form is a flex box', () => {
-  const css = readFileSync(new URL('../../../mj-controller/src/web/viewer.css', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../../../mj-server/src/web/viewer.css', import.meta.url), 'utf8');
   assert.match(css, /\.inbox-reply\s*\{[^}]*display:\s*flex/);
   assert.match(css, /\.inbox-reply\[hidden\]\s*\{\s*display:\s*none;/);
   const view = screen([row('a', 'important', 1)], { launchFailures: [{ id: 'f', workspace_id: 'w' }] });

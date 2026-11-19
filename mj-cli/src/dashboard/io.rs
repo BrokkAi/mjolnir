@@ -10,7 +10,7 @@ pub(crate) use spawn::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -125,10 +125,6 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         generation: u64,
-        assignment: mj_tui::PaneAssignment,
-        /// The pane that asked for this conversation. A result whose pane has
-        /// since moved on to another session is dropped.
-        pane: mj_tui::tile_layout::PaneId,
         session_id: String,
         result: Box<std::result::Result<mj_chat::chat::PreparedChat, String>>,
     },
@@ -278,20 +274,25 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// One SessionWiki search result. The request id is the dialog's; an
     /// answer for an older one is dropped there.
+    WikiSync {
+        dialog: bool,
+        episode: u64,
+        result: std::result::Result<mj_client::daemon::WikiSyncStatus, String>,
+    },
     WikiRows {
         request_id: u64,
         result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
     },
     ResumeTextMatches {
         request_id: u64,
-        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+        result: std::result::Result<mj_client::daemon::SessionTextSearchPage, String>,
     },
     /// The daemon's answer to a Sessions filter search of conversation text.
     /// The request id is the dashboard's; an answer for an older one is
     /// dropped there.
     SessionTextMatches {
         request_id: u64,
-        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+        result: std::result::Result<mj_client::daemon::SessionTextSearchPage, String>,
     },
     /// One archived session's briefing, for the resume dialog's preview.
     WikiBrief {
@@ -900,27 +901,27 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ChatOpened {
                 generation,
-                assignment,
-                pane,
                 session_id,
                 result,
             } => {
                 // Ignore a late result after the pane that asked for it moved
                 // on (or the dashboard has shut down).
-                if !self.attachments.get(&pane).is_some_and(|attachment| {
-                    attachment.accepts_pane_result(
-                        generation,
-                        assignment,
-                        &self.dashboard,
-                        pane,
-                        &session_id,
-                    )
-                }) || self.opening_chat_sessions.get(&pane).map(String::as_str)
-                    != Some(session_id.as_str())
-                {
+                if !self.attachments.get(&session_id).is_some_and(|attachment| {
+                    attachment.accepts_surface_result(generation, &self.dashboard, &session_id)
+                }) {
+                    if let Some(attachment) = self.attachments.get_mut(&session_id)
+                        && attachment.accepts(generation, Some(&session_id)) {
+                        attachment.defer();
+                        self.opening_chat_sessions.retain(|_, session| session != &session_id);
+                        self.sync_opening_session();
+                    }
                     return;
                 }
-                self.opening_chat_sessions.remove(&pane);
+                let conversation_opening = self.attachments[&session_id]
+                    .has_conversation_interest(&self.dashboard, &session_id);
+                self.attachments.get_mut(&session_id).unwrap().finish();
+                self.opening_chat_sessions.retain(|_, session| session != &session_id);
+                if !self.wanted_chat_sessions().contains(&session_id) { return; }
                 self.sync_opening_session();
                 // The attach may have crossed a lifecycle boundary while it
                 // was preparing. Keep the warm chat/draft untouched and drop
@@ -931,7 +932,7 @@ impl DashboardContext {
                         .transition_failure_kind(&session_id)
                         .is_some()
                 {
-                    self.defer_chat_open_in(pane);
+                    self.attachments.get_mut(&session_id).unwrap().defer();
                     return;
                 }
                 match *result {
@@ -950,12 +951,14 @@ impl DashboardContext {
                         let chat = if composer.is_none() {
                             if let Some(draft) = self.composer_drafts.get(&session_id) { chat.with_draft(draft.text.clone()) } else { chat }
                         } else { chat };
-                        let mut chat = chat.open();
+                        let mut chat = match composer {
+                            Some(composer) => chat.open_with_composer(composer),
+                            None => chat.open(),
+                        };
                         super::drains::apply_policy_config_key(
                             &mut chat,
                             &self.runtime_sessions,
                         );
-                        if let Some(composer) = composer { chat.adopt_live_composer(composer); }
                         // Only a newly opened chat may receive a locator jump. A warm
                         // chat retains the reader's current position.
                         let target = (!self.chats.contains_key(&session_id))
@@ -979,13 +982,12 @@ impl DashboardContext {
                         // was in flight is handed over now.
                         self.refresh_chat_context();
                         self.apply_runtime_review_to_chat(&session_id);
-                        self.dashboard.clear_notice();
+                        self.dashboard.report_chat_attachment_result(&session_id, None, conversation_opening);
                         self.acknowledge_visible_chats();
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
-                        self.dashboard
-                            .report_open_failure(&session_id, &error.to_string());
+                        self.dashboard.report_chat_attachment_result(&session_id, Some(&error), conversation_opening);
                     }
                 }
             }
@@ -1300,6 +1302,19 @@ impl DashboardContext {
                     ),
                 }
             }
+            DashboardIoUpdate::WikiSync { dialog, episode, result } => {
+                if self.shutdown_requested_at.is_none()
+                    && self.dashboard.apply_wiki_sync(dialog, episode, result) {
+                    if dialog {
+                        if let Some((request_id, query)) = self.dashboard.refresh_wiki_search() {
+                            self.wiki_search_task = Some((request_id, spawn_wiki_search(request_id, query,
+                                Duration::ZERO, self.dashboard_io_tx.clone())));
+                        }
+                    } else if let Some((request_id, query)) = self.dashboard.refresh_sessions_text_search() {
+                        self.sessions_text_task = Some(spawn_sessions_text_search(request_id, query, self.dashboard_io_tx.clone()));
+                    }
+                }
+            }
             DashboardIoUpdate::WikiRows { request_id, result } => {
                 if self.dashboard.apply_wiki_search_result(request_id, result) {
                     self.load_resume_preview();
@@ -1308,13 +1323,13 @@ impl DashboardContext {
             DashboardIoUpdate::ResumeTextMatches { request_id, result } => {
                 if self
                     .dashboard
-                    .apply_resume_text_search_result(request_id, result)
+                    .apply_resume_text_search_result(request_id, result.map(|page| page.matches))
                 {
                     self.load_resume_preview();
                 }
             }
             DashboardIoUpdate::SessionTextMatches { request_id, result } => {
-                self.dashboard.apply_sessions_text(request_id, result);
+                self.dashboard.apply_sessions_text(request_id, result.map(|page| page.matches));
             }
             DashboardIoUpdate::WikiBrief { wiki_id, result } => match result {
                 Ok(markdown) => self.dashboard.apply_wiki_brief(wiki_id, markdown),
@@ -1995,7 +2010,7 @@ impl DashboardContext {
             .state
             .sessions
             .get(&session_id)
-            .is_some_and(mj_controller::pollers::session_target_is_pollable)
+            .is_some_and(mj_daemon::pollers::session_target_is_pollable)
         {
             self.worker_diagnoses.observe(&session_id, true, None);
             self.worker_diagnoses.finish(&session_id, episode_id);

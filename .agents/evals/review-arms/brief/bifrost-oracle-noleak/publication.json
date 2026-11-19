@@ -1,0 +1,92 @@
+{
+  "retained": [
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "round": 1,
+      "brief_sha256": "db80691f8e6e62e0b56ba90e6558b93c27234d969cefd3ddf737523e12c2df22"
+    },
+    {
+      "bug": "cpp-template-inherited-base-signature",
+      "round": 1,
+      "brief_sha256": "44f07cfeceac1a77a1158891f1b63f43f1c4f0fcc252b499657e75cddd002ee6"
+    },
+    {
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "round": 1,
+      "brief_sha256": "f258b7f21fcaacda4a9f4701af0b4bb91cf6e6fe829897909aae5220ea777235"
+    },
+    {
+      "bug": "retained-fill-java-memo-loses-gap",
+      "round": 1,
+      "brief_sha256": "d5f94074c4bb60256dc2877d1c968fc8488b2e677a1b647d34dc2d209d891ed0"
+    },
+    {
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "round": 1,
+      "brief_sha256": "ab34944bfa9b4893e29c7be26da616cdaa1c8d3b2a3289cdb62d02138c5da8e0"
+    },
+    {
+      "bug": "mcp-default-advisory-reported-clean",
+      "round": 1,
+      "brief_sha256": "3cf01abb440d63435c27ce9d72b1c3f989318b61bb598da931cee44fb8deb5a0"
+    },
+    {
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "round": 1,
+      "brief_sha256": "26ea7f2bf977ed0318f2379a647029dd95e9170e91b9991bae622d9cb47c9e6e"
+    },
+    {
+      "bug": "python-module-binding-representative-after-event",
+      "round": 1,
+      "brief_sha256": "011d6662c16705d2cbb7c8ab2003af20e66df7454c5176e975a276b63924bfde"
+    },
+    {
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "round": 1,
+      "brief_sha256": "f536568e78894fa6f419a191193baa714d36f5cbca4485736c822894355758fc"
+    },
+    {
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "round": 1,
+      "brief_sha256": "386daa42d712430eaeee67720a0612d425636579d9493b6ae117a06067c288c3"
+    },
+    {
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "round": 1,
+      "brief_sha256": "abef8135eb25900ff904adceb2aba8f71a20055c75fb5bf077ec4a215d4af5a9"
+    },
+    {
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "round": 1,
+      "brief_sha256": "15a8f8cb80e2d42628be2d47fd8be59a631f3e7f92c03bb963c05c0383791907"
+    },
+    {
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "round": 1,
+      "brief_sha256": "e3c1f2ca1eb86a5ac98123588ff6572586bcaa1c40be9bc92239269a0a085f5b"
+    },
+    {
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "round": 1,
+      "brief_sha256": "ba8b04e4830496c527600dae6f47174251fad872b096e2e2cabb3b0fe24fc711"
+    },
+    {
+      "bug": "java-static-getter-drops-incomplete-route",
+      "round": 1,
+      "brief_sha256": "470b1147ffdfdf9386488c16d6c2caf52c5fc4b3517f2aa4297019891e478b4c"
+    },
+    {
+      "bug": "unproven-override-family-certifies-empty",
+      "round": 1,
+      "brief_sha256": "8eed200a60ba3d53106b6df55ca68c8323802cdb66eab9ba311b222b02689421"
+    },
+    {
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "round": 1,
+      "brief_sha256": "5a41fe58a86e59598f3e1f2da4dfbc21beba7af19dfdb95fbb80c0c13bf8a8cc"
+    }
+  ],
+  "excluded": [],
+  "jobs": "/mnt/optane/review-arms-bifrost-20261116/oracle-noleak-arm/jobs-on-af.json",
+  "registered_outcome_from_retention": null
+}

@@ -59,8 +59,8 @@ impl ApiClient {
         };
         let path = response
             .headers()
-            .get(mj_controller::server::api::FETCHED_PATH_HEADER)
-            .and_then(|value| mj_controller::server::api::decode_fetched_path(value.as_bytes()))
+            .get(mj_daemon::server::api::FETCHED_PATH_HEADER)
+            .and_then(|value| mj_daemon::server::api::decode_fetched_path(value.as_bytes()))
             .context("the daemon did not say where the path resolved; it predates `mj fetch`")?;
         let expected = response.content_length();
         let file =

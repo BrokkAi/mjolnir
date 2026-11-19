@@ -4,11 +4,17 @@ pub fn spawn_session_manager() -> Result<SessionManagerChannels> {
     spawn_session_manager_observed(None)
 }
 
-pub(crate) fn spawn_session_manager_observed(
+pub fn spawn_session_manager_observed(
     delegation: Option<DelegationSender>,
 ) -> Result<SessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
+    let (launches_tx, mut launches_rx) = mpsc::unbounded_channel();
+    let mut committed = if crate::database::database_writer_installed() {
+        Some(crate::database::subscribe_committed_state()?)
+    } else {
+        None
+    };
     let (mut updates_tx, updates_rx) = coalesced_update_channel();
     updates_tx.delegation = delegation;
     let session_gate = updates_tx.session_gate.clone();
@@ -17,6 +23,7 @@ pub(crate) fn spawn_session_manager_observed(
     let harness_failure = updates_tx.harness_failure.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let mut starting = StartingSessions::default();
         let mut actors = BTreeMap::<String, ActorRegistration>::new();
         let mut tasks = tokio::task::JoinSet::<String>::new();
         let mut desired_targets = BTreeMap::<String, RelaySessionTarget>::new();
@@ -35,10 +42,42 @@ pub(crate) fn spawn_session_manager_observed(
                         &updates_tx,
                     );
                 }
-                command = commands_rx.recv() => {
-                    let Some(ManagerCommand::Session { session_id, reply }) = command else {
-                        break;
+                event = launches_rx.recv() => {
+                    let Some(event) = event else { break; };
+                    let view = match &event {
+                        StartingEvent::Route { session_id, .. } => actors.get(session_id).map(|actor| actor.view.borrow().clone()),
+                        _ => None,
                     };
+                    let snapshot = committed.as_ref().map(|feed| feed.borrow().clone());
+                    match snapshot.as_ref() {
+                        Some(Ok(snapshot)) => starting.event(event, view, Some(snapshot)),
+                        None => starting.event(event, view, None),
+                        Some(Err(error)) => {
+                            tracing::error!(%error, "launch registration lost its durable state feed");
+                            break;
+                        }
+                    }
+                }
+                changed = async {
+                    match &mut committed {
+                        Some(feed) => feed.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() { break; }
+                    match &*committed.as_mut().expect("feed changed").borrow_and_update() {
+                        Ok(snapshot) => {
+                            starting.reconcile_committed(&snapshot.state);
+                            starting.reconcile_attached(|id| actors.get(id).and_then(|actor| crate::mailbox_outbox::published_worker_relay_protocol(&actor.view.borrow())));
+                        },
+                        Err(error) => {
+                            tracing::error!(%error, "launch registration lost its durable state feed");
+                            break;
+                        }
+                    }
+                }
+                command = commands_rx.recv() => {
+                    let Some(ManagerCommand::Session { session_id, reply }) = command else { break; };
                     let handle = actors
                         .get(&session_id)
                         .filter(|actor| !actor.commands.is_closed())
@@ -121,6 +160,7 @@ pub(crate) fn spawn_session_manager_observed(
             harness_failure,
             model_policies,
             commands: commands_tx,
+            launches: launches_tx,
             session_cpu,
         },
         updates: updates_rx,

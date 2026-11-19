@@ -643,7 +643,8 @@ image = "ubuntu:24.04"
     // copying and hashing large debug binaries for every parallel fixture. It
     // carries this build's stamp, because a mismatched override is an error.
     let worker = storage.path().join("fixture-worker");
-    mj_core::test_hooks::install_fake_worker(
+    mj_core::test_hooks::install_fake_worker_from(
+        mj_build_id::fake_worker_dispatcher(),
         storage.path(),
         "fixture-worker",
         "#!/bin/sh\necho 'PTY fixture cannot launch workers' >&2\nexit 1\n",

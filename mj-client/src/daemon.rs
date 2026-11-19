@@ -246,8 +246,40 @@ pub enum WikiIndexState {
 #[serde(deny_unknown_fields)]
 pub struct WikiStatus {
     pub state: WikiIndexState,
-    /// A sync is running now, so repeating the query may return more.
-    pub topping_up: bool,
+}
+
+/// Progress within one adapter of the current sync phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSyncProgress {
+    pub phase: String,
+    pub tool: String,
+    pub adapter: usize,
+    pub adapters: usize,
+    pub done: usize,
+    pub total: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WikiSyncOutcome {
+    Succeeded,
+    Failed(String),
+}
+
+/// One ordered snapshot from the indexer's generation owner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSyncStatus {
+    pub epoch: String,
+    pub version: u64,
+    pub requested: u64,
+    pub started: u64,
+    pub finished: u64,
+    pub successful: u64,
+    pub outcome: Option<WikiSyncOutcome>,
+    pub running: Option<WikiSyncProgress>,
+    pub target: Option<u64>,
 }
 
 /// Where in a session's conversation a text search matched. A match in a
@@ -266,6 +298,12 @@ pub enum SessionTextMatchKind {
 pub struct SessionTextMatch {
     pub session_id: String,
     pub kind: SessionTextMatchKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTextSearchPage {
+    pub matches: Vec<SessionTextMatch>,
 }
 
 /// One page of search results with the state of the index behind them.
@@ -977,6 +1015,11 @@ pub enum DaemonAction {
     RemoveProject {
         bundle_id: String,
     },
+    WikiSyncRequest,
+    WikiSyncWatch {
+        epoch: String,
+        after: u64,
+    },
     WikiSearch {
         query: String,
         limit: usize,
@@ -1428,9 +1471,10 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    WikiSyncStatus(WikiSyncStatus),
     ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
     ProjectCreated(mj_core::project_catalog::SavedProject),
-    SessionTextMatches(Vec<SessionTextMatch>),
+    SessionTextMatches(SessionTextSearchPage),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
     /// Whether a queued startup prompt was withdrawn before delivery.
@@ -2784,9 +2828,38 @@ impl DaemonClient {
         }
     }
 
+    async fn request_without_reconnect(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        match self.request_once(action).await? {
+            DaemonReply::UpgradePending => {
+                bail!("the daemon refused admission while being replaced; reopen to sync again")
+            }
+            reply => Ok(reply),
+        }
+    }
+
+    pub async fn wiki_sync_request(&mut self) -> Result<WikiSyncStatus> {
+        match self
+            .request_without_reconnect(DaemonAction::WikiSyncRequest)
+            .await?
+        {
+            DaemonReply::WikiSyncStatus(status) => Ok(status),
+            reply => bail!("unexpected SessionWiki sync reply {reply:?}"),
+        }
+    }
+
+    pub async fn wiki_sync_watch(&mut self, epoch: String, after: u64) -> Result<WikiSyncStatus> {
+        match self
+            .request_without_reconnect(DaemonAction::WikiSyncWatch { epoch, after })
+            .await?
+        {
+            DaemonReply::WikiSyncStatus(status) => Ok(status),
+            reply => bail!("unexpected SessionWiki sync reply {reply:?}"),
+        }
+    }
+
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
-            .request(DaemonAction::WikiSearch { query, limit })
+            .request_without_reconnect(DaemonAction::WikiSearch { query, limit })
             .await?
         {
             DaemonReply::WikiRows(page) => Ok(page),
@@ -2797,9 +2870,9 @@ impl DaemonClient {
     /// The live sessions whose user or agent messages contain `query`, and
     /// which of the two matched. Answers from the SessionWiki index, so a very
     /// new message can be missing until the next sync.
-    pub async fn session_text_search(&mut self, query: String) -> Result<Vec<SessionTextMatch>> {
+    pub async fn session_text_search(&mut self, query: String) -> Result<SessionTextSearchPage> {
         match self
-            .request(DaemonAction::SessionTextSearch { query })
+            .request_without_reconnect(DaemonAction::SessionTextSearch { query })
             .await?
         {
             DaemonReply::SessionTextMatches(matches) => Ok(matches),
@@ -3719,7 +3792,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 /// The first protocol with notification cards and completion-bound transcript reads.
 pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
 /// The first protocol with daemon-owned notify-once alert events.
-pub const ALERT_EVENTS_PROTOCOL: u32 = 107;
+pub const ALERT_EVENTS_PROTOCOL: u32 = 108;
+// Version 107: explicit SessionWiki sync generations and progress watches.
 pub const PROTOCOL_VERSION: u32 = ALERT_EVENTS_PROTOCOL;
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;

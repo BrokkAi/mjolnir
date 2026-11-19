@@ -1,0 +1,28 @@
+{
+  "id": "unproven-override-family-certifies-empty",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "caught",
+      "brief_sha256": "aa03db4578eb9c1931840ca07ef77e65adc22f1544d8b869eac93a4ca35b1f35",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "The `Some(overrides) if overrides.is_empty()` arm matches an empty vector from either `is_proven` value",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it explicitly points out the unproven->Some(empty) conflation at the concrete discharge arm, but does not claim this unsoundly discharges the dispatch gap; unsure between caught and partial, so lower.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "The `Some(overrides) if overrides.is_empty()` arm matches an empty vector from either `is_proven` value",
+          "rationale": "The output directly identifies unproven families being converted to Some(empty) and accepted by the concrete empty-override arm. Its account of the absence flag and filtered dynamic-dispatch gap connects that conflation to losing uncertainty in downstream completeness.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

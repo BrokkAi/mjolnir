@@ -1,0 +1,422 @@
+{
+  "label_counts": {
+    "partial": 5,
+    "caught": 10,
+    "missed": 2
+  },
+  "flagged_cases": [
+    "python-filescope-enclosing-tie",
+    "cpp-template-inherited-base-signature",
+    "incompatible-semantic-bundle-late-gate",
+    "retained-fill-java-memo-loses-gap",
+    "kotlin-source-constructor-steals-class-header-comment",
+    "mcp-default-advisory-reported-clean",
+    "go-receiver-poisons-package-result-contract-discovery",
+    "python-module-binding-representative-after-event",
+    "jvm-protected-unindexed-hierarchy-denied",
+    "php-indexed-write-reenters-current-rhs",
+    "kotlin-value-class-this-loses-underlying-projection",
+    "go-nilness-ignores-modeled-nonreturn",
+    "java-static-getter-drops-incomplete-route",
+    "unproven-override-family-certifies-empty",
+    "js-synthetic-owner-leaks-file-summary"
+  ],
+  "paired_rows": [
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "round": 0,
+      "label": "partial",
+      "brief_sha256": "5c9cc953faf51d3b818e8ec3bcb6e7f200f9b73f689f67aade2739875b955aea",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "for a whole-file root, that range has the same byte span as the synthetic `FileScope` range `0..source.len()`",
+          "rationale": "It identifies the equal whole-file spans and separately describes span-minimum enclosing selection. It does not identify unordered tie selection of the synthetic owner or the resulting loss of module receiver facts and definitions, so the full defect is not established.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "that range has the same byte span as the synthetic `FileScope` range",
+          "rationale": "The trace identifies the equal Python-module/FileScope spans and smallest-range selection over the raw declarations. It does not identify unordered tie selection or the loss of module receiver facts and resulting failed definition lookup, so the full defect is not established.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "cpp-template-inherited-base-signature",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "c9e7a4655b2d458027acb8e1cd91ffe2d901c66998e8255a0016d3626b5b56cd",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "Class `CodeUnit`s receive `scope.template_signature` as that identity signature",
+          "rationale": "The output directly connects inherited traversal to a helper preferring signature metadata and explains that class-template signatures contain only the template parameter head, excluding the base clause. This identifies the specific base-discovery mismatch rather than a generic template limitation.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "cpp_template_signature` supplies only the template parameter head, not the class base clause",
+          "rationale": "The output connects the new inherited-member traversal to a base helper that prefers the identity signature, then identifies that template owners supply only template parameters rather than their base clause. Together with its empty-member lookup diagnostic path, this identifies the template-specific inherited lookup failure.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "round": 0,
+      "label": "partial",
+      "brief_sha256": "c725efa719b973be1d2d567523c8a4c9a8714c6ff2c5babfa3f08e836b212f7a",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "before calling `verify_generated_production`",
+          "rationale": "It explicitly locates generated compatibility checks after whole-bundle hashing and curated decoding. It does not explain that an index-known incompatible bundle needlessly blocks synchronous acquisition before rejection; conservatively this is a partial ordering observation.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "then decodes each curated manifest and shard",
+          "rationale": "The output correctly traces whole-bundle hashing and curated decoding before generated schema/cache checks, and locates acquisition within preparation. It never explains that index-known incompatibility makes this work unnecessary or that it delays the requesting tool before rejection; under the conservative rule this is partial.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "retained-fill-java-memo-loses-gap",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "73b7c4b9dcd08da07621d6516028658779ec95052217e451c35608494ff1e7cc",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "it inserts indexes built from `declarations(file)` without a completion check and returns memo hits without replaying their build gaps",
+          "rationale": "The output connects the newly shared retained domain and its lifetime to a Java memo that retains indexes without completion checks or gap replay. This identifies how later fills reuse incomplete builds without their incompleteness evidence.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "it inserts indexes built from `declarations(file)` without a completion check and returns memo hits without replaying their build gaps",
+          "rationale": "The output identifies the newly shared domain and the Java memo storing indexes without checking completion or replaying gaps. It stops short of identifying a StructureUnavailable or equivalent incomplete build being reused as a complete absence by a later retained fill, so the required false-admission mechanism remains incomplete.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "c64c7d45350c75a375d114d897b8119c83191fcd1ade453c992ad32839a0cf15",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`enclosing_declaration` assigns overlapping comments to the deepest declaration",
+          "rationale": "It follows the nonsynthetic primary constructor into comment-density traversal, notes range expansion without exclusion, and describes deepest-owner attribution. It does not identify the shared class KDoc/header being taken from the class or the incorrect own-header count, leaving the particular faulty behavior implicit.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "`enclosing_declaration` assigns overlapping comments to the deepest declaration",
+          "rationale": "The output connects the newly source-visible primary constructor child to the synthetic-only Kotlin child filter, range expansion for comment density, and deepest-declaration ownership of overlapping comments. This identifies the primary-constructor ownership contest that steals the enclosing class documentation.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "bug": "mcp-default-advisory-reported-clean",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "c601f2bdced7c0e4e2f1c9c1ae07ffd04ecbc698795f180e25f9ae8dc5716ddb",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "inheriting `Pass`",
+          "rationale": "The MCP observation connects default Pass options directly to the exit-status projection that calls POLICY_EXIT_CLEAN clean while returning the report. Together with the described exit-zero inconclusive gate, this identifies the advisory-to-clean conflation.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "`run_policy` maps `outcome.exit_status()` directly to the public status, with `POLICY_EXIT_CLEAN` becoming `clean`",
+          "rationale": "The output explicitly connects MCP default options inheriting Pass to projecting the numeric exit status as clean while returning the original report. That is the advisory-versus-clean conflation in the defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "abd4fd87a6af72c20430e28b8acca5b41da415a153c8e5dd66cab95b5c06a7a1",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "receiverless summaries and receiver calls with the same tuple share an inventory entry",
+          "rationale": "The output identifies the name/arity-only empty-open applicability check and its missing receiver distinction. It also follows that empty-arm coverage into Incomplete diagnostics, connecting the overbroad match to false discovery incompleteness.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "receiverless summaries and receiver calls with the same tuple share an inventory entry",
+          "rationale": "The output identifies the name/arity-only inventory ignoring receiver applicability and connects empty Open lookups to the diagnostic that makes query completion incomplete. This captures unrelated receiver calls inheriting uncertainty from receiverless result-contract models.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "python-module-binding-representative-after-event",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "352aeba7ed37c673d77c4c74581b44af58f7699b5d1ae4277449e5af0951722a",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "retaining only the last assignment's declaration range, not a range for each binding event",
+          "rationale": "It connects repeated assignments replacing the sole declaration range to the event-end eligibility bound, and follows an empty result to no_indexed_definition before fallback. This identifies why an earlier visible repeated binding loses its target.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "retaining only the last assignment's declaration range, not a range for each binding event",
+          "rationale": "The output connects repeated assignments replacing the representative declaration range with the latest spelling to the new event-end cutoff. It also traces the empty result to no_indexed_definition before fallback, identifying the valid earlier read losing its target.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "25308a33e036d3918a520a4763fc0a8ba09103c8caac10ab54d7b18ac0bb7e4d",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "it returns `Some(false)` without checking hierarchy closure",
+          "rationale": "The output identifies the unclosed-inventory false subtype result and routes Scala protected access to that helper. It stops short of explaining that the new visibility consumer treats that result as Denied and drops the selected protected declaration, so the required false-denial consequence remains unstated.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "it returns `Some(false)` without checking hierarchy closure",
+          "rationale": "The output identifies an empty supertype inventory being treated as a definitive negative without closure, explicitly routes Scala protected access through that helper, and describes selected owners with no surviving targets being skipped. This is the missing-proof-to-false-denial mechanism rather than an ordinary negative subtype answer.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "f2e666da81e245336362ef8686909d3ecd8a2a0b58aa32ed417f1df78ffe3a4b",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes shared hierarchy budgeting and per-base guard calls but does not identify repeated whole-module mutation scans or their exhaustion of that budget. No finding connects repeated scan work to false incomplete ancestry.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces shared bounded hierarchy sessions and guarded base lookups, but does not identify repeated whole-module mutation scans, cumulative scope-budget exhaustion, or a falsely incomplete hierarchy answer. Shared-budget plumbing alone does not identify the defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "d1eff1980fcf51245f1d25fbabb0a7f27bd9937f5416cbf7f997e6411d9e0962",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions cloning caller activation and a working Go overlay fixture, but never identifies the discovery/preparation failure early returns or loss of independent activation evidence. Its other activation publication observations concern different mechanisms.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output notes the cloned activation request and independently supported Go overlay evidence. It never identifies the discovery/preparation failure early returns or connects them to losing activation of that evidence, so it does not report the known defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "ed7a2f88f92cab2688f02ec7c0c1c0794817c91f4c9fce24b2fe1e9d5f1b6745",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "calls `resolve_value(right)` for matching indexed writes even when the assignment encloses the current collection read",
+          "rationale": "It identifies the start-only ordering filter and acceptance of the enclosing assignment, and supplies the receiver-inference callback path. It does not identify the resulting identical-RHS self-recursion or stack overflow; conservatively the exact failure mechanism is not fully stated.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "calls `resolve_value(right)` for matching indexed writes even when the assignment encloses the current collection read",
+          "rationale": "The output connects the new subscript receiver route to a collection helper whose callback re-enters the receiver evaluator and accepts the assignment containing the read because only start offsets are checked. Resolving that enclosing assignment RHS again identifies the non-progressing self-recursion, even without spelling out the eventual stack overflow.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "round": 0,
+      "label": "partial",
+      "brief_sha256": "ee49a9e5f33c50ba5dcaf690b584547fc63908f26d33ea5a7517067030c2811c",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "sets `self.receiver` without the `bind_carrier` call used for formal slots",
+          "rationale": "The output identifies the missing receiver carrier binding and separately mentions the underlying-projection branch. It does not connect that omission to this.amount in a value-class member falling back to a field load/gap or losing underlying-value dependence.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "sets `self.receiver` without the `bind_carrier` call used for formal slots",
+          "rationale": "The output identifies the missing receiver carrier binding and the this-expression receiver source. It does not connect that omission to a value-class member underlying-property read losing UnderlyingProjection and becoming a generic field load or losing carrier dependence, so it stops before the required faulty behavior.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "round": 0,
+      "label": "partial",
+      "brief_sha256": "19df943f4239d5cf23c1b001f551e09af0e3117d7293a6eb96524835ed5a9c62",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`proves_normal_continuation_absent` evaluates exact active-model agreement independently of summary completeness",
+          "rationale": "It notices the complete-summary gate versus the exact nonreturn fact on partial testing.T.Fatal models. It does not say nilness reachability retains normal continuation or explain the impossible nil-use path after the terminating guard, so it falls short of the match rule.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "`proves_normal_continuation_absent` evaluates exact active-model agreement independently of summary completeness",
+          "rationale": "The output contrasts complete-only modeled facts with the independent nonreturn proof and cites testing.T.Fatal. It does not identify retained normal CFG continuation or the resulting impossible nil-use path and false positive; the related model-completeness observation alone is insufficient to catch the defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "java-static-getter-drops-incomplete-route",
+      "round": 0,
+      "label": "partial",
+      "brief_sha256": "0548dbe3d696de7bcf75850648fd74a0b5631bc4eba16d1543d1bd9c961ebb18",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`found_alias` is set after owner/static/namespace matching",
+          "rationale": "The output places static getter Value aliases beside the namespace filter and the later found-alias evidence tracking. It does not identify a getter mismatch being skipped before open-route evidence, or the resulting false absence/unindexed-owner diagnosis; those causal steps would have to be supplied by the reader.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "`found_alias` is set after owner/static/namespace matching",
+          "rationale": "The output juxtaposes Kotlin getter aliases in the Value namespace, static namespace/kind matching, and found_alias tracking after that matching. It does not explain that skipping the alias loses incomplete-route evidence and produces false absence or an unindexed-owner diagnosis, so the required consequence remains unstated.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "unproven-override-family-certifies-empty",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "Both empty-vector routes enter the new `Some(overrides) if overrides.is_empty()` arm",
+          "rationale": "It explicitly identifies unproven family answers being converted to Some(empty) and entering the new empty-overrides proof arm. Its subsequent gap-filter and completeness flow explains how that conflation suppresses uncertainty.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "Both empty-vector routes enter the new `Some(overrides) if overrides.is_empty()` arm",
+          "rationale": "The output explicitly identifies unproven member families becoming Some(empty) and reaching the concrete absence arm. Its gap-filter and policy-status trace connects that conflation to suppressing unresolved/truncated dispatch evidence and permitting completeness, which matches the defect.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "round": 0,
+      "label": "caught",
+      "brief_sha256": "3587b9c753e8a1522ae418525e3b8ddd10c98cc0d28a2fe957418a29bd71ff6d",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "sets each element extent to the maximum of its signature line count and matching range line count, retaining the signature text",
+          "rationale": "The output correctly connects root-range registration to signature-driven summary extents while preserving signature text. It does not identify the resulting synthetic summary coverage enclosing or duplicating later real declarations, so it leaves the required faulty summary behavior implicit.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "sets each element extent to the maximum of its signature line count and matching range line count, retaining the signature text",
+          "rationale": "The output connects registering the JS/TS import module at the tree root to the summary renderer expanding the signature element extent using that stored range, alongside separately emitted top-level declarations. This identifies whole-file synthetic coverage enclosing real declarations while correctly retaining signature text.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ],
+  "raw_workflow_sha256": "d2162eddfe406a0770918a0ff294b65c48566831d42cb896afc28c4e8faa103f",
+  "judge_roles": 2,
+  "root_usage_cost_ticks": 3831644000,
+  "api_equivalent_estimate_usd": 0.3831644,
+  "report_correction": "Flagged means caught or partial. The operator report lists 10^9 ticks per USD. The source uses 10^10, giving $0.3831644 for these two judges. The full flagged set and rationales are reconstructed here from collected records."
+}

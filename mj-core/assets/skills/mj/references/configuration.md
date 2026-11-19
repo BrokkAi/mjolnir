@@ -549,8 +549,9 @@ effort = "high"
 ```
 
 `max_concurrent` is shared by every target. By default the task choices above
-are shared too. To give SSH bare targets with `permissions = "yolo"` their own
-choices, turn off **Use the same subagents on all targets** in Settings, which
+are shared too. To give YOLO targets, where the harness runs without
+approvals (container runtimes, and SSH bare targets with `permissions = "yolo"`),
+their own choices, turn off **Use the same subagents on all targets** in Settings, which
 writes `use_same_on_all_targets = false`, and set the `[subagents.yolo.*]`
 tables:
 
@@ -570,9 +571,10 @@ The YOLO set starts empty when the box is first unchecked. An empty YOLO set
 means Mjolnir sub-agents and the oracle are unavailable on YOLO targets; it
 does not fall back to the shared choices. While `use_same_on_all_targets` is
 true, any `[subagents.yolo.*]` values are ignored but retained, so checking
-the box again hides and disables them, and unchecking restores them. Only an
-SSH bare target with `permissions = "yolo"` uses this set; container runtimes
-are unconstrained but have no permission mode and use the shared choices.
+the box again hides and disables them, and unchecking restores them. A
+session uses this set when its harness runs without approvals: every container
+runtime, and an SSH bare target with `permissions = "yolo"`. Localhost and
+guardian SSH bare targets use the shared choices.
 
 `[subagents.oracle]` is optional and independent of the other two: it can be set
 without straightforward. It names the read-only advisor behind the `ask_oracle`

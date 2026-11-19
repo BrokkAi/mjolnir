@@ -86,7 +86,15 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              # Writer model (brief/PLAN-writer-terra.md): stage B's blind brief written by Terra/high.
              "TT": ["gpt-6.1-terra:high"] * 3,
              # Sonnet writer (brief/PLAN-writer-sonnet.md), same Terra reviewers.
-             "TS": ["gpt-6.1-terra:high"] * 3})
+             "TS": ["gpt-6.1-terra:high"] * 3,
+             # Non-leaking oracle brief (brief/PLAN-bifrost-oracle-noleak.md), Terra reviewers.
+             "ON": ["gpt-6.1-terra:high"] * 3,
+             # Fresh no-brief control in the same window and image as ON (its 2026-11-18 amendment).
+             "AF": ["gpt-6.1-terra:high"] * 3,
+             # Strict-construction oracle brief and its same-image no-brief control
+             # (brief/PLAN-bifrost-oracle-strict.md). The plan calls the brief arm "OS"; that ID
+             # already names stage A's Sol oracle arm above, so the strict arm is OX here.
+             "OX": ["gpt-6.1-terra:high"] * 3, "AF2": ["gpt-6.1-terra:high"] * 3})
 
 
 def workspace_id():
@@ -167,6 +175,170 @@ def container(sid):
     return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/{REPO_DIR}",
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in mounts]}
+
+
+def reviewer_runtime(child, carrier):
+    """The reviewer's container image and runtime, read while the reviewer is alive (reviewers are
+    destroyed at role end). Podman reviewers run inside the carrier's container, which carries the
+    carrier's session label; a reviewer with a container of its own is read from that instead.
+    Harness binaries come from mj, so the mj version and mounts name them."""
+    # Each probe command gets the 60 s the process listing below already had: a stalled podman call
+    # ends this attempt (logged, retried) instead of holding collection.
+    ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={child}",
+                                   "--format", "{{.ID}}"], timeout=60).decode().split()
+    source = "reviewer"
+    child_state = {k: session(child).get(k) for k in ("lifecycle", "is_idle", "activity_state")}
+    if not ids:
+        # Only a live reviewer without a container of its own is known to run in the carrier's; a
+        # finished one may have had its own, now gone, so it stays unobserved rather than inferred.
+        if child_state.get("lifecycle") != "live":
+            return None
+        ids, source = [carrier], "carrier"
+    if len(ids) != 1:
+        return None
+    info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]], timeout=60))[0]
+    image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]], timeout=60))[0]
+    # Once the image is known it is kept; the auxiliary probes below record their own failures.
+    try:
+        version = subprocess.check_output([str(MJX), "--version"], timeout=60).decode().strip()
+    except Exception as e:  # noqa: BLE001
+        version = {"error": repr(e)}
+    # The installed CLI can change during a run; the container's live processes name the worker and
+    # harness binaries actually serving this review.
+    try:
+        processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
+                                   text=True, timeout=60, check=True).stdout.splitlines()
+    except Exception as e:  # noqa: BLE001
+        processes = {"error": repr(e)}
+    # The process list is evidence of the reviewer's worker and harness only while its session is
+    # live, so its state at the probe is recorded beside it.
+    return {"container": ids[0], "container_source": source, "image": info["Image"],
+            "reviewer_state_at_probe": child_state,
+            "image_digest": image.get("Digest"),
+            "repo_digests": image.get("RepoDigests"), "image_labels": (info.get("Config") or {}).get("Labels"),
+            "mj_cli_version_at_observation": version, "processes": processes, "observed_ns": time.time_ns(),
+            "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
+                       for m in info.get("Mounts") or []]}
+
+
+# --same-image: every job of this run must use the image the first job recorded, checked before
+# its review starts, so a moving image tag cannot split a paired comparison (ON/AF amendment).
+IMAGE_PIN = None
+IMAGE_PIN_LOCK = threading.Lock()
+
+
+def image_pin_mismatch(place):
+    """None when the carrier's image is the run's pinned image (pinning it if this is the first)."""
+    if IMAGE_PIN is None:
+        return None
+    with IMAGE_PIN_LOCK:
+        # Write a complete temporary file, then hard-link it into place: link fails if a pin exists,
+        # so the first writer wins across processes and a visible pin is never partial.
+        tmp = IMAGE_PIN.with_name(f"{IMAGE_PIN.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps({"image": place["image"], "time_ns": time.time_ns()}) + "\n")
+        try:
+            os.link(tmp, IMAGE_PIN)
+        except FileExistsError:
+            pinned = json.loads(IMAGE_PIN.read_text())["image"]
+            return None if place["image"] == pinned else pinned
+        finally:
+            tmp.unlink()
+        return None
+
+
+def set_aside_carrier(d, sid, place, pinned):
+    """A carrier on another image never reviews. The marker records the decision first; finishing it
+    (suspend, move the launch records aside) is idempotent and resumes at the job's next start, so a
+    later run starts a fresh carrier once the pinned image is current again."""
+    save(d / "rejected-pending.json", {"tag": f"rejected-{time.time_ns()}", "session_id": sid,
+                                       "image": place["image"], "pinned": pinned})
+    finish_set_aside(d)
+
+
+def finish_set_aside(d):
+    marker = d / "rejected-pending.json"
+    rec = json.loads(marker.read_text())
+    tag, sid = rec["tag"], rec["session_id"]
+    # Suspend is accepted asynchronously and can fail after acceptance; request it again whenever the
+    # carrier is not yet suspended, and retire the launch records only once it has taken effect.
+    # Otherwise the marker stays and the next start retries.
+    try:
+        # A destroyed session can still be indexed as a record with no lifecycle: it is gone.
+        state = session(sid).get("lifecycle") or "closed"
+    except RuntimeError as e:
+        # A carrier destroyed meanwhile is gone, which is what the set-aside needs; any other
+        # lookup failure is raised so the next start retries.
+        if not any(m in str(e).lower() for m in ("404", "not found", "no session")):
+            raise
+        state = "closed"
+    if state not in ("suspended", "closed"):
+        with (d / f"{tag}-suspend.jsonl").open("a") as f:
+            f.write(json.dumps({"time_ns": time.time_ns(), "state": state,
+                                "response": mj("suspend", "--session", sid, "--acknowledge-unpublished-work",
+                                               timeout=900)}) + "\n")
+        # The request is accepted before checkpoint and teardown finish; wait for them within the
+        # same bound the suspend call itself allows.
+        end = time.monotonic() + 900
+        while (state := session(sid).get("lifecycle")) not in ("suspended", "closed") and time.monotonic() < end:
+            time.sleep(5)
+    if state not in ("suspended", "closed"):
+        raise RuntimeError(f"rejected carrier {sid} is {state}, not suspended yet; set-aside will be retried")
+    for name in ("launch-intent.json", "launch.json", "placement.json", "pre-inventory.json"):
+        if (d / name).exists():
+            (d / name).rename(d / f"{tag}-{name}")
+    marker.rename(d / f"{tag}-image.json")
+
+
+RUNTIME_PROBES = {}  # (job dir, child) -> its probe thread
+RUNTIME_STOP = {}  # job dir -> Event set when the review settles; probes then stop retrying
+RUNTIME_PROBES_LOCK = threading.Lock()
+
+
+def probe_runtime(d, child, carrier):
+    """Samples one reviewer's runtime on its own thread, so a slow podman or mj call never delays the
+    status polls that observe the other reviewers. Retries until it records the runtime or the
+    reviewer is gone; every failed attempt is written to runtime-errors.jsonl."""
+    path = d / "reviewers" / child[:12] / "runtime.json"
+    stop = RUNTIME_STOP[d]
+    while not path.exists() and not stop.is_set():
+        try:
+            runtime = reviewer_runtime(child, carrier)
+        except Exception as e:  # noqa: BLE001 - a probe failure loses evidence, never fails a review
+            with (d / "runtime-errors.jsonl").open("a") as f:
+                f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
+            runtime = None
+        if runtime:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            save(path, runtime)
+            return
+        try:
+            if session(child).get("lifecycle") in ("suspended", "closed", "failed", "destroyed"):
+                return  # ended: collect() records it as unobserved; starting reviewers keep being probed
+        except Exception as e:  # noqa: BLE001 - destroyed, or a transient API failure: log, keep trying
+            with (d / "runtime-errors.jsonl").open("a") as f:
+                f.write(json.dumps({"child": child, "lifecycle_error": repr(e), "time_ns": time.time_ns()}) + "\n")
+        stop.wait(5)
+
+
+def record_runtimes(d, children):
+    carrier = json.loads((d / "placement.json").read_text())["container"]
+    with RUNTIME_PROBES_LOCK:
+        RUNTIME_STOP.setdefault(d, threading.Event())
+        for child in children:
+            if (d, child) not in RUNTIME_PROBES and not (d / "reviewers" / child[:12] / "runtime.json").exists():
+                t = threading.Thread(target=probe_runtime, args=(d, child, carrier), daemon=True)
+                RUNTIME_PROBES[(d, child)] = t
+                t.start()
+
+
+def join_runtime_probes(d):
+    """Once the review has settled, probes stop retrying; collect() waits for any attempt in flight
+    (each command is bounded) so runtime.json is final before it reads them."""
+    with RUNTIME_PROBES_LOCK:
+        RUNTIME_STOP.setdefault(d, threading.Event()).set()
+        threads = [t for (jd, _), t in RUNTIME_PROBES.items() if jd == d]
+    for t in threads:
+        t.join()
 
 
 def inventory(place, mode, base):
@@ -264,7 +436,8 @@ def commit_message(bug):
 # Arms whose reviewers also get a relation brief (brief/PLAN.md), by brief kind.
 BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind", "FT": "bifrost", "FS": "bifrost",
               "DT": "bifrost-plus", "DS": "bifrost-plus", "XT": "blind-minus", "XS": "blind-minus",
-              "WT": "bifrost-diluted", "WS": "bifrost-diluted", "TT": "blind-terra", "TS": "blind-sonnet"}
+              "WT": "bifrost-diluted", "WS": "bifrost-diluted", "TT": "blind-terra", "TS": "blind-sonnet",
+              "ON": "oracle-noleak", "OX": "oracle-strict"}
 BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
               "They may be incomplete.")
 
@@ -334,6 +507,8 @@ def run_job(job, gate):
     d = ROOT / "runs" / bug["id"] / arm
     if (d / "done.json").exists():
         return "done"
+    if (d / "rejected-pending.json").exists():
+        finish_set_aside(d)  # an interrupted set-aside of a wrong-image carrier
     if (d / "review-start.json").exists():
         # The review was started; finishing it only reads state, so it is safe to resume.
         identity = json.loads((d / "launch-intent.json").read_text())
@@ -380,6 +555,10 @@ def run_job(job, gate):
             s = wait_idle(sid)
     assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
     place = container(sid)
+    pinned = image_pin_mismatch(place)
+    if pinned:
+        set_aside_carrier(d, sid, place, pinned)
+        return f"held: carrier image {place['image']} differs from the pinned {pinned}; carrier set aside"
     if recorded:
         if place != json.loads((d / "placement.json").read_text()):
             return "needs-recovery"
@@ -466,6 +645,7 @@ def await_review(d, sid):
         if review is None and children:
             return children, None
         observe(children, review or {})
+        record_runtimes(d, children)
         verdict = (review or {}).get("verdict")
         if verdict:
             return children, verdict
@@ -479,7 +659,10 @@ def collect(d, bug, identity, sid, place, before):
     if (d / "reviewers.json").exists():
         reviewers = json.loads((d / "reviewers.json").read_text())
     else:
-        children, verdict = await_review(d, sid)
+        try:
+            children, verdict = await_review(d, sid)
+        finally:
+            join_runtime_probes(d)  # every exit, including a failed status poll, ends this job's probes
         save(d / "verdict.json", verdict or {"kind": "cleared", "note": "review finished and cleared between polls"})
         if verdict and verdict.get("kind") == "failed":
             raise RuntimeError("review failed: " + json.dumps(verdict)[:800])
@@ -504,7 +687,12 @@ def collect(d, bug, identity, sid, place, before):
             output = message or None
             if output:
                 (cd / "output.md").write_text(output + "\n")
+            runtime_path = cd / "runtime.json"
+            if not runtime_path.exists():
+                # Never observed alive (it finished between polls): say so rather than guess.
+                save(runtime_path, {"container": None, "note": "reviewer container not observed while alive"})
             reviewers.append({"child": child, "slot": info["slot"], "profile": stored["selection"]["profile"],
+                              "image": json.loads(runtime_path.read_text()).get("image"),
                               "model": settings.get("model"), "effort": settings.get("effort"),
                               "has_output": bool(output), "handback": bool(messages)})
         # A review can clear before every reviewer was observed, or with a reviewer
@@ -557,9 +745,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--jobs", required=True)
     p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--same-image", help="path of a pin file: every job must use the first job's image")
     p.add_argument("--stop-on-failure", action="store_true",
                    help="stop admitting new jobs after a failed, held, or recovery-needed job")
     a = p.parse_args()
+    global IMAGE_PIN
+    IMAGE_PIN = pathlib.Path(a.same_image) if a.same_image else None
     jobs = json.loads(pathlib.Path(a.jobs).read_text())
     # Serialize session creation and startup; reviews themselves run concurrently.
     gate = threading.Semaphore(2)

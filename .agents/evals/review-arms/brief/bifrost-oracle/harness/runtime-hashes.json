@@ -1,0 +1,13 @@
+{
+  "driver.py": "0aca7b9b18f79f15f8c606f5513000c9ab556db9cd9720e3e623c75c2343ed36",
+  "brief_driver.py": "efda957e92fad2cec0e34cafe6a8fdb11f8fd8b625522c05c1e0fd4b2a2a71cb",
+  "verify_driver.py": "e0a8d6f9a88b617125e2469afa246c4e71977a11f08c93f11975455faeca6abb",
+  "brief_oracle.py": "59eef6a5e0eed42f5e9572f3bf5c0e6bf8bc23d19af3581e1f41526519f61921",
+  "brief_score.py": "d028408aaf2a9862b5348d9bfb0c17e621dc8d7f366eb64edaf82634f005f5c4",
+  "brief_writer_terra.py": "0a5cb0807d8b2035bf51c92a5226cedd4b176a862d240d18fa703bf2708dcbf0",
+  "brief_ablation.py": "e4f725f2cc29a0d0dc3e3250b040fd421a03c3876583c22bfa1fe6e6dfff763c",
+  "brief/ORACLE.md": "d7dcbacfddd475d562315c8fa1fde5daee9d3767f4022f6cd84251a104502a34",
+  "brief/WRITER.md": "ce7ff171838c0c1071a01877844b56ea423d48cd7dd93be6b2fec9a244d333e5",
+  "judge/SPEC.md": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+  "mjx": "03168f1bd86b5427964e5241d18255a46618c5f0446a61d0427a7beed435e714"
+}

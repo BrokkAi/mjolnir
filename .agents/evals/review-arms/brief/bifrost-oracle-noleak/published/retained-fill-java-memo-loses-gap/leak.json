@@ -1,0 +1,28 @@
+{
+  "id": "retained-fill-java-memo-loses-gap",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "d5f94074c4bb60256dc2877d1c968fc8488b2e677a1b647d34dc2d209d891ed0",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It describes the shared retained domain and how JavaFileClassIndexMemo inserts and hits entries, but it never mentions StructureUnavailable, lost incompleteness, or a later fill reusing an incomplete absence.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It describes the shared retained-fill domain and how JavaFileClassIndexMemo behaves on hits and misses, but never mentions StructureUnavailable or lost incompleteness on a memo hit.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

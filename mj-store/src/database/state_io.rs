@@ -1,0 +1,1707 @@
+use super::*;
+
+/// Scoped to a load/publication: no cache retains deleted sessions.
+#[derive(Default)]
+pub(super) struct SessionInterns {
+    projects: std::collections::HashMap<
+        String,
+        std::sync::Arc<mj_core::repository::ProjectBundleSnapshot>,
+    >,
+    runtimes:
+        std::collections::HashMap<String, std::sync::Arc<mj_core::state::TargetRuntimeSettings>>,
+}
+
+impl SessionInterns {
+    pub(super) fn from_state(state: &State) -> Result<Self> {
+        let mut pool = Self::default();
+        let mut projects = std::collections::HashSet::new();
+        let mut runtimes = std::collections::HashSet::new();
+        for record in state.sessions.values() {
+            if let Some(value) = &record.project
+                && projects.insert(std::sync::Arc::as_ptr(value))
+            {
+                pool.projects
+                    .entry(serde_json::to_string(value)?)
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(value) = &record.target_runtime
+                && runtimes.insert(std::sync::Arc::as_ptr(value))
+            {
+                pool.runtimes
+                    .entry(serde_json::to_string(value)?)
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        Ok(pool)
+    }
+
+    /// A pool holding only one record's values. A refresh that leaves a
+    /// session's project and runtime unchanged reuses that record's
+    /// allocations without visiting any other session.
+    pub(super) fn from_record(record: Option<&SessionRecord>) -> Result<Self> {
+        let mut pool = Self::default();
+        if let Some(record) = record {
+            if let Some(value) = &record.project {
+                pool.projects
+                    .insert(serde_json::to_string(value)?, value.clone());
+            }
+            if let Some(value) = &record.target_runtime {
+                pool.runtimes
+                    .insert(serde_json::to_string(value)?, value.clone());
+            }
+        }
+        Ok(pool)
+    }
+
+    /// Replace a record's values with equal ones already in this pool.
+    pub(super) fn share(&mut self, record: &mut SessionRecord) -> Result<()> {
+        if let Some(value) = &record.project {
+            let shared = self
+                .projects
+                .entry(serde_json::to_string(value)?)
+                .or_insert_with(|| value.clone())
+                .clone();
+            record.project = Some(shared);
+        }
+        if let Some(value) = &record.target_runtime {
+            let shared = self
+                .runtimes
+                .entry(serde_json::to_string(value)?)
+                .or_insert_with(|| value.clone())
+                .clone();
+            record.target_runtime = Some(shared);
+        }
+        Ok(())
+    }
+}
+
+fn decode_shared<T: serde::de::DeserializeOwned>(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+    pool: &mut std::collections::HashMap<String, std::sync::Arc<T>>,
+) -> rusqlite::Result<Option<std::sync::Arc<T>>> {
+    let Some(json) = row.get::<_, Option<String>>(column)? else {
+        return Ok(None);
+    };
+    if let Some(value) = pool.get(&json) {
+        return Ok(Some(value.clone()));
+    }
+    let value = std::sync::Arc::new(serde_json::from_str::<T>(&json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+    })?);
+    pool.insert(json, value.clone());
+    Ok(Some(value))
+}
+
+/// The configuration and the committed session records, as every reader that
+/// needs both loads them.
+///
+/// A configuration the person has to fix, such as an entry whose secret is
+/// missing, is the reason a request fails, not an internal error, so that
+/// failure carries a refusal.
+pub fn load_config_and_state() -> Result<(mj_core::config::Config, State)> {
+    let config = mj_core::config::Config::load().map_err(|error| {
+        let refusal = mj_core::refusal::Refusal::precondition(format!("{error:#}"));
+        error.context(refusal)
+    })?;
+    Ok((config, load_state()?))
+}
+
+pub fn load_state() -> Result<State> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state.clone());
+    }
+    load_state_from(&database_path())
+}
+
+pub fn load_state_from(path: &Path) -> Result<State> {
+    let mut reader = open_reader(path)?;
+    // Sessions and their relationships must come from the same WAL snapshot.
+    // Otherwise a concurrent spawn can look orphaned despite intact foreign keys.
+    let connection = reader.transaction()?;
+    load_state_with(&connection)
+}
+
+pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
+    let mut state = State {
+        operator_presence: connection.query_row(
+            "SELECT away,revision FROM operator_away WHERE singleton=1",
+            [],
+            |row| {
+                Ok(OperatorPresence {
+                    away: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )?,
+        ..Default::default()
+    };
+    let mut statement = connection
+        .prepare("SELECT profile_id, policy FROM subagent_preference ORDER BY profile_id")?;
+    let rows = statement.query_map([], |row| {
+        let profile_id = row.get::<_, String>(0)?;
+        let json = row.get::<_, String>(1)?;
+        let policy = mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+        Ok((profile_id, policy))
+    })?;
+    for row in rows {
+        let (profile_id, policy) = row?;
+        state.last_subagent_policies.insert(profile_id, policy);
+    }
+    let mut statement = connection
+        .prepare("SELECT profile_id, enabled FROM oracle_preference ORDER BY profile_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+    })?;
+    for row in rows {
+        let (profile_id, enabled) = row?;
+        state.last_oracle_choices.insert(profile_id, enabled);
+    }
+    let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
+    let mut interns = SessionInterns::default();
+    let rows = statement.query_map([], |row| decode_session(row, &mut interns))?;
+    for row in rows {
+        if let Some(session) = row? {
+            state.sessions.insert(session.id.clone(), session);
+        }
+    }
+    #[cfg(test)]
+    super::tests::after_state_sessions_read();
+    let mut statement = connection.prepare(
+        "SELECT child_session_id, record_json FROM subagent_sessions ORDER BY child_session_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let child_id = row.get::<_, String>(0)?;
+        let json = row.get::<_, String>(1)?;
+        let record = serde_json::from_str::<SubagentRecord>(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+        Ok((child_id, record))
+    })?;
+    for row in rows {
+        let (child_id, record) = row?;
+        // A relation whose child or parent is not among the sessions this load
+        // returned describes nothing. Keeping it would fail the state check
+        // below and make every later operation fail with it, which is how a
+        // sub-agent spawn came to be refused with "sub-agent ... has no child
+        // session" long after the child in question was gone (#1065). The load
+        // already skips a session whose harness it cannot parse; a relation
+        // that points at such a session is also omitted from memory.
+        // Snapshot saves preserve relations whose endpoints were not loaded.
+        let missing = if !state.sessions.contains_key(&child_id) {
+            Some("child")
+        } else if !state.sessions.contains_key(&record.parent_session_id) {
+            Some("parent")
+        } else {
+            None
+        };
+        if let Some(missing) = missing {
+            tracing::warn!(
+                child_session_id = child_id,
+                parent_session_id = record.parent_session_id,
+                missing,
+                "dropping a sub-agent relation whose session is not in this state"
+            );
+            continue;
+        }
+        state.subagents.insert(child_id, (&record).into());
+    }
+    load_targets(connection, &mut state)?;
+    load_mounts(connection, &mut state)?;
+    load_checkpoints(connection, &mut state)?;
+    state.mount_history = read_mount_history(connection)?.into_iter().collect();
+    let mut statement = connection
+        .prepare("SELECT host, cpus, memory_bytes FROM host_container_sizes ORDER BY host")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            HostContainerSize {
+                cpus: row.get::<_, i64>(1)? as u64,
+                memory_bytes: row.get::<_, i64>(2)? as u64,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (host, size) = row?;
+        state.container_sizes.insert(host, size);
+    }
+    state.validate()?;
+    Ok(state)
+}
+
+/// The remembered mount sources and project directories by host key, newest
+/// first, as `load_state` reads them. A dashboard reads this again when a
+/// wizard opens, since sessions created after it started add to the history.
+pub fn load_mount_history() -> Result<BTreeMap<String, Vec<PathBuf>>> {
+    read_mount_history(&*open_reader(&database_path())?)
+}
+
+pub(super) fn read_mount_history(
+    connection: &Connection,
+) -> Result<BTreeMap<String, Vec<PathBuf>>> {
+    let mut history = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut statement =
+        connection.prepare("SELECT host, source FROM mount_history ORDER BY host, ordinal")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            blob_to_path(row.get_ref(1)?.as_blob()?),
+        ))
+    })?;
+    for row in rows {
+        let (host, source) = row?;
+        history.entry(host).or_default().push(source);
+    }
+    for location in super::projects::read_project_catalog_from(connection)?.locations {
+        let paths = history
+            .entry(format!("project:{}", location.host))
+            .or_default();
+        if !paths.contains(&location.checkout_root) {
+            paths.push(location.checkout_root);
+        }
+    }
+    Ok(history)
+}
+
+pub fn save_state(state: &State) -> Result<()> {
+    let state = state.clone();
+    submit_database_write("save_state", move |_| {
+        save_state_to(&database_path(), &state)
+    })
+}
+
+pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
+    state.validate()?;
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let existing_contexts = existing_contexts(&tx)?;
+    tx.execute(
+        "DELETE FROM subagent_sessions
+         WHERE child_session_id NOT IN (SELECT session_id FROM sessions)
+            OR parent_session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    let existing_subagents = {
+        let mut statement =
+            tx.prepare("SELECT child_session_id, parent_session_id FROM subagent_sessions")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (child_id, parent_id) in existing_subagents {
+        if state.sessions.contains_key(&child_id)
+            && state.sessions.contains_key(&parent_id)
+            && !state.subagents.contains_key(&child_id)
+        {
+            tx.execute(
+                "DELETE FROM subagent_sessions WHERE child_session_id = ?1",
+                [child_id],
+            )?;
+        }
+    }
+    // A report outlives nothing: it goes with its child's relation.
+    tx.execute(
+        "DELETE FROM subagent_handbacks
+         WHERE child_session_id NOT IN (SELECT child_session_id FROM subagent_sessions)",
+        [],
+    )?;
+    // A snapshot owns only the records it contains. Absence is not a deletion
+    // request: unsupported or concurrently inserted sessions were never loaded.
+    // Operational deletion goes through delete_session_from instead.
+    tx.execute("DELETE FROM mount_history", [])?;
+    tx.execute("DELETE FROM host_container_sizes", [])?;
+    for session in state.sessions.values() {
+        if let Some((existing_bundle, existing_workspace)) = existing_contexts.get(&session.id) {
+            ensure!(
+                existing_bundle
+                    == &super::projects::session_project_id(&tx, &session.id, &session.bundle_id)?,
+                "session {} was already associated with bundle {}, not {}",
+                session.id,
+                existing_bundle,
+                session.bundle_id
+            );
+            ensure!(
+                existing_workspace == &session.workspace_id,
+                "session {} was already associated with workspace {}, not {}",
+                session.id,
+                existing_workspace,
+                session.workspace_id
+            );
+        }
+        insert_session(&tx, session)?;
+    }
+    for subagent in state.subagents.values() {
+        // State contains metadata only. New launches must be registered with
+        // their complete intent; metadata saves preserve those stored fields.
+        let stored_json: String = tx
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&subagent.child_session_id],
+                |row| row.get(0),
+            )
+            .with_context(|| {
+                format!(
+                    "sub-agent {} must be registered with its launch intent before saving metadata",
+                    subagent.child_session_id
+                )
+            })?;
+        let mut stored: SubagentRecord = serde_json::from_str(&stored_json)?;
+        subagent.apply_to(&mut stored);
+        super::usage::record_child_accounting(&tx, &stored)?;
+        let record_json = serde_json::to_string(&stored)?;
+        tx.execute(
+            "INSERT INTO subagent_sessions(
+                 child_session_id, parent_session_id, request_key, record_json
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(child_session_id) DO UPDATE SET
+                 parent_session_id = excluded.parent_session_id,
+                 request_key = excluded.request_key,
+                 record_json = excluded.record_json",
+            params![
+                subagent.child_session_id,
+                subagent.parent_session_id,
+                subagent.kind.request_key(&subagent.request_key),
+                record_json
+            ],
+        )?;
+    }
+    for (host, sources) in &state.mount_history {
+        for (ordinal, source) in sources.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO mount_history(host, source, ordinal) VALUES (?1, ?2, ?3)",
+                params![host, path_to_blob(source), ordinal as i64],
+            )?;
+        }
+    }
+    for (host, size) in &state.container_sizes {
+        write_host_container_size(&tx, host, *size)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn existing_contexts(
+    tx: &Transaction<'_>,
+) -> Result<BTreeMap<String, (String, String)>> {
+    let mut statement =
+        tx.prepare("SELECT session_id, bundle_id, workspace_id FROM session_contexts")?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+pub(super) fn session_exists(tx: &Transaction<'_>, session_id: &str) -> Result<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT 1 FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+pub(super) fn write_materialized_session(
+    tx: &Transaction<'_>,
+    materialized: &MaterializedSession,
+) -> Result<()> {
+    let (execution, running_started_at_ms) = materialized_execution_columns(materialized.execution);
+    tx.execute(
+        "INSERT INTO materialized_sessions(
+             session_id, applied_event_ordinal, applied_event_digest, execution_state,
+             running_started_at_ms, session_title, configuration_json, last_activity_at_ms,
+             pending_elicitations_json, active_turn_json, last_turn_outcome_json,
+             input_required_event_frontier
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?2)
+         ON CONFLICT(session_id) DO UPDATE SET
+             input_required_event_frontier = max(materialized_sessions.input_required_event_frontier,
+                 materialized_sessions.applied_event_ordinal, excluded.applied_event_ordinal),
+             applied_event_ordinal = excluded.applied_event_ordinal,
+             applied_event_digest = excluded.applied_event_digest,
+             execution_state = excluded.execution_state,
+             running_started_at_ms = excluded.running_started_at_ms,
+             session_title = excluded.session_title,
+             configuration_json = excluded.configuration_json,
+             last_activity_at_ms = excluded.last_activity_at_ms,
+             pending_elicitations_json = excluded.pending_elicitations_json,
+             active_turn_json = excluded.active_turn_json,
+             last_turn_outcome_json = excluded.last_turn_outcome_json",
+        params![
+            materialized.session_id,
+            materialized.applied_event_ordinal,
+            materialized.applied_event_digest,
+            execution,
+            running_started_at_ms,
+            materialized.session_title,
+            serde_json::to_string(&materialized.configuration)?,
+            materialized.last_activity_at_ms,
+            serde_json::to_string(&materialized.pending_elicitations)?,
+            materialized
+                .active_turn
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            materialized
+                .last_turn_outcome
+                .as_ref()
+                .map(serialize_turn_outcome)
+                .transpose()?,
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM materialized_transcript_items WHERE session_id = ?1",
+        [materialized.session_id.as_str()],
+    )?;
+    for item in &materialized.transcript {
+        upsert_transcript_item(tx, &materialized.session_id, item)?;
+    }
+    replace_materialized_queue(tx, &materialized.session_id, &materialized.queued_prompts)?;
+    Ok(())
+}
+
+pub(super) fn upsert_transcript_item(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    item: &TranscriptItem,
+) -> Result<()> {
+    let existing = tx
+        .query_row(
+            "SELECT position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms
+             FROM materialized_transcript_items
+             WHERE session_id = ?1 AND stable_id = ?2",
+            params![session_id, item.stable_id],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, Option<u64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms)) =
+        existing
+    {
+        if position != item.position || created_at_ms != item.created_at_ms {
+            return Err(ProjectionIntegrityError(format!(
+                "transcript item {:?} changed immutable identity fields",
+                item.stable_id
+            ))
+            .into());
+        }
+        if item.last_changed_at_ms < last_changed_at_ms {
+            return Err(ProjectionIntegrityError(format!(
+                "transcript item {:?} moved its changed timestamp backwards",
+                item.stable_id
+            ))
+            .into());
+        }
+        if latest_content_event_ordinal.is_some_and(|existing| {
+            item.latest_content_event_ordinal
+                .is_none_or(|next| next < existing)
+        }) {
+            return Err(ProjectionIntegrityError(format!(
+                "transcript item {:?} moved its latest content ordinal backwards",
+                item.stable_id
+            ))
+            .into());
+        }
+        tx.execute(
+            "UPDATE materialized_transcript_items
+             SET latest_content_event_ordinal = ?3, last_changed_at_ms = ?4, body_json = ?5
+             WHERE session_id = ?1 AND stable_id = ?2",
+            params![
+                session_id,
+                item.stable_id,
+                item.latest_content_event_ordinal,
+                item.last_changed_at_ms,
+                serde_json::to_string(&item.body)?,
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO materialized_transcript_items(
+                 session_id, stable_id, position, latest_content_event_ordinal,
+                 created_at_ms, last_changed_at_ms, body_json
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                session_id,
+                item.stable_id,
+                item.position,
+                item.latest_content_event_ordinal,
+                item.created_at_ms,
+                item.last_changed_at_ms,
+                serde_json::to_string(&item.body)?,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn replace_materialized_queue(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    queued_prompts: &[MaterializedQueuedPrompt],
+) -> Result<()> {
+    let mut command_ids = BTreeSet::new();
+    for prompt in queued_prompts {
+        if prompt.command_id.trim().is_empty() {
+            bail!("materialized prompt queue has an empty command id");
+        }
+        if !command_ids.insert(prompt.command_id.as_str()) {
+            bail!(
+                "materialized prompt queue contains duplicate command {:?}",
+                prompt.command_id
+            );
+        }
+    }
+    tx.execute(
+        "DELETE FROM materialized_queued_prompts WHERE session_id = ?1",
+        [session_id],
+    )?;
+    for (ordinal, prompt) in queued_prompts.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO materialized_queued_prompts(
+                 session_id, ordinal, command_id, kind_json, content_json, queued_at_ms,
+                 accepted_ordinal
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                session_id,
+                ordinal as i64,
+                prompt.command_id,
+                serde_json::to_string(&prompt.kind)?,
+                serde_json::to_string(&prompt.content)?,
+                prompt.queued_at_ms,
+                prompt.accepted_ordinal,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn materialized_execution_columns(
+    execution: MaterializedExecutionState,
+) -> (&'static str, Option<i64>) {
+    match execution {
+        MaterializedExecutionState::Idle => ("idle", None),
+        MaterializedExecutionState::Running { started_at_ms } => ("running", Some(started_at_ms)),
+        MaterializedExecutionState::Closing => ("closing", None),
+        MaterializedExecutionState::Closed => ("closed", None),
+    }
+}
+
+pub(super) fn parse_materialized_execution(
+    execution: &str,
+    running_started_at_ms: Option<i64>,
+) -> Result<MaterializedExecutionState> {
+    match (execution, running_started_at_ms) {
+        ("idle", None) => Ok(MaterializedExecutionState::Idle),
+        ("running", Some(started_at_ms)) => {
+            Ok(MaterializedExecutionState::Running { started_at_ms })
+        }
+        ("closing", None) => Ok(MaterializedExecutionState::Closing),
+        ("closed", None) => Ok(MaterializedExecutionState::Closed),
+        _ => bail!("invalid materialized execution state {execution:?}"),
+    }
+}
+
+/// Write every field of a session, including the ones other writers own.
+/// Only a flow that authors the whole record — creation, import, resume, or
+/// orphan adoption — may use this.
+pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    insert_session_with_parent(tx, session, None)
+}
+
+pub(super) fn insert_session_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
+    let previous_error = super::events::previous_session_error(tx, &session.id)?;
+    let canonical_bundle =
+        super::projects::session_project_id(tx, &session.id, &session.bundle_id)?;
+    tx.execute(
+        "INSERT INTO session_contexts(session_id, bundle_id, created_at, workspace_id)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO NOTHING",
+        params![
+            session.id,
+            canonical_bundle,
+            session.created_at,
+            session.workspace_id
+        ],
+    )?;
+    let (stored_bundle, stored_workspace): (String, String) = tx.query_row(
+        "SELECT bundle_id, workspace_id FROM session_contexts WHERE session_id = ?1",
+        [session.id.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(
+        stored_bundle == canonical_bundle,
+        "session {} belongs to bundle {}, not {}",
+        session.id,
+        stored_bundle,
+        session.bundle_id
+    );
+    ensure!(
+        stored_workspace == session.workspace_id,
+        "session {} belongs to workspace {}, not {}",
+        session.id,
+        stored_workspace,
+        session.workspace_id
+    );
+    tx.execute(
+        "INSERT INTO sessions(
+             session_id, title, harness_kind, last_profile, target_template_id, state,
+             native_session_id, acp_session_title, session_title_override, updated_at,
+             viewed_through_event_ordinal, last_error, resource_allocation,
+             last_checkpoint_error, project_directory, managed_worktree,
+             archived, draft_input, create_managed_worktree,
+             subagents, container_workspace, build_cache_json, launch_base,
+             target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
+             review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials,
+             notifications_ignored
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
+         ON CONFLICT(session_id) DO UPDATE SET
+             title = excluded.title,
+             harness_kind = excluded.harness_kind,
+             last_profile = excluded.last_profile,
+             target_template_id = excluded.target_template_id,
+             state = excluded.state,
+             native_session_id = excluded.native_session_id,
+             acp_session_title = excluded.acp_session_title,
+             session_title_override = excluded.session_title_override,
+             updated_at = excluded.updated_at,
+             viewed_through_event_ordinal = max(
+                 sessions.viewed_through_event_ordinal,
+                 excluded.viewed_through_event_ordinal
+             ),
+             last_error = excluded.last_error,
+             resource_allocation = excluded.resource_allocation,
+             last_checkpoint_error = excluded.last_checkpoint_error,
+             project_directory = excluded.project_directory,
+             managed_worktree = excluded.managed_worktree,
+             archived = excluded.archived,
+             create_managed_worktree = excluded.create_managed_worktree,
+             subagents = excluded.subagents,
+             container_workspace = excluded.container_workspace,
+             build_cache_json = excluded.build_cache_json,
+             launch_base = excluded.launch_base,
+             target_runtime_json = excluded.target_runtime_json,
+             launch_branch = excluded.launch_branch,
+             publication_json = excluded.publication_json,
+             checkout_json = excluded.checkout_json,
+             project_json = coalesce(excluded.project_json, sessions.project_json),
+             review_json = excluded.review_json,
+             no_project_memory = excluded.no_project_memory,
+             no_mailbox = excluded.no_mailbox,
+             oracle = excluded.oracle,
+             oracle_choice = excluded.oracle_choice,
+             no_github_credentials = excluded.no_github_credentials,
+             notifications_ignored = excluded.notifications_ignored",
+        params![
+            session.id,
+            session.title,
+            session.harness_kind.id(),
+            session.last_profile,
+            session.target_template_id,
+            session.state.as_str(),
+            session.native_session_id,
+            session.acp_session_title,
+            session.session_title_override,
+            session.updated_at,
+            session.viewed_through_event_ordinal,
+            session.last_error,
+            session
+                .resource_allocation
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            session.last_checkpoint_error,
+            session
+                .project_directory
+                .as_ref()
+                .map(|path| path_to_blob(path)),
+            session
+                .managed_worktree
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            session.archived,
+            session.draft_input,
+            session.create_managed_worktree,
+            session.subagents.as_ref().map(serde_json::to_string).transpose()?,
+            session
+                .container_workspace
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            session
+                .build_cache
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            session.launch_base,
+            session.target_runtime.as_ref().map(serde_json::to_string).transpose()?,
+            session.launch_branch,
+            session.publication.as_ref().map(serde_json::to_string).transpose()?,
+            session.checkout.as_ref().map(serde_json::to_string).transpose()?,
+            session.project.as_ref().map(serde_json::to_string).transpose()?,
+            session.review.as_ref().map(serde_json::to_string).transpose()?,
+            session.no_project_memory,
+            session.no_github_events,
+            session.oracle,
+            session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
+            session.no_github_credentials,
+            session.notifications_ignored,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO materialized_sessions(session_id) VALUES (?1)
+         ON CONFLICT(session_id) DO NOTHING",
+        [session.id.as_str()],
+    )?;
+    replace_targets_with_parent(tx, session, parent)?;
+    replace_mounts(tx, &session.id, &session.additional_mounts)?;
+    replace_checkpoint(tx, session)?;
+    super::events::record_session_fault_transition(tx, session, previous_error)?;
+    super::session_create::settle_create_intent(tx, session)?;
+    Ok(())
+}
+
+/// Update the columns a lifecycle transition owns, plus the target locator
+/// that provisioning and teardown maintain with them. The row must exist:
+/// a transition never resurrects a session another writer deleted.
+pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    let previous_error = super::events::previous_session_error(tx, &session.id)?;
+    // Destructured exhaustively and without `..` on purpose. This statement is
+    // the only thing standing between a new `SessionRecord` field and a value
+    // that is set in memory, read back as its default, and never missed until
+    // somebody inspects the database. A new field breaks this binding, and
+    // whoever adds it decides then whether a lifecycle transition owns it.
+    // Fields bound to `_` have explicit writers, such as container settings.
+    let SessionRecord {
+        oracle_choice,
+        target_runtime,
+        id,
+        title,
+        harness_kind,
+        last_profile,
+        target_template_id,
+        state,
+        updated_at,
+        viewed_through_event_ordinal,
+        last_error,
+        dismissed_failure: _,
+        failure_generation: _,
+        resource_allocation: _,
+        last_checkpoint_error,
+        project_directory,
+        managed_worktree,
+        build_cache,
+        workspace_id: _,
+        bundle_id: _,
+        project,
+        create_managed_worktree: _,
+        launch_base: _,
+        launch_branch: _,
+        checkout: _,
+        publication: _,
+        // Chosen once, when the session is created.
+        review: _,
+        no_project_memory: _,
+        no_github_events: _,
+        no_github_credentials: _,
+        notifications_ignored: _,
+        // A Move can change it along with the profile the session runs on.
+        subagents,
+        oracle,
+        additional_mounts: _,
+        container_workspace: _,
+        archived: _,
+        // Written by `replace_targets` below rather than by this statement.
+        target: _,
+        native_session_id: _,
+        acp_session_title: _,
+        session_title_override: _,
+        created_at: _,
+        draft_input: _,
+        // Written by `replace_checkpoint`.
+        checkpoint: _,
+    } = session;
+    let changed = tx.execute(
+        // The detach ordinal only ever moves forward, so a transition that
+        // started before a detach receipt cannot rewind it.
+        "UPDATE sessions
+         SET title = ?2,
+             harness_kind = ?3,
+             last_profile = ?4,
+             target_template_id = ?5,
+             state = ?6,
+             updated_at = ?7,
+             viewed_through_event_ordinal = max(viewed_through_event_ordinal, ?8),
+             last_error = ?9,
+             last_checkpoint_error = ?10,
+             project_directory = ?11,
+             managed_worktree = ?12,
+             build_cache_json = ?13,
+             target_runtime_json = ?14,
+             subagents = ?15,
+             project_json = coalesce(?16,project_json),
+             oracle = ?17,
+             oracle_choice = ?18
+         WHERE session_id = ?1",
+        params![
+            id,
+            title,
+            harness_kind.id(),
+            last_profile,
+            target_template_id,
+            state.as_str(),
+            updated_at,
+            viewed_through_event_ordinal,
+            last_error,
+            last_checkpoint_error,
+            project_directory.as_ref().map(|path| path_to_blob(path)),
+            managed_worktree
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            // Resolved while a session is provisioned and assigned to the
+            // record right before this write, so the lifecycle path owns it.
+            build_cache
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            target_runtime
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            subagents.as_ref().map(serde_json::to_string).transpose()?,
+            project.as_ref().map(serde_json::to_string).transpose()?,
+            oracle,
+            oracle_choice
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        ],
+    )?;
+    if changed != 1 {
+        bail!("unknown session {id}");
+    }
+    super::events::record_session_fault_transition(tx, session, previous_error)?;
+    super::session_create::settle_create_intent(tx, session)?;
+    replace_targets(tx, session)
+}
+
+pub(super) fn replace_targets(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    replace_targets_with_parent(tx, session, None)
+}
+
+fn replace_targets_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
+    super::environments::capture_session_environment(tx, session, parent)?;
+    tx.execute(
+        "DELETE FROM session_targets WHERE session_id = ?1",
+        [session.id.as_str()],
+    )?;
+    if let Some(target) = &session.target {
+        insert_target(tx, &session.id, target)?;
+    }
+    Ok(())
+}
+
+pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    tx.execute(
+        "DELETE FROM session_checkpoints WHERE session_id = ?1",
+        [session.id.as_str()],
+    )?;
+    if let Some(checkpoint) = &session.checkpoint {
+        tx.execute(
+            "INSERT INTO session_checkpoints(session_id, archive_path, sha256, created_at, event_frontier)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session.id,
+                path_to_blob(&checkpoint.archive_path),
+                checkpoint.sha256,
+                checkpoint.created_at,
+                checkpoint.event_frontier,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) struct StoredTargetValues<'a> {
+    pub kind: &'static str,
+    pub host: Option<&'a str>,
+    pub resource: Option<&'a str>,
+    pub address: Option<&'a str>,
+    pub workspace: Option<Vec<u8>>,
+    pub worker_id: Option<&'a str>,
+    pub workspace_storage: Option<String>,
+    pub borrowed_from: Option<&'a str>,
+}
+
+pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTargetValues<'_>> {
+    let (kind, host, resource, address, workspace, worker_id, workspace_storage, borrowed_from) =
+        match target {
+            TargetLocator::LocalBare { worker_root } => (
+                "local-bare",
+                None,
+                None,
+                None,
+                Some(path_to_blob(worker_root)),
+                None,
+                None,
+                None,
+            ),
+            TargetLocator::LocalPodman {
+                container_id,
+                workspace_storage,
+                borrowed_from,
+            } => (
+                "local-podman",
+                None,
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                Some(serde_json::to_string(workspace_storage)?),
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::LocalDocker {
+                container_id,
+                borrowed_from,
+            } => (
+                "local-docker",
+                None,
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::SshAppleContainer {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-apple-container",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::SshNitro {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-nitro",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::SshDocker {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-docker",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::AppleContainer {
+                container_id,
+                borrowed_from,
+            } => (
+                "apple-container",
+                None,
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::AwsEc2 {
+                instance_id,
+                address,
+            } => (
+                "aws-ec2",
+                None,
+                Some(instance_id.as_str()),
+                address.as_deref(),
+                None,
+                None,
+                None,
+                None,
+            ),
+            TargetLocator::SshBare {
+                host,
+                workspace,
+                worker_id,
+            } => (
+                "ssh-bare",
+                Some(host.as_str()),
+                None,
+                None,
+                Some(path_to_blob(workspace)),
+                worker_id.as_deref(),
+                None,
+                None,
+            ),
+            TargetLocator::SshPodman {
+                host,
+                container_id,
+                workspace_storage,
+                borrowed_from,
+            } => (
+                "ssh-podman",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                Some(serde_json::to_string(workspace_storage)?),
+                borrowed_from.as_deref(),
+            ),
+        };
+    Ok(StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    })
+}
+
+pub(super) fn insert_target(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    target: &TargetLocator,
+) -> Result<()> {
+    let StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    } = stored_target_values(target)?;
+    tx.execute(
+        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            session_id,
+            kind,
+            host,
+            resource,
+            address,
+            workspace,
+            worker_id,
+            workspace_storage,
+            borrowed_from
+        ],
+    )?;
+    Ok(())
+}
+
+pub(super) fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
+    load_targets_selected(connection, state, None)
+}
+
+fn load_targets_selected(
+    connection: &Connection,
+    state: &mut State,
+    id: Option<&str>,
+) -> Result<()> {
+    for (session_id, target) in read_targets(connection, id)? {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.target = Some(Box::new(target));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn read_targets(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<BTreeMap<String, TargetLocator>> {
+    let predicate = if id.is_some() {
+        " WHERE session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!("SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
+         FROM session_targets{predicate}"))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
+        Ok((row.get(0)?, decode_target(row, 1)?))
+    })?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+pub(super) fn decode_target(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+) -> rusqlite::Result<TargetLocator> {
+    let kind: String = row.get(start)?;
+    let host: Option<String> = row.get(start + 1)?;
+    let resource: Option<String> = row.get(start + 2)?;
+    let address: Option<String> = row.get(start + 3)?;
+    let workspace = row.get_ref(start + 4)?.blob_or_null()?.map(blob_to_path);
+    let worker_id: Option<String> = row.get(start + 5)?;
+    let workspace_storage = row
+        .get::<_, Option<String>>(start + 6)?
+        .map(|serialized| {
+            serde_json::from_str(&serialized).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(start + 6, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let borrowed_from: Option<String> = row.get(start + 7)?;
+    let target = match kind.as_str() {
+        "local-bare" => TargetLocator::LocalBare {
+            worker_root: workspace.unwrap(),
+        },
+        "local-podman" => TargetLocator::LocalPodman {
+            borrowed_from,
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        "local-docker" => TargetLocator::LocalDocker {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "apple-container" => TargetLocator::AppleContainer {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "aws-ec2" => TargetLocator::AwsEc2 {
+            instance_id: resource.unwrap(),
+            address,
+        },
+        "ssh-bare" => TargetLocator::SshBare {
+            host: host.unwrap(),
+            workspace: workspace.unwrap(),
+            worker_id,
+        },
+        "ssh-docker" => TargetLocator::SshDocker {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-apple-container" => TargetLocator::SshAppleContainer {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-nitro" => TargetLocator::SshNitro {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-podman" => TargetLocator::SshPodman {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        _ => unreachable!("target kind constrained by schema"),
+    };
+    Ok(target)
+}
+
+/// Rewrite a session's attached directories.
+///
+/// `session_mounts.read_only` keeps the meaning older builds understand, so
+/// read-write mounts are stored there as not read-only and recorded again in
+/// `session_mount_access`. Older builds rewrite `session_mounts` without
+/// touching that table, which is what keeps the read-write choice.
+pub(super) fn replace_mounts(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    mounts: &[AdditionalMount],
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM session_mounts WHERE session_id = ?1",
+        [session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_mount_access WHERE session_id = ?1",
+        [session_id],
+    )?;
+    for (ordinal, mount) in mounts.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                ordinal as i64,
+                path_to_blob(&mount.source),
+                path_to_blob(&mount.destination),
+                mount.access == MountAccess::Ro
+            ],
+        )?;
+        if mount.access == MountAccess::Rw {
+            tx.execute(
+                "INSERT INTO session_mount_access(session_id, source, destination, access)
+                 VALUES (?1, ?2, ?3, 'rw')",
+                params![
+                    session_id,
+                    path_to_blob(&mount.source),
+                    path_to_blob(&mount.destination)
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn load_mounts(connection: &Connection, state: &mut State) -> Result<()> {
+    load_mounts_selected(connection, state, None)
+}
+
+fn load_mounts_selected(
+    connection: &Connection,
+    state: &mut State,
+    id: Option<&str>,
+) -> Result<()> {
+    let predicate = if id.is_some() {
+        " WHERE m.session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT m.session_id, m.source, m.destination, m.read_only, a.access IS NOT NULL
+         FROM session_mounts m
+         LEFT JOIN session_mount_access a
+             ON a.session_id = m.session_id
+             AND a.source = m.source
+             AND a.destination = m.destination
+         {predicate} ORDER BY m.session_id, m.ordinal"
+    ))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
+        // An older build that made the mount read-only left the access row
+        // behind; its later choice wins.
+        let access = match (row.get::<_, bool>(3)?, row.get::<_, bool>(4)?) {
+            (true, _) => MountAccess::Ro,
+            (false, true) => MountAccess::Rw,
+            (false, false) => MountAccess::Cow,
+        };
+        Ok((
+            row.get::<_, String>(0)?,
+            AdditionalMount {
+                source: blob_to_path(row.get_ref(1)?.as_blob()?),
+                destination: blob_to_path(row.get_ref(2)?.as_blob()?),
+                access,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (session_id, mount) = row?;
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.additional_mounts.push(mount);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn load_checkpoints(connection: &Connection, state: &mut State) -> Result<()> {
+    load_checkpoints_selected(connection, state, None)
+}
+
+fn load_checkpoints_selected(
+    connection: &Connection,
+    state: &mut State,
+    id: Option<&str>,
+) -> Result<()> {
+    let predicate = if id.is_some() {
+        " WHERE session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!("SELECT session_id, archive_path, sha256, created_at, event_frontier FROM session_checkpoints{predicate}"))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            CheckpointMetadata {
+                archive_path: blob_to_path(row.get_ref(1)?.as_blob()?),
+                sha256: row.get(2)?,
+                created_at: row.get(3)?,
+                event_frontier: row.get(4)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (session_id, checkpoint) = row?;
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.checkpoint = Some(Box::new(checkpoint));
+        }
+    }
+    Ok(())
+}
+
+/// Fill a missing snapshot without overwriting a concurrent writer. A deleted
+/// or retargeted session returns `None`; its stale controller copy can be dropped
+/// by reload instead of preventing every subsequent reload.
+pub fn backfill_target_runtime(
+    session_id: &str,
+    target_template_id: &str,
+    runtime: &mj_core::state::TargetRuntimeSettings,
+) -> Result<Option<std::sync::Arc<mj_core::state::TargetRuntimeSettings>>> {
+    let session_id = session_id.to_owned();
+    let target_template_id = target_template_id.to_owned();
+    let runtime = serde_json::to_string(runtime)?;
+    submit_database_write("backfill_target_runtime", move |_| {
+        let mut connection = open(&database_path())?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("UPDATE sessions SET target_runtime_json = ?2 WHERE session_id = ?1 AND target_template_id = ?3 AND target_runtime_json IS NULL",
+            params![session_id, runtime, target_template_id])?;
+        // Concurrent backfills must all use the winning durable value.
+        let stored: Option<String> = tx.query_row("SELECT target_runtime_json FROM sessions WHERE session_id = ?1 AND target_template_id = ?2",
+            params![session_id, target_template_id], |row| row.get(0)).optional()?;
+        let runtime = stored.as_deref().map(serde_json::from_str).transpose()?;
+        tx.commit()?;
+        Ok(runtime)
+    })
+}
+
+const SESSION_QUERY: &str =
+    "SELECT s.session_id, s.title, s.harness_kind, s.last_profile, c.bundle_id,
+                s.target_template_id, s.state, s.native_session_id, s.acp_session_title,
+                s.session_title_override, c.created_at, s.updated_at,
+                s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
+                s.last_checkpoint_error, s.project_directory, s.managed_worktree,
+                s.draft_input, s.archived
+                , c.workspace_id, s.create_managed_worktree, s.subagents,
+                s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
+                s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
+                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
+         FROM sessions s JOIN session_contexts c USING(session_id)";
+
+fn decode_session(
+    row: &rusqlite::Row<'_>,
+    interns: &mut SessionInterns,
+) -> rusqlite::Result<Option<SessionRecord>> {
+    // A harness Mjolnir no longer supports can still own rows an earlier
+    // release wrote. Skip such a session with a warning rather than
+    // failing the whole listing and hiding every other session with it.
+    let harness_text: String = row.get(2)?;
+    let Ok(harness_kind) = harness_text.parse() else {
+        let session_id: String = row.get(0)?;
+        tracing::warn!(
+            session_id,
+            harness = %harness_text,
+            "session harness is no longer supported; the session is not listed"
+        );
+        return Ok(None);
+    };
+    Ok(Some(SessionRecord {
+        oracle_choice: row
+            .get::<_, Option<String>>(35)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(35, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        oracle: row.get(34)?,
+        project: decode_shared(row, 30, &mut interns.projects)?,
+        target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
+        harness_kind,
+        create_managed_worktree: row.get(21)?,
+        launch_base: row.get(25)?,
+        launch_branch: row.get(27)?,
+        checkout: row
+            .get::<_, Option<String>>(29)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(29, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        publication: row
+            .get::<_, Option<String>>(28)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(28, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        subagents: row
+            .get::<_, Option<String>>(22)?
+            .map(|json| {
+                mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(22, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        container_workspace: row.get::<_, Option<String>>(23)?.map(PathBuf::from),
+        build_cache: row
+            .get::<_, Option<String>>(24)?
+            .as_deref()
+            .and_then(|text| match serde_json::from_str(text) {
+                Ok(build_cache) => Some(build_cache),
+                Err(error) => {
+                    tracing::warn!(%error, "session build cache record is unreadable");
+                    None
+                }
+            }),
+        workspace_id: row.get(20)?,
+        archived: row.get(19)?,
+        id: row.get(0)?,
+        title: row.get(1)?,
+        last_profile: row.get(3)?,
+        bundle_id: row.get(4)?,
+        project_directory: row.get_ref(16)?.blob_or_null()?.map(blob_to_path),
+        managed_worktree: row
+            .get::<_, Option<String>>(17)?
+            .map(|json| serde_json::from_str::<ManagedWorktree>(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?
+            .map(Box::new),
+        // An unreadable choice, such as a mode a newer release wrote, falls
+        // back to `[review]` rather than hiding the session.
+        review: row
+            .get::<_, Option<String>>(31)?
+            .as_deref()
+            .and_then(|text| match serde_json::from_str(text) {
+                Ok(review) => Some(review),
+                Err(error) => {
+                    tracing::warn!(%error, "session review choice is unreadable");
+                    None
+                }
+            }),
+        no_project_memory: row.get(32)?,
+        // Keep the shipped no_mailbox column for the GitHub target opt-out.
+        no_github_events: row.get(33)?,
+        no_github_credentials: row.get(36)?,
+        notifications_ignored: row.get(37)?,
+        target_template_id: row.get(5)?,
+        resource_allocation: row
+            .get::<_, Option<String>>(14)?
+            .map(|json| serde_json::from_str::<SessionResourceAllocation>(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    14,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        additional_mounts: Vec::new(),
+        state: stored_session_state(&row.get::<_, String>(6)?),
+        target: None,
+        native_session_id: row.get(7)?,
+        acp_session_title: row
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .and_then(mj_core::state::normalize_session_title),
+        session_title_override: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        viewed_through_event_ordinal: row.get::<_, u64>(12)?,
+        draft_input: row.get(18)?,
+        last_error: row.get(13)?,
+        failure_generation: row.get(39)?,
+        dismissed_failure: row
+            .get::<_, Option<String>>(38)?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    38,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        last_checkpoint_error: row.get(15)?,
+        checkpoint: None,
+    }))
+}
+
+/// Read one complete record with indexed queries from the caller's WAL snapshot.
+pub fn load_session_record(id: &str) -> Result<Option<SessionRecord>> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state.sessions.get(id).cloned());
+    }
+    read_durable_session_record(id)
+}
+
+/// Recovery checks storage under target ownership before touching a process.
+/// This bounded read also detects a broken store even without a pending write.
+pub fn read_durable_session_record(id: &str) -> Result<Option<SessionRecord>> {
+    let mut connection = open_reader(&database_path())?;
+    let snapshot = connection.transaction()?;
+    load_session_with(&snapshot, id)
+}
+
+pub(super) fn load_session_with(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<SessionRecord>> {
+    load_session_interned_with(connection, id, &mut SessionInterns::default())
+}
+
+pub(super) fn load_session_interned_with(
+    connection: &Connection,
+    id: &str,
+    interns: &mut SessionInterns,
+) -> Result<Option<SessionRecord>> {
+    let record = connection
+        .query_row(
+            &format!("{SESSION_QUERY} WHERE s.session_id=?1"),
+            [id],
+            |row| decode_session(row, interns),
+        )
+        .optional()?
+        .flatten();
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let mut state = State::default();
+    state.sessions.insert(id.to_owned(), record);
+    load_targets_selected(connection, &mut state, Some(id))?;
+    load_mounts_selected(connection, &mut state, Some(id))?;
+    load_checkpoints_selected(connection, &mut state, Some(id))?;
+    state.validate()?;
+    Ok(state.sessions.remove(id))
+}
+
+/// Read the daemon-owned setting without loading all session records.
+pub fn load_operator_presence() -> Result<OperatorPresence> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state.operator_presence);
+    }
+    open_reader(&database_path())?
+        .query_row(
+            "SELECT away,revision FROM operator_away WHERE singleton=1",
+            [],
+            |row| {
+                Ok(OperatorPresence {
+                    away: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )
+        .map_err(Into::into)
+}
+
+/// The shared database writer owns transition and no-op decisions.
+pub fn set_operator_away(away: bool, auto_afk_window: std::time::Duration) -> Result<bool> {
+    let changed = submit_database_write("operator away setting", move |connection| {
+        super::operator_away::set_with(connection, away, auto_afk_window)
+    })?;
+    if changed {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(changed)
+}
+
+/// Persist the last negotiated worker protocol so AFK-off remains correct
+/// before the daemon has reattached every worker after a restart.
+pub fn record_operator_away_worker_protocol(session: String, protocol: u32) -> Result<()> {
+    submit_database_write("operator away worker protocol", move |connection| {
+        connection.execute("INSERT INTO operator_away_workers(session_id,protocol) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET protocol=excluded.protocol WHERE protocol != excluded.protocol", params![session,protocol])?;
+        Ok(())
+    })
+}
+
+/// Only explicit dialog choices change next-creation requests.
+pub(super) fn update_container_requests(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    allocation: Option<Option<&SessionResourceAllocation>>,
+    mounts: Option<&[AdditionalMount]>,
+) -> Result<()> {
+    if let Some(allocation) = allocation {
+        tx.execute(
+            "UPDATE sessions SET resource_allocation=?2 WHERE session_id=?1",
+            params![
+                session_id,
+                allocation.map(serde_json::to_string).transpose()?
+            ],
+        )?;
+    }
+    if let Some(mounts) = mounts {
+        replace_mounts(tx, session_id, mounts)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod targeted_read_tests {
+    use super::*;
+
+    #[test]
+    fn single_session_read_includes_related_rows_and_ignores_unrelated_invalid_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        let expected = super::super::tests::session("selected", "project");
+        save_session_to(&path, &expected).unwrap();
+        save_session_to(&path, &super::super::tests::session("unrelated", "project")).unwrap();
+        let connection = open(&path).unwrap();
+        // A corrupt unrelated value makes a full-state read fail. A point read
+        // must not decode it or any of its related rows.
+        connection
+            .execute(
+                "UPDATE sessions SET resource_allocation = '[]' WHERE session_id = 'unrelated'",
+                [],
+            )
+            .unwrap();
+        assert!(load_state_from(&path).is_err());
+        let mut reader = open_reader(&path).unwrap();
+        let snapshot = reader.transaction().unwrap();
+        assert_eq!(
+            load_session_with(&snapshot, "selected").unwrap(),
+            Some(expected)
+        );
+        assert_eq!(load_session_with(&snapshot, "missing").unwrap(), None);
+    }
+}

@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#08090d" />
+    <link rel="icon" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/viewer.css" />
+    <title>Mjolnir</title>
+  </head>
+  <body>
+    <!-- Route-level announcements for a screen reader. One region, polite, so
+         a background result is spoken without interrupting what is being read. -->
+    <p id="announcer" class="visually-hidden" role="status" aria-live="polite"></p>
+
+    <p id="connection" class="connection" role="status">
+      Offline. Showing the last state received.
+    </p>
+
+    <header id="shell-header">
+      <button id="back" class="icon-button hidden" aria-label="Back">&#8592;</button>
+      <h1 id="shell-title">Mjolnir</h1>
+      <button id="notifications-badge" class="secondary notifications-badge hidden" type="button"></button>
+      <button id="operator-away-indicator" class="operator-away hidden" type="button" aria-label="End AFK">AFK</button>
+      <button
+        id="menu-button"
+        class="icon-button hidden"
+        aria-label="Menu"
+        aria-haspopup="menu"
+        aria-expanded="false"
+      >
+        &#9776;
+      </button>
+      <div id="menu" class="menu hidden">
+        <nav class="menu-items" role="menu" aria-label="Mjolnir">
+          <button role="menuitem" data-route="targets">Targets</button>
+          <button role="menuitem" data-route="quota">Quota</button>
+          <button role="menuitem" data-route="settings" id="menu-settings">Settings</button>
+          <button role="menuitem" id="operator-away-toggle">Go AFK</button>
+          <button role="menuitem" id="logout">Sign out</button>
+        </nav>
+        <p id="menu-version" class="menu-version">Mjolnir</p>
+      </div>
+    </header>
+    <p id="operator-away-error" class="operator-away-error hidden" role="status" aria-live="polite"></p>
+
+    <main id="boot-status" class="card" role="status" aria-live="polite">
+      <h2>Connecting to Mjolnir</h2>
+      <p id="boot-message" class="dim">Loading the viewer…</p>
+    </main>
+
+    <main id="login" class="card hidden">
+      <h2>Unlock viewer</h2>
+      <p class="dim">Enter the six-digit code shown by <code>mj daemon status</code>.</p>
+      <form id="login-form" class="row">
+        <input
+          id="code"
+          inputmode="numeric"
+          autocomplete="one-time-code"
+          pattern="[0-9]{6}"
+          maxlength="6"
+          placeholder="000000"
+          required
+        />
+        <button>Enter</button>
+      </form>
+      <p id="login-error" role="alert"></p>
+    </main>
+
+    <main id="app" class="hidden">
+      <!-- A select, not a row of tabs: workspace names are as long as people
+           make them, and a phone has no room to lay them side by side. -->
+      <div id="workspaces" class="workspace-bar">
+        <select id="workspace-select" aria-label="Workspace"></select>
+        <div id="subagent-workspace" class="virtual-workspace hidden"></div>
+      </div>
+      <div id="launch-failures" aria-live="polite"></div>
+
+      <section id="dashboard" class="page">
+        <aside id="notification-offer" hidden>
+          <span id="notification-offer-text"></span>
+          <button type="button" id="notification-offer-enable">Enable</button>
+          <button type="button" id="notification-offer-dismiss" class="secondary">Not now</button>
+          <span id="notification-offer-error" role="alert"></span>
+        </aside>
+        <div class="row page-actions">
+          <button data-route="new">New session</button>
+          <button data-route="resume" class="secondary">Resume a session</button>
+        </div>
+        <p id="action-error" role="alert"></p>
+        <div id="sessions"></div>
+      </section>
+
+      <section id="notifications-page" class="page hidden">
+        <p id="inbox-error" role="alert"></p>
+        <div id="inbox"></div>
+      </section>
+
+      <section id="new-page" class="page hidden">
+        <h2 id="new-heading">New session</h2>
+        <p id="new-progress" class="dim"></p>
+        <form id="new-form">
+          <div id="new-step"></div>
+          <div class="row">
+            <button type="button" id="new-back" class="secondary">Back</button>
+            <button id="new-next">Next</button>
+            <button type="button" class="secondary" data-route="dashboard">Cancel</button>
+          </div>
+        </form>
+        <p id="new-error" role="alert"></p>
+      </section>
+
+      <section id="resume-page" class="page hidden">
+        <div id="resume-list-view">
+          <h2>Resume a session <span id="resume-wiki-progress" class="dim hidden" role="status"></span></h2>
+          <label class="field resume-search-field">
+            <span>Find a session</span>
+            <input id="resume-search" type="search" autocomplete="off" placeholder="Title, project, or anything said" />
+          </label>
+          <div id="resumable"></div>
+          <p id="resume-wiki-note" class="dim hidden" role="status"></p>
+          <section id="resume-archived" class="resume-archived hidden">
+            <h3>Archived</h3>
+            <div id="resume-archived-rows"></div>
+          </section>
+        </div>
+        <div id="resume-detail-view" class="hidden">
+          <div class="row resume-detail-actions">
+            <button type="button" id="resume-detail-back" class="secondary">Back to sessions</button>
+          </div>
+          <div id="resume-detail"></div>
+        </div>
+      </section>
+
+      <section id="move-page" class="page hidden">
+        <h2>Move session</h2>
+        <p id="move-progress" class="dim"></p>
+        <form id="move-form" class="card">
+          <div id="move-step"></div>
+          <div class="row">
+            <button type="button" id="move-back" class="secondary">Back</button>
+            <button id="move-next">Prepare move</button>
+            <button type="button" class="secondary" data-route="dashboard">Cancel</button>
+          </div>
+        </form>
+        <p id="move-error" role="alert"></p>
+      </section>
+
+      <section id="targets-page" class="page hidden">
+        <h2>Targets</h2>
+        <div id="targets"></div>
+      </section>
+
+      <section id="quota-page" class="page hidden">
+        <h2>Quota</h2>
+        <div id="quota"></div>
+      </section>
+
+      <!-- The daemon renders every settings page; this only draws it. -->
+      <section id="settings-page" class="page hidden">
+        <nav id="settings-trail" class="settings-trail" aria-label="Settings pages"></nav>
+        <h2 id="settings-heading">Settings</h2>
+        <p id="settings-help" class="dim"></p>
+        <div id="settings-notices"></div>
+        <fieldset id="device-notifications">
+          <legend>Notifications on this device</legend>
+          <p id="device-notification-state" role="status">Checking notification support…</p>
+          <button type="button" id="device-notification-enable">Enable notifications on this device</button>
+          <button type="button" id="device-notification-disable" class="secondary">Disable notifications</button>
+          <button type="button" id="device-notification-test" class="secondary">Send test notification</button>
+          <p class="dim">Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.</p>
+        </fieldset>
+        <div id="settings"></div>
+        <div id="settings-entry-actions" class="row"></div>
+        <p id="settings-error" role="alert"></p>
+        <div id="settings-savebar" class="settings-savebar hidden" role="region" aria-label="Unsaved settings">
+          <p id="settings-status" class="dim" role="status"></p>
+          <div class="row">
+            <button type="button" id="settings-discard" class="secondary">Discard</button>
+            <button type="button" id="settings-save">Save</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="conversation" class="page conversation hidden">
+        <div class="conversation-header">
+          <span id="conversation-title" class="conversation-name">Conversation</span>
+          <span id="conversation-state" class="pill"></span>
+          <select id="model-select" class="model-select hidden" aria-label="Model"></select>
+          <div class="turn-controls">
+            <button id="cancel-turn" class="secondary hidden">Interrupt</button>
+            <details id="turn-actions" hidden>
+              <summary aria-label="More turn actions" title="More turn actions">⋯</summary>
+              <button id="interrupt-turn" class="secondary" type="button">Interrupt turn</button>
+            </details>
+          </div>
+        </div>
+        <section id="conversation-transition" class="conversation-transition card" hidden aria-live="polite">
+          <h2 id="conversation-transition-title"></h2>
+          <p id="conversation-transition-stage" class="session-activity"></p>
+          <p id="conversation-transition-notice" class="dim"></p>
+          <p id="conversation-transition-error" class="error" role="alert"></p>
+          <button id="conversation-transition-cancel" class="danger hidden" type="button">Cancel operation</button>
+        </section>
+        <section id="conversation-move-failure" class="card" hidden role="alert"></section>
+        <div id="conversation-scroll" class="conversation-scroll">
+          <button id="earlier-messages" type="button">Earlier messages</button>
+          <div id="conversation-feed"></div>
+          <div id="pending-submissions" aria-live="polite"></div>
+        </div>
+        <button id="jump-to-latest" class="jump-to-latest hidden">New messages ↓</button>
+        <div id="turn-review"></div>
+        <div id="elicitations"></div>
+        <div id="conversation-status" class="conversation-status">
+          <details id="conversation-side" class="card">
+            <summary>
+              <span class="conversation-summary-full">Queue and shells</span>
+              <span class="conversation-summary-phone"></span>
+            </summary>
+            <div class="conversation-side-content">
+              <h3>Queued prompts</h3>
+              <div id="conversation-queue"></div>
+              <h3>Shell commands</h3>
+              <div id="conversation-shells"></div>
+              <h3>Background tasks</h3>
+              <div id="conversation-background-tasks"></div>
+            </div>
+          </details>
+          <div class="child-workspace-buttons">
+            <button
+              type="button"
+              id="subagents-button"
+              class="secondary hidden"
+              aria-label="Open sub-agent workspace"
+            >
+              Sub-agents
+            </button>
+            <button
+              type="button"
+              id="reviewers-button"
+              class="secondary hidden"
+              aria-label="Open reviewers workspace"
+            >
+              Reviewers
+            </button>
+          </div>
+        </div>
+        <form id="prompt-form" class="composer">
+          <div
+            id="command-palette"
+            class="palette hidden"
+            role="listbox"
+            aria-label="Commands"
+          ></div>
+          <div
+            id="prompt-settings"
+            class="prompt-settings hidden"
+            role="group"
+            aria-label="Current session settings"
+          ></div>
+          <div
+            id="prompt-text"
+            class="composer-input"
+            contenteditable="true"
+            role="textbox"
+            aria-multiline="true"
+            spellcheck="true"
+            aria-label="Message the agent"
+            data-placeholder="Message the agent or use !command"
+          ></div>
+          <div id="attachments" class="row" aria-label="Attached images"></div>
+          <div class="composer-lower-border">
+            <button
+              type="button"
+              id="subagents-button-desktop"
+              class="secondary hidden"
+              aria-label="Open sub-agent workspace"
+            >
+              Sub-agents
+            </button>
+            <button
+              type="button"
+              id="reviewers-button-desktop"
+              class="secondary hidden"
+              aria-label="Open reviewers workspace"
+            >
+              Reviewers
+            </button>
+          </div>
+          <div id="composer-actions" class="row composer-actions">
+            <button id="send-button">Send</button>
+            <button
+              type="button"
+              id="attach-image"
+              class="secondary paperclip-button"
+              aria-label="Attach one or more images"
+              hidden
+            >
+              <svg
+                aria-hidden="true"
+                focusable="false"
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+              >
+                <path
+                  d="m16.5 5.5-7.8 7.8a3.25 3.25 0 0 0 4.6 4.6l7-7a4.75 4.75 0 1 0-6.7-6.7l-7.1 7.1a6.25 6.25 0 0 0 8.8 8.8l5.7-5.7"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.8"
+                />
+              </svg>
+            </button>
+            <input id="image-picker" type="file" accept="image/*" multiple hidden />
+          </div>
+          <p id="conversation-error" role="alert"></p>
+        </form>
+      </section>
+    </main>
+
+    <script src="/push-sync.js"></script>
+    <script type="module" src="/viewer.js"></script>
+  </body>
+</html>

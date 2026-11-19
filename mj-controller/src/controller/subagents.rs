@@ -10,10 +10,6 @@ use mj_core::config::HarnessKind;
 use mj_core::state::{SessionRecord, SessionState, new_session_id};
 use mj_core::subagent::SubagentRecord;
 
-/// What the oracle is told before its first question. The handback variant
-/// names the tool only for a harness that gives it to children.
-pub(super) const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only advisor to another coding agent, the primary, which works in this workspace. The primary consults you before decisions it is unsure about. Each question includes the decision, the options and the evidence.\n\nDo not change anything. Do not edit, create or delete files in the workspace, do not change git state, and do not run builds, tests, installs or other commands that write files. Read files, search, and run read-only commands such as git log, git show, git diff and grep. You may write notes only in your report directory.\n\nCheck the primary's claims against the code. Answer with: your recommendation; the requirements the choice must satisfy and whether each option meets them; the evidence, with file:line references; what would fail if your recommendation were wrong; and what you could not verify. Say \"confirmed\", \"likely\" or \"unknown\" according to the evidence. Disagree with the primary when the evidence points the other way. If the question lacks what you need, say what is missing.\n\nSend each answer with the handback tool; Mjolnir delivers it to the primary. Later questions arrive as messages in this conversation, so you keep your earlier context.";
-
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
     pub no_github_credentials: bool,
@@ -268,10 +264,29 @@ impl Controller {
         Ok(())
     }
 
-    /// Register a child without provisioning another target or checkout.
+    /// Store-only fixtures have no launching daemon. Production must register
+    /// with the manager first, or sends can misclassify a starting child.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_subagent(
         &mut self,
         request: RegisterSubagentRequest,
+    ) -> Result<SubagentRecord> {
+        self.register_subagent_inner(request, None)
+    }
+
+    /// Register managed launches before the committed relation becomes addressable.
+    pub fn register_subagent_with_manager(
+        &mut self,
+        request: RegisterSubagentRequest,
+        manager: &crate::session_manager::SessionManagerControl,
+    ) -> Result<SubagentRecord> {
+        self.register_subagent_inner(request, Some(manager))
+    }
+
+    fn register_subagent_inner(
+        &mut self,
+        request: RegisterSubagentRequest,
+        manager: Option<&crate::session_manager::SessionManagerControl>,
     ) -> Result<SubagentRecord> {
         let request_key = request.kind.request_key(&request.request_key);
         let reviewer = request.kind == mj_core::subagent::SubagentKind::Reviewer;
@@ -427,38 +442,24 @@ impl Controller {
             .report_root
             .as_deref()
             .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
-        // The first prompt names the tool only when the child will have it.
-        let initial_prompt = match (handback_tool, &report_dir) {
-            (true, Some(report_dir)) if reviewer => format!(
-                "You are a Mjolnir reviewer child. Your report directory is {report_dir}. Call handback with the complete rubric JSON (up to {} characters).\n\n{}",
-                mj_core::subagent::SubagentKind::Reviewer.max_handback_chars(),
-                request.initial_prompt
-            ),
-            (_, report_dir) if oracle => {
-                let instructions = if handback_tool {
-                    ORACLE_INSTRUCTIONS.to_owned()
-                } else {
-                    ORACLE_INSTRUCTIONS.replace(
-                        "Send each answer with the handback tool; Mjolnir delivers it to the primary.",
-                        "Send each answer as your last message; Mjolnir delivers it to the primary.",
-                    )
-                };
-                let directory_note = report_dir
-                    .as_ref()
-                    .map(|dir| format!("Your report directory is {dir}.\n\n"))
-                    .unwrap_or_default();
-                format!(
-                    "{directory_note}{instructions} Your answer may contain up to {} characters.\n\n{}",
-                    mj_core::subagent::SubagentKind::Oracle.max_handback_chars(),
-                    request.initial_prompt
-                )
-            }
-            (true, Some(report_dir)) => format!(
+        // The assignment and directory are per-task data; standing role policy
+        // is composed by the worker from the durable subagent record.
+        let assignment = if oracle {
+            format!(
                 "{}\n\n{}",
-                mj_core::subagent::handback_prompt_note(report_dir),
+                mj_core::subagent::READ_ONLY_TASK_SCOPE,
                 request.initial_prompt
+            )
+        } else {
+            request.initial_prompt
+        };
+        let initial_prompt = match &report_dir {
+            Some(report_dir) => format!(
+                "{}\n\n{}",
+                mj_core::subagent::report_directory_note(report_dir),
+                assignment
             ),
-            _ => request.initial_prompt,
+            None => assignment,
         };
         let relation = SubagentRecord {
             kind: request.kind,
@@ -478,12 +479,18 @@ impl Controller {
             handback_tool,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
+        let registration = manager
+            .map(|manager| manager.register_starting_blocking(&child_id))
+            .transpose()?;
         crate::database::register_subagent_with_startup(
             &session,
             &relation,
             startup,
             report_dir.as_deref(),
         )?;
+        if let Some(registration) = registration {
+            registration.publish()?;
+        }
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents
@@ -530,7 +537,7 @@ impl Controller {
 /// Older daemons registered children before saving their initial input. A
 /// replay of a still-provisioning registration completes that old transaction
 /// boundary before any worker can start. Existing groups retain their payload.
-pub(crate) fn recover_registered_subagent_startup(
+pub fn recover_registered_subagent_startup(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<()> {
@@ -556,9 +563,9 @@ fn initial_startup_deliveries(
         return Ok(Vec::new());
     }
     let group_id = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
-    crate::daemon::startup_followup::api_followup_steps(
+    crate::database::api_followup_steps(
         &group_id,
-        crate::server::api::StartFollowup {
+        crate::database::StartFollowup {
             model: relation.model.clone(),
             effort: relation.effort.clone(),
             fast_mode,

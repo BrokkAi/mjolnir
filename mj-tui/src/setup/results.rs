@@ -374,6 +374,7 @@ impl DashboardState {
                             if let crate::MachineFinding::Unreachable {
                                 detail,
                                 remediation,
+                                ..
                             } = &probe.finding
                             {
                                 rejected_runtimes.push(RejectedRuntime {
