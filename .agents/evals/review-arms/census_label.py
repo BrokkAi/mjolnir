@@ -397,13 +397,13 @@ def check_query(query, allowed, *, query_heads=None):
         if query_heads is not None:
             query_heads.add(name)
         if use == "unknown":
-            return set()
+            return set(), None
         if use == "pattern":
             pattern(form)
-            return row_kinds(output)
+            return row_kinds(output), True
         if use not in ("step", "source", "set", "ancestor", "compound"):
             errors.append(f"{name}: expected a query form")
-            return set()
+            return set(), None
         args, options = arguments(form)
         option_forms(options)
         missing = [aliases[0] for aliases in required if not any(option in options for option in aliases)]
@@ -415,20 +415,26 @@ def check_query(query, allowed, *, query_heads=None):
             if len(args) != 2:
                 raise ValueError(f"{name}: expected an ancestor pattern and a nested query")
             pattern(args[0])
-            # Containment constrains the nested query's seed, leaving its terminal rows intact.
-            return infer(args[1])
+            kinds, structural_seed = infer(args[1])
+            if structural_seed is False:
+                errors.append(f"{name}: structural containment requires a structural pattern seed")
+            return kinds, structural_seed
         input_kinds = set()
+        # Dedicated sources, set operators and compound sources do not lower
+        # to a match source, even when their operands start with one.
+        structural_seed = False
         if use == "step":
             if len([arg for arg in args if isinstance(arg, list)]) != 1:
                 raise ValueError(f"{name}: expected one nested query")
             nested = next((arg for arg in reversed(args) if isinstance(arg, list)), None)
-            input_kinds = infer(nested)
+            input_kinds, structural_seed = infer(nested)
             compatible(name, input_kinds, inputs)
         elif use == "set":
             if len(args) < 2:
                 raise ValueError(f"{name}: expected at least two query operands")
             for arg in args:
-                input_kinds.update(infer(arg))
+                kinds, _ = infer(arg)
+                input_kinds.update(kinds)
             if name != "union" and len(input_kinds) > 1:
                 errors.append(f"{name}: operands need the same row kind, got "
                               f"{', '.join(sorted(input_kinds))}")
@@ -447,28 +453,30 @@ def check_query(query, allowed, *, query_heads=None):
                 elif relation_use != "unknown":
                     errors.append(f"{name}: expected a correlation relation")
             for option, signature in expected.items():
-                actual = infer(options.get(option))
+                actual, _ = infer(options.get(option))
                 compatible(f"{name} {option}", actual, signature)
                 if signature == "any code row" and actual & {
                         "configuration_fact", "dependency_evidence", "cross_domain"}:
                     errors.append(f"{name} {option}: expected a programming-code query")
         if output == "no rows":
             errors.append(f"{name}: describes a plan without executing and returns no rows")
-            return set()
+            return set(), structural_seed
         if inputs == "unknown" or output == "unknown":
             untyped = True
         if output == "unknown":
-            return set()
+            return set(), structural_seed
         if output == "same row":
-            return input_kinds
+            return input_kinds, structural_seed
         if name == "witness":
             # The catalogue gives the outputs in the same order as the inputs.
-            return {kind for source, kind in zip(re.findall(r"`(\w+)`", inputs),
-                                                re.findall(r"`(\w+)`", output))
-                    if source in input_kinds}
-        if output == "projected row":
-            return {"projected_row"}
-        return row_kinds(output)
+            kinds = {kind for source, kind in zip(re.findall(r"`(\w+)`", inputs),
+                                                   re.findall(r"`(\w+)`", output))
+                     if source in input_kinds}
+        elif output == "projected row":
+            kinds = {"projected_row"}
+        else:
+            kinds = row_kinds(output)
+        return kinds, structural_seed
 
     try:
         infer(parse_query(query))
