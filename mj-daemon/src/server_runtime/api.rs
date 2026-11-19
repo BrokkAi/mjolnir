@@ -3909,7 +3909,6 @@ impl SubagentBackend for ApiBackend {
                     // A forced refresh bypasses the catalogue's cache, not its
                     // allow-list: an explicit request cannot select a model the
                     // picker hides.
-                    let specific = model.is_some();
                     let (mut choices, default) = refreshed_profile_choices(model, |model| {
                         mj_controller::controller::profile_config::discover(
                             profile.clone(),
@@ -3922,10 +3921,7 @@ impl SubagentBackend for ApiBackend {
                     choices.model = default;
                     let offer = self.profile_catalog.model_offer(&profile);
                     choices = choices.restricted_to(&offer);
-                    // A default read keeps the allowed default `restricted_to` chose.
-                    if specific {
-                        choices.model = selected;
-                    }
+                    choices.model = selected;
                     Ok(choices)
                 }
             }

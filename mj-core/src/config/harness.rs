@@ -81,8 +81,10 @@ impl ModelOffer {
             && !self.excludes(model)
     }
 
-    /// Whether `model` is in a scope the profile turned off. No exemption
-    /// applies: the profile never offers or starts such a model.
+    /// Whether `model` is in a scope the profile turned off. Only the
+    /// current-model exemption in [`crate::worker_launch::ProfileConfig::restricted_to`]
+    /// still offers such a model: a session already on it, or a harness whose
+    /// own default is in the scope, keeps it until someone switches.
     pub fn excludes(&self, model: &str) -> bool {
         self.excluded_scopes
             .iter()

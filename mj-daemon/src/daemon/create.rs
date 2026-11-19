@@ -284,48 +284,6 @@ impl RuntimeState {
         }
     }
 
-    /// The model a new session on `profile_id` must start on when the harness
-    /// default sits in a scope the profile turned off: the catalogue's first
-    /// allowed choice. `None` when the harness default is offered. Fails,
-    /// naming the setting, when nothing remains allowed.
-    async fn allowed_default_model(
-        &self,
-        config: &mj_core::config::Config,
-        profile_id: &str,
-    ) -> Result<Option<String>> {
-        if config
-            .named_profile(profile_id)?
-            .model_offer()
-            .excluded_scopes
-            .is_empty()
-        {
-            return Ok(None);
-        }
-        let catalog = self
-            .profile_catalog
-            .get()
-            .context("profile catalogue unavailable")?;
-        let harness_default = catalog.unrestricted_capabilities(profile_id).await?.model;
-        if !harness_default
-            .as_deref()
-            .is_some_and(|model| catalog.model_offer(profile_id).excludes(model))
-        {
-            return Ok(None);
-        }
-        catalog
-            .capabilities(&[profile_id.to_owned()])
-            .await?
-            .remove(0)
-            .model
-            .map(Some)
-            .with_context(|| {
-                format!(
-                    "profile {profile_id:?} offers no model its harness can start on: \
-                     `third_party_models = false` turns off the only models it advertises"
-                )
-            })
-    }
-
     /// Fail unless the reviewer child's record is still one a Create can
     /// finish: missing, closed, failed or destroyed children never become
     /// ready, so waiting for them would never end. Also fail, and cancel, a
@@ -452,9 +410,6 @@ impl RuntimeState {
         )
         .await?;
         drop(validation_timing);
-        let replacement_model = self
-            .allowed_default_model(&config, &request.profile_id)
-            .await?;
         if let Some(allocation) = request.resource_allocation.as_ref() {
             validate_minimum_container_allocation(allocation)?;
         }
@@ -606,24 +561,6 @@ impl RuntimeState {
             None,
         )
         .await?;
-        if let Some(model) = replacement_model {
-            // The same startup step `mj new --model` queues; a model the
-            // caller requests is queued after it and wins.
-            let group = new_command_id("api-startup")?;
-            self.queue_startup_steps_with_ids(
-                &registered.session.id,
-                mj_controller::database::api_followup_steps(
-                    &group,
-                    crate::server::api::StartFollowup {
-                        model: Some(model),
-                        ..Default::default()
-                    },
-                ),
-                Some(group),
-                &CancellationToken::new(),
-            )
-            .await?;
-        }
         let publishing = mj_controller::launch_timing::LaunchPhaseTimer::new(
             &registered.session.id,
             "publish registered session view",
