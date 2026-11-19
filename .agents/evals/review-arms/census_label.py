@@ -274,13 +274,15 @@ def check_query(query, allowed):
             errors.append(f"{name}: missing required options {', '.join(missing)}")
         if selectors and sum(option in options for aliases in selectors for option in aliases) != 1:
             errors.append(f"{name}: expected exactly one of {', '.join(aliases[0] for aliases in selectors)}")
+        if use == "ancestor":
+            if len(args) != 2:
+                raise ValueError(f"{name}: expected an ancestor pattern and a nested query")
+            pattern(args[0])
+            # Containment constrains the nested query's seed, leaving its terminal rows intact.
+            return infer(args[1])
         input_kinds = set()
-        if use in ("step", "ancestor"):
-            if use == "ancestor":
-                if len(args) != 2:
-                    raise ValueError(f"{name}: expected an ancestor pattern and a nested query")
-                pattern(args[0])
-            elif len([arg for arg in args if isinstance(arg, list)]) != 1:
+        if use == "step":
+            if len([arg for arg in args if isinstance(arg, list)]) != 1:
                 raise ValueError(f"{name}: expected one nested query")
             nested = next((arg for arg in reversed(args) if isinstance(arg, list)), None)
             input_kinds = infer(nested)
@@ -446,6 +448,13 @@ def validate_fact(fact, split, where, errors, query_checks, allowed):
 
 
 def append_rows(path, labels):
+    # Drop an unterminated fragment left by an interrupted append, so the new rows start on a
+    # fresh line. Safe because one run at a time holds the labels directory's lock.
+    if path.exists():
+        with path.open("r+b") as stream:
+            data = stream.read()
+            if data and not data.endswith(b"\n"):
+                stream.truncate(data.rfind(b"\n") + 1)
     with path.open("a", encoding="utf-8") as stream:
         stream.write("".join(json.dumps(row, ensure_ascii=True) + "\n" for row in labels))
 

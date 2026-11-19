@@ -183,8 +183,8 @@ spellings. A slash between keywords marks aliases of one option.
 | `flow_relations_of` | `flow-relations-of`, `flow_relations_of` | `state_event` or `procedure` -> `flow_relation` | `flow_relation`, `certainty` | Reaching, dominance, and same-evaluation relations between state events. |
 | `flow_source` | `flow-source`, `flow_source` | `flow_relation` -> `state_event` | none | The establish or kill end of a relation. |
 | `flow_target` | `flow-target`, `flow_target` | `flow_relation` -> `state_event` | none | The read end of a relation. |
-| `value_flow` | `value-flow`, `value_flow` | `procedure` -> `flow_endpoint` | `:plan-ref` (required) | Run one host-registered value-flow plan for the exact procedure. |
-| `taint` | `taint` | `procedure` -> `taint_finding` | `:taint-ref` (required) | Project the findings of one host-registered production taint result for the exact procedure. |
+| `value_flow` | `value-flow`, `value_flow` | `procedure` -> `flow_endpoint` | `:plan-ref` / `:plan_ref` (required) | Run one host-registered value-flow plan for the exact procedure. |
+| `taint` | `taint` | `procedure` -> `taint_finding` | `:taint-ref` / `:taint_ref` (required) | Project the findings of one host-registered production taint result for the exact procedure. |
 | `typestate` | `typestate` | `procedure` -> `typestate_finding` | `:protocol-ref` (required) | Run one host-registered typestate protocol for the exact procedure. |
 | `witness` | `witness` | `typestate_finding`, `flow_endpoint`, or `absent_member_finding` -> `typestate_witness`, `flow_witness`, or `absent_member_witness`, respectively | `max_steps`, `max_bytes` | Project the retained evidence of each finding without running the analysis again. |
 | `class_set` | `class-set`, `class_set` | `procedure` -> `class_set_row` | none | For each member access reachable from the procedure, the classes its receiver may hold. |
@@ -300,6 +300,9 @@ For `correlate`, the relation determines the code-side domain. The
 configuration operand is always a `configuration_fact` query.
 `require-both` accepts a programming-code query on the code side.
 `explain` describes a plan and has no result-row domain.
+The ancestor forms take a structural pattern and a nested query. The pattern
+constrains the nested query's structural seed even when steps have already
+changed the terminal row kind.
 
 | Form | Use | Input -> output | Source | Meaning |
 | --- | --- | --- | --- | --- |
@@ -317,9 +320,9 @@ configuration operand is always a `configuration_fact` query.
 | `result-detail`, `result_detail` | step | any row -> same row | `docs/src/content/docs/reference/code-query.md:70` | Select row detail. |
 | `profile` | step | any row -> same row | `docs/src/content/docs/reference/code-query.md:71` | Attach execution measurements to ordinary results. |
 | `explain` | step | any row -> unknown | `docs/src/content/docs/reference/code-query.md:71` | Describe the plan without executing it. |
-| `inside` | ancestor | `structural_match` -> same row | `docs/src/content/docs/reference/code-query.md:65` | Require a matching ancestor. |
-| `inside-decl`, `inside_decl` | ancestor | `structural_match` -> same row | `docs/src/content/docs/reference/code-query.md:66` | Require a matching ancestor within the nearest callable boundary. |
-| `not-inside` | ancestor | `structural_match` -> same row | `docs/src/content/docs/reference/code-query.md:67` | Exclude a matching ancestor. |
+| `inside` | ancestor | structurally seeded query -> same row | `docs/src/content/docs/reference/code-query.md:65` | Require a matching ancestor. |
+| `inside-decl`, `inside_decl` | ancestor | structurally seeded query -> same row | `docs/src/content/docs/reference/code-query.md:66` | Require a matching ancestor within the nearest callable boundary. |
+| `not-inside` | ancestor | structurally seeded query -> same row | `docs/src/content/docs/reference/code-query.md:67` | Exclude a matching ancestor. |
 | `union` | set | branch rows -> same row | `docs/src/content/docs/reference/code-query.md:52`, `docs/src/content/docs/rune-query-language.md:278` | Keep the endpoints from any branch. Mixed row kinds are allowed at the root and through filters or projection. |
 | `intersect` | set | branch rows -> same row | `docs/src/content/docs/reference/code-query.md:53`, `docs/src/content/docs/rune-query-language.md:278` | Keep endpoints common to every branch of the same kind. |
 | `except` | set | branch rows -> same row | `docs/src/content/docs/reference/code-query.md:54`, `docs/src/content/docs/rune-query-language.md:278` | Subtract later branch endpoints of the same kind from the first. |
