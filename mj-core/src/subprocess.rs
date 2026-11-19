@@ -69,6 +69,68 @@ pub fn preparation_cancellation() -> tokio_util::sync::CancellationToken {
     scoped_preparation_cancellation().unwrap_or_default()
 }
 
+/// Waits for a spawned child's exit without polling `waitpid`.
+///
+/// `wait4` on a multithreaded process scans the children of every thread, so
+/// a daemon with hundreds of threads paid for that on each 25 ms poll of every
+/// running command. On Linux a pidfd becomes readable once the child exits:
+/// the loop sleeps in `poll` on it and reaps only after it fires. Without a
+/// pidfd (other systems, or a kernel older than 5.3) every check reports a
+/// possible exit, so callers reap on each tick as before.
+pub struct ExitWatch {
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
+}
+
+impl ExitWatch {
+    /// Must be called before the child is reaped, so the pid cannot be reused.
+    pub fn new(child: &std::process::Child) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd;
+            // SAFETY: pidfd_open takes a pid and flags and returns a new
+            // descriptor or -1; the child is ours and not yet reaped.
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+            Self {
+                // SAFETY: a non-negative result is a descriptor we now own.
+                pidfd: (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = child;
+            Self {}
+        }
+    }
+
+    /// Whether the child may have exited; false only when it certainly has not.
+    pub fn exited(&self) -> bool {
+        self.wait(std::time::Duration::ZERO)
+    }
+
+    /// Sleep up to `timeout`, returning early once the child exits. Returns
+    /// whether the child may have exited.
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = &self.pidfd {
+            use std::os::fd::AsRawFd;
+            let mut poll = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
+            // SAFETY: one valid pollfd for the duration of the call.
+            let ready = unsafe { libc::poll(&mut poll, 1, millis) };
+            // An interrupted or failed poll reports a possible exit, so the
+            // caller reaps instead of waiting on a descriptor it cannot use.
+            return ready != 0;
+        }
+        std::thread::sleep(timeout);
+        true
+    }
+}
+
 /// Own a child-created process group through all of its I/O and cleanup.
 /// The group can outlive its leader, so reaping the child does not disarm it.
 pub struct ProcessGroupGuard {
@@ -1323,6 +1385,24 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exit_watch_wakes_when_the_child_exits_and_not_before() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.3"])
+            .spawn()
+            .unwrap();
+        let watch = ExitWatch::new(&child);
+        assert!(!watch.exited(), "a running child must not look exited");
+        let started = std::time::Instant::now();
+        assert!(watch.wait(std::time::Duration::from_secs(10)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the wait must end at the exit, not at its timeout"
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn capture_drains_both_pipes_beyond_pipe_capacity() {
