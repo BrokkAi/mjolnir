@@ -16365,3 +16365,51 @@ fn adoption_destroy_advice_follows_durable_worker_ownership() {
         "mj --instance 'adoption-advice-test' recover destroy --session 'owned-adoption' --target 'bare' --confirm 'owned-adoption' --all-instances"
     );
 }
+
+// Hard-won: b370417: concurrent adoption waits exhausted the daemon blocking pool.
+#[test]
+fn adoption_waits_leave_the_blocking_pool_available() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let release = CancellationToken::new();
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            let cancelled = release.clone();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            waits.push(super::serve::spawn_adoption_operation(async move {
+                entered.send(()).unwrap();
+                cancelled.cancelled().await;
+                Ok(())
+            }));
+            // Make every operation enter its wait before asking for the next.
+            // Cancellation below also releases waits if the regression returns.
+            if tokio::time::timeout(Duration::from_secs(5), started)
+                .await
+                .is_err()
+            {
+                release.cancel();
+                for wait in waits {
+                    let _ = wait.await;
+                }
+                panic!("adoption waits occupied the blocking pool");
+            }
+        }
+        let progress =
+            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| 42)).await;
+        release.cancel();
+        for wait in waits {
+            wait.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            progress
+                .expect("blocking pool remains available for controller loads and progress")
+                .unwrap(),
+            42
+        );
+    });
+}

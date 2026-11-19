@@ -1,5 +1,30 @@
 use super::*;
 
+// Worker quiescence is unbounded. Only the synchronous controller operations
+// leave async workers; the wait must never occupy a blocking-pool thread.
+pub(super) fn spawn_adoption_operation<F, T>(operation: F) -> tokio::task::JoinHandle<Result<T>>
+where
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::spawn(async move {
+        use futures::FutureExt;
+        let result = match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
+            Ok(result) => result,
+            Err(panic) => {
+                tracing::error!(?panic, "adoption controller task panicked");
+                Err(anyhow::anyhow!(
+                    "adoption controller task panicked; check session state before retrying"
+                ))
+            }
+        };
+        if let Err(error) = &result {
+            tracing::error!(%error, "adoption controller task failed");
+        }
+        result
+    })
+}
+
 pub(super) async fn refresh_runtime_workspaces(state: &RuntimeState) -> Result<()> {
     state.refresh_workspaces().await
 }
@@ -423,23 +448,7 @@ pub(super) async fn serve_client(
                     refresh_runtime_controller(&work_state).await;
                     Ok::<_, anyhow::Error>(outcome)
                 };
-                let mut work = mj_core::runtime::spawn_off_async_workers(async move {
-                    use futures::FutureExt;
-                    let result = match std::panic::AssertUnwindSafe(operation).catch_unwind().await
-                    {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "adoption controller task panicked");
-                            Err(anyhow::anyhow!(
-                                "adoption controller task panicked; check session state before retrying"
-                            ))
-                        }
-                    };
-                    if let Err(error) = &result {
-                        tracing::error!(%error, "adoption controller task failed");
-                    }
-                    result
-                });
+                let mut work = spawn_adoption_operation(operation);
                 let mut disconnected = false;
                 let mut draining = false;
                 let mut progress_open = true;
@@ -457,7 +466,7 @@ pub(super) async fn serve_client(
                         }
 
                         result = &mut work => break match result {
-                            Ok(result) => result.and_then(|result| result),
+                            Ok(result) => result,
                             Err(error) => {
                                 tracing::error!(%error, "adoption supervisor task failed");
                                 Err(anyhow::anyhow!("adoption task failed: {error}"))

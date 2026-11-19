@@ -53,7 +53,37 @@ impl StandaloneSession {
         .await
         .context("record negotiated worker protocol")??;
         let operational = client.status().await?;
-        if let Some((legacy_pending, pinned_operations)) = client.command_retention_status().await?
+        let (materialized, window) = load_projection(&target.session_id).await?;
+        let mut connection = Self {
+            client,
+            materialized,
+            window,
+            operational: operational.into(),
+            latest_credential_sync_signal: None,
+            project_memory: target.project_memory.clone(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
+            subagent_queue: None,
+            subagent_queue_error: None,
+            history_jobs: tokio::task::JoinSet::new(),
+            operator_presence_revision: None,
+            history_active: Default::default(),
+        };
+        if let Some(baseline) = baseline {
+            ensure!(
+                baseline.state.session_id == target.session_id,
+                "live recovery cut belongs to another session"
+            );
+            Self::cache_baseline_attachments(&mut connection.client, &baseline).await?;
+            let projection =
+                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
+            crate::database::install_live_session_baseline(&projection, baseline)?;
+            (connection.materialized, connection.window) =
+                load_projection(&target.session_id).await?;
+        }
+        connection.sync_in_place().await?;
+        if let Some((legacy_pending, pinned_operations)) =
+            connection.client.command_retention_status().await?
             && (legacy_pending || !pinned_operations.is_empty())
         {
             let session = target.session_id.clone();
@@ -103,48 +133,22 @@ impl StandaloneSession {
             })
             .await
             .context("reconcile command retention owners")??;
-            // Upgrade protection is replaced before an ACK can release journal
-            // history. Once consumed, stale reconcilers cannot change the pins.
+            // Catch-up has validated this store against the worker before any
+            // receipt protection changes. Existing pins and the legacy hold
+            // protect receipts during that ACK; stale backups never release them.
             if let Some((operation, ids)) = legacy {
-                client
+                connection
+                    .client
                     .update_command_retention(operation, ids, true)
                     .await?;
             }
             for operation in completed {
-                client
+                connection
+                    .client
                     .update_command_retention(Some(operation), Default::default(), false)
                     .await?;
             }
         }
-        let (materialized, window) = load_projection(&target.session_id).await?;
-        let mut connection = Self {
-            client,
-            materialized,
-            window,
-            operational: operational.into(),
-            latest_credential_sync_signal: None,
-            project_memory: target.project_memory.clone(),
-            subagent_requests: Default::default(),
-            subagent_completions: Default::default(),
-            subagent_queue: None,
-            subagent_queue_error: None,
-            history_jobs: tokio::task::JoinSet::new(),
-            operator_presence_revision: None,
-            history_active: Default::default(),
-        };
-        if let Some(baseline) = baseline {
-            ensure!(
-                baseline.state.session_id == target.session_id,
-                "live recovery cut belongs to another session"
-            );
-            Self::cache_baseline_attachments(&mut connection.client, &baseline).await?;
-            let projection =
-                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
-            crate::database::install_live_session_baseline(&projection, baseline)?;
-            (connection.materialized, connection.window) =
-                load_projection(&target.session_id).await?;
-        }
-        connection.sync_in_place().await?;
         Ok(connection)
     }
 

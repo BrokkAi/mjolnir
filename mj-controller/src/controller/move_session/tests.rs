@@ -1224,6 +1224,19 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .unwrap()
         .unwrap();
 
+    // Establish a positive durable ACK before simulating a backup from genesis.
+    let spec = controller.reconnect_command(MOVE_QUEUE_SESSION_ID).unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        assert!(connection.operational().acknowledged_through > 0);
+        connection.detach().await.unwrap();
+    });
+
     // Hard-won: 581ae9e: a missing legacy Move archive prevented ordinary attachment.
     let snapshot_path = worker_root.join(mj_core::relay::RELAY_STATE_FILE);
     let mut saved: mj_core::relay::RelaySnapshot =
@@ -1239,7 +1252,31 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     fs::write(&snapshot_path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let archive_path = operation.restore_artifact().unwrap().archive_path.clone();
     let archive = fs::read(&archive_path).unwrap();
-    let spec = controller.reconnect_command(MOVE_QUEUE_SESSION_ID).unwrap();
+    // Hard-won: b370417: a stale store released Move pins before its cursor was rejected.
+    let projection = crate::database::load_materialized_session(MOVE_QUEUE_SESSION_ID)
+        .unwrap()
+        .unwrap();
+    let mut stale_operation = operation.clone();
+    stale_operation.queue_admission_finished = true;
+    crate::database::save_move_operation(&stale_operation).unwrap();
+    crate::database::save_materialized_session(&MaterializedSession::empty(MOVE_QUEUE_SESSION_ID))
+        .unwrap();
+    runtime.block_on(async {
+        assert!(
+            crate::session_manager::StandaloneSession::connect_command(
+                &spec,
+                MOVE_QUEUE_SESSION_ID,
+            )
+            .await
+            .is_err()
+        );
+    });
+    let protected: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    assert!(protected.legacy_command_retention);
+    assert_eq!(protected.command_retention, saved.command_retention);
+    crate::database::save_move_operation(&operation).unwrap();
+    crate::database::save_materialized_session(&projection).unwrap();
     for corrupt in [false, true] {
         if corrupt {
             fs::write(&archive_path, b"corrupt archive").unwrap();
