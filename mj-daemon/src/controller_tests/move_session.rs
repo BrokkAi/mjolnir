@@ -643,7 +643,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         } else {
             delivery_lease.release();
             let result = stored.clone();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::record_stored_delegation_result(LATCH_RELAY_SESSION.into(), result)
             }).await.unwrap().unwrap();
             crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();

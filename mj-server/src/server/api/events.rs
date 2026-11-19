@@ -60,7 +60,7 @@ pub(super) async fn events(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
     let shutdown = state.shutdown.clone();
     let stream_state = state.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         // The cursor through which events are queued to this client. A page
         // read without a cursor starts at the frontier it read.
         let mut delivered = after_seq.unwrap_or(first.latest_seq);
@@ -208,7 +208,7 @@ pub(super) fn load_events(
     after_seq: Option<u64>,
 ) -> BoxFuture<'static, AnyResult<ApiEventPage>> {
     Box::pin(async move {
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_controller::database::load_api_events(&filter, after_seq, 200)
         })
         .await?

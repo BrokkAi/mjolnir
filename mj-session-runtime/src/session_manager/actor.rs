@@ -46,7 +46,7 @@ async fn durable_session_outcome(
     session_id: &str,
 ) -> Option<(mj_core::state::SessionState, Option<String>)> {
     let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let Some(record) = crate::database::load_session_record(&session_id).ok()? else {
             return Some((mj_core::state::SessionState::Lost, None));
         };
@@ -76,7 +76,7 @@ async fn capture_harness_failure(
         .worker_recovery
         .as_ref()
         .map(|plan| plan.source_target.clone());
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let Some(record) = crate::database::load_session_record(&id)? else {
             return Ok(None);
         };
@@ -1572,7 +1572,7 @@ pub async fn submit_actor_command(
             sync_actor_connection(gate, target, connection).await?;
             let session_id = target.session_id.clone();
             let event_key = event.key.clone();
-            let status = tokio::task::spawn_blocking(move || {
+            let status = mj_core::runtime::spawn_blocking(move || {
                 crate::database::mailbox_delivery_state(&session_id, &event_key)
             })
             .await
@@ -1783,7 +1783,7 @@ pub async fn sync_actor_connection(
     let (observation, startup_owned) = if target.worker_recovery.is_some() {
         let id = target.session_id.clone();
         let gate = gate.clone();
-        tokio::task::spawn_blocking(move || -> Result<_> {
+        mj_core::runtime::spawn_blocking(move || -> Result<_> {
             // If there is no intent, a snapshot cannot complete one. Skip
             // ownership so ordinary actor sync never competes with a swap.
             if crate::database::load_worker_restart(&id)?.is_none() {
@@ -1899,7 +1899,7 @@ async fn reopen_subagent_admission_after_move(
 
     let id = target.session_id.clone();
     let query_owner = owner.clone();
-    let (queue_enabled, move_active) = tokio::task::spawn_blocking(move || {
+    let (queue_enabled, move_active) = mj_core::runtime::spawn_blocking(move || {
         query_owner.scope_blocking(|| -> Result<_> {
             let Some(session) = crate::database::load_session_record(&id)? else {
                 return Ok((false, false));
@@ -1951,7 +1951,7 @@ async fn observe_worker_readiness(
     {
         let source_target = recovery.source_target.clone();
         let snapshot = snapshot.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        mj_core::runtime::spawn_blocking(move || -> Result<()> {
             crate::worker_lifecycle::observe_worker_restart_outcome(
                 &owner,
                 &source_target,
@@ -2069,7 +2069,7 @@ pub async fn load_projection(
     session_id: &str,
 ) -> Result<(MaterializedSession, mj_core::state::ProjectionWindow)> {
     let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let loaded = crate::database::load_materialized_actor_projection(&session_id)?;
         Ok(loaded.unwrap_or_else(|| {
             let materialized = MaterializedSession::empty(session_id);

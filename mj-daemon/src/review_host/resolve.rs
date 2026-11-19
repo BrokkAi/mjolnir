@@ -130,7 +130,7 @@ impl HostState {
         }
         let events = self.events.clone();
         let session_id = session_id.to_owned();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             tokio::time::sleep(delay).await;
             let _ = events.send(HostEvent::RetryPushDelivery { session_id, epoch });
         });
@@ -225,7 +225,7 @@ pub(super) async fn finish_push_delivery(
         ReviewVerdict::Failed { .. } => mj_controller::database::FinishedReviewResolution::Failed,
         _ => mj_controller::database::FinishedReviewResolution::Completed,
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let result = mj_core::runtime::spawn_blocking(move || {
         let _admission = admission;
         for delta in deltas {
             let event = mj_core::mailbox::MailboxEvent {

@@ -10,7 +10,7 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
     ) -> mj_client::session::BoxFuture<'_, Result<mj_core::storage::TranscriptHistoryPage>> {
         let session_id = self.0.session_id().to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 crate::database::load_transcript_history(&session_id, before.as_ref(), 128)?
                     .context("session history is unavailable")
             })
@@ -29,7 +29,7 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
     ) -> mj_client::session::BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
         let session_id = self.0.session_id().to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 crate::database::search_prompt_page(
                     &session_id,
                     &bundle_id,
@@ -49,7 +49,7 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
     ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         let session_id = self.0.session_id().to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || crate::database::session_prompts(&session_id))
+            mj_core::runtime::spawn_blocking(move || crate::database::session_prompts(&session_id))
                 .await
                 .context("session history task")?
         })
@@ -61,7 +61,7 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
     ) -> mj_client::session::BoxFuture<'_, Result<Option<Option<String>>>> {
         let session_id = self.session_id().to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 crate::database::load_config_result(&session_id, &command_id)
             })
             .await
@@ -176,7 +176,7 @@ impl mj_client::session::SessionControlBackend for ClientSessionControl {
                     .map(|snapshot| snapshot.materialized)
                     .context("session has no transcript yet");
             }
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 crate::database::load_materialized_session(&session_id)
             })
             .await

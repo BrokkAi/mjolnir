@@ -294,7 +294,7 @@ fn is_conflict_marker_line(line: &str) -> bool {
 }
 
 async fn read_canonical_blocking(root: PathBuf) -> Result<ProjectMemorySnapshot> {
-    tokio::task::spawn_blocking(move || mj_core::project_memory::read_canonical(&root))
+    mj_core::runtime::spawn_blocking(move || mj_core::project_memory::read_canonical(&root))
         .await
         .context("project-memory canonical read task failed")?
 }
@@ -320,7 +320,7 @@ where
     if cancel.is_cancelled() {
         bail!("project-memory synchronization for checkpoint was cancelled");
     }
-    tokio::task::spawn_blocking(swap)
+    mj_core::runtime::spawn_blocking(swap)
         .await
         .context("project-memory canonical swap task failed")?
 }
@@ -599,7 +599,7 @@ mod tests {
                 let first_call = self.calls.fetch_add(1, Ordering::Relaxed) == 0;
                 if first_call {
                     let root = self.root.clone();
-                    tokio::task::spawn_blocking(move || {
+                    mj_core::runtime::spawn_blocking(move || {
                         let canonical = mj_core::project_memory::read_canonical(&root)?;
                         let mut concurrent = canonical.clone();
                         concurrent
@@ -662,7 +662,7 @@ mod tests {
             Box::pin(async move {
                 let index = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
                 let root = self.root.clone();
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     let canonical = mj_core::project_memory::read_canonical(&root)?;
                     let mut changed = canonical.clone();
                     changed

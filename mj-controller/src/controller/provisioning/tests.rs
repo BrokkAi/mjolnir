@@ -2062,7 +2062,9 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
     let queued = std::sync::Arc::new(StageRecorder::default());
     let waiter = {
         let (gate, queued) = (gate.clone(), queued.clone());
-        tokio::spawn(async move { admit_container_start(&gate, &*queued).await.is_some() })
+        mj_core::runtime::spawn(
+            async move { admit_container_start(&gate, &*queued).await.is_some() },
+        )
     };
     while queued.events.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;

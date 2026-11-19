@@ -34,7 +34,7 @@ impl StandaloneSession {
         let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
         let session = target.session_id.clone();
         let protocol = client.protocol_version();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             crate::database::record_operator_away_worker_protocol(session, protocol)
         })
         .await
@@ -170,9 +170,10 @@ impl StandaloneSession {
 
     pub async fn sync_in_place(&mut self) -> Result<bool> {
         if self.protocol_version() >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL {
-            let presence = tokio::task::spawn_blocking(crate::database::load_operator_presence)
-                .await
-                .context("read operator away setting")??;
+            let presence =
+                mj_core::runtime::spawn_blocking(crate::database::load_operator_presence)
+                    .await
+                    .context("read operator away setting")??;
             if self.operator_presence_revision != Some(presence.revision) {
                 self.client.set_operator_away(presence).await?;
                 self.operator_presence_revision = Some(presence.revision);
@@ -348,11 +349,12 @@ impl StandaloneSession {
 
     pub async fn repair_projection(&mut self) -> Result<()> {
         let session_id = self.materialized.session_id.clone();
-        let record =
-            tokio::task::spawn_blocking(move || crate::database::load_session_record(&session_id))
-                .await
-                .context("projection repair record reader failed")??
-                .context("controller session disappeared while repairing its projection")?;
+        let record = mj_core::runtime::spawn_blocking(move || {
+            crate::database::load_session_record(&session_id)
+        })
+        .await
+        .context("projection repair record reader failed")??
+        .context("controller session disappeared while repairing its projection")?;
         let Some(checkpoint) = record.checkpoint.as_ref() else {
             let replacement = MaterializedSession::empty(&self.materialized.session_id);
             self.client
@@ -368,7 +370,7 @@ impl StandaloneSession {
             return Ok(());
         };
         let checkpoint_path = checkpoint.archive_path.clone();
-        let archive = tokio::task::spawn_blocking(move || {
+        let archive = mj_core::runtime::spawn_blocking(move || {
             verify_archive_streaming(&checkpoint_path).with_context(|| {
                 format!(
                     "verify projection repair checkpoint {}",
@@ -604,7 +606,7 @@ impl StandaloneSession {
                 }
                 let lookup_session = session_id.clone();
                 let lookup_command = command_id.clone();
-                let identity = tokio::task::spawn_blocking(move || {
+                let identity = mj_core::runtime::spawn_blocking(move || {
                     crate::database::load_session_turn_profile_model(
                         &lookup_session,
                         &lookup_command,
@@ -660,7 +662,7 @@ impl StandaloneSession {
             // Projection is CPU work and its durable page uses synchronous
             // SQLite. Keep both off the async actor runtime so independent
             // sessions stay responsive during each bounded catch-up chunk.
-            let (projection, window, credential_sync_signal) = tokio::task::spawn_blocking(
+            let (projection, window, credential_sync_signal) = mj_core::runtime::spawn_blocking(
                 move || -> Result<(MaterializedSession, mj_core::state::ProjectionWindow, Option<CredentialSyncSignal>)> {
                     // The in-memory projection advances on a working copy and
                     // is published only once its page is durable.

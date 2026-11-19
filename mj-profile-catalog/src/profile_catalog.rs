@@ -473,7 +473,7 @@ impl ProfileCatalog {
                 .swap(true, Ordering::AcqRel)
         {
             let catalog = Arc::clone(self);
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 for attempt in 1.. {
                     let result = tokio::select! {
                         _ = catalog.cancellation.cancelled() => return,
@@ -629,7 +629,7 @@ impl ProfileCatalog {
             .config_path
             .clone()
             .context("catalog has no config path for review upgrade")?;
-        let wrote = tokio::task::spawn_blocking(move || {
+        let wrote = mj_core::runtime::spawn_blocking(move || {
             Self::persist_legacy_review_to(&path, reviewers, disable_auto, &definitions, &legacy)
         })
         .await??;
@@ -908,7 +908,7 @@ impl ProfileCatalog {
     fn start_refreshing(self: &Arc<Self>) {
         let catalog = Arc::downgrade(self);
         let cancellation = self.cancellation.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             // Startup discovery is already current; the first check waits.
             let mut tick = tokio::time::interval_at(
                 tokio::time::Instant::now() + REFRESH_CHECK_INTERVAL,
@@ -934,7 +934,7 @@ impl ProfileCatalog {
     fn start_watching_homes(self: &Arc<Self>) {
         let catalog = Arc::downgrade(self);
         let cancellation = self.cancellation.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             // Startup discovery already reads the homes; the first pass
             // only baselines them.
             let mut tick = tokio::time::interval_at(
@@ -1170,7 +1170,7 @@ impl ProfileCatalog {
             .map(|(key, _, _)| key.clone())
             .collect::<Vec<_>>();
         for (key, attempt, cancellation) in started {
-            tokio::spawn(self.clone().drive_refresh(key, attempt, cancellation));
+            mj_core::runtime::spawn(self.clone().drive_refresh(key, attempt, cancellation));
         }
         launched
     }
@@ -1367,7 +1367,7 @@ impl ProfileCatalog {
     }
 
     fn spawn(self: &Arc<Self>, key: CacheKey, attempt: Attempt) {
-        tokio::spawn(self.clone().drive(key, attempt));
+        mj_core::runtime::spawn(self.clone().drive(key, attempt));
     }
 
     fn drive(self: Arc<Self>, key: CacheKey, mut attempt: Attempt) -> BoxFuture<'static, ()> {
@@ -2385,7 +2385,7 @@ mod tests {
         let reader = {
             let catalog = catalog.clone();
             let config = config.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 catalog
                     .options_for(&config, "parent", Some("other".into()))
                     .await
@@ -2601,7 +2601,7 @@ mod tests {
         started.recv().await.unwrap();
         let reader = {
             let catalog = catalog.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 catalog
                     .capabilities(&["parent".into(), "helper".into()])
                     .await
@@ -2643,7 +2643,7 @@ mod tests {
         let old_key = config.profiles["parent"].capabilities_key("parent");
         let pending = {
             let catalog = catalog.clone();
-            tokio::spawn(async move { catalog.capabilities(&["parent".into()]).await })
+            mj_core::runtime::spawn(async move { catalog.capabilities(&["parent".into()]).await })
         };
         tokio::task::yield_now().await;
         config.profiles.get_mut("parent").unwrap().home = "/changed".into();
@@ -4029,7 +4029,7 @@ mod tests {
         let catalog = billing_catalog(&path, reports.clone());
         let upgrade = {
             let catalog = Arc::clone(&catalog);
-            tokio::spawn(async move { catalog.upgrade_legacy_review(1).await })
+            mj_core::runtime::spawn(async move { catalog.upgrade_legacy_review(1).await })
         };
         // OpenAI fills both slots, so an unused Claude profile's unknown
         // billing must not delay the upgrade.
@@ -4120,7 +4120,7 @@ mod tests {
         ]);
         config.review = mj_core::config::ReviewConfig::legacy_default();
         catalog.sync(&config);
-        let task = tokio::spawn(async move { catalog.upgrade_legacy_review(12).await });
+        let task = mj_core::runtime::spawn(async move { catalog.upgrade_legacy_review(12).await });
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
@@ -4559,7 +4559,7 @@ mod tests {
         let reader = {
             let catalog = catalog.clone();
             let config = config.clone();
-            tokio::spawn(async move { catalog.fetch(&config, "p", None).await })
+            mj_core::runtime::spawn(async move { catalog.fetch(&config, "p", None).await })
         };
         tokio::task::yield_now().await;
         config.profiles.get_mut("p").unwrap().models = vec!["new".into()];

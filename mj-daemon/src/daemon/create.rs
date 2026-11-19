@@ -693,7 +693,7 @@ impl RuntimeState {
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
         let loading =
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
-        let mut controller = tokio::task::spawn_blocking(Controller::load)
+        let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon create task")??;
         drop(loading);

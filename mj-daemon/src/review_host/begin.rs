@@ -86,7 +86,7 @@ impl HostState {
             },
         );
         self.publish(&session_id);
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             // No deadline covers preparation as a whole: most of it is waiting
             // on the session actor, the worker or other work holding the
             // session, and each step that does work carries its own bound

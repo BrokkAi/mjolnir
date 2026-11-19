@@ -91,10 +91,10 @@ impl ActiveChat {
         let generation = reader.generation;
         let session = self.session.clone();
         let updates = self.chat_io_tx.clone();
-        self.earlier_task = Some(tokio::spawn(async move {
+        self.earlier_task = Some(mj_core::runtime::spawn(async move {
             let result = async {
                 let page = session.transcript_history(before).await?;
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     let mut lines = Vec::new();
                     for entry in mj_client::transcript::history_entries(&page) {
                         lines.push(Line::styled(entry.role.to_owned(), theme::title(true)));

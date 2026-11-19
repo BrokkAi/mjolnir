@@ -273,7 +273,7 @@ impl DashboardContext {
                 self.terminal.ring_bell()?;
             }
             if notify.mode == mj_core::config::NotifyMode::System {
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     if let Err(error) = post_system_notification(&notification) {
                         tracing::warn!(%error, session = %notification.session_id, "desktop notification failed");
                     }

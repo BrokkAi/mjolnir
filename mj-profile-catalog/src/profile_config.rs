@@ -16,7 +16,7 @@ pub async fn subagent_options(
     parent: String,
     model: Option<String>,
 ) -> Result<mj_core::subagent::SubagentOptions> {
-    let config = tokio::task::spawn_blocking(Config::load)
+    let config = mj_core::runtime::spawn_blocking(Config::load)
         .await
         .context("load subagent profiles")??;
     subagent_options_with(&config, &parent, model, |id, model| {
@@ -285,7 +285,7 @@ where
         locks.insert(profile_id, Arc::downgrade(&lock));
         lock
     };
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let _guard = tokio::select! {
             biased;
             _ = cancellation.cancelled() => anyhow::bail!("profile definition retired"),
@@ -304,7 +304,7 @@ where
         }
         let _cancel_on_drop = CancelOnDrop(cancelled.clone());
         let job_cancelled = cancelled.clone();
-        let mut task = tokio::task::spawn_blocking(move || job(job_cancelled));
+        let mut task = mj_core::runtime::spawn_blocking(move || job(job_cancelled));
         let result = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
@@ -1193,7 +1193,7 @@ mod tests {
     async fn retiring_a_definition_cancels_probes_and_preserves_its_replacement() {
         let cancellation = CancellationToken::new();
         let (started, running) = tokio::sync::oneshot::channel();
-        let first = tokio::spawn(serialized_until::<()>(
+        let first = mj_core::runtime::spawn(serialized_until::<()>(
             "retirement-test".into(),
             cancellation.clone(),
             move |cancelled| {
@@ -1260,7 +1260,7 @@ mod tests {
         let saw_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = saw_cancellation.clone();
         runtime.block_on(async move {
-            tokio::spawn(serialized_until(
+            mj_core::runtime::spawn(serialized_until(
                 "runtime-drop-test".into(),
                 CancellationToken::new(),
                 move |cancelled| {
@@ -1297,7 +1297,7 @@ mod tests {
         for _ in 0..8 {
             let cache = cache.clone();
             let calls = calls.clone();
-            tasks.push(tokio::spawn(serialized(
+            tasks.push(mj_core::runtime::spawn(serialized(
                 "concurrent-cache-test".into(),
                 move |_| {
                     resolve_cached(

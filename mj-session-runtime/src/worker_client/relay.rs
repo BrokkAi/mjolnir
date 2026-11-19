@@ -495,9 +495,11 @@ impl RelayClient {
         let request = RelayRequest::ProjectMemorySnapshot;
         match self.call_legacy_project_memory(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
-                tokio::task::spawn_blocking(move || Ok((baseline.decode()?, replica.decode()?)))
-                    .await
-                    .context("decode project memory task failed")?
+                mj_core::runtime::spawn_blocking(move || {
+                    Ok((baseline.decode()?, replica.decode()?))
+                })
+                .await
+                .context("decode project memory task failed")?
             }
             _ => bail!("relay returned an unexpected project-memory response"),
         }
@@ -563,7 +565,7 @@ impl RelayClient {
                 else {
                     bail!("relay returned an unexpected project-memory page response");
                 };
-                let chunk = tokio::task::spawn_blocking(move || BASE64.decode(chunk))
+                let chunk = mj_core::runtime::spawn_blocking(move || BASE64.decode(chunk))
                     .await
                     .context("decode project-memory page task failed")??;
                 anyhow::ensure!(
@@ -603,7 +605,7 @@ impl RelayClient {
             }
             Err(error) => return Err(transfer.abort(error).await),
         };
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireSnapshot::decode(&bytes)
         })
         .await
@@ -616,7 +618,7 @@ impl RelayClient {
         tree: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<MemoryResult> {
         let protocol = self.protocol_version;
-        let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let bytes = mj_core::runtime::spawn_blocking(move || -> Result<Vec<u8>> {
             Ok(serde_json::to_vec(
                 &mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)?,
             )?)
@@ -716,7 +718,7 @@ impl RelayClient {
             };
         }
         let protocol = self.protocol_version;
-        let snapshot = tokio::task::spawn_blocking(move || {
+        let snapshot = mj_core::runtime::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireTree::encode(snapshot, protocol)
         })
         .await
@@ -754,7 +756,7 @@ impl RelayClient {
             };
         }
         let protocol = self.protocol_version;
-        let tree = tokio::task::spawn_blocking(move || {
+        let tree = mj_core::runtime::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)
         })
         .await
@@ -809,7 +811,7 @@ impl RelayClient {
         }
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let reference_copy = reference.clone();
-        let bytes = tokio::task::spawn_blocking(move || store.read(&reference_copy))
+        let bytes = mj_core::runtime::spawn_blocking(move || store.read(&reference_copy))
             .await
             .context("image loading task failed")??;
         match self
@@ -832,7 +834,7 @@ impl RelayClient {
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let local = store.clone();
         let reference_copy = reference.clone();
-        if tokio::task::spawn_blocking(move || local.contains(&reference_copy))
+        if mj_core::runtime::spawn_blocking(move || local.contains(&reference_copy))
             .await
             .context("image lookup task failed")??
         {
@@ -847,7 +849,7 @@ impl RelayClient {
             bail!("unexpected image download response")
         };
         let reference = reference.clone();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             anyhow::ensure!(
                 data.len() <= mj_core::attachment::MAX_IMAGE_BYTES.div_ceil(3) * 4,
                 "image download is too large"

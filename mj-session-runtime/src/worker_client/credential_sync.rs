@@ -390,7 +390,7 @@ impl CredentialSyncCoordinator {
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
         let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<PassEvent>();
         let (results_tx, results_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let mut tick = tokio::time::interval_at(
                 tokio::time::Instant::now() + SYNC_INTERVAL,
                 SYNC_INTERVAL,
@@ -634,14 +634,14 @@ impl CredentialSyncCoordinator {
                     let runtime = runtime.clone();
                     let steps = steps.clone();
                     let log = log.into_owned();
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         let (focus_tx, focus_rx) = if triggered_by.is_some() {
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             (Some(tx), Some(rx))
                         } else {
                             (None, None)
                         };
-                        let reconcile = tokio::spawn(async move {
+                        let reconcile = mj_core::runtime::spawn(async move {
                             reconcile_profile_observed(
                                 &SessionAccess {
                                     relays: &relays,
@@ -956,7 +956,7 @@ async fn reconcile_profile_observed(
     // Read once per pass, and only when a session needs a copy: a raw
     // localhost session reads the host's own login.
     let slopcop_login = if targets.iter().any(syncs_slopcop_login) {
-        match tokio::task::spawn_blocking(slopcop_login)
+        match mj_core::runtime::spawn_blocking(slopcop_login)
             .await
             .context("slopcop login task stopped")
             .and_then(|result| result)
@@ -983,7 +983,7 @@ async fn reconcile_profile_observed(
             .filter(|source| source.role.is_none())
     }) {
         Some(source) => {
-            let exported = tokio::task::spawn_blocking(move || {
+            let exported = mj_core::runtime::spawn_blocking(move || {
                 crate::aws_credentials::export(
                     &source,
                     &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
@@ -1000,7 +1000,7 @@ async fn reconcile_profile_observed(
     // scheduler threads once per wire format, then derive both scoped trees.
     let skills_target = first.clone();
     let skills = Arc::new(
-        tokio::task::spawn_blocking(move || CanonicalSkills::collect(&skills_target))
+        mj_core::runtime::spawn_blocking(move || CanonicalSkills::collect(&skills_target))
             .await
             .unwrap_or_else(|error| {
                 CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
@@ -1402,7 +1402,7 @@ async fn target_is_current(
         return runtime.credential_target_is_current(target);
     }
     let candidate = target.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         // Read only: cancellation may leave this blocking read finishing
         // after admission has been released.
         let config = mj_core::config::Config::load()?;
@@ -1822,7 +1822,7 @@ pub async fn aws_cycle(
     // issued are kept until they expire, anything else is withdrawn, and the
     // reason is reported.
     let selection = base.clone();
-    let source = match tokio::task::spawn_blocking(move || {
+    let source = match mj_core::runtime::spawn_blocking(move || {
         crate::aws_credentials::resolve(&selection)
     })
     .await
@@ -2041,7 +2041,11 @@ impl RenewalTasks {
         for (session_id, target) in wanted {
             if !self.0.contains_key(session_id) {
                 let (wakes, wake_rx) = mpsc::unbounded_channel();
-                let handle = tokio::spawn(renew_session_aws(env.clone(), target.clone(), wake_rx));
+                let handle = mj_core::runtime::spawn(renew_session_aws(
+                    env.clone(),
+                    target.clone(),
+                    wake_rx,
+                ));
                 self.0.insert(
                     session_id.to_owned(),
                     RenewalTask {
@@ -2214,7 +2218,7 @@ async fn scheduling_source(
     target: &CredentialSyncTarget,
 ) -> Option<mj_core::aws_credentials::AwsCredentialSource> {
     let source = target.aws_credentials.clone()?;
-    tokio::task::spawn_blocking(move || crate::aws_credentials::resolve(&source).ok())
+    mj_core::runtime::spawn_blocking(move || crate::aws_credentials::resolve(&source).ok())
         .await
         .ok()
         .flatten()
@@ -2276,7 +2280,7 @@ fn start_scoped_mint(
     let worker_profile = worker_profile.to_owned();
     let executor = crate::targets::CancellableProcessExecutor::new(Arc::default());
     let stops_with_the_task = executor.cancel_on_drop();
-    let mint = tokio::task::spawn_blocking(move || {
+    let mint = mj_core::runtime::spawn_blocking(move || {
         let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
         if force_new {
             cache.forget(&session_id, &source);
@@ -2466,7 +2470,7 @@ impl LoginAccess {
         kind: mj_core::config::HarnessKind,
     ) -> Result<(CredentialSnapshot, Vec<u8>)> {
         let access = self.clone();
-        tokio::task::spawn_blocking(move || access.read(kind))
+        mj_core::runtime::spawn_blocking(move || access.read(kind))
             .await
             .context("read profile credentials task stopped")?
     }
@@ -2588,11 +2592,13 @@ impl ProfileLogin {
 
     async fn read(&self, target: &CredentialSyncTarget) -> Result<Arc<CanonicalLogin>, String> {
         let target = target.clone();
-        tokio::task::spawn_blocking(move || read_canonical_login(&target, &PassLogin::PerSession))
-            .await
-            .context("profile login reader stopped")
-            .and_then(|result| result)
-            .map_err(|error| format!("{error:#}"))
+        mj_core::runtime::spawn_blocking(move || {
+            read_canonical_login(&target, &PassLogin::PerSession)
+        })
+        .await
+        .context("profile login reader stopped")
+        .and_then(|result| result)
+        .map_err(|error| format!("{error:#}"))
     }
 
     fn for_target(&self, target: &CredentialSyncTarget) -> Result<Arc<CanonicalLogin>> {

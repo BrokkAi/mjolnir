@@ -368,7 +368,7 @@ where
     assert!(!state.owner().lifecycle.contains_key(LATCH_RELAY_SESSION));
     let control = LifecycleControl::default();
     let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
-    let closing = tokio::spawn({
+    let closing = mj_core::runtime::spawn({
         let state = state.clone();
         let control = control.clone();
         async move {
@@ -1646,7 +1646,7 @@ pub(super) fn test_metadata(address: SocketAddr) -> DaemonMetadata {
 async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
     let mut manager = TestRemoteManager::new().await;
     let (reply, response) = tokio::sync::oneshot::channel();
-    let forwarding = tokio::spawn(forward_in_process_session_request(
+    let forwarding = mj_core::runtime::spawn(forward_in_process_session_request(
         RemoteSessionRequest::Reviewer {
             session_id: "session-1".into(),
             role: None,
@@ -1677,7 +1677,7 @@ async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
     let state = test_runtime_state_with_manager(&manager);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(
             stream,
@@ -1969,7 +1969,7 @@ fn late_runtime_revision_publication_cannot_move_cursor_backwards() {
 async fn framing_round_trips_payloads_larger_than_a_pipe_buffer() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let sender = tokio::spawn(async move {
+    let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         write_frame(&mut stream, &"x".repeat(512 * 1024))
             .await
@@ -1985,7 +1985,7 @@ async fn framing_round_trips_payloads_larger_than_a_pipe_buffer() {
 async fn framing_rejects_an_oversized_frame_before_allocating_it() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let sender = tokio::spawn(async move {
+    let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         stream
             .write_u32((MAX_FRAME_BYTES + 1) as u32)
@@ -2019,7 +2019,7 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
     cancellation.cancel();
     let server_metadata = metadata.clone();
     let server_cancellation = cancellation.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(stream, server_metadata, state, server_cancellation)
             .await
@@ -2094,7 +2094,7 @@ async fn management_stop_is_bounded_when_the_daemon_never_acknowledges() {
     };
     let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
     let (mut peer, _) = listener.accept().await.unwrap();
-    let stop = tokio::spawn(async move { client.stop().await });
+    let stop = mj_core::runtime::spawn(async move { client.stop().await });
     let request: RequestEnvelope = read_frame(&mut peer).await.unwrap();
     assert!(matches!(request.action, DaemonAction::Stop));
     // Pause only after the real socket exchange reaches the fake daemon.
@@ -2120,7 +2120,7 @@ async fn daemon_rejects_a_request_with_the_wrong_owner_token() {
         placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(stream, server_metadata, state, CancellationToken::new())
             .await
@@ -2161,7 +2161,7 @@ async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
         placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(stream, server_metadata, state, CancellationToken::new())
             .await
@@ -2264,7 +2264,7 @@ async fn daemon_serves_management_actions_for_any_protocol_version() {
             placement: DaemonPlacement::Host,
         };
         let server_metadata = metadata.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             serve_client(stream, server_metadata, state, CancellationToken::new())
                 .await
@@ -2552,7 +2552,7 @@ async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_fe
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server_state = state.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(
             stream,
@@ -2603,7 +2603,7 @@ async fn management_client_talks_to_every_released_protocol_version() {
         let daemon_build = transcript.daemon_build;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             for (expected, response) in transcript
                 .expected_requests
@@ -3343,7 +3343,7 @@ async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownershi
         state.request_close("close-race");
         let waiter = {
             let state = state.clone();
-            tokio::spawn(async move { state.wait_before_close("close-race").await })
+            mj_core::runtime::spawn(async move { state.wait_before_close("close-race").await })
         };
         tokio::task::yield_now().await;
         assert!(
@@ -3490,7 +3490,7 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
     state
         .begin_restart_container_teardown("session-1", &intent.operation_id)
         .unwrap();
-    let mut close = tokio::spawn({
+    let mut close = mj_core::runtime::spawn({
         let state = state.clone();
         async move { state.wait_before_close("session-1").await }
     });
@@ -3760,8 +3760,9 @@ async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cance
     tokio::task::yield_now().await;
 
     let preempt_state = state.clone();
-    let waited =
-        tokio::spawn(async move { preempt_state.preempt_active_lifecycle("session-1").await });
+    let waited = mj_core::runtime::spawn(async move {
+        preempt_state.preempt_active_lifecycle("session-1").await
+    });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waited.is_finished(), "the second destroy waits");
     assert!(
@@ -5445,7 +5446,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     });
 
     let cancelled = Arc::new(AtomicBool::new(true));
-    let result = tokio::task::spawn_blocking({
+    let result = mj_core::runtime::spawn_blocking({
         let cancelled = cancelled.clone();
         || {
             mj_controller::database::begin_session_restart(
@@ -5485,7 +5486,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         .await
         .unwrap();
     let cancelled = control.cancelled.clone();
-    let intent = tokio::task::spawn_blocking({
+    let intent = mj_core::runtime::spawn_blocking({
         let cancelled = cancelled.clone();
         || {
             mj_controller::database::begin_session_restart(
@@ -5503,7 +5504,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         .bind_restart_intent("session-1", &intent.operation_id)
         .unwrap();
     assert!(!intent.checkpoint_started);
-    tokio::task::spawn_blocking(|| {
+    mj_core::runtime::spawn_blocking(|| {
         mj_controller::database::mark_session_restart_checkpoint_started(
             "session-1",
             "restart-accepted",
@@ -5518,7 +5519,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     .unwrap()
     .unwrap();
 
-    tokio::task::spawn_blocking(|| {
+    mj_core::runtime::spawn_blocking(|| {
         let mut session = mj_controller::database::load_state()?
             .sessions
             .remove("session-1")
@@ -5606,7 +5607,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         )
         .await
         .unwrap();
-    tokio::task::spawn_blocking({
+    mj_core::runtime::spawn_blocking({
         let cancelled = control.cancelled.clone();
         || {
             mj_controller::database::begin_session_restart(
@@ -5626,7 +5627,8 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         .bind_restart_intent("session-2", "restart-preempted")
         .unwrap();
     let closing_state = state.clone();
-    let close = tokio::spawn(async move { closing_state.wait_before_close("session-2").await });
+    let close =
+        mj_core::runtime::spawn(async move { closing_state.wait_before_close("session-2").await });
     tokio::time::timeout(Duration::from_secs(2), async {
         while !control.cancelled.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
@@ -7123,7 +7125,7 @@ async fn a_create_wait_is_answered_from_the_intent_row_and_the_record() {
     ));
     let waiting = |id: &'static str| {
         let state = state.clone();
-        tokio::spawn(async move { state.wait_create_outcome(id).await })
+        mj_core::runtime::spawn(async move { state.wait_create_outcome(id).await })
     };
     let finishes = waiting("wait-finishes");
     let fails = waiting("wait-fails");
@@ -7195,7 +7197,7 @@ async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive
         connection.execute_batch("ROLLBACK").unwrap();
     });
     locked_rx.await.unwrap();
-    let checkpoint = tokio::spawn({
+    let checkpoint = mj_core::runtime::spawn({
         let state = state.clone();
         async move { state.checkpoint_session_now("checkpoint-io").await }
     });
@@ -7721,7 +7723,7 @@ async fn workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_dele
     // A refresh queued before deletion must read after the writer commits,
     // rather than publish a workspace list captured before deletion.
     let refresh_guard = state.workspace_refresh.lock().await;
-    let delayed = tokio::spawn({
+    let delayed = mj_core::runtime::spawn({
         let state = state.clone();
         async move { state.refresh_workspaces().await }
     });
@@ -7810,7 +7812,7 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
             .await
             .unwrap();
     }
-    let closing = tokio::spawn({
+    let closing = mj_core::runtime::spawn({
         let state = state.clone();
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
@@ -7943,7 +7945,7 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         .unwrap();
     drop(started);
     let cancellable_baseline = cancellable_acceptance.receiver_count();
-    let mut closing = tokio::spawn({
+    let mut closing = mj_core::runtime::spawn({
         let state = state.clone();
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
@@ -8094,7 +8096,7 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
     assert!(payload_bytes > MAX_FRAME_BYTES);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         for reply in [
             DaemonReply::DashboardStartup(Box::new(startup)),
@@ -8122,7 +8124,7 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
     });
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let proxy_address = proxy.local_addr().unwrap();
-    let copied = tokio::spawn(async move {
+    let copied = mj_core::runtime::spawn(async move {
         let (mut incoming, _) = proxy.accept().await.unwrap();
         let mut outgoing = TcpStream::connect(address).await.unwrap();
         tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
@@ -8154,7 +8156,7 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
 async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let sender = tokio::spawn(async move {
+    let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         for (request_id, result) in [
             (7, Ok(DaemonReply::Text("x".repeat(MAX_FRAME_BYTES)))),
@@ -9028,7 +9030,7 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
         })
         .await
         .unwrap();
-    let destroy = tokio::spawn({
+    let destroy = mj_core::runtime::spawn({
         let state = state.clone();
         async move {
             state
@@ -10463,7 +10465,7 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
             mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
         )
         .unwrap();
-    let suspend = tokio::spawn({
+    let suspend = mj_core::runtime::spawn({
         let state = state.clone();
         async move { state.suspend_session(parent_id.to_owned()).await }
     });
@@ -10561,7 +10563,7 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
         )
         .unwrap();
 
-    let mut suspend = tokio::spawn({
+    let mut suspend = mj_core::runtime::spawn({
         let state = state.clone();
         async move { state.suspend_session(parent_id.to_owned()).await }
     });
@@ -10923,7 +10925,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             }),
             state.clone(),
         ));
-        let pending = tokio::spawn(async move {
+        let pending = mj_core::runtime::spawn(async move {
             backend
                 .execute_subagent_tool_durable(parent_id.into(), request)
                 .await
@@ -10992,7 +10994,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
         let (channels, state) = serve_live_session(&worker_root, false).await;
         // Startup recovery and replay can arrive in either order. The
         // lifecycle owner must coalesce the unkeyed recovery and keyed replay.
-        let recovering = tokio::spawn({
+        let recovering = mj_core::runtime::spawn({
             let state = state.clone();
             async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
         });
@@ -11012,7 +11014,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             }),
             state,
         ));
-        let replaying = tokio::spawn({
+        let replaying = mj_core::runtime::spawn({
             let backend = backend.clone();
             let request = request.clone();
             async move {
@@ -11190,7 +11192,7 @@ async fn exercise_child_close_with_a_nested_workspace(
         state.reviewer_runtime.set(Arc::downgrade(&state)).unwrap();
     }
     if cancel_before_commit {
-        let closing = tokio::spawn({
+        let closing = mj_core::runtime::spawn({
             let state = state.clone();
             async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
         });
@@ -11827,7 +11829,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
         .workspace_names
         .insert("large".into(), "x".repeat(MAX_FRAME_BYTES + 1024));
     let expected = projection.clone();
-    let sender = tokio::spawn(async move {
+    let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         for (request_id, result) in [
             (
@@ -11878,7 +11880,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
 async fn interrupted_runtime_fragments_never_publish_partial_state() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let sender = tokio::spawn(async move {
+    let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         write_frame(
             &mut stream,
@@ -12860,7 +12862,7 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(
             stream,
@@ -12900,7 +12902,7 @@ async fn resume_candidates_larger_than_a_frame_arrive_whole() {
     let expected = candidates.clone();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let sender = tokio::spawn(async move {
+    let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         for (request_id, result) in [
             (3, Ok(DaemonReply::ResumeCandidates(Box::new(candidates)))),
@@ -14447,7 +14449,7 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
     let server_metadata = metadata.clone();
-    let server = tokio::spawn({
+    let server = mj_core::runtime::spawn({
         let state = state.clone();
         async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -14702,7 +14704,7 @@ async fn daemon_api_exchange() {
         let connect = TcpStream::connect(metadata.address);
         let (stream, accepted) = tokio::join!(connect, server_listener.accept());
         let (server_stream, _) = accepted.unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             serve_client(
                 server_stream,
                 server_metadata,
@@ -14846,7 +14848,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
     let server_metadata = metadata.clone();
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
-    let mut server = tokio::spawn(async move {
+    let mut server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         serve_client(stream, server_metadata, state, server_shutdown)
             .await
@@ -14947,7 +14949,7 @@ async fn daemon_upload_exchange() {
         placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         for (index, authenticated) in [true, false, true, false, true].into_iter().enumerate() {
             if index == 4 {
                 assert!(mj_controller::upgrade::gate().try_close());
@@ -15310,7 +15312,7 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
         let server_metadata = metadata.clone();
         let shutdown = CancellationToken::new();
         let server_shutdown = shutdown.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             serve_client(
                 stream,
@@ -15523,7 +15525,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .expect("a needs-input session serves its dismissal target");
     assert_eq!(target, NotificationDismissal::Stack { revision: 9 });
 
-    let answerer = tokio::spawn(async move {
+    let answerer = mj_core::runtime::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
             .await
             .expect("the dismissal submit reached the worker bridge")
@@ -15748,7 +15750,7 @@ esac
         .await
         .unwrap();
     let mut revisions = state.revisions.subscribe();
-    let pending = tokio::spawn({
+    let pending = mj_core::runtime::spawn({
         let state = state.clone();
         let id = session.id.clone();
         async move {
@@ -15832,7 +15834,7 @@ async fn identical_lifecycle_requests_do_not_conflict_during_fifo_turnover() {
             })
             .await
             .unwrap();
-        let queued = tokio::spawn({
+        let queued = mj_core::runtime::spawn({
             let state = state.clone();
             let session = session.clone();
             async move {
@@ -15852,7 +15854,7 @@ async fn identical_lifecycle_requests_do_not_conflict_during_fifo_turnover() {
         })
         .await
         .expect("differing request queues behind the first operation");
-        let identical = tokio::spawn({
+        let identical = mj_core::runtime::spawn({
             let state = state.clone();
             let session = session.clone();
             async move {
@@ -15934,7 +15936,7 @@ async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop
     );
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
-    let server = tokio::spawn({
+    let server = mj_core::runtime::spawn({
         let state = state.clone();
         let metadata = metadata.clone();
         async move {
@@ -16112,7 +16114,7 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
     let server_metadata = metadata.clone();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         for _ in 0..3 {
             let (stream, _) = listener.accept().await.unwrap();
             serve_client(
@@ -16351,7 +16353,8 @@ async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
     sessionwiki::index::open().unwrap();
     let state = test_runtime_state_loading_the_store();
     let waiting_state = Arc::clone(&state);
-    let waiting = tokio::spawn(async move { waiting_state.wiki().sync_now(false).await });
+    let waiting =
+        mj_core::runtime::spawn(async move { waiting_state.wiki().sync_now(false).await });
     let hooks = PathBuf::from(std::env::var_os("MJ_TEST_HOOK_DIR").unwrap());
     tokio::time::timeout(Duration::from_secs(60), async {
         while !hooks.join("sessionwiki_sync_pass.reached").exists() {

@@ -54,7 +54,7 @@ async fn reviewer_standing(
 ) -> Result<ChildStanding, String> {
     let environment = environment.clone();
     let child = child.to_owned();
-    tokio::task::spawn_blocking(move || environment.reviewer_child_standing(&child))
+    mj_core::runtime::spawn_blocking(move || environment.reviewer_child_standing(&child))
         .await
         .map_err(|error| format!("reviewer standing lookup stopped: {error}"))?
 }
@@ -84,7 +84,7 @@ fn settle_ended_reviewer(
         reply,
     });
     let events = events.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         if let Ok(Err(error)) = saved.await {
             let _ = events.send(HostEvent::ReviewerEndNotSaved {
                 child_session_id: child,
@@ -139,10 +139,10 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let owner = session_id.clone();
             let register = environment.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = mj_core::runtime::spawn_blocking(move || {
                 register.register_child(
                     &owner,
                     &reviewer,
@@ -255,7 +255,7 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if !fresh {
                 // A restored child may still be running its worker turn, and
                 // a start error after a restart can be transient, so only the
@@ -330,7 +330,7 @@ impl HostState {
         tracing::warn!(%session_id, role, ?origin, %error, retry_in_seconds = delay.as_secs(), "reviewer's standing will be read again");
         let events = self.events.clone();
         let session_id = session_id.to_owned();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             tokio::time::sleep(delay).await;
             let _ = events.send(HostEvent::RetryReviewerStanding {
                 session_id,
@@ -357,7 +357,7 @@ impl HostState {
         let delay = slot.take_retry_delay();
         tracing::warn!(child, %error, retry_in_seconds = delay.as_secs(), "an ended reviewer's report did not save; it will be reported again");
         let events = self.events.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             tokio::time::sleep(delay).await;
             let _ = events.send(HostEvent::ChildEnded {
                 child_session_id: child,
@@ -563,7 +563,7 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let child = child.to_owned();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             // A handback the child recorded before it ended is its outcome.
             let handback = match reviewer_standing(&environment, &child).await {
                 Ok(standing) => standing.answer_to(&command_id),

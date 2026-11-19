@@ -202,7 +202,7 @@ impl TerminalRegistry {
             self.connection,
             self.next_id.fetch_add(1, Ordering::Relaxed) + 1
         );
-        let supervisor = tokio::spawn(supervise(
+        let supervisor = mj_core::runtime::spawn(supervise(
             terminal_id.clone(),
             child,
             stdout,
@@ -739,7 +739,7 @@ mod tests {
                     },
                     buffer: Arc::new(Mutex::new(TerminalBuffer::new(1024))),
                     exit: exit_rx,
-                    supervisor: tokio::spawn(std::future::pending::<()>()),
+                    supervisor: mj_core::runtime::spawn(std::future::pending::<()>()),
                 },
             );
     }

@@ -111,7 +111,7 @@ fn new_session_titles(
 /// API, before it is submitted; see `mj_controller::database::record_user_prompt`.
 /// A failure to record does not stop the prompt, so it is logged.
 pub(super) async fn record_user_prompt(session_id: String, command_id: String, text: String) {
-    let recorded = tokio::task::spawn_blocking({
+    let recorded = mj_core::runtime::spawn_blocking({
         let session_id = session_id.clone();
         move || mj_controller::database::record_user_prompt(&session_id, &command_id, &text)
     })

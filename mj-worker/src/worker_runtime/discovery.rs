@@ -139,7 +139,7 @@ async fn probe_with_close_timeout(
     let (commands, requests) = mpsc::channel(8);
     let (events, mut updates) = mpsc::channel(128);
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let mut task = tokio::spawn(acp::run_with_shutdown(
+    let mut task = mj_core::runtime::spawn(acp::run_with_shutdown(
         launch,
         requests,
         events,

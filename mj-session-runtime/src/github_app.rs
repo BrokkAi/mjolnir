@@ -517,7 +517,7 @@ impl GithubAppTokenProvider {
             .signing_key
             .get_or_try_init(|| async move {
                 let path = config.private_key_path.clone();
-                let bytes = tokio::task::spawn_blocking(move || read_private_key_file(&path))
+                let bytes = mj_core::runtime::spawn_blocking(move || read_private_key_file(&path))
                     .await
                     .context("GitHub App private-key read task failed")??;
                 parse_private_key(&bytes).map(Arc::new)
@@ -714,15 +714,16 @@ pub async fn validate_bundle_installations(
     })?;
     let provider =
         GithubAppTokenProvider::shared(app).map_err(GithubBundleSelectionError::Provider)?;
-    let repositories =
-        tokio::task::spawn_blocking(move || github_repositories(&bundle, None, &ProcessExecutor))
-            .await
-            .map_err(|error| {
-                GithubBundleSelectionError::Provider(anyhow!(
-                    "GitHub repository source task failed: {error}"
-                ))
-            })?
-            .map_err(GithubBundleSelectionError::Provider)?;
+    let repositories = mj_core::runtime::spawn_blocking(move || {
+        github_repositories(&bundle, None, &ProcessExecutor)
+    })
+    .await
+    .map_err(|error| {
+        GithubBundleSelectionError::Provider(anyhow!(
+            "GitHub repository source task failed: {error}"
+        ))
+    })?
+    .map_err(GithubBundleSelectionError::Provider)?;
     provider
         .token_for_owner_repo_pairs(bundle_id, &repositories)
         .await?;
@@ -789,7 +790,7 @@ pub async fn app_token_for_session(
         .project
         .as_ref()
         .map(|project| project.network_sources.clone());
-    let repositories = tokio::task::spawn_blocking(move || {
+    let repositories = mj_core::runtime::spawn_blocking(move || {
         github_repositories(&bundle, network_sources.as_ref(), &ProcessExecutor)
     })
     .await
@@ -822,14 +823,14 @@ pub async fn github_token_for_session(
     if github.app.is_none() {
         return Ok(controller_github_token().await);
     }
-    let (config, state) = tokio::task::spawn_blocking(crate::database::load_config_and_state)
+    let (config, state) = mj_core::runtime::spawn_blocking(crate::database::load_config_and_state)
         .await
         .context("load controller for GitHub credential sync")??;
     token_for_session(&config, &state, &session_id).await
 }
 
 pub async fn renew_session_github_app_token(session_id: String) -> Result<Option<String>> {
-    let (config, state) = tokio::task::spawn_blocking(crate::database::load_config_and_state)
+    let (config, state) = mj_core::runtime::spawn_blocking(crate::database::load_config_and_state)
         .await
         .context("load controller for GitHub App export token")??;
     // Export may renew an App token, but must not replace an explicit PAT.
@@ -844,7 +845,7 @@ async fn session_token_override(github: &GithubConfig) -> Result<Option<String>>
         return Ok(None);
     }
     let github = github.clone();
-    tokio::task::spawn_blocking(move || configured_session_github_token(&github))
+    mj_core::runtime::spawn_blocking(move || configured_session_github_token(&github))
         .await
         .context("read session GitHub token task stopped")?
 }
@@ -1209,7 +1210,7 @@ mod tests {
             .with_state(fake);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (Url::parse(&format!("http://{address}/")).unwrap(), task)

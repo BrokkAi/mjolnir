@@ -419,10 +419,10 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let owner = session_id.to_owned();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let lookup = owner.clone();
             let exists =
-                tokio::task::spawn_blocking(move || environment.session_exists(&lookup)).await;
+                mj_core::runtime::spawn_blocking(move || environment.session_exists(&lookup)).await;
             let step = match exists {
                 Ok(Ok(false)) => Some(ReviewStep::OwnerGone),
                 Ok(Ok(true)) => otherwise,

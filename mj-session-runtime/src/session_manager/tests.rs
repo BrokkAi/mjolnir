@@ -86,7 +86,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
         launches: mpsc::unbounded_channel().0,
         session_cpu: watch::channel(SessionCpuTable::new()).1,
     };
-    let request = tokio::spawn(async move {
+    let request = mj_core::runtime::spawn(async move {
         control
             .wait_for_session("muse", Duration::from_millis(20))
             .await
@@ -326,7 +326,7 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
     let (updates_tx, _updates_rx) = coalesced_update_channel();
     let mut dead = target("sh");
     dead.spec = CommandSpec::new("sh", ["-c", "exit 1"]).purpose("dead relay proxy fixture");
-    tokio::spawn(run_session_actor(
+    mj_core::runtime::spawn(run_session_actor(
         dead,
         commands_rx,
         releases_rx,
@@ -1283,7 +1283,7 @@ async fn unreachable_relay_publishes_error_view() {
     let (_retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, mut updates_rx) = coalesced_update_channel();
-    tokio::spawn(run_session_actor(
+    mj_core::runtime::spawn(run_session_actor(
         target("hel-relay-program-that-does-not-exist"),
         commands_rx,
         releases_rx,
@@ -1530,7 +1530,7 @@ async fn retirement_ends_a_connect_that_never_answers() {
     // can for the whole handshake timeout.
     let mut hung = target("sleep");
     hung.spec = CommandSpec::new("sleep", ["600"]);
-    let actor = tokio::spawn(run_session_actor(
+    let actor = mj_core::runtime::spawn(run_session_actor(
         hung,
         commands_rx,
         releases_rx,
@@ -2042,7 +2042,7 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
         )
         .await
         .unwrap();
-    tokio::spawn(run_session_actor(
+    mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,
@@ -2170,7 +2170,7 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     let (_retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, _updates_rx) = coalesced_update_channel();
-    tokio::spawn(run_session_actor(
+    mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,
@@ -2272,7 +2272,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     let (_retirement, retirement_rx) = watch::channel(false);
     let (view_tx, view) = watch::channel(ManagedSessionView::default());
     let (updates, _updates_rx) = coalesced_update_channel();
-    let actor = tokio::spawn(run_session_actor(
+    let actor = mj_core::runtime::spawn(run_session_actor(
         target.clone(),
         commands_rx,
         releases_rx,
@@ -2602,7 +2602,7 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
     let (retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, updates_rx) = coalesced_update_channel();
-    tokio::spawn(run_session_actor(
+    mj_core::runtime::spawn(run_session_actor(
         leased_relay_target(relay_root.path()),
         commands_rx,
         releases_rx,
@@ -2995,7 +2995,7 @@ async fn a_quiet_session_stops_polling_its_worker_until_work_is_in_flight() {
         .spec
         .env
         .insert(RELAY_SESSION_CONFIGURED.to_owned(), "1".to_owned());
-    tokio::spawn(run_session_actor(
+    mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,
@@ -3310,7 +3310,7 @@ async fn a_terminal_session_retires_its_relay_actor() {
     let (_retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, _updates_rx) = coalesced_update_channel();
-    let actor = tokio::spawn(run_session_actor(
+    let actor = mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,
@@ -3370,7 +3370,7 @@ async fn a_discarded_session_retires_its_relay_actor() {
     let (_retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, _view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, _updates_rx) = coalesced_update_channel();
-    let actor = tokio::spawn(run_session_actor(
+    let actor = mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,
@@ -3881,7 +3881,7 @@ async fn suppressed_recovery_preserves_hello_backoff() {
     let (retirement, retirement_rx) = watch::channel(false);
     let (view, mut views) = watch::channel(ManagedSessionView::default());
     let (updates, _updates_rx) = coalesced_update_channel();
-    let actor = tokio::spawn(run_session_actor(
+    let actor = mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,
@@ -3965,7 +3965,7 @@ async fn a_fresh_actor_cannot_fail_a_worker_before_its_first_sync() {
         .spec
         .env
         .insert("STARTED".into(), started.to_string_lossy().into_owned());
-    let actor = tokio::spawn(run_session_actor(
+    let actor = mj_core::runtime::spawn(run_session_actor(
         target,
         commands_rx,
         releases_rx,

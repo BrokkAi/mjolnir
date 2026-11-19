@@ -136,7 +136,7 @@ pub(super) async fn prepare(
         let _stage = stages.enter(session_id, "checking the session's project source");
         let environment = environment.clone();
         let session = session_id.to_owned();
-        tokio::task::spawn_blocking(move || environment.review_refusal(&session))
+        mj_core::runtime::spawn_blocking(move || environment.review_refusal(&session))
             .await
             .map_err(|error| StartRefusal(format!("preparing review: {error}")))?
     };
@@ -183,7 +183,7 @@ pub(super) async fn prepare(
         let _stage = stages.enter(session_id, "loading the review state");
         let session = session_id.to_owned();
         let environment = environment.clone();
-        tokio::task::spawn_blocking(move || environment.load_state(&session))
+        mj_core::runtime::spawn_blocking(move || environment.load_state(&session))
             .await
             .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
             .map_err(StartRefusal)?
@@ -256,7 +256,7 @@ pub(super) async fn prepare(
         let profile = selected.profile.clone();
         let session = session_id.to_owned();
         let environment = environment.clone();
-        tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+        mj_core::runtime::spawn_blocking(move || environment.check(&session, &profile))
             .await
             .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
             .map_err(StartRefusal)?;
@@ -273,7 +273,7 @@ pub(super) async fn prepare(
                     let profile = writer.profile.clone();
                     let session = session_id.to_owned();
                     let environment = environment.clone();
-                    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+                    mj_core::runtime::spawn_blocking(move || environment.check(&session, &profile))
                         .await
                         .map_err(|e| format!("checking the brief writer: {e}"))
                         .and_then(|checked| checked)

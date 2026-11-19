@@ -289,7 +289,7 @@ async fn read_notification_message(
     read: impl FnOnce(&str) -> anyhow::Result<Option<String>> + Send + 'static,
 ) -> Result<Response<Body>, ApiError> {
     let reader = session_id.clone();
-    let text = tokio::task::spawn_blocking(move || read(&reader))
+    let text = mj_core::runtime::spawn_blocking(move || read(&reader))
     .await
     .map_err(|error| {
         tracing::error!(%error, session_id, "notification message read did not finish");
@@ -336,7 +336,7 @@ pub(super) async fn upload_attachment(
         return Err(ApiError::bad_request("image upload must not be empty"));
     }
 
-    let result = tokio::task::spawn_blocking(move || {
+    let result = mj_core::runtime::spawn_blocking(move || {
         let optimized = optimize_image(&body).map_err(|_| {
             ApiError::bad_request("unsupported image format or image could not be decoded")
         })?;
@@ -1078,11 +1078,11 @@ pub(super) async fn events(
             })
             .and_then(viewer_feed::parse_cursor);
         let history = state.viewer_history.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let publish = async {
                 let mut feed = viewer_feed::ViewerFeed::new(history);
                 let current = snapshots.borrow_and_update().clone();
-                let encoded = tokio::task::spawn_blocking(move || {
+                let encoded = mj_core::runtime::spawn_blocking(move || {
                     let result = feed.start(current, requested_cursor);
                     (feed, result)
                 })
@@ -1115,7 +1115,7 @@ pub(super) async fn events(
                         return;
                     }
                     let current = snapshots.borrow_and_update().clone();
-                    let encoded = tokio::task::spawn_blocking(move || {
+                    let encoded = mj_core::runtime::spawn_blocking(move || {
                         let result = feed.update(current);
                         (feed, result)
                     })
@@ -1157,7 +1157,7 @@ pub(super) async fn events(
         });
         return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
     }
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let publish = async {
             let initial = snapshots.borrow().revision;
             if tx
@@ -1241,7 +1241,7 @@ async fn catalog_response(
 pub(super) async fn read_git_identity()
 -> Result<Json<mj_controller::controller::GitIdentity>, ApiError> {
     // Reading runs `git`, so it stays off the async runtime.
-    tokio::task::spawn_blocking(mj_controller::controller::controller_git_identity)
+    mj_core::runtime::spawn_blocking(mj_controller::controller::controller_git_identity)
         .await
         .map_err(|error| git_identity_failure("read", anyhow::anyhow!("{error}")))?
         .map(Json)
@@ -1269,7 +1269,7 @@ pub(super) async fn save_git_identity(
     else {
         return upgrade_pending_response();
     };
-    let saved = tokio::task::spawn_blocking(move || {
+    let saved = mj_core::runtime::spawn_blocking(move || {
         let _admission = admission;
         mj_controller::controller::set_controller_git_identity(&request.name, &request.email)
     })

@@ -67,7 +67,7 @@ impl ImportedLogins {
     /// imported. A missing export is the same as one without logins.
     pub(super) async fn changed(&self) -> Result<bool> {
         let path = self.path.clone();
-        let entries = tokio::task::spawn_blocking(move || read_entries(&path))
+        let entries = mj_core::runtime::spawn_blocking(move || read_entries(&path))
             .await
             .context("read the staged OpenCode logins")??;
         Ok(entries != self.entries)

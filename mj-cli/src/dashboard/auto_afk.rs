@@ -76,7 +76,7 @@ impl AutoAfkReporter {
         };
         let (signal, receiver) = watch::channel(state);
         let (error_tx, errors) = mpsc::channel(1);
-        let task = tokio::spawn(run_reporter(
+        let task = mj_core::runtime::spawn(run_reporter(
             receiver,
             error_tx,
             DaemonActivityTransport { client: None },
@@ -232,7 +232,7 @@ mod tests {
         let (errors_tx, _errors_rx) = mpsc::channel(1);
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        let worker = tokio::spawn(run_reporter(
+        let worker = mj_core::runtime::spawn(run_reporter(
             signal_rx,
             errors_tx,
             RecordedTransport {
@@ -275,7 +275,7 @@ mod tests {
         let (errors_tx, _errors_rx) = mpsc::channel(1);
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        let worker = tokio::spawn(run_reporter(
+        let worker = mj_core::runtime::spawn(run_reporter(
             signal_rx,
             errors_tx,
             RecordedTransport {

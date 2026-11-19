@@ -418,7 +418,7 @@ fn records(root: &Path) -> Result<Vec<Record>> {
 }
 
 pub(crate) async fn run(args: Ec2Args) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let root = config_dir().join("ec2");
         match args.command {
             Ec2Command::Create(args) => create(args, &root),

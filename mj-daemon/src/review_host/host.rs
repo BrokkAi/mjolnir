@@ -80,7 +80,7 @@ impl TurnReviewHost {
             events: events.clone(),
             shared: shared.clone(),
         };
-        let persistence_task = tokio::spawn(persistence_loop(
+        let persistence_task = mj_core::runtime::spawn(persistence_loop(
             environment.clone(),
             events.clone(),
             persistence_receiver,
@@ -91,7 +91,7 @@ impl TurnReviewHost {
         persistence
             .send(PersistenceRequest::SweepInterrupted)
             .expect("new review persistence lane accepts its initial sweep");
-        tokio::spawn(host_loop(
+        mj_core::runtime::spawn(host_loop(
             HostState {
                 control,
                 config,

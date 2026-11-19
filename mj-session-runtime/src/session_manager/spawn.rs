@@ -22,7 +22,7 @@ pub fn spawn_session_manager_observed(
     let model_policies = updates_tx.model_policies.clone();
     let harness_failure = updates_tx.harness_failure.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(async move {
+    let task = mj_core::runtime::spawn(async move {
         let mut starting = StartingSessions::default();
         let mut actors = BTreeMap::<String, ActorRegistration>::new();
         let mut tasks = tokio::task::JoinSet::<String>::new();

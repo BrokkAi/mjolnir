@@ -77,8 +77,8 @@ impl ActiveLogin {
         // transcript faster than the dashboard can render it.
         let (updates, output) = mpsc::channel(1);
         let worker_profile = profile.to_owned();
-        let job = AbortOnDropHandle::new(tokio::spawn(async move {
-            let worker = AbortOnDropHandle::new(tokio::spawn(connection(
+        let job = AbortOnDropHandle::new(mj_core::runtime::spawn(async move {
+            let worker = AbortOnDropHandle::new(mj_core::runtime::spawn(connection(
                 worker_profile,
                 cols,
                 rows,

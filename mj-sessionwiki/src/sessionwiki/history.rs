@@ -16,7 +16,7 @@ pub async fn execute(request: HistoryRequest) -> HistoryResult {
             .acquire_owned()
             .await
             .context("history service stopped")?;
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             let _permit = permit;
             query(&request)
         })

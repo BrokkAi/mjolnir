@@ -134,7 +134,7 @@ impl RelayClient {
             crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
         let _cancel_preparation = executor.cancel_on_drop();
         let mut walked = std::mem::take(walk);
-        let prepared = tokio::task::spawn_blocking(move || {
+        let prepared = mj_core::runtime::spawn_blocking(move || {
             let prepared = requested
                 .open_ssh_session(&executor, &mut walked)
                 .map(mj_core::targets::SessionCommand::into_parts);
@@ -208,7 +208,7 @@ impl RelayClient {
             let purpose = spec.purpose.clone();
             let session_id = expected_session_id.to_owned();
             let tail = stderr_tail.clone();
-            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id, tail))
+            mj_core::runtime::spawn(drain_proxy_stderr(errors, purpose, session_id, tail))
         });
         let mut nonce_bytes = [0_u8; 8];
         getrandom::fill(&mut nonce_bytes).map_err(|error| {

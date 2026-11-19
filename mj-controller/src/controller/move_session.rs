@@ -648,7 +648,7 @@ impl MoveSourceRelay {
                     continue;
                 }
                 let parent = id.to_owned();
-                let effects_pending = tokio::task::spawn_blocking(move || {
+                let effects_pending = mj_core::runtime::spawn_blocking(move || {
                     crate::database::has_pending_mutating_delegations(&parent)
                 })
                 .await??;

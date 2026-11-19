@@ -723,7 +723,7 @@ impl PlanProbe {
             stall_policy: None,
         };
         let operator_away = spec.operator_away.clone();
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 ByteStreams::new(client_write.compat_write(), client_read.compat()),
                 spec,

@@ -104,7 +104,7 @@ impl<T: Clone + PartialEq + Default + Send + Sync + 'static> WorkspaceSettingPer
         };
         let (sender, mut receiver) = watch::channel(initial_snapshot.clone());
         let reports = notices.clone();
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             let mut persisted = BTreeMap::new();
             let mut failures = BTreeMap::<String, String>::new();
             // The initial snapshot is the database baseline. Newly remembered
@@ -314,7 +314,7 @@ mod tests {
         persistence.update("workspace-a", middle);
         persistence.update("workspace-a", latest);
         assert!(calls.try_recv().is_err(), "saves must not overlap");
-        let finish = tokio::spawn(persistence.finish());
+        let finish = mj_core::runtime::spawn(persistence.finish());
         complete.send(Ok(())).unwrap();
         let (workspace_id, sizes, complete) = calls.recv().await.unwrap();
         assert_eq!(workspace_id, "workspace-a");

@@ -418,7 +418,7 @@ pub(super) async fn persistence_loop(
         match request {
             PersistenceRequest::Load { session_id, reply } => {
                 let load = environment.clone();
-                let result = tokio::task::spawn_blocking(move || load.load_state(&session_id))
+                let result = mj_core::runtime::spawn_blocking(move || load.load_state(&session_id))
                     .await
                     .map_err(|error| format!("review state load stopped: {error}"))
                     .and_then(|result| result);
@@ -439,7 +439,7 @@ pub(super) async fn persistence_loop(
                     }
                 };
                 let save = environment.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let result = mj_core::runtime::spawn_blocking(move || {
                     let _admission = admission;
                     let result = save.save_state(&session_id, &state);
                     if let Err(error) = &result {
@@ -462,7 +462,7 @@ pub(super) async fn persistence_loop(
             } => {
                 let save = environment.clone();
                 let owner = session_id.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let result = mj_core::runtime::spawn_blocking(move || {
                     save.save_reviewer_outcome(&owner, &state, &reports)
                 })
                 .await
@@ -492,7 +492,7 @@ pub(super) async fn persistence_loop(
             }
             PersistenceRequest::SweepInterrupted => {
                 let sweep = environment.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let result = mj_core::runtime::spawn_blocking(move || {
                     let groups = sweep.active_groups()?;
                     let mut retained = BTreeSet::new();
                     for (parent, state) in &groups {
@@ -551,7 +551,7 @@ pub(super) async fn persistence_loop(
             PersistenceRequest::MarkInterrupted { session_id } => {
                 let environment = environment.clone();
                 let owner = session_id.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let result = mj_core::runtime::spawn_blocking(move || {
                     let mut state = environment.load_state(&owner)?;
                     state
                         .active
@@ -580,7 +580,7 @@ pub(super) async fn persistence_loop(
                     Some(PersistenceCompletion::Close(resolution)) => Some(*resolution),
                     _ => None,
                 };
-                let result = tokio::task::spawn_blocking(move || match close {
+                let result = mj_core::runtime::spawn_blocking(move || match close {
                     Some(resolution) => environment.close_review(&owner, &state, resolution),
                     None => environment.save_state(&owner, &state),
                 })

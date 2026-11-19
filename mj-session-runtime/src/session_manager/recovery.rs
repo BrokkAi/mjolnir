@@ -142,7 +142,7 @@ pub async fn recover_worker_for_session(
     } else {
         None
     };
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let cancelled = admission
             .as_ref()
             .map(crate::recovery_gate::RecoveryAttempt::cancellation)

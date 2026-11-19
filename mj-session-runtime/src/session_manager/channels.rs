@@ -195,7 +195,7 @@ impl SessionRequestOrder {
         Self {
             sender,
             budgets: Default::default(),
-            supervisor: tokio::spawn(supervise_requests(receiver)),
+            supervisor: mj_core::runtime::spawn(supervise_requests(receiver)),
         }
     }
 

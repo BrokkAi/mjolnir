@@ -412,7 +412,7 @@ impl StartingWorkerProbe for StartingWorkerConnection<'_> {
         let worker_root = self.worker_root.to_owned();
         let session_id = self.session_id.to_owned();
         async move {
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 probe_worker(&executor, &locator, &session_id, &worker_root)
             })
             .await
@@ -959,7 +959,7 @@ mod tests {
             state: state.clone(),
             saw_started: saw_started.clone(),
         };
-        let wait = tokio::spawn(async move {
+        let wait = mj_core::runtime::spawn(async move {
             let mut probe = probe;
             wait_for_native_session(&mut probe, &executor, HarnessKind::Codex).await
         });
@@ -1023,7 +1023,7 @@ mod tests {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(cancelled);
         let mut probe = StepsProbe(state.clone());
-        let wait = tokio::spawn(async move {
+        let wait = mj_core::runtime::spawn(async move {
             wait_for_harness_prepared_in_stage(
                 &mut probe,
                 &executor,
@@ -1096,7 +1096,7 @@ mod tests {
 
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(cancelled);
-        let wait = tokio::spawn(async move {
+        let wait = mj_core::runtime::spawn(async move {
             wait_for_native_session(&mut LegacyWaitingProbe, &executor, HarnessKind::Codex).await
         });
         tokio::task::yield_now().await;
@@ -1164,7 +1164,7 @@ mod tests {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(cancelled.clone());
         let mut probe = PendingProbe { polls: 0 };
-        let cancellation = tokio::spawn(async move {
+        let cancellation = mj_core::runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             cancelled.store(true, std::sync::atomic::Ordering::Release);
         });
@@ -1312,7 +1312,7 @@ mod tests {
                 }
                 // Like the real probe, this keeps running on its own thread
                 // after the wait drops its handle, and stops only when told.
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -1975,7 +1975,7 @@ mod tests {
                 // The first probe starts after 3 s. The connection completes at
                 // 4 s while this probe blocks, and the deadline is 4.5 s.
                 async {
-                    tokio::task::spawn_blocking(|| {
+                    mj_core::runtime::spawn_blocking(|| {
                         std::thread::sleep(Duration::from_secs(2));
                         Ok(WorkerProbe {
                             startup: None,

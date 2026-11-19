@@ -107,7 +107,7 @@ impl HostState {
         let operation = run(control, persistence, events.clone(), owner.clone());
         let environment = self.environment.clone();
         let (completed, result) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             let held = {
                 let owner = owner.clone();
                 async move {

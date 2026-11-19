@@ -119,7 +119,7 @@ pub async fn run_remote_session_actor(
                 reply,
             } => {
                 let (remote_reply, result) = oneshot::channel();
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     let answer = result
                         .await
                         .unwrap_or_else(|_| Err("remote submit receiver stopped".into()));
@@ -221,7 +221,7 @@ pub fn spawn_remote_actor(
     let (actor_tx, actor_rx) = mpsc::channel(32);
     let (release_tx, _release_rx) = mpsc::unbounded_channel();
     let (view_tx, view_rx) = watch::channel(view.clone());
-    let abort = tokio::spawn(run_remote_session_actor(
+    let abort = mj_core::runtime::spawn(run_remote_session_actor(
         session_id.clone(),
         actor_rx,
         requests.clone(),
@@ -261,7 +261,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     let (published_tx, mut published_rx) = mpsc::unbounded_channel();
     let (requests_tx, requests_rx) = mpsc::channel(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(async move {
+    let task = mj_core::runtime::spawn(async move {
         let mut starting = StartingSessions::default();
         let mut actors = BTreeMap::<String, RemoteActorRegistration>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();

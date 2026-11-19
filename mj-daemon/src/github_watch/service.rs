@@ -162,10 +162,11 @@ async fn run_poll_loop(
                 notices.clone(),
             ));
         let sessions_by_repo = sessions_by_github_repo(&projection.state);
-        let watched_repositories =
-            tokio::task::spawn_blocking(mj_controller::database::load_github_watched_repositories)
-                .await
-                .context("load watched GitHub repositories")??;
+        let watched_repositories = mj_core::runtime::spawn_blocking(
+            mj_controller::database::load_github_watched_repositories,
+        )
+        .await
+        .context("load watched GitHub repositories")??;
         let mut repositories = sessions_by_repo;
         for key in watched_repositories {
             repositories.entry(key).or_default();
@@ -307,7 +308,7 @@ async fn poll_repository(
         tracing::debug!(%owner, %repo, "GitHub repository has no session to take a credential from; skipping");
         return Ok(());
     };
-    let controller = tokio::task::spawn_blocking(mj_controller::controller::Controller::load)
+    let controller = mj_core::runtime::spawn_blocking(mj_controller::controller::Controller::load)
         .await
         .context("load controller for GitHub watch credentials")??;
     let token = controller
@@ -696,7 +697,7 @@ async fn prepare_session_evidence(
     let original = evidence.item.clone();
     let session_id = session.id.clone();
     let cutoff = timestamp_millis(&item.created_at).context("invalid GitHub item creation time")?;
-    let evidence = tokio::task::spawn_blocking(move || {
+    let evidence = mj_core::runtime::spawn_blocking(move || {
         let mut base = serde_json::to_value(evidence.bounded_for_request()?)?;
         mj_core::redact::redact_json_strings(&mut base);
         let base = serde_json::from_value(base)?;
@@ -818,7 +819,7 @@ async fn opened_by_session(
 }
 
 async fn session_evidence_snapshot(session_id: String) -> Result<SessionEvidenceSnapshot> {
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let history = mj_controller::database::load_github_history_snapshot(&session_id)?;
         let digest = mj_controller::database::load_materialized_recent_turns(
             &session_id,
@@ -837,7 +838,7 @@ async fn session_evidence_snapshot(session_id: String) -> Result<SessionEvidence
 
 #[cfg(test)]
 async fn session_digest(session_id: String) -> Result<SessionContext> {
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         const TURNS: usize = mj_core::github_item::SESSION_TURNS;
         let Some(materialized) =
             mj_controller::database::load_materialized_recent_turns(&session_id, TURNS)?
@@ -1321,7 +1322,7 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 async fn blocking_db<T: Send + 'static>(
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(work)
+    mj_core::runtime::spawn_blocking(work)
         .await
         .context("GitHub watch database task failed")?
 }
@@ -1677,7 +1678,8 @@ mod tests {
         let app = Router::new()
             .route("/user", get(retrying_user))
             .with_state(state.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let api = GithubApi::new(&base, Some("watch-login-retry-test-token".into())).unwrap();
 
         assert_eq!(api.credential_login().await.unwrap(), None);
@@ -1725,7 +1727,8 @@ mod tests {
             .route("/repos/{owner}/{repo}/issues", get(disable_after_issues))
             .route("/ping", get(count_ping))
             .with_state(state.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let calls = Arc::new(AtomicUsize::new(0));
         let classifier: Arc<dyn GithubClassifier> = Arc::new(FakeClassifier {
             calls: calls.clone(),
@@ -1781,7 +1784,8 @@ mod tests {
             .route("/reset", get(rate_limited_reset))
             .route("/ok", get(rate_limit_ok))
             .with_state(state.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         for (path, token) in [
             ("retry-after", "watch-rate-retry-after-test-token"),
@@ -2135,7 +2139,8 @@ mod tests {
                 get(|| async { Json(json!({"login":"watcher-bot"})) }),
             )
             .with_state(fake.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let api = GithubApi::new(&base, Some("synthetic-watcher-items".into())).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let classifier: Arc<dyn GithubClassifier> = Arc::new(FakeClassifier {
@@ -2340,7 +2345,8 @@ mod tests {
                 get(|| async { Json(json!({"login":"watcher-bot"})) }),
             )
             .with_state(fake);
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (GithubApi::new(&base, Some(base.clone())).unwrap(), server)
     }
 

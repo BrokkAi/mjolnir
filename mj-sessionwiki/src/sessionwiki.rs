@@ -1537,7 +1537,8 @@ impl WikiIndexer {
             return IndexedBeforeDestroy::Unavailable(reason);
         }
         let root = session_id.to_owned();
-        let pending = match tokio::task::spawn_blocking(move || unindexed_session(&root)).await {
+        let pending = match mj_core::runtime::spawn_blocking(move || unindexed_session(&root)).await
+        {
             Ok(Ok(pending)) => pending,
             Ok(Err(error)) => {
                 return IndexedBeforeDestroy::Failed(format!(
@@ -1622,7 +1623,7 @@ where
 {
     // A timed-out caller leaves its generation with the owner; the pass
     // finishes even when destroy proceeds with its captured session copy.
-    match tokio::time::timeout(wait, tokio::spawn(sync)).await {
+    match tokio::time::timeout(wait, mj_core::runtime::spawn(sync)).await {
         Ok(Ok(Ok(()))) => return IndexedBeforeDestroy::Synced,
         Ok(Ok(Err(error))) => tracing::warn!(
             error = %format!("{error:#}"),
@@ -1637,7 +1638,7 @@ where
             "the SessionWiki sync did not finish in time; indexing the session on its own"
         ),
     }
-    let captured = match tokio::task::spawn_blocking(capture).await {
+    let captured = match mj_core::runtime::spawn_blocking(capture).await {
         Ok(Ok(captured)) => Arc::new(captured),
         Ok(Err(error)) => {
             return IndexedBeforeDestroy::Failed(format!(
@@ -1654,7 +1655,7 @@ where
         return IndexedBeforeDestroy::Current;
     }
     let attempt = Arc::clone(&captured);
-    match tokio::task::spawn_blocking(move || write_captured(&attempt)).await {
+    match mj_core::runtime::spawn_blocking(move || write_captured(&attempt)).await {
         Ok(Ok(())) => IndexedBeforeDestroy::WrittenDirectly,
         Ok(Err(error)) if crate::database::is_busy_error(&error) => {
             write_captured_later(captured, retry);
@@ -1807,19 +1808,20 @@ fn write_captured_later(captured: Arc<Vec<CapturedSession>>, retry: Duration) {
         ?sessions,
         "the SessionWiki index is busy; indexing the destroyed sessions once it is free"
     );
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let started = Instant::now();
         loop {
             tokio::time::sleep(retry).await;
             let attempt = Arc::clone(&captured);
-            let error = match tokio::task::spawn_blocking(move || write_captured(&attempt)).await {
-                Ok(Ok(())) => {
-                    tracing::info!(?sessions, "indexed the destroyed sessions");
-                    return;
-                }
-                Ok(Err(error)) => error,
-                Err(error) => anyhow::Error::new(error),
-            };
+            let error =
+                match mj_core::runtime::spawn_blocking(move || write_captured(&attempt)).await {
+                    Ok(Ok(())) => {
+                        tracing::info!(?sessions, "indexed the destroyed sessions");
+                        return;
+                    }
+                    Ok(Err(error)) => error,
+                    Err(error) => anyhow::Error::new(error),
+                };
             if !crate::database::is_busy_error(&error) || started.elapsed() >= DEFERRED_WRITE_LIMIT
             {
                 tracing::warn!(

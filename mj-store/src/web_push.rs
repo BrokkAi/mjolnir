@@ -22,7 +22,7 @@ pub fn wake_signal() -> &'static tokio::sync::Notify {
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(f)
+    mj_core::runtime::spawn_blocking(f)
         .await
         .context("Web Push storage task panicked")?
 }

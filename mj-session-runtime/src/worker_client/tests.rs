@@ -1129,7 +1129,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
 #[tokio::test]
 async fn response_frame_limit_is_enforced_before_newline() {
     let (mut writer, reader) = tokio::io::duplex(32);
-    let write = tokio::spawn(async move {
+    let write = mj_core::runtime::spawn(async move {
         writer.write_all(b"123456789\n").await.unwrap();
     });
     let mut reader = BufReader::new(reader);
@@ -2496,7 +2496,7 @@ async fn a_stuck_session_delays_only_its_own_aws_install() {
         ),
         aws_sync_session_named(home.path(), &fast_root, &token, &cli, "fast-session", None),
     ];
-    let pass = tokio::spawn({
+    let pass = mj_core::runtime::spawn({
         let targets = targets.clone();
         async move { reconcile_profile(&targets, None).await }
     });
@@ -3082,7 +3082,7 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
     let steps = credential_sync::SessionSteps::default();
-    let login = tokio::spawn({
+    let login = mj_core::runtime::spawn({
         let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
         async move {
             credential_sync::reconcile_profile_guarded(
@@ -3094,7 +3094,7 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
             .await
         }
     });
-    let install = tokio::spawn({
+    let install = mj_core::runtime::spawn({
         let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
         async move {
             credential_sync::aws_cycle(
@@ -3458,7 +3458,7 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
     // The job keeps the session until it ends.
     let (job, response, queued) = queue().await;
     let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
-    let running = tokio::spawn(async move { Box::new(job).run(&mut client).await });
+    let running = mj_core::runtime::spawn(async move { Box::new(job).run(&mut client).await });
     tokio::time::timeout(Duration::from_secs(20), async {
         while !root.join("waiting").exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3517,7 +3517,7 @@ async fn a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one() {
         retry: Duration::from_millis(50),
     };
     let (wakes, wake_rx) = mpsc::unbounded_channel();
-    let renewal = tokio::spawn(credential_sync::renew_session_aws(
+    let renewal = mj_core::runtime::spawn(credential_sync::renew_session_aws(
         env,
         target.clone(),
         wake_rx,
@@ -3700,7 +3700,7 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
         retry: Duration::from_millis(100),
     };
     let (_wakes, wake_rx) = mpsc::unbounded_channel();
-    let renewal = tokio::spawn(credential_sync::renew_session_aws(env, target, wake_rx));
+    let renewal = mj_core::runtime::spawn(credential_sync::renew_session_aws(env, target, wake_rx));
 
     // The credentials are withdrawn and the step says why, while STS has not
     // answered (the mint is still waiting on it).
@@ -4183,7 +4183,7 @@ async fn a_renewal_task_that_panics_is_reported_and_replaced_at_the_next_sync() 
     // The session's task, which dies as soon as it runs and drops what it
     // listened on.
     let (wakes, wake_rx) = mpsc::unbounded_channel();
-    let dying = tokio::spawn(async move {
+    let dying = mj_core::runtime::spawn(async move {
         let _wakes = wake_rx;
         panic!("renewal task panicked on purpose");
     });
@@ -4246,7 +4246,7 @@ async fn a_queued_job_releases_its_hold_as_soon_as_admission_is_cancelled() {
     // The task that waits for the job: it queues it (here, hands it to the
     // test, which plays the busy actor) and waits for the answer.
     let (queue_tx, queue_rx) = tokio::sync::oneshot::channel();
-    let waiting = tokio::spawn({
+    let waiting = mj_core::runtime::spawn({
         let (gate, steps, target) = (gate.clone(), steps.clone(), target.clone());
         async move {
             let turn = steps.enter(&target.session_id).await;
@@ -4344,7 +4344,7 @@ async fn a_running_credential_job_stops_when_its_admission_is_cancelled() {
 
     let (job, response, _queued) = queue().await;
     let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
-    let running = tokio::spawn(async move {
+    let running = mj_core::runtime::spawn(async move {
         Box::new(job).run(&mut client).await;
         client
     });
@@ -4532,7 +4532,7 @@ async fn session_turns_are_exclusive_and_leave_no_entry_behind() {
     // A holds; B waits; A releases. The entry must survive for B, so that C
     // still finds the lock B holds.
     let first = steps.enter("shared").await;
-    let waiting = tokio::spawn({
+    let waiting = mj_core::runtime::spawn({
         let steps = steps.clone();
         async move { steps.enter("shared").await }
     });
@@ -5417,7 +5417,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
         let queue = Arc::new(tokio::sync::Semaphore::new(0));
         let worker_queue = queue.clone();
         let (queued, mut waiting) = mpsc::channel(1);
-        let peer = tokio::spawn(async move {
+        let peer = mj_core::runtime::spawn(async move {
             let bytes = mj_core::relay::ProjectMemoryWireSnapshot::encode(
                 ProjectMemorySnapshot::default(),
                 ProjectMemorySnapshot::default(),
@@ -5480,7 +5480,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
         });
         let dropped = tokio_util::sync::CancellationToken::new();
         let drop_transfer = dropped.clone();
-        let transfer = tokio::spawn(async move {
+        let transfer = mj_core::runtime::spawn(async move {
             let result = tokio::select! {
                 result = client.project_memory_snapshot() => result,
                 () = drop_transfer.cancelled() => Err(anyhow!("checkpoint was cancelled")),

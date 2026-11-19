@@ -2892,7 +2892,7 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
     .await
     .unwrap();
     let submitting = handle.clone();
-    let mut prompt = tokio::spawn(async move {
+    let mut prompt = mj_core::runtime::spawn(async move {
         submitting
             .submit(
                 new_command_id("after-write").unwrap(),
@@ -3790,7 +3790,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL.to_string(),
     );
     let targets = channels.targets.clone();
-    let restore_actor = tokio::spawn(async move {
+    let restore_actor = mj_core::runtime::spawn(async move {
         tokio::time::timeout(Duration::from_secs(10), async move {
             loop {
                 let state = crate::database::load_session_record(LATCH_RELAY_SESSION)

@@ -744,7 +744,7 @@ mod tests {
         let mut revisions = state.revisions();
         revisions.borrow_and_update();
         let cancellation = CancellationToken::new();
-        let mut observer = tokio::spawn(crate::daemon::push_delivery::run_alerts(
+        let mut observer = mj_core::runtime::spawn(crate::daemon::push_delivery::run_alerts(
             state.clone(),
             cancellation.clone(),
         ));
@@ -985,7 +985,7 @@ mod tests {
             "a failed observation is not recorded, so the retry commits it"
         );
         streaming = failing;
-        tokio::task::spawn_blocking(move || _writer.shutdown())
+        mj_core::runtime::spawn_blocking(move || _writer.shutdown())
             .await
             .unwrap()
             .unwrap();
@@ -1039,7 +1039,7 @@ mod tests {
             "refused reconciliation leaves no admission hold"
         );
         let cancellation = CancellationToken::new();
-        let observer = tokio::spawn(crate::daemon::push_delivery::run_alerts(
+        let observer = mj_core::runtime::spawn(crate::daemon::push_delivery::run_alerts(
             state,
             cancellation.clone(),
         ));

@@ -540,7 +540,7 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
                             2 => release.notified().await,
                             _ => anyhow::bail!("an accepted write must not be applied again"),
                         }
-                        tokio::task::spawn_blocking(move || {
+                        mj_core::runtime::spawn_blocking(move || {
                             let mut controller = crate::controller::Controller::load()?;
                             controller.fail_unready_session(
                                 &id,
@@ -554,7 +554,7 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
                 }))
                 .is_ok()
         );
-        let actor = tokio::spawn(run_session_actor(
+        let actor = mj_core::runtime::spawn(run_session_actor(
             leased_relay_target(relay_root.path()),
             commands_rx,
             releases_rx,

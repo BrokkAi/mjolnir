@@ -1420,7 +1420,7 @@ async fn finish_a_turn(manager: &FakeManager, host: &TurnReviewHost) {
     }
     let host = host.clone();
     let session = manager.session.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let _ = host.start(&session).await;
     });
 }
@@ -1585,8 +1585,8 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     let close_gate = environment.block_saves();
     let first_host = host.clone();
     let second_host = host.clone();
-    let first = tokio::spawn(async move { first_host.shutdown().await });
-    let second = tokio::spawn(async move { second_host.shutdown().await });
+    let first = mj_core::runtime::spawn(async move { first_host.shutdown().await });
+    let second = mj_core::runtime::spawn(async move { second_host.shutdown().await });
     tokio::time::timeout(Duration::from_secs(5), close_gate.entered())
         .await
         .expect("shutdown queues the final inactive state");
@@ -1956,7 +1956,7 @@ async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
     let finished = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.reviewer_finished(session, child, Some("No findings.".into()))
                 .await
         })
@@ -2608,12 +2608,12 @@ async fn startup_restores_group_before_push_or_override_admission() {
     let push = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
     };
     let override_request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("old finding"))
                 .await
         })
@@ -3100,7 +3100,7 @@ async fn an_ended_reviewers_failure_is_applied_after_a_failed_outcome_save() {
     let gate = SaveGate::new();
     *environment.save_gate.lock().unwrap() = Some(gate.clone());
     *environment.save_error.lock().unwrap() = Some("database busy".into());
-    let first = tokio::spawn({
+    let first = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
         let child = children[0].clone();
@@ -3163,7 +3163,7 @@ async fn a_reviewer_that_ended_behind_a_failing_save_is_settled_from_its_standin
     environment
         .extra_save_failures
         .store(1, std::sync::atomic::Ordering::SeqCst);
-    let first = tokio::spawn({
+    let first = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
         let child = children[0].clone();
@@ -3175,7 +3175,7 @@ async fn a_reviewer_that_ended_behind_a_failing_save_is_settled_from_its_standin
     gate.entered().await;
     // Reviewer 2's handback queues behind that save, and its session ends.
     // The delegation that carries the handback gives up on the failure.
-    let second = tokio::spawn({
+    let second = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
         let child = children[1].clone();
@@ -3599,7 +3599,9 @@ async fn push_path_reaches_capture_and_old_worker_refuses_it() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, Some("../linked".into())).await })
+        mj_core::runtime::spawn(
+            async move { host.begin_push(&session, Some("../linked".into())).await },
+        )
     };
     let (_, action, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -3661,7 +3663,7 @@ async fn a_review_request_with_review_off_records_the_tree_and_chooses_no_review
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -3754,7 +3756,7 @@ async fn open_commit_review_with_delta(
     let request = {
         let host = host.clone();
         let session = manager.session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if manual {
                 host.start(&session)
                     .await
@@ -3845,7 +3847,7 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
         let request = {
             let host = host.clone();
             let session = manager.session.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 if push {
                     host.begin_push(&session, None).await.map(|_| ())
                 } else {
@@ -3917,7 +3919,7 @@ async fn empty_push_delta_records_clean_tree_without_a_reviewer() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -3992,7 +3994,7 @@ async fn old_git_push_delta_records_warning_and_clean_tree_without_reviewer() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -4121,7 +4123,9 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             let session = session.clone();
             let child = child.clone();
             let report = report.map(str::to_owned);
-            tokio::spawn(async move { host.reviewer_finished(session, child, report).await })
+            mj_core::runtime::spawn(
+                async move { host.reviewer_finished(session, child, report).await },
+            )
         };
         let mut recorded = false;
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -4472,9 +4476,9 @@ async fn push_override_rejects_missing_or_changed_findings_without_unlocking_a_t
         let request = {
             let host = host.clone();
             let session = session.clone();
-            tokio::spawn(
-                async move { host.override_push(&session, one_override("disagree")).await },
-            )
+            mj_core::runtime::spawn(async move {
+                host.override_push(&session, one_override("disagree")).await
+            })
         };
         if pending {
             answer_override_capture(&mut manager, deltas).await;
@@ -4502,7 +4506,7 @@ async fn push_override_audit_refusal_keeps_findings_and_never_records_a_ref() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override(&"🔥".repeat(4000)))
                 .await
         })
@@ -4550,7 +4554,7 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("incorrect"))
                 .await
         })
@@ -4594,7 +4598,7 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
     );
     let shutdown = {
         let host = host.clone();
-        tokio::spawn(async move { host.shutdown().await })
+        mj_core::runtime::spawn(async move { host.shutdown().await })
     };
     tokio::task::yield_now().await;
     assert!(
@@ -4640,7 +4644,7 @@ async fn push_override_retries_after_initial_save_or_ref_failure() {
             let request = {
                 let host = host.clone();
                 let session = session.clone();
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     host.override_push(&session, one_override("false positive"))
                         .await
                 })
@@ -4689,7 +4693,7 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
         let request = {
             let host = host.clone();
             let session = session.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 host.override_push(&session, one_override("false positive"))
                     .await
             })
@@ -4761,7 +4765,7 @@ async fn push_override_on_an_old_worker_records_reviewed_and_says_the_base_moved
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("false positive"))
                 .await
         })
@@ -4789,7 +4793,7 @@ async fn push_override_on_a_current_worker_says_the_base_is_unchanged() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("false positive"))
                 .await
         })
@@ -4822,7 +4826,7 @@ async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.set_push_base(&session, "abc1234".into(), Some("../linked".into()))
                 .await
         })
@@ -4886,7 +4890,9 @@ async fn set_review_baseline_preserves_state_when_a_later_base_already_exists() 
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.set_push_base(&session, "older".into(), None).await })
+        mj_core::runtime::spawn(
+            async move { host.set_push_base(&session, "older".into(), None).await },
+        )
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::SetReviewBase { .. }))
@@ -4917,7 +4923,9 @@ async fn set_review_baseline_keeps_the_declined_list_when_the_worker_refuses() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.set_push_base(&session, "abc1234".into(), None).await })
+        mj_core::runtime::spawn(async move {
+            host.set_push_base(&session, "abc1234".into(), None).await
+        })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::SetReviewBase { .. }))
@@ -4950,7 +4958,7 @@ async fn set_review_baseline_refuses_an_old_worker_and_a_running_review() {
     let busy = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("false positive"))
                 .await
         })
@@ -5025,7 +5033,7 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     let review = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -5044,7 +5052,7 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     let override_request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("incorrect"))
                 .await
         })
@@ -5075,7 +5083,7 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             host.override_push(&session, one_override("incorrect"))
                 .await
         })
@@ -5201,7 +5209,7 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
             let request = {
                 let host = host.clone();
                 let session = session.clone();
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     if manual {
                         host.start(&session).await
                     } else {
@@ -5380,7 +5388,7 @@ async fn slow_review_preparation_waits_until_cancelled_and_names_the_stopped_ste
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -5658,7 +5666,7 @@ async fn push_recording_does_not_block_daemon_handoff() {
     const PROBE: &str = "MJ_TEST_REVIEW_RECORDING_HANDOFF";
     // Closing the process-wide gate belongs in a separate test process.
     if std::env::var_os(PROBE).is_none() {
-        tokio::task::spawn_blocking(|| {
+        mj_core::runtime::spawn_blocking(|| {
             let root = tempfile::tempdir().unwrap();
             mj_controller::controller::test_support::IsolatedTest::new(
                 "review_host::tests::push_recording_does_not_block_daemon_handoff",
@@ -5708,7 +5716,7 @@ async fn push_recording_does_not_block_daemon_handoff() {
 async fn push_state_changes_do_not_block_daemon_handoff() {
     const PROBE: &str = "MJ_TEST_PUSH_STATE_HANDOFF";
     let Some(kind) = std::env::var_os(PROBE) else {
-        tokio::task::spawn_blocking(|| {
+        mj_core::runtime::spawn_blocking(|| {
             for kind in ["baseline", "override"] {
                 let root = tempfile::tempdir().unwrap();
                 mj_controller::controller::test_support::IsolatedTest::new(
@@ -5733,7 +5741,7 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if baseline {
                 host.set_push_base(&session, "abc1234".into(), None).await
             } else {
@@ -5827,7 +5835,7 @@ async fn a_review_off_request_waits_for_background_work_before_reaching_the_work
         )
         .await
         .unwrap();
-    let request = tokio::spawn({
+    let request = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
         async move { host.begin_push(&session, None).await }
@@ -5880,7 +5888,7 @@ async fn review_admission_deadline_reports_refusal_and_releases_its_hold() {
         .unwrap();
     let host =
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
-    let request = tokio::spawn({
+    let request = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
         async move { host.begin_push(&session, None).await }

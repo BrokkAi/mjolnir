@@ -270,7 +270,7 @@ mod tests {
         };
         let payload: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
         let expected = payload.clone();
-        let feed = tokio::spawn(async move {
+        let feed = mj_core::runtime::spawn(async move {
             let (head, tail) = SSH_START_MARKER.as_bytes().split_at(9);
             writer.write_all(head).await.unwrap();
             tokio::task::yield_now().await;

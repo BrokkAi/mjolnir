@@ -473,7 +473,7 @@ impl Controller {
             if let Some(project) = &project {
                 let bundle = project.bundle.clone();
                 let network_sources = project.network_sources.clone();
-                let repositories = tokio::task::spawn_blocking(move || {
+                let repositories = mj_core::runtime::spawn_blocking(move || {
                     github_repositories(&bundle, Some(&network_sources), &ProcessExecutor)
                 })
                 .await
@@ -1020,7 +1020,7 @@ impl Controller {
                 }
                 if include_in_place_subagents {
                     let session_id = session_id.to_owned();
-                    let (context, _) = tokio::task::spawn_blocking(move || {
+                    let (context, _) = mj_core::runtime::spawn_blocking(move || {
                         load_in_place_subagent_prompt_data(&session_id)
                     })
                     .await
@@ -1120,7 +1120,7 @@ impl Controller {
             }
             if include_in_place_subagents {
                 let session_id = session_id.to_owned();
-                let (_, notice) = tokio::task::spawn_blocking(move || {
+                let (_, notice) = mj_core::runtime::spawn_blocking(move || {
                     load_in_place_subagent_prompt_data(&session_id)
                 })
                 .await
@@ -1919,7 +1919,7 @@ impl Controller {
         let projection_build = rebuild_projection.then(|| {
             let canonical = Arc::clone(&canonical_session);
             let session_id = session_id.to_owned();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 materialized_session_from_canonical(session_id, &canonical)
             })
         });

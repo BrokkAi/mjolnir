@@ -26,7 +26,7 @@ pub struct CredentialWriteGuard {
 impl CredentialWriteGuard {
     pub async fn acquire(kind: HarnessKind, marker: &Path) -> Result<Self> {
         let marker = marker.to_owned();
-        let home = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        let home = crate::runtime::spawn_blocking(move || -> Result<PathBuf> {
             let parent = marker.parent().context("credential marker has no parent")?;
             std::fs::create_dir_all(parent)?;
             let parent = std::fs::canonicalize(parent).context("resolve credential home")?;
@@ -170,7 +170,7 @@ async fn install_credentials(
     let guard = CredentialWriteGuard::acquire(kind, path).await?;
     let path = path.to_owned();
     let bytes = bytes.to_owned();
-    tokio::task::spawn_blocking(move || {
+    crate::runtime::spawn_blocking(move || {
         // Blocking writes cannot be cancelled: ownership follows the write.
         let _guard = guard;
         refuse_symlinked_token("credential", &path)?;
@@ -200,7 +200,7 @@ async fn install_credentials(
 
 async fn acquire_file_lock(path: PathBuf, wait: Option<Duration>) -> Result<FileLock> {
     let open_path = path.clone();
-    let file = tokio::task::spawn_blocking(move || {
+    let file = crate::runtime::spawn_blocking(move || {
         std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -275,7 +275,7 @@ impl OAuthRefreshLock {
             // Create the lease and its Rust owner in one blocking operation.
             // Cancelling the waiter drops that owner instead of orphaning a
             // directory created by an already-running filesystem operation.
-            let attempt = tokio::task::spawn_blocking(move || -> std::io::Result<Self> {
+            let attempt = crate::runtime::spawn_blocking(move || -> std::io::Result<Self> {
                 std::fs::create_dir(&attempt_path)?;
                 let path = Arc::new(Mutex::new(Some(attempt_path)));
                 let heartbeat_path = path.clone();
@@ -283,7 +283,7 @@ impl OAuthRefreshLock {
                     loop {
                         tokio::time::sleep(heartbeat_interval).await;
                         let heartbeat_path = heartbeat_path.clone();
-                        match tokio::task::spawn_blocking(move || {
+                        match crate::runtime::spawn_blocking(move || {
                             let held = heartbeat_path.lock().unwrap();
                             let Some(path) = held.as_ref() else { return false };
                             if let Err(error) = touch(path, SystemTime::now()) {
@@ -525,7 +525,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("refreshed.json"), refreshed).unwrap();
             let child_root = root.path().to_owned();
-            let child = tokio::task::spawn_blocking(move || {
+            let child = crate::runtime::spawn_blocking(move || {
                 crate::subprocess::run_capturing_stdout(
                     std::process::Command::new(std::env::current_exe().unwrap())
                         .args([
@@ -551,7 +551,7 @@ mod tests {
             .unwrap();
             let marker = root.path().join("auth.json");
             let cancelled_marker = marker.clone();
-            let mut cancelled = tokio::spawn(async move {
+            let mut cancelled = crate::runtime::spawn(async move {
                 CredentialWriteGuard::acquire(kind, &cancelled_marker).await
             });
             assert!(
@@ -571,7 +571,7 @@ mod tests {
             .unwrap();
             drop(independent);
             let install_marker = marker.clone();
-            let mut install = tokio::spawn(async move {
+            let mut install = crate::runtime::spawn(async move {
                 install_credentials_if_newer(kind, &install_marker, incoming.as_bytes())
                     .await
                     .unwrap()

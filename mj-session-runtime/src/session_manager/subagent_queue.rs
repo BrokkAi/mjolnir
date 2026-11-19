@@ -53,7 +53,7 @@ impl SubagentQueueObserver {
         let (waiting_tx, waiting) = watch::channel(false);
         let (synced, synced_rx) = watch::channel(None::<(u64, String)>);
         let target = target.clone();
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             let mut client: Option<crate::worker_client::RelayClient> = None;
             let mut delay = RECONNECT_INTERVAL;
             // What the last change wait reported (on a new connection, what the

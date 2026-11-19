@@ -210,7 +210,7 @@ impl ManagedSessionHandle {
             Ok(ordinal) => Ok(MailboxEventDelivery::Accepted(ordinal)),
             Err(failure) => {
                 let session_id = self.session_id.clone();
-                let status = tokio::task::spawn_blocking(move || {
+                let status = mj_core::runtime::spawn_blocking(move || {
                     crate::database::mailbox_delivery_state(&session_id, &event_key)
                 })
                 .await
