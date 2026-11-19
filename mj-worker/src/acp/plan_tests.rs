@@ -715,7 +715,6 @@ impl PlanProbe {
             harness,
             execution_policy: policy,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),

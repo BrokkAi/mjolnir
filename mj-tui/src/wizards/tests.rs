@@ -6158,7 +6158,7 @@ fn golden_create_delegation_availability_and_submission() {
         let screen = drawn(&mut dashboard, 140, 40).join("\n");
         assert!(screen.contains("Delegation"));
         if !configured {
-            assert!(screen.contains("Set up Mjolnir sub-agents"));
+            assert!(screen.contains("Set up YOLO target sub-agents"));
         }
         output.push_str(&format!("=== configured={configured} ===\n{screen}\n"));
         let Mode::New(wizard) = &dashboard.mode else {

@@ -2404,7 +2404,12 @@ fn removing_a_queued_restart_continuation_releases_its_mailbox_context() {
     let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
     let recovery = relay.snapshot.queued_prompts[0].command_id.clone();
     assert!(mj_core::continuation::is_restart_continuation(&recovery));
-    assert!(relay.snapshot.mailbox_prompt_contexts.contains_key(&recovery));
+    assert!(
+        relay
+            .snapshot
+            .mailbox_prompt_contexts
+            .contains_key(&recovery)
+    );
     submit_relay(
         &mut relay,
         "remove-recovery",

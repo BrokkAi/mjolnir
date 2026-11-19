@@ -63,6 +63,7 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
 }
 
 // Hard-won: 92684ad3b: unread-frontier changes must reach the viewer even when attention stays unchanged.
+// Hard-won: 4c2c5b4f8: conversation jumps exposed a newer held question.
 #[test]
 fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
     for count in [100, 10_000, 100_000] {
@@ -87,6 +88,17 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             stable_id: None,
         };
         let native_rows = BTreeMap::from([("history-000000".to_owned(), vec![native.clone()])]);
+        let mut live =
+            mj_core::relay::RelaySnapshot::new("history-000000".into()).operational_state();
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+        live.open_request = Some(mj_core::assessment::OpenRequest {
+            question: mj_core::assessment::InferredQuestion {
+                turn_id: "held-b".into(),
+                completed_ordinal: 20,
+            },
+            question_message: Some("agent:held-b".into()),
+        });
+        let operational = BTreeMap::from([("history-000000".into(), live.into())]);
         let views = PhoneSessionViews {
             native_agents: &native_rows,
             conversations: &Default::default(),
@@ -94,7 +106,7 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             active_user_shells: &Default::default(),
             pending_elicitations: &Default::default(),
             prompt_images: &Default::default(),
-            operational: &Default::default(),
+            operational: &operational,
             materialized_activity: &Default::default(),
             project_sources: &sources,
             operations: &Default::default(),
@@ -187,8 +199,62 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
         assert_eq!(crate::server::take_viewer_row_visits(), 1);
         assert_eq!(changed.sessions.0["history-000000"].title, "Changed");
         assert_ne!(held.sessions.0["history-000000"].title, "Changed");
+        // The public jump target must stay on shown A, despite the worker's B.
+        controller
+            .state
+            .sessions
+            .get_mut("history-000000")
+            .unwrap()
+            .state = SessionState::Running;
+        runtime.metadata.session_attention.insert(
+            "history-000000".into(),
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        let card = mj_client::runtime_feed::NotificationCard {
+            since_ms: 1,
+            badge: mj_core::attention::NotificationKind::NeedsInput,
+            entries: vec![mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 1,
+                completed_ordinal: 10,
+                kind: mj_core::attention::NotificationKind::NeedsInput,
+                message: mj_core::attention::EntryMessage::Found("agent:shown-a".into()),
+            }],
+            dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 20 }),
+            holder: None,
+            form: None,
+        };
+        runtime.metadata.notification_cards = Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "history-000000".into(),
+            card,
+        )]));
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let shown = publisher.snapshot(&controller, &[], &Default::default(), &views, 5);
+        assert_eq!(
+            shown.sessions.0["history-000000"]
+                .question_message
+                .as_deref(),
+            Some("agent:shown-a")
+        );
+        assert_eq!(
+            operational["history-000000"].question_message(),
+            Some("agent:held-b")
+        );
+        assert_eq!(crate::server::take_viewer_row_visits(), 1);
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("history-000000")
+            .unwrap()
+            .entries[0]
+            .message = mj_core::attention::EntryMessage::Locating;
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let locating = publisher.snapshot(&controller, &[], &Default::default(), &views, 6);
+        assert_eq!(locating.sessions.0["history-000000"].question_message, None);
+        assert_eq!(crate::server::take_viewer_row_visits(), 1);
         controller.state.sessions.remove("history-000000");
-        let removed = publisher.snapshot(&controller, &[], &Default::default(), &views, 5);
+        let removed = publisher.snapshot(&controller, &[], &Default::default(), &views, 7);
         assert_eq!(crate::server::take_viewer_row_visits(), 0);
         assert_eq!(removed.sessions.len(), count - 1);
         if count == 100 {

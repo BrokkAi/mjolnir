@@ -459,6 +459,7 @@ pub(crate) struct DashboardContext {
 
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
+    runtime_alerts: Feed<UnboundedReceiver<(u64, Vec<mj_client::runtime_feed::AlertEvent>)>>,
     runtime_subagent_parents: watch::Sender<BTreeSet<String>>,
     runtime_health: Feed<watch::Receiver<mj_daemon::pollers::RuntimeFeedHealth>>,
     /// Reviews the daemon is running. The chat renders one of these rather
@@ -1053,6 +1054,10 @@ pub(crate) async fn run_dashboard_for_workspace(
             update = paced(feed_gate, context.runtime_notices.wait()), if context.runtime_notices.is_open() => {
                 context.loop_stalls.woke("runtime_notices");
                 context.runtime_notices.accept(update);
+            }
+            update = paced(feed_gate, context.runtime_alerts.wait()), if context.runtime_alerts.is_open() => {
+                context.loop_stalls.woke("runtime_alerts");
+                context.runtime_alerts.accept(update);
             }
             update = paced(feed_gate, context.runtime_ui_requests.wait()), if context.runtime_ui_requests.is_open() => {
                 context.loop_stalls.woke("runtime_ui_requests");
@@ -2043,6 +2048,7 @@ impl DashboardContext {
             session_preflight_cancel: None,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
+            runtime_alerts: Feed::new(remote_worker.alerts),
             runtime_subagent_parents,
             runtime_health: Feed::new(remote_worker.health),
             runtime_reviews: Feed::new(runtime_reviews_rx),

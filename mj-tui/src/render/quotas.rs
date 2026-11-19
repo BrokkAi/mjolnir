@@ -28,6 +28,16 @@ pub(crate) fn minimized_targets_line(
         .capacity_details
         .values()
         .map(|detail| {
+            // Same rule as the expanded table: a host whose listed targets
+            // are all unavailable shows no reading.
+            if super::capacity::all_listed_targets_unavailable(&detail.target.target_ids, dashboard)
+            {
+                return SummaryReading {
+                    name: detail.target.host.clone(),
+                    value: "unavailable".to_string(),
+                    color: None,
+                };
+            }
             if detail.refreshing {
                 return SummaryReading {
                     name: detail.target.host.clone(),
