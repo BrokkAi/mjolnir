@@ -421,17 +421,11 @@ impl Controller {
                             _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
                         });
                         self.revalidate_adoption_resource(&record)?;
-                        let mut current = crate::database::read_durable_session_record(session_id)?
-                            .context("provisional adoption record disappeared")?;
-                        current.target = None;
-                        current.state = SessionState::Lost;
-                        let diagnostic = format!("orphan adoption failed: {error:#}");
-                        current.last_error = Some(match current.last_error {
-                            Some(previous) => format!("{previous}\n{diagnostic}"),
-                            None => diagnostic,
-                        });
-                        current.updated_at = now();
-                        crate::database::save_session(&current)?;
+                        let current = crate::database::refuse_adoption_if_current(
+                            &record,
+                            &format!("orphan adoption failed: {error:#}"),
+                            &now(),
+                        )?;
                         self.state.sessions.insert(session_id.to_owned(), current);
                     }
                     return Err(error);

@@ -2514,10 +2514,18 @@ pub(super) async fn serve_client_with_memory(
                 let cut = if matches!(envelope.request, RelayRequest::BeginLiveBaseline) {
                     let mut releases = relay.releases();
                     let mut receiver = relay.lock().expect("relay state lock poisoned").reserve_live_baseline();
+                    let mut preparation = preparation.clone();
+                    let mut preparation_open = preparation.is_some();
                     let operation = async {
                         let mut previous = None;
                         loop {
                             releases.borrow_and_update();
+                            if let Some(receiver) = &mut preparation {
+                                let snapshot = receiver.borrow_and_update();
+                                if matches!(snapshot.state, Some(mj_core::relay::HarnessPreparation::Failed { .. })) {
+                                    anyhow::bail!("{}", preparation_error(&snapshot, "adoption").expect("failed preparation diagnostic"));
+                                }
+                            }
                             let blockers = relay.observe().expect("relay state lock poisoned").adoption_blockers();
                             if previous.as_ref() != Some(&blockers) {
                                 if !blockers.is_empty() {
@@ -2530,6 +2538,12 @@ pub(super) async fn serve_client_with_memory(
                             }
                             tokio::select! {
                                 biased;
+                                changed = async {
+                                    match preparation.as_mut().filter(|_| preparation_open) {
+                                        Some(receiver) => receiver.changed().await.is_ok(),
+                                        None => std::future::pending().await,
+                                    }
+                                } => if !changed { preparation_open = false },
                                 cut = &mut receiver => break cut.context("worker dropped its adoption cut")?.map_err(anyhow::Error::msg),
                                 changed = releases.changed() => changed.context("worker adoption observation stopped")?,
                             }
@@ -3561,6 +3575,116 @@ mod preparation_tests {
         let _ = coordinator.await;
         writer.shutdown().await.unwrap();
         accept.abort();
+    }
+
+    // Hard-won: b8acf76: a promoted prompt outlived failed preparation and blocked adoption forever.
+    #[tokio::test]
+    async fn adoption_wait_reports_preparation_failure_with_a_stranded_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = test_relay(temp.path());
+        {
+            let mut owner = relay.lock().unwrap();
+            let submitted = owner.handle(RelayRequestEnvelope {
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request_id: "submit-stranded".into(),
+                request: RelayRequest::Submit {
+                    command_id: "stranded".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                            "accepted before restart",
+                        )],
+                    },
+                },
+            });
+            assert!(matches!(submitted.body, RelayResponseBody::Ok { .. }));
+            owner.claim_pending_commands(true).unwrap();
+            let through = owner.latest_ordinal();
+            let digest = owner.latest_digest().to_owned();
+            let response = owner.handle(RelayRequestEnvelope {
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request_id: "collect-genesis".into(),
+                request: RelayRequest::Acknowledge {
+                    through_ordinal: through,
+                    through_digest: digest,
+                },
+            });
+            assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+            assert!(owner.operational_state().retained_event_ordinal() > 0);
+        }
+        let (status, preparation) = watch::channel(PreparationSnapshot {
+            state: Some(mj_core::relay::HarnessPreparation::Preparing {
+                step: "launch".into(),
+                since_ms: 1,
+            }),
+            services: None,
+        });
+        let (wake, _wakes) = mpsc::channel(1);
+        let (accept, mut reader, mut writer) = start_control_server(
+            temp.path(),
+            relay,
+            wake,
+            preparation,
+            CancellationToken::new(),
+        )
+        .await;
+        request(
+            &mut reader,
+            &mut writer,
+            "hello",
+            RelayRequest::Hello {
+                controller_version: "test".into(),
+                supported: mj_core::relay::RelayVersionRange::CURRENT,
+            },
+        )
+        .await;
+        let waiting = request(
+            &mut reader,
+            &mut writer,
+            "cut",
+            RelayRequest::BeginLiveBaseline,
+        )
+        .await;
+        assert!(matches!(
+            waiting.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::LiveBaselineWaiting { .. }
+            }
+        ));
+        status.send_replace(PreparationSnapshot {
+            state: Some(mj_core::relay::HarnessPreparation::Failed {
+                step: "launch".into(),
+                error: "recorded launch failure".into(),
+                at_ms: 2,
+            }),
+            services: None,
+        });
+        drop(status); // The final diagnostic also survives the watch sender closing.
+        let response: RelayResponseEnvelope = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            serde_json::from_str(&line).unwrap()
+        })
+        .await
+        .expect("failed preparation must end the adoption wait");
+        let RelayResponseBody::Error { error } = response.body else {
+            panic!("{response:?}")
+        };
+        assert!(
+            error.message.contains("launch") && error.message.contains("recorded launch failure"),
+            "{error:?}"
+        );
+        let response = request(
+            &mut reader,
+            &mut writer,
+            "still-reachable",
+            RelayRequest::Status,
+        )
+        .await;
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+        writer.shutdown().await.unwrap();
+        drop(reader);
+        accept.abort();
+        let _ = accept.await;
     }
 
     #[tokio::test]

@@ -960,6 +960,63 @@ fn publish_adoption_connected_with(
     Ok(current)
 }
 
+/// Refuse a legacy provisional adoption without restoring stale session edits.
+pub fn refuse_adoption_if_current(
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<SessionRecord> {
+    let expected = expected.clone();
+    let detail = detail.to_owned();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("refuse legacy adoption", move |connection| {
+        refuse_adoption_with(connection, &expected, &detail, &updated_at)
+    })
+}
+
+fn refuse_adoption_with(
+    connection: &mut Connection,
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<SessionRecord> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("provisional adoption record disappeared")?;
+    ensure!(
+        current.state == SessionState::Disconnected
+            && current.native_session_id.is_none()
+            && current.target == expected.target
+            && current.target_template_id == expected.target_template_id
+            && current.last_profile == expected.last_profile,
+        "adoption refusal ownership changed"
+    );
+    let previous_error = super::events::previous_session_error(&tx, &current.id)?;
+    current.target = None;
+    current.state = SessionState::Lost;
+    current.last_error = Some(match current.last_error {
+        Some(previous) => format!("{previous}\n{detail}"),
+        None => detail.to_owned(),
+    });
+    current.updated_at = updated_at.to_owned();
+    tx.execute(
+        "UPDATE sessions SET state=?2, last_error=?3, updated_at=?4 WHERE session_id=?1",
+        params![
+            current.id,
+            current.state.as_str(),
+            current.last_error,
+            current.updated_at
+        ],
+    )?;
+    super::events::record_session_fault_transition(&tx, &current, previous_error)?;
+    super::session_create::settle_create_intent(&tx, &current)?;
+    super::state_io::replace_targets(&tx, &current)?;
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("refused adoption record disappeared")?;
+    tx.commit()?;
+    Ok(current)
+}
+
 /// Record a failed adoption only while its disconnected resource owner is still
 /// current. A successful concurrent adoption must never be demoted by a loser.
 pub fn record_adoption_failure_if_current(
@@ -2030,6 +2087,60 @@ mod ownership_tests {
                 &expected,
                 Some("late-native"),
                 "2030-01-01T00:00:00Z"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            super::super::state_io::load_session_with(&connection, &expected.id)
+                .unwrap()
+                .unwrap(),
+            stopped
+        );
+    }
+
+    // Hard-won: b8acf76: a legacy refusal rewrote concurrent title/notification edits from a stale record.
+    #[test]
+    fn legacy_adoption_refusal_preserves_concurrent_edits_and_resource_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-adoption.sqlite3");
+        let mut expected = super::super::tests::session("legacy-owner", "project");
+        expected.state = SessionState::Disconnected;
+        expected.native_session_id = None;
+        expected.last_error = Some("previous diagnosis".into());
+        expected.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: directory.path().join(&expected.id),
+        }));
+        save_session_to(&path, &expected).unwrap();
+        let mut connection = open(&path).unwrap();
+        connection.execute("UPDATE sessions SET title='concurrent edit', notifications_ignored=1 WHERE session_id=?1", [&expected.id]).unwrap();
+        let refused = refuse_adoption_with(
+            &mut connection,
+            &expected,
+            "legacy refusal",
+            "2030-01-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(refused.title, "concurrent edit");
+        assert!(refused.notifications_ignored);
+        assert_eq!(refused.state, SessionState::Lost);
+        assert!(refused.target.is_none());
+        assert_eq!(
+            refused.last_error.as_deref(),
+            Some("previous diagnosis\nlegacy refusal")
+        );
+        // A later lifecycle owner cannot be detached by the same stale refusal.
+        let mut stopped = refused;
+        stopped.state = SessionState::Stopped;
+        save_session_to(&path, &stopped).unwrap();
+        let stopped = super::super::state_io::load_session_with(&connection, &expected.id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            refuse_adoption_with(
+                &mut connection,
+                &expected,
+                "late refusal",
+                "2030-01-01T00:00:01Z"
             )
             .is_err()
         );

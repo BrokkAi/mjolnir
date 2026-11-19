@@ -798,7 +798,8 @@ pub(super) fn project_observation(
             if matches!(
                 current.execution,
                 MaterializedExecutionState::Running { .. }
-            ) {
+            ) && current.active_turn.is_none()
+            {
                 push_system_with_id(
                     mutation,
                     event,
