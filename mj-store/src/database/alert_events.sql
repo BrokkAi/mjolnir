@@ -8,3 +8,4 @@ CREATE TABLE IF NOT EXISTS alert_events (
     text TEXT NOT NULL,
     kind TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS alert_events_destination ON alert_events(destination);

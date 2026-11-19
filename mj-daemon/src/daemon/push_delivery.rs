@@ -15,6 +15,8 @@ type NotificationInputs = Option<BTreeMap<String, PushEntry<String>>>;
 pub(crate) enum NotificationObservation {
     Unchanged,
     Deferred,
+    /// The write failed; the inputs stay unrecorded so the next revision retries.
+    Failed,
     Observed(bool),
 }
 
@@ -38,17 +40,18 @@ impl NotificationReconciler {
         if self.previous.as_ref() == Some(&inputs) {
             return Ok(NotificationObservation::Unchanged);
         }
-        let result = blocking(move || {
-            let result = db::notification_reconcile(runtime);
-            if let Err(error) = &result {
-                tracing::error!(
+        // Only a panicked storage task is fatal; a failed write is retried.
+        let result = blocking(move || Ok(db::notification_reconcile(runtime))).await?;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(
                     error = format!("{error:#}"),
-                    "notification reconciliation failed"
+                    "notification reconciliation failed; the next runtime revision retries"
                 );
+                return Ok(NotificationObservation::Failed);
             }
-            result
-        })
-        .await?;
+        };
         // Refused observations were not accepted: retain the previous inputs so
         // a lapsed handoff can reobserve them, as a fresh daemon would.
         match result {

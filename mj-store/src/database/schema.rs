@@ -2671,9 +2671,11 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         ))?;
     }
-    // Compatible: older session deletion also runs this trigger; no existing data shape changes.
+    // Compatible: older session deletion also runs this trigger; the indexes only speed
+    // its lookups, and no existing data shape changes.
     if version < 140 {
         connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE INDEX IF NOT EXISTS push_entries_session ON push_entries(session);
             CREATE TRIGGER IF NOT EXISTS alert_events_session_destroyed AFTER DELETE ON sessions BEGIN
                 DELETE FROM alert_events WHERE destination=OLD.session_id OR identity IN
                     (SELECT identity FROM push_entries WHERE session=OLD.session_id);

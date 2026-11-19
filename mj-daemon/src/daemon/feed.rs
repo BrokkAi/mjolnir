@@ -855,6 +855,47 @@ mod tests {
             observer_inputs.reconcile(streaming.clone()).await.unwrap(),
             crate::daemon::push_delivery::NotificationObservation::Observed(true)
         );
+        // A failed write is reported and retried by the next observation.
+        let mut failing = streaming.clone();
+        failing
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("hidden")
+            .unwrap()
+            .entries[0]
+            .completed_ordinal += 3;
+        let injected = |sql: &'static str| {
+            mj_controller::web_push::blocking(move || {
+                rusqlite::Connection::open(mj_controller::database::database_path())?
+                    .execute_batch(sql)?;
+                Ok(())
+            })
+        };
+        injected(
+            "CREATE TRIGGER fail_alert_write BEFORE INSERT ON alert_events \
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            observer_inputs.reconcile(failing.clone()).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Failed
+        );
+        assert!(
+            log.at(tracing::Level::WARN)
+                .iter()
+                .any(|line| line.contains("injected write failure")),
+            "the failed write is logged at WARN"
+        );
+        injected("DROP TRIGGER fail_alert_write;").await.unwrap();
+        assert_eq!(
+            observer_inputs.reconcile(failing.clone()).await.unwrap(),
+            crate::daemon::push_delivery::NotificationObservation::Observed(true),
+            "a failed observation is not recorded, so the retry commits it"
+        );
+        streaming = failing;
         tokio::task::spawn_blocking(move || _writer.shutdown())
             .await
             .unwrap()
