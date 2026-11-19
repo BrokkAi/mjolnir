@@ -23,7 +23,7 @@ mod new_session_preflight;
 pub(crate) use mj_build_cache::tool_cache;
 pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
-pub mod profile_config;
+pub use crate::profile_config;
 mod provisioning;
 pub mod publication;
 mod readiness;

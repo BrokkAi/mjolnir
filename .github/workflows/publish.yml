@@ -132,7 +132,7 @@ jobs:
           # Dependency order: core first, then independent checkpoint,
           # transcript and review implementations, then their runtime/UI consumers.
           # The voice worker is independent. The final binaries come last.
-          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-build-id brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-client brokk-mj-worker-runtime brokk-mj-worker brokk-mj-targets brokk-mj-session-types brokk-mj-store brokk-mj-accounts brokk-mj-import brokk-mj-sessionwiki brokk-mj-build-cache brokk-mj-worker-staging brokk-mj-session-runtime brokk-mj-github-relevance brokk-mj-controller brokk-mj-setup brokk-mj-server brokk-mj-daemon brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
+          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-build-id brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-client brokk-mj-worker-runtime brokk-mj-worker brokk-mj-targets brokk-mj-session-types brokk-mj-store brokk-mj-accounts brokk-mj-import brokk-mj-sessionwiki brokk-mj-build-cache brokk-mj-worker-staging brokk-mj-session-runtime brokk-mj-profile-catalog brokk-mj-github-relevance brokk-mj-controller brokk-mj-setup brokk-mj-server brokk-mj-daemon brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue

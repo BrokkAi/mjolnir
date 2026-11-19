@@ -32,7 +32,7 @@ pub async fn subagent_options(
 /// Reports whether the harness actually ran: a served cache row answers
 /// from an earlier read of the home, which the catalog's settled-digest
 /// recording must not treat as current.
-pub(crate) async fn discover_for(
+pub async fn discover_for(
     config: Config,
     id: String,
     model: Option<String>,
@@ -402,7 +402,7 @@ pub async fn observe(
             ObservationCheck::ProbeBuild => {
                 let executor = CancellableProcessExecutor::new(cancelled)
                     .with_deadline(Duration::from_secs(30));
-                super::worker_binary::worker_binary_for(
+                mj_worker_staging::worker_binary::worker_binary_for(
                     &TargetLocator::LocalBare {
                         worker_root: String::new(),
                     },
@@ -453,7 +453,7 @@ fn discover_blocking(
 /// launching anything, and its choices may predate the profile home's
 /// current files. Settled-digest recording and any other answer that must
 /// describe the home as it is now need `probed`.
-pub(crate) struct Discovery {
+pub struct Discovery {
     pub choices: ProfileConfig,
     pub probed: bool,
 }
@@ -471,7 +471,7 @@ fn discover_with_provenance(
     );
     let profile = config.named_profile(profile_id)?;
     let mut environment = profile.environment.resolved().clone();
-    let _ = super::worker_binary::apply_claude_setup_token(
+    let _ = mj_worker_staging::worker_binary::apply_claude_setup_token(
         &mut environment,
         profile.kind,
         &mj_core::credentials::claude_oauth_token_path(profile_id),
@@ -512,10 +512,10 @@ fn discover_with_provenance(
 
 /// How long discovered choices are served before discovery probes again.
 /// Providers add and retire models without any change Mjolnir can see.
-pub(crate) const CHOICES_LIFETIME: Duration = Duration::from_secs(60 * 60);
+pub const CHOICES_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 /// Whether `choices` were observed within [`CHOICES_LIFETIME`].
-pub(crate) fn is_current(choices: &ProfileConfig) -> bool {
+pub fn is_current(choices: &ProfileConfig) -> bool {
     is_current_at(choices, chrono::Utc::now().timestamp())
 }
 
@@ -584,7 +584,7 @@ fn resolve_cached_discovery(
 /// worker to probe a profile with. The profile's capabilities stay unknown;
 /// its sessions still offer the harness's own choices.
 #[derive(Debug)]
-pub(crate) struct DiscoveryUnsupported;
+pub struct DiscoveryUnsupported;
 
 impl std::fmt::Display for DiscoveryUnsupported {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -597,7 +597,7 @@ impl std::fmt::Display for DiscoveryUnsupported {
 impl std::error::Error for DiscoveryUnsupported {}
 
 /// Whether `error` is a discovery that no retry can make succeed.
-pub(crate) fn discovery_is_unsupported(error: &anyhow::Error) -> bool {
+pub fn discovery_is_unsupported(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.is::<DiscoveryUnsupported>())
@@ -629,18 +629,18 @@ fn probe_profile(
     let home = profile
         .kind
         .home_from_environment(root.path().join("profile"));
-    super::worker_binary::stage_profile_with_catalog(
+    mj_worker_staging::worker_binary::stage_profile_with_catalog(
         profile_id,
         profile,
         &home,
-        &super::worker_binary::fetch_catalog_over_https,
-        &super::worker_binary::SharedCatalogCache,
+        &mj_worker_staging::worker_binary::fetch_catalog_over_https,
+        &mj_worker_staging::worker_binary::SharedCatalogCache,
     )?;
     let cwd = root.path().join("workspace");
     std::fs::create_dir(&cwd)?;
     let executor =
         CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(300));
-    let worker = super::worker_binary::worker_binary_for(
+    let worker = mj_worker_staging::worker_binary::worker_binary_for(
         &TargetLocator::LocalBare {
             worker_root: root.path().to_string_lossy().into_owned(),
         },
@@ -754,7 +754,7 @@ mod tests {
         ]);
         let recorded: BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
             serde_json::from_str(include_str!(
-                "../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+                "../../mj-core/tests/fixtures/claude-antigravity-models.json"
             ))
             .unwrap();
         let recorded = &recorded;
@@ -996,12 +996,10 @@ mod tests {
         const CHILD: &str = "MJ_TEST_UNSAVED_PROFILE_DISCOVERY";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings",
-                ),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings",
+            ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "unsaved-profile-discovery-test")
             .isolated_store(root.path())
@@ -1167,7 +1165,7 @@ mod tests {
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
-            let _ = super::super::worker_binary::apply_claude_setup_token(
+            let _ = mj_worker_staging::worker_binary::apply_claude_setup_token(
                 &mut environment,
                 profile.kind,
                 &token,
@@ -1504,12 +1502,10 @@ mod tests {
         const CHILD: &str = "MJ_TEST_MUSE_OBSERVATIONS_UNCACHED";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "muse_worker_observations_are_never_cached",
-                ),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "muse_worker_observations_are_never_cached",
+            ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "muse-observations-uncached-test")
             .isolated_store(root.path())

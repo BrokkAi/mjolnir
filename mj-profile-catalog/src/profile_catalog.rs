@@ -33,7 +33,7 @@ type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileCon
 type Attempt = Shared<BoxFuture<'static, Result<ProbeOutcome, AttemptError>>>;
 type CacheKey = (String, Option<String>);
 type NoticeCallback = Arc<dyn Fn(String) + Send + Sync>;
-pub(crate) type QuotaReports = Arc<Mutex<QuotaReportMap>>;
+pub type QuotaReports = Arc<Mutex<QuotaReportMap>>;
 
 /// How long the legacy upgrade waits for every offering profile's first
 /// quota report before treating profiles without one as subscriptions.
@@ -130,7 +130,7 @@ impl AttemptError {
     fn new(error: &anyhow::Error, home_digest: Option<[u8; 32]>) -> Self {
         Self {
             message: format!("{error:#}").into(),
-            retryable: !crate::controller::profile_config::discovery_is_unsupported(error),
+            retryable: !crate::profile_config::discovery_is_unsupported(error),
             home_digest,
         }
     }
@@ -923,8 +923,7 @@ impl ProfileCatalog {
                 let Some(catalog) = catalog.upgrade() else {
                     return;
                 };
-                catalog
-                    .refresh(|_, choices| !crate::controller::profile_config::is_current(choices));
+                catalog.refresh(|_, choices| !crate::profile_config::is_current(choices));
             }
         });
     }
@@ -1300,7 +1299,7 @@ impl ProfileCatalog {
         model: Option<String>,
         refresh: bool,
     ) -> Attempt {
-        let probe: BoxFuture<'static, Result<crate::controller::profile_config::Discovery>> = {
+        let probe: BoxFuture<'static, Result<crate::profile_config::Discovery>> = {
             #[cfg(any(test, feature = "test-support"))]
             if let Some((probe, model_probe)) = &self.probe {
                 let future = match model {
@@ -1309,14 +1308,14 @@ impl ProfileCatalog {
                 };
                 async move {
                     let choices = future.await?;
-                    Ok::<_, anyhow::Error>(crate::controller::profile_config::Discovery {
+                    Ok::<_, anyhow::Error>(crate::profile_config::Discovery {
                         choices,
                         probed: true,
                     })
                 }
                 .boxed()
             } else {
-                crate::controller::profile_config::discover_for(
+                crate::profile_config::discover_for(
                     (*definition.config).clone(),
                     definition.id.clone(),
                     model,
@@ -1327,7 +1326,7 @@ impl ProfileCatalog {
             }
             #[cfg(not(any(test, feature = "test-support")))]
             {
-                crate::controller::profile_config::discover_for(
+                crate::profile_config::discover_for(
                     (*definition.config).clone(),
                     definition.id.clone(),
                     model,
@@ -1590,9 +1589,7 @@ impl ProfileCatalog {
             // succeeds.
             self.reread_failed(id);
             self.refresh_where(
-                |key, choices| {
-                    key.0 == identity && !crate::controller::profile_config::is_current(choices)
-                },
+                |key, choices| key.0 == identity && !crate::profile_config::is_current(choices),
                 true,
             );
         }
@@ -1858,7 +1855,7 @@ impl ProfileCatalog {
             .collect()
     }
 
-    pub(crate) async fn admission_options(
+    pub async fn admission_options(
         self: &Arc<Self>,
         config: &Config,
         parent: &str,
@@ -1874,7 +1871,7 @@ impl ProfileCatalog {
         let results = join_all(models.into_iter().map(|model| {
             let defaults = &defaults;
             async move {
-                let options = crate::controller::profile_config::subagent_options_with(
+                let options = crate::profile_config::subagent_options_with(
                     config,
                     parent,
                     Some(model.clone()),
@@ -1902,7 +1899,7 @@ impl ProfileCatalog {
         parent: &str,
         model: Option<String>,
     ) -> Result<mj_core::subagent::SubagentOptions> {
-        crate::controller::profile_config::subagent_options_with(
+        crate::profile_config::subagent_options_with(
             config,
             parent,
             model,
@@ -3504,7 +3501,7 @@ mod tests {
                     // The delisted model's probe fails for good; other models
                     // answer from the home like the default probe does.
                     if model == "extra" {
-                        return Err(crate::controller::profile_config::DiscoveryUnsupported.into());
+                        return Err(crate::profile_config::DiscoveryUnsupported.into());
                     }
                     let mut choices = read_home_choices(&homes, &profile)?;
                     choices.model = Some(model.clone());
@@ -3670,7 +3667,7 @@ mod tests {
                 if cached {
                     Ok(test_choices(&profile))
                 } else {
-                    Err(crate::controller::profile_config::DiscoveryUnsupported.into())
+                    Err(crate::profile_config::DiscoveryUnsupported.into())
                 }
             })
         }));
@@ -4426,7 +4423,7 @@ mod tests {
             subtle: None,
         };
         catalog.sync(&config);
-        let validation = crate::controller::profile_config::validate_session_subagent_policy(
+        let validation = crate::profile_config::validate_session_subagent_policy(
             &catalog,
             &config,
             "parent",
@@ -4464,7 +4461,7 @@ mod tests {
             subtle: None,
         };
         for _ in 0..2 {
-            crate::controller::profile_config::validate_session_subagent_policy(
+            crate::profile_config::validate_session_subagent_policy(
                 &catalog,
                 &config,
                 "parent",
