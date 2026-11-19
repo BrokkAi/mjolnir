@@ -285,9 +285,10 @@ pub struct WorkerLaunchConfig {
     /// Accepted from older daemon launch files, which carried Brokk Observe
     /// guardrail settings here; no longer used or written. This struct
     /// rejects unknown fields, so dropping the name would make a new worker
-    /// refuse those launches.
+    /// refuse those launches. The contents (including a bearer token) are
+    /// discarded while parsing, so they never reach `Debug` output.
     #[serde(default, skip_serializing)]
-    pub observe_policy: Option<serde_json::Value>,
+    pub observe_policy: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

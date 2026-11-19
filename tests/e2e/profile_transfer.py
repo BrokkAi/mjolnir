@@ -111,9 +111,13 @@ def main():
     sessions = []
 
     def mj(*argv, check=True):
+        # Older binaries passed through --mj may still read Brokk Observe
+        # settings; keep the operator's configuration away from fixtures.
+        env = {key: value for key, value in lab.environment().items() if not key.startswith("OBSERVE_")}
+        env["OBSERVE_CONFIG"] = str(root / "observe-unconfigured")
         return subprocess.run(
             [lab.hel, "--instance", "send-only-missing", *argv],
-            env=lab.environment(), text=True, capture_output=True, timeout=180, check=check,
+            env=env, text=True, capture_output=True, timeout=180, check=check,
         )
 
     try:
