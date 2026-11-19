@@ -1412,6 +1412,13 @@ pub(crate) fn render(
     if form_requested && !inline_form {
         if let Some(error) = dashboard.notifications.form_errors.get(&session_id) {
             text = format!("Could not load form: {error}\n{text}");
+        } else if chat.is_none() && dashboard.session_failed(&session_id) {
+            // No attach will run for a failed session, so no attach error
+            // will arrive either; say why instead of loading forever.
+            let reason = dashboard.session_failure_text(&session_id);
+            text = format!("Could not load form: {reason}\n{text}");
+        } else if chat.is_none() && dashboard.pane_session_is_suspended(&session_id) {
+            text = format!("Could not load form: the session is suspended.\n{text}");
         } else if chat.is_none() {
             text = format!("Loading form…\n{text}");
         } else {
@@ -1452,7 +1459,9 @@ pub(crate) fn render(
                 dashboard.notifications.text_generation.wrapping_add(1);
             dashboard.notifications.form_text = form_text;
         }
+        // Claim input exactly when handle_notification_form_event accepts it.
         dashboard.notifications.form_area = (dashboard.chat_input_available(&session_id)
+            && chat.as_ref().unwrap().has_live_composer()
             && chat
                 .as_ref()
                 .unwrap()

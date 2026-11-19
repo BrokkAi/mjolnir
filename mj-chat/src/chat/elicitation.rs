@@ -510,7 +510,23 @@ impl ElicitationDialog {
     }
 
     pub(super) fn finish_surface(&self) {
-        self.focus.set(self.view.form.borrow().focused());
+        let form = self.view.form.borrow();
+        // A compact presentation without an action bar (Cancel is always
+        // drawn with the bar) keeps its field fallback local, so a button
+        // focused on the other surface stays focused there.
+        let bar_drawn = form.is_enabled(ElicitationControl::Cancel);
+        if bar_drawn
+            || !matches!(
+                self.focus.get(),
+                Some(
+                    ElicitationControl::Submit
+                        | ElicitationControl::Cancel
+                        | ElicitationControl::Previous
+                )
+            )
+        {
+            self.focus.set(form.focused());
+        }
     }
 
     fn handle_key_in_view(&mut self, key: KeyEvent) -> Option<ElicitationResponse> {
