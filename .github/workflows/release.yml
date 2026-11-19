@@ -369,10 +369,18 @@ jobs:
             brokk-mjolnir-*.tar.gz.sha256
           if-no-files-found: error
 
+  # One job for each architecture, so the two release builds run side by side
+  # on runners of their own. As one job that built them in turn, this was the
+  # longest job of a release: 69 minutes for v2.72.0.
   build-macos:
-    name: Build macOS per architecture
+    name: Build macOS (${{ matrix.target }})
     needs: verify-version
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -380,44 +388,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Build native binaries
-        run: |
-          for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-voice-worker --target "$target"
-          done
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-voice-worker --target "$TARGET"
 
       - name: Stage native binaries
         run: |
-          for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            mkdir -p "native/$target"
-            cp "target/$target/release/mj" "target/$target/release/mj-worker" \
-              "target/$target/release/mj-voice-worker" "native/$target/"
-          done
+          mkdir -p "native/$TARGET"
+          cp "target/$TARGET/release/mj" "target/$TARGET/release/mj-worker" \
+            "target/$TARGET/release/mj-voice-worker" "native/$TARGET/"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: native-x86_64-apple-darwin
-          path: native/x86_64-apple-darwin/
+          name: native-${{ matrix.target }}
+          path: native/${{ matrix.target }}/
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         with:
-          name: native-aarch64-apple-darwin
-          path: native/aarch64-apple-darwin/
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: mj-worker-x86_64-apple-darwin
-          path: target/x86_64-apple-darwin/release/mj-worker
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: mj-worker-aarch64-apple-darwin
-          path: target/aarch64-apple-darwin/release/mj-worker
+          name: mj-worker-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/mj-worker
           if-no-files-found: error
 
   # The macOS archives keep both Darwin workers: a controller on either Mac
