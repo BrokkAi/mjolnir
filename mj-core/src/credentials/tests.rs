@@ -1284,6 +1284,8 @@ fn claude_login_with_token(token: &str) -> Vec<u8> {
 }
 
 // Hard-won: #1600: a failure during a renewal was judged against the login being replaced and called refused
+// macOS keeps a Claude login in the Keychain, which mj-core cannot read.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_login_is_judged_against_the_login_the_renewer_writes() {
     let home = tempfile::tempdir().expect("temporary home");

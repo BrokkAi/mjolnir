@@ -1322,12 +1322,12 @@ async fn target_is_current(
     runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
 ) -> Result<bool> {
+    if let Some(runtime) = runtime {
+        return runtime.credential_target_is_current(target);
+    }
     #[cfg(any(test, feature = "test-support"))]
     if SESSIONS_ARE_CURRENT.with(std::cell::Cell::get) {
         return Ok(true);
-    }
-    if let Some(runtime) = runtime {
-        return runtime.credential_target_is_current(target);
     }
     let candidate = target.clone();
     tokio::task::spawn_blocking(move || {
