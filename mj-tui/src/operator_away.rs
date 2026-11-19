@@ -306,9 +306,15 @@ pub(crate) fn render(
                 theme::muted(),
             ));
         }
-        let block_width = block.iter().map(Line::width).max().unwrap_or(0);
+        // Padding past the body width would wrap a short row onto a blank line.
+        let block_width = block
+            .iter()
+            .map(Line::width)
+            .max()
+            .unwrap_or(0)
+            .min(usize::from(inner.width));
         for mut line in block {
-            let padding = block_width - line.width();
+            let padding = block_width.saturating_sub(line.width());
             line.spans.push(Span::raw(" ".repeat(padding)));
             lines.push(line);
         }
