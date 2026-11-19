@@ -110,6 +110,7 @@ def unique_facts(sets):
 def categories(fact):
     rql = fact["rql"] or {}
     return {
+        "in_diff": fact["in_diff"],
         "rql.class": rql.get("class"),
         # The menu ranks missing-step kinds, so agreement on them is reported where both
         # labellers call the fact missing.
@@ -137,8 +138,8 @@ def category_comparisons(a, b):
 
 def comparison(pairs, split):
     categories_by_fact = {category: {"agree": 0, "n": 0}
-                          for category in ("rql.class", "rql.missing_kind", "rql.locator_present", "kind",
-                                           "anchors_on_touched")}
+                          for category in ("in_diff", "rql.class", "rql.missing_kind", "rql.locator_present",
+                                           "kind", "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
     defects = {"both_confirmed": 0, "both_not_confirmed": 0, "split": 0}
     for first, second in pairs:
