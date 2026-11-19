@@ -274,7 +274,6 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                         break;
                     }
                     desired = target_map(&targets_rx.borrow_and_update());
-                    starting.reconcile(&desired);
                     actors.retain(|session_id, actor| {
                         if desired.contains_key(session_id) {
                             true
@@ -327,7 +326,10 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                 } => {
                     if changed.is_err() { break; }
                     match &*committed.as_mut().expect("feed changed").borrow_and_update() {
-                        Ok(snapshot) => starting.reconcile_committed(&snapshot.state),
+                        Ok(snapshot) => {
+                            starting.reconcile_committed(&snapshot.state);
+                            starting.reconcile_attached(|id| actors.get(id).and_then(|actor| crate::mailbox_outbox::published_worker_relay_protocol(&actor.view.borrow())));
+                        },
                         Err(error) => {
                             tracing::error!(%error, "launch registration lost its durable state feed");
                             break;

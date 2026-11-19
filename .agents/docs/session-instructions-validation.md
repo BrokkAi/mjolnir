@@ -192,3 +192,23 @@ Enqueue now carries an internal Failed(reason) outcome out of the writer transac
 - `cargo clippy -p brokk-mj-store -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review5-clippy.log`).
 - Explicit stop of the private recovery-probe instance confirmed it was already stopped (`memory-instructions-review5-probe-cleanup.log`).
 - Formatting and diff checks are clean. No still-failing checks, default-instance operations, pushes or Milestone 3 live acceptance. Logs remain untracked; schema, relay snapshot and RuntimeEvent shapes remain unchanged. Corrections are committed and submitted for re-review.
+
+
+## Sixth review: owner-decided finality
+
+The parent replaced the earlier StartupCleanup/Destroying terminal rule after provisioning.rs showed automatic retry through StartupCleanup back to Provisioning. Intermediate states settle nothing. Final failed-startup settlement now occurs only in save_startup_cleanup_outcome, after its archived=1 write in that same transaction. Generic lifecycle/state writers no longer settle messages. Enqueue reads the durable archived failed-startup fact, so a delayed sender after final cleanup gets the stored failure while ordinary Error remains recoverable. Destruction uses existing record removal/TargetGone.
+
+The manager retains the launch registration through unarchived cleanup and retry; committed final archival/removal releases it, and a published worker protocol hands it over to the attached worker. Worker acceptance SQL is unchanged: the failure update and acknowledgement each require accepted_at IS NULL. In-progress Destroying no longer fills the failure marker ahead of a valid acknowledgement; an accepted row also survives final archived cleanup.
+
+One deterministic test per finding: startup_retry_preserves_parent_message_and_launch_registration (new), destroying_preserves_worker_mailbox_acceptance (new), and the extended failed_startup_settles_queued_parent_messages_without_attachment (late send after final archived Error). All affected checks completed outside the sandbox on the dev profile:
+
+- `cargo test -p brokk-mj-daemon startup_retry_preserves_parent_message_and_launch_registration`: 1 passed (`memory-instructions-review6-retry-test.log`).
+- `cargo test -p brokk-mj-daemon destroying_preserves_worker_mailbox_acceptance`: 1 passed (`memory-instructions-review6-acceptance-final-test.log`). The interrupted attempt ended during compilation and was restarted only after confirming no process remained.
+- `cargo test -p brokk-mj-daemon failed_startup_settles_queued_parent_messages_without_attachment`: 1 passed, now covering the archived final Error and original delayed sender error (`memory-instructions-review6-finality-test.log`).
+- `cargo test -p brokk-mj-daemon launch_reservation_releases_on_precommit_abort_and_terminal_publication`: 1 passed (`memory-instructions-review6-reservation-test.log`).
+- `cargo test -p brokk-mj-daemon send_to_registered_child_before_attachment_queues_mailbox_without_a_turn`: 1 passed (`memory-instructions-review6-routing-test.log`).
+- `cargo test -p brokk-mj-daemon outbox_`: 3 passed (`memory-instructions-review6-outbox-tests.log`).
+- `cargo test -p brokk-mj-store database::mailbox::tests`: 4 passed, including late acknowledgement after /clear (`memory-instructions-review6-store-tests.log`).
+- `cargo clippy -p brokk-mj-controller -p brokk-mj-store -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review6-clippy.log`).
+
+The exact finality writer is save_startup_cleanup_outcome: its archive branch writes archived=1, then settles unaccepted ParentMessages before committing. Generic lifecycle writers no longer settle. No schema, relay snapshot or RuntimeEvent shape changed. Formatting/diff checks are clean; diagnostic logs remain untracked. No still-failing checks or default-instance operations. No review findings from this round are overridden.

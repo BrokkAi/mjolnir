@@ -32,20 +32,12 @@ pub(super) struct StartingSessions(BTreeMap<String, StartingSessionPhase>);
 enum StartingSessionPhase {
     Guarded,
     AwaitingTarget,
-    PublishedTarget,
 }
 
 impl StartingSessions {
-    pub(super) fn reconcile(&mut self, targets: &BTreeMap<String, RelaySessionTarget>) {
+    pub(super) fn reconcile_attached(&mut self, protocol: impl Fn(&str) -> Option<u32>) {
         self.0.retain(|id, phase| {
-            if matches!(phase, StartingSessionPhase::Guarded) {
-                true
-            } else if targets.contains_key(id) {
-                *phase = StartingSessionPhase::PublishedTarget;
-                true
-            } else {
-                matches!(phase, StartingSessionPhase::AwaitingTarget)
-            }
+            matches!(phase, StartingSessionPhase::Guarded) || protocol(id).is_none()
         });
     }
 
@@ -55,7 +47,7 @@ impl StartingSessions {
                 || state
                     .sessions
                     .get(id)
-                    .is_some_and(|record| record.state.can_receive_child_work())
+                    .is_some_and(|record| !record.archived)
         });
     }
 
@@ -126,6 +118,7 @@ impl StartingSessions {
                     .and_then(|view| view.snapshot.as_ref())
                     .and_then(|snapshot| snapshot.operational.relay_protocol_version);
                 let route = if let Some(protocol) = protocol {
+                    self.0.remove(&session_id);
                     ParentMessageRoute::Published(Some(protocol))
                 } else if self.0.contains_key(&session_id) {
                     ParentMessageRoute::Starting

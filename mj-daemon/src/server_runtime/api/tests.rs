@@ -3739,6 +3739,7 @@ async fn send_to_registered_child_before_attachment_queues_mailbox_without_a_tur
 
 // Hard-won: 9674cd6aa: a launch that failed before attachment left acknowledged parent messages pending.
 // Hard-won: 4e37c532c: recoverable Error lost queued work and terminal enqueue returned false success.
+// Hard-won: 7b9292ec6: delayed enqueue missed final failed-startup archival.
 #[tokio::test]
 async fn failed_startup_settles_queued_parent_messages_without_attachment() {
     if !isolated_parked_test("failed_startup_settles_queued_parent_messages_without_attachment") {
@@ -3779,7 +3780,7 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
         .unwrap()
         .unwrap();
     let key = "subagent-message-before-startup-failure";
-    child.state = SessionState::StartupCleanup;
+    child.state = SessionState::Error;
     child.last_error = Some("fixture provisioning failed before the worker started".into());
     let expected = "child startup failed: fixture provisioning failed before the worker started";
 
@@ -3799,7 +3800,7 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
                 let route = self.inner.parent_message_route(id).await?;
                 let failed = self.failed.clone();
                 tokio::task::spawn_blocking(move || {
-                    mj_controller::database::save_lifecycle_session(&failed)
+                    mj_controller::database::save_startup_cleanup_outcome(&failed, true)
                 })
                 .await??;
                 Ok(route)
@@ -3898,6 +3899,118 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
     manager.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: 7b9292ec6: intermediate cleanup lost the queued message and launch registration before retry.
+#[tokio::test]
+async fn startup_retry_preserves_parent_message_and_launch_registration() {
+    if !isolated_parked_test("startup_retry_preserves_parent_message_and_launch_registration") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
+    let owner = manager.control.clone();
+    let held = tokio::task::spawn_blocking(move || owner.register_starting_blocking("child-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    store_parent_and_child("child-1");
+    tokio::task::spawn_blocking(move || held.publish())
+        .await
+        .unwrap()
+        .unwrap();
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "subagent-message-retry".into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "survive retry".into(),
+        },
+    };
+    mj_controller::database::enqueue_mailbox_event(
+        &event.key,
+        "child-1",
+        &serde_json::to_string(&event).unwrap(),
+        true,
+        true,
+    )
+    .unwrap();
+    let mut child = mj_controller::database::load_session_record("child-1")
+        .unwrap()
+        .unwrap();
+    child.state = SessionState::StartupCleanup;
+    child.last_error = Some("pre-socket worker failure".into());
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
+    assert!(matches!(
+        manager
+            .control
+            .client()
+            .parent_message_route("child-1".into())
+            .await
+            .unwrap(),
+        mj_client::session::ParentMessageRoute::Starting
+    ));
+    child.state = SessionState::Provisioning;
+    child.last_error = None;
+    mj_controller::database::save_startup_cleanup_outcome(&child, false).unwrap();
+    assert!(matches!(
+        manager
+            .control
+            .client()
+            .parent_message_route("child-1".into())
+            .await
+            .unwrap(),
+        mj_client::session::ParentMessageRoute::Starting
+    ));
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-1", &event.key).unwrap(),
+        mj_controller::database::MailboxDeliveryState::Pending
+    );
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: 7b9292ec6: an in-progress destroy masked a valid worker acceptance receipt.
+#[tokio::test]
+async fn destroying_preserves_worker_mailbox_acceptance() {
+    if !isolated_parked_test("destroying_preserves_worker_mailbox_acceptance") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "subagent-message-accepted".into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "accepted before teardown".into(),
+        },
+    };
+    mj_controller::database::enqueue_mailbox_event(
+        &event.key,
+        "child-1",
+        &serde_json::to_string(&event).unwrap(),
+        true,
+        true,
+    )
+    .unwrap();
+    let mut child = mj_controller::database::load_session_record("child-1")
+        .unwrap()
+        .unwrap();
+    child.state = SessionState::Destroying;
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
+    mj_controller::database::mark_mailbox_event_accepted(&event.key, "worker-receipt", 42).unwrap();
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-1", &event.key).unwrap(),
+        mj_controller::database::MailboxDeliveryState::Accepted(42)
+    );
+    child.state = SessionState::Error;
+    mj_controller::database::save_startup_cleanup_outcome(&child, true).unwrap();
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-1", &event.key).unwrap(),
+        mj_controller::database::MailboxDeliveryState::Accepted(42)
+    );
+}
+
 // Hard-won: 9674cd6aa: failed and removed children that never published a target leaked launch reservations.
 #[tokio::test]
 async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication() {
@@ -3962,7 +4075,7 @@ async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication
                 .unwrap();
             child.state = SessionState::Error;
             child.last_error = Some("launch never published a target".into());
-            mj_controller::database::save_lifecycle_session(&child).unwrap();
+            mj_controller::database::save_startup_cleanup_outcome(&child, true).unwrap();
         }
         // Test both the ordinary feed transition and a delayed handover after
         // the entire failed/removed lifetime has coalesced in the feed.

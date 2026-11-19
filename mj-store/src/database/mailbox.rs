@@ -161,14 +161,21 @@ pub fn enqueue_mailbox_event_with(
     ) {
         connection
             .query_row(
-                "SELECT state, last_error FROM sessions WHERE session_id=?1",
+                "SELECT state, last_error, archived FROM sessions WHERE session_id=?1",
                 [target_session_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()?
-            .and_then(|(state, error)| {
-                mj_core::state::SessionState::from_stored(&state)
-                    .and_then(|state| terminal_parent_message_failure(state, error.as_deref()))
+            .and_then(|(state, error, archived)| {
+                mj_core::state::SessionState::from_stored(&state).and_then(|state| {
+                    terminal_parent_message_failure(state, error.as_deref(), archived)
+                })
             })
     } else {
         None
@@ -293,38 +300,36 @@ pub fn subagent_mailbox_messages(parent_session_id: &str) -> Result<Vec<Subagent
         .collect()
 }
 
-fn terminal_parent_message_failure(state: SessionState, error: Option<&str>) -> Option<String> {
-    match state {
-        SessionState::StartupCleanup => Some(match error {
+fn terminal_parent_message_failure(
+    state: SessionState,
+    error: Option<&str>,
+    archived: bool,
+) -> Option<String> {
+    (archived && matches!(state, SessionState::Error | SessionState::StartupCleanup)).then(|| {
+        match error {
             Some(error) => format!("child startup failed: {error}"),
-            None => "child startup cleanup prevents delivery of the queued parent message".into(),
-        }),
-        SessionState::Destroying => Some(match error {
-            Some(error) => format!(
-                "child is being destroyed; queued parent message was not delivered: {error}"
-            ),
-            None => "child is being destroyed; queued parent message was not delivered".into(),
-        }),
-        // Error is recoverable: Resume/Restart reattaches the worker and the
-        // outbox must still have the parent's message to deliver then.
-        _ => None,
-    }
+            None => {
+                "child startup failed and was archived; queued parent message was not delivered"
+                    .into()
+            }
+        }
+    })
 }
 
-/// The lifecycle record and its undeliverable parent messages commit together.
+/// Read finality from the committed columns in this owner's transaction.
 pub(super) fn settle_failed_parent_messages_with(
     connection: &Connection,
     session: &SessionRecord,
 ) -> Result<()> {
-    if let Some(reason) =
-        terminal_parent_message_failure(session.state, session.last_error.as_deref())
+    let (state, error, archived): (String, Option<String>, bool) = connection.query_row(
+        "SELECT state,last_error,archived FROM sessions WHERE session_id=?1",
+        [&session.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if let Some(reason) = SessionState::from_stored(&state)
+        .and_then(|state| terminal_parent_message_failure(state, error.as_deref(), archived))
     {
-        connection.execute(
-            "UPDATE mailbox_outbox SET accepted_at=?2, failure=?3
-             WHERE target_session_id=?1 AND accepted_at IS NULL AND failure IS NULL
-               AND json_extract(event_json, '$.body.type')='parent_message'",
-            params![session.id, Utc::now().to_rfc3339(), reason],
-        )?;
+        connection.execute("UPDATE mailbox_outbox SET accepted_at=?2,failure=?3 WHERE target_session_id=?1 AND accepted_at IS NULL AND failure IS NULL AND json_extract(event_json,'$.body.type')='parent_message'", params![session.id,Utc::now().to_rfc3339(),reason])?;
     }
     Ok(())
 }

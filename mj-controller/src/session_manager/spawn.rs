@@ -35,7 +35,6 @@ pub fn spawn_session_manager_observed(
                         break;
                     }
                     desired_targets = target_map(&targets_rx.borrow_and_update());
-                    starting.reconcile(&desired_targets);
                     reconcile_actors(
                         &desired_targets,
                         &mut actors,
@@ -67,7 +66,10 @@ pub fn spawn_session_manager_observed(
                 } => {
                     if changed.is_err() { break; }
                     match &*committed.as_mut().expect("feed changed").borrow_and_update() {
-                        Ok(snapshot) => starting.reconcile_committed(&snapshot.state),
+                        Ok(snapshot) => {
+                            starting.reconcile_committed(&snapshot.state);
+                            starting.reconcile_attached(|id| actors.get(id).and_then(|actor| crate::mailbox_outbox::published_worker_relay_protocol(&actor.view.borrow())));
+                        },
                         Err(error) => {
                             tracing::error!(%error, "launch registration lost its durable state feed");
                             break;
