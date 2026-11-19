@@ -154,8 +154,16 @@ class Server:
             time.sleep(1)
 
     def _read(self):
+        # Keep only replies (messages with an id); notifications and unparsable lines are dropped
+        # here. The driver has one request outstanding at a time, so the queue stays bounded
+        # however much Bifrost writes, and nothing piles up in this process outside the cap.
         for line in self.proc.stdout:
-            self.lines.put(line)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and "id" in msg:
+                self.lines.put(msg)
         self.lines.put(None)  # EOF
 
     def request(self, method, params, deadline=None):
@@ -176,9 +184,9 @@ class Server:
                     continue
                 raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
                                    f"readiness {READINESS_SECONDS} s)")
-            if not line:
+            if line is None:  # EOF from the reader
                 raise RuntimeError(f"server exited with {self.proc.poll()}")
-            msg = json.loads(line)
+            msg = line  # the reader already parsed it and kept only replies
             if msg.get("id") == self.seq:
                 return msg
 
@@ -519,6 +527,8 @@ def main():
     # Each line is `owner__repo <pinned sha> <origin url>`: the repo is cloned from its origin
     # and measured at that commit, so a reused record always matches its revision.
     entries = [l.split() for l in open(sys.argv[1]) if l.strip()]
+    if not entries:  # an empty or truncated shortlist is an error, not a finished batch
+        sys.exit(f"{sys.argv[1]} lists no repos")
     bad = [e for e in entries if len(e) < 3]
     if bad:
         sys.exit(f"every line needs `owner__repo <pinned sha> <origin url>`; unpinned: {bad[:3]}")
