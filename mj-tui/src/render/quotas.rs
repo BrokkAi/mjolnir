@@ -631,10 +631,12 @@ fn lane(
                         .resets_at_epoch_seconds
                         .is_none_or(|reset| reset > t0 as i64)
             });
+        // A five-hour reading without a reset time is still the active
+        // balance; only its end is unknown.
         let five = member.five_hour.as_ref().filter(|window| {
             window
                 .resets_at_epoch_seconds
-                .is_some_and(|reset| reset > t0 as i64)
+                .is_none_or(|reset| reset > t0 as i64)
         });
         let marker = if contains(weekly_reset) && contains(five_reset) {
             Some('*')
@@ -850,7 +852,15 @@ fn quota_lines(
             for member in &pool.members {
                 if let Some(note) = &member.note {
                     for text in wrap_note(
-                        &format!("{} {}% · {note}", member.id, member.remaining),
+                        &format!(
+                            "{} {} · {note}",
+                            member.id,
+                            if member.awaiting_reading {
+                                "?".to_string()
+                            } else {
+                                format!("{}%", member.remaining)
+                            }
+                        ),
                         width.saturating_sub(2),
                     ) {
                         lines.push(Line::styled(format!("  {text}"), theme::muted()));

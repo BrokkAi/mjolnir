@@ -268,15 +268,21 @@ impl DashboardState {
         // A reading crossing its reset changes pool totals and lanes while the
         // countdowns stay at `0m`, so count the windows awaiting a reading
         // (the minimized line shows the totals too).
-        let awaiting = providers
-            .iter()
-            .flat_map(|provider| &provider.pools)
-            .flat_map(|pool| &pool.members)
-            .filter(|member| member.awaiting_reading || member.five_hour_awaiting_reading)
+        // Long and five-hour windows are counted separately: either crossing
+        // its reset changes what is drawn.
+        let members = || {
+            providers
+                .iter()
+                .flat_map(|provider| &provider.pools)
+                .flat_map(|pool| &pool.members)
+        };
+        let awaiting = members().filter(|member| member.awaiting_reading).count();
+        let five_awaiting = members()
+            .filter(|member| member.five_hour_awaiting_reading)
             .count();
         clocks.push(DisplayedClock {
             key: "quota:awaiting-reading".to_owned(),
-            value: awaiting.to_string(),
+            value: format!("{awaiting}/{five_awaiting}"),
         });
         if self.pane_size(SupportPane::Quota) != crate::PaneSize::Minimized {
             for provider in providers {
@@ -447,7 +453,7 @@ mod tests {
                 .find(|clock| clock.key == "quota:awaiting-reading")
                 .map(|clock| clock.value.clone())
         };
-        assert_eq!(awaiting(&before).as_deref(), Some("0"));
-        assert_eq!(awaiting(&after).as_deref(), Some("1"));
+        assert_eq!(awaiting(&before).as_deref(), Some("0/0"));
+        assert_eq!(awaiting(&after).as_deref(), Some("1/0"));
     }
 }
