@@ -7,9 +7,9 @@
 
 use super::*;
 use crate::observe::{
-    ObserveCheckpoint, ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool,
-    checkpoint_envelopes, envelopes_for_transcript, transcript_response_from_materialized,
-    usage_envelopes,
+    ObserveCheckpoint, ObserveDeliveryState, ObserveIdsNotDurable, ObservePaths, ObserveSession,
+    ObserveSpool, checkpoint_envelopes, envelopes_for_transcript,
+    transcript_response_from_materialized, usage_envelopes,
 };
 use mj_core::observe::{ObserveCommit, ObserveDeliveryConfig, ObserveGitMeta};
 use mj_core::state::MaterializedExecutionState;
@@ -26,7 +26,13 @@ pub(super) fn spawn(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> JoinHandle<Result<()>> {
-    tokio::spawn(async move { run(state, cancellation).await })
+    tokio::spawn(async move {
+        let outcome = run(state, cancellation).await;
+        if let Err(error) = &outcome {
+            tracing::warn!(error = %format!("{error:#}"), "automatic Brokk Observe delivery stopped");
+        }
+        outcome
+    })
 }
 
 async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Result<()> {
@@ -37,11 +43,32 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
             paths.root.display()
         )
     })?;
-    let config = match ObserveDeliveryConfig::load() {
+    let config = ObserveDeliveryConfig::load();
+    if matches!(config, Ok(None)) {
+        return Ok(());
+    }
+    let delivery = {
+        let path = paths.state.clone();
+        let loading_cancellation = cancellation.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            ObserveDeliveryState::load_cancellable(
+                &path,
+                mj_core::clock::epoch_millis(),
+                &loading_cancellation,
+            )
+        })
+        .await
+        .context("Observe state load task panicked")?;
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        Arc::new(std::sync::Mutex::new(loaded?))
+    };
+    let config = match config {
         Ok(Some(config)) => config,
         Ok(None) => return Ok(()),
         Err(error) => {
-            record_failure(&paths, &error)?;
+            record_failure(&paths, &delivery, &error).await?;
             tracing::warn!(%error, "automatic Brokk Observe delivery is misconfigured");
             return Ok(());
         }
@@ -55,20 +82,22 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
     let mut immediate = true;
     let mut backoff = INITIAL_DELIVERY_BACKOFF;
 
+    // Export saves cursor progress before returning, including cancellation.
+    // An idle exit has no progress to preserve and must not rewrite the store.
     loop {
         if cancellation.is_cancelled() {
             return Ok(());
         }
         if immediate {
             let before = revisions.borrow_and_update().to_owned();
-            let export = publish_changed_sessions(&state, &paths, &cancellation).await;
+            let export = publish_changed_sessions(&state, &paths, &delivery, &cancellation).await;
             if let Err(error) = &export {
                 tracing::warn!(error = %format!("{error:#}"), "automatic Brokk Observe export stopped early");
             }
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            let flush = flush_spool(&paths, &config, &client, &cancellation).await;
+            let flush = flush_after_export(&export, &paths, &config, &client, &cancellation).await;
             match &flush {
                 Ok(delivered) => {
                     if *delivered > 0 {
@@ -85,17 +114,19 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                         retry_after_ms = backoff.as_millis(),
                         "could not deliver Mjolnir events to Brokk Observe; retained the spool"
                     );
-                    backoff = (backoff * 2).min(MAX_DELIVERY_BACKOFF);
                 }
             }
             if cancellation.is_cancelled() {
                 return Ok(());
             }
             let failed = match (&export, &flush) {
-                (Ok(()), Ok(_)) => {
-                    record_success(&paths)?;
-                    false
-                }
+                (Ok(()), Ok(_)) => match record_success(&paths, &delivery).await {
+                    Ok(()) => false,
+                    Err(error) => {
+                        tracing::warn!(error = %format!("{error:#}"), "could not persist Observe delivery success");
+                        true
+                    }
+                },
                 (export, flush) => {
                     let error = match (export, flush) {
                         (Err(export), Err(flush)) => {
@@ -105,22 +136,37 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                         (_, Err(flush)) => format!("delivery: {flush:#}"),
                         (Ok(()), Ok(_)) => unreachable!(),
                     };
-                    record_failure(&paths, &anyhow!(error))?;
+                    if let Err(error) = record_failure(&paths, &delivery, &anyhow!(error)).await {
+                        tracing::warn!(error = %format!("{error:#}"), "could not persist Observe delivery failure; retrying");
+                    }
                     true
                 }
             };
             immediate = *revisions.borrow() != before;
             if failed {
-                tokio::select! {
-                    _ = cancellation.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep(backoff) => immediate = true,
-                    changed = revisions.changed() => {
-                        if changed.is_err() { return Ok(()); }
-                        immediate = true;
+                if flush.is_err() {
+                    let delay = backoff;
+                    backoff = (backoff * 2).min(MAX_DELIVERY_BACKOFF);
+                    // New revisions cannot repair failed id commits or a
+                    // delivery outage; retain their pending work until retry.
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(delay) => immediate = true,
                     }
-                    changed = wiki_changes.changed() => {
-                        if changed.is_err() { return Ok(()); }
-                        immediate = true;
+                } else {
+                    // Ordinary projection errors must not delay healthy
+                    // sessions whose revisions can still be delivered.
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(backoff) => immediate = true,
+                        changed = revisions.changed() => {
+                            if changed.is_err() { return Ok(()); }
+                            immediate = true;
+                        }
+                        changed = wiki_changes.changed() => {
+                            if changed.is_err() { return Ok(()); }
+                            immediate = true;
+                        }
                     }
                 }
             }
@@ -148,6 +194,7 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
 async fn publish_changed_sessions(
     state: &RuntimeState,
     paths: &ObservePaths,
+    delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
     cancellation: &CancellationToken,
 ) -> Result<()> {
     let (runtime_state, config) = {
@@ -156,11 +203,13 @@ async fn publish_changed_sessions(
         (controller.state.clone(), controller.config.clone())
     };
     let paths = paths.clone();
+    let delivery = Arc::clone(delivery);
     let cancellation = cancellation.clone();
     tokio::task::spawn_blocking(move || {
-        let now = mj_core::clock::epoch_millis();
-        let mut delivery = ObserveDeliveryState::load(&paths.state, now)?;
-        let spool = ObserveSpool::open(&paths.spool)?;
+        let mut delivery = delivery
+            .lock()
+            .map_err(|_| anyhow!("Observe state lock poisoned"))?;
+        let spool = ObserveSpool::open_for_delivery(&paths, &cancellation)?;
         let mut ids = runtime_state
             .sessions
             .keys()
@@ -185,7 +234,7 @@ async fn publish_changed_sessions(
                 None => match mj_controller::database::load_session_record(&session_id) {
                     Ok(record) => record,
                     Err(error) => {
-                        failures.push(format!("{error:#}"));
+                        failures.push(error);
                         continue;
                     }
                 },
@@ -213,27 +262,45 @@ async fn publish_changed_sessions(
                     }
                 }
                 Err(error) => {
-                    failures.push(format!("session {session_id}: {error:#}"));
                     tracing::warn!(
                         session_id,
                         error = %format!("{error:#}"),
                         "could not enqueue one Mjolnir session for Brokk Observe"
                     );
+                    failures.push(error.context(format!("session {session_id}")));
                 }
             }
         }
-        delivery.save(&paths.state)?;
+        let ids_not_durable = failures
+            .iter()
+            .any(|error| error.downcast_ref::<ObserveIdsNotDurable>().is_some());
+        delivery.save(&paths.state).map_err(|error| {
+            if ids_not_durable {
+                error.context(ObserveIdsNotDurable)
+            } else {
+                error
+            }
+        })?;
         if emitted > 0 {
             tracing::debug!(emitted, "enqueued Mjolnir events for Brokk Observe");
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            bail!(
+            let error = anyhow!(
                 "{} Mjolnir session(s) could not be prepared for Observe: {}",
                 failures.len(),
-                failures.join("; ")
-            )
+                failures
+                    .iter()
+                    .map(|error| format!("{error:#}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            Err(if ids_not_durable {
+                error.context(ObserveIdsNotDurable)
+            } else {
+                error
+            })
         }
     })
     .await
@@ -283,6 +350,9 @@ fn publish_one(
         .subagents
         .get(&record.id)
         .map(|relation| relation.parent_session_id.clone());
+    let emitted = spool
+        .emitted_ids()
+        .load_cancellable(&record.id, spool.cancellation())?;
     let cursor = delivery.sessions.get(&record.id);
     let initialized_at = delivery.initialized_at_ms;
     let started_at_ms = chrono::DateTime::parse_from_rfc3339(&record.created_at)
@@ -311,17 +381,13 @@ fn publish_one(
         known.remote = known.remote.take().or(found.remote);
         known.branch = found.position.branch.clone().or(known.branch.take());
         let start_already_sent = known.head.is_none()
-            && cursor.is_some_and(|cursor| {
-                cursor.reported_git.is_none()
-                    && cursor
-                        .emitted_event_ids
-                        .contains(&mj_core::observe::event_id(
-                            &record.id,
-                            0,
-                            "SessionStart",
-                            0,
-                        ))
-            });
+            && cursor.is_none_or(|cursor| cursor.reported_git.is_none())
+            && emitted.contains(&mj_core::observe::event_id(
+                &record.id,
+                0,
+                "SessionStart",
+                0,
+            ));
         if known.head.is_none() {
             known.head = found.launch.clone();
         }
@@ -395,6 +461,7 @@ fn publish_one(
         },
         spool,
         delivery,
+        emitted,
     )
 }
 
@@ -418,6 +485,12 @@ fn publish_checkpoint(
         path.display(),
         archive.manifest.session.id
     );
+    if delivery.sessions.get(session_id).is_some_and(|cursor| {
+        cursor.checkpoint_sha256.as_deref() == Some(archive.archive_sha256.as_str())
+            && cursor.historical_imported_at_ms.is_some()
+    }) {
+        return Ok(Some(0));
+    }
     let mut materialized = mj_transcript::projection::materialized_session_from_canonical(
         session_id,
         &archive.canonical_session,
@@ -476,6 +549,9 @@ fn publish_checkpoint(
     if let Some(position) = &position {
         insert_before_session_end(&mut envelopes, checkpoint_envelopes(&session, position)?);
     }
+    let emitted = spool
+        .emitted_ids()
+        .load_cancellable(session_id, spool.cancellation())?;
     enqueue_envelopes(
         session_id,
         envelopes,
@@ -489,6 +565,7 @@ fn publish_checkpoint(
         },
         spool,
         delivery,
+        emitted,
     )
     .map(Some)
 }
@@ -499,19 +576,40 @@ fn enqueue_envelopes(
     batch: ObserveBatch<'_>,
     spool: &ObserveSpool,
     delivery: &mut ObserveDeliveryState,
+    mut emitted: BTreeSet<String>,
 ) -> Result<usize> {
-    let cursor = delivery.sessions.entry(session_id.to_owned()).or_default();
+    let ids = spool.emitted_ids();
+    let mut appended = Vec::new();
     let mut count = 0_usize;
     for envelope in envelopes {
-        if cursor.emitted_event_ids.contains(&envelope.meta.event_id) {
+        if spool.cancellation().is_cancelled() {
+            if !appended.is_empty() {
+                ids.append(session_id, &appended)
+                    .context(ObserveIdsNotDurable)?;
+            }
+            // Preserve the committed prefix without advancing the session
+            // cursor. The next daemon resumes from the durable exact-id log.
+            return Ok(count);
+        }
+        if emitted.contains(&envelope.meta.event_id) {
             continue;
         }
-        spool.enqueue(&envelope)?;
-        cursor
-            .emitted_event_ids
-            .insert(envelope.meta.event_id.clone());
+        if let Err(error) = spool.enqueue(&envelope) {
+            if !appended.is_empty() {
+                ids.append(session_id, &appended)
+                    .context(ObserveIdsNotDurable)?;
+            }
+            // Post-publication errors retain their undurable-id marker. An
+            // error before publication cannot create an unlogged queue entry.
+            return Err(error);
+        }
+        emitted.insert(envelope.meta.event_id.clone());
+        appended.push(envelope.meta.event_id.clone());
         count += 1;
     }
+    ids.append(session_id, &appended)
+        .context(ObserveIdsNotDurable)?;
+    let cursor = delivery.sessions.entry(session_id.to_owned()).or_default();
     cursor.record_updated_at = batch.revision.to_owned();
     cursor.materialized_event_ordinal = batch.materialized_event_ordinal;
     cursor.execution = Some(batch.execution);
@@ -719,14 +817,41 @@ fn git_observation(record: &SessionRecord) -> (Option<ObserveGitMeta>, Vec<Obser
     (git, commits)
 }
 
+/// Export is serialized before delivery. Only a failed id commit (or a
+/// post-publication enqueue failure) leaves this cycle unsafe to flush.
+async fn flush_after_export(
+    export: &Result<()>,
+    paths: &ObservePaths,
+    config: &ObserveDeliveryConfig,
+    client: &reqwest::Client,
+    cancellation: &CancellationToken,
+) -> Result<usize> {
+    if export
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<ObserveIdsNotDurable>().is_some())
+    {
+        // A deferred flush is a failed delivery cycle, not a successful empty
+        // batch: retry scheduling must keep its growing delay.
+        return Err(anyhow!(ObserveIdsNotDurable));
+    }
+    flush_spool(paths, config, client, cancellation).await
+}
+
 async fn flush_spool(
     paths: &ObservePaths,
     config: &ObserveDeliveryConfig,
     client: &reqwest::Client,
     cancellation: &CancellationToken,
 ) -> Result<usize> {
-    let spool = ObserveSpool::open(&paths.spool)?;
-    let pending = spool.pending()?;
+    let delivery_paths = paths.clone();
+    let preparing_cancellation = cancellation.clone();
+    let (spool, pending) = tokio::task::spawn_blocking(move || {
+        let spool = ObserveSpool::open_for_delivery(&delivery_paths, &preparing_cancellation)?;
+        let pending = spool.pending_cancellable(&preparing_cancellation)?;
+        Ok::<_, anyhow::Error>((spool, Arc::new(pending)))
+    })
+    .await
+    .context("Observe spool preparation task panicked")??;
     if pending.is_empty() {
         return Ok(0);
     }
@@ -764,7 +889,14 @@ async fn flush_spool(
     let mut delivered = 0_usize;
     let mut index = 0_usize;
     while index < pending.len() {
-        let (body, end) = batch_from(&pending, index, limit)?;
+        let batch_paths = Arc::clone(&pending);
+        let (body, end) =
+            tokio::task::spawn_blocking(move || batch_from(&batch_paths, index, limit))
+                .await
+                .context("Observe batch read task panicked")??;
+        if cancellation.is_cancelled() {
+            return Ok(0);
+        }
         let exchange = async {
             let response = client
                 .post(format!("{}/api/v1/ingest/batch", config.url))
@@ -788,9 +920,16 @@ async fn flush_spool(
                 response_body.chars().take(300).collect::<String>()
             );
         }
-        for path in &pending[index..end] {
-            spool.remove(path)?;
-        }
+        let removing_spool = spool.clone();
+        let removing_paths = Arc::clone(&pending);
+        tokio::task::spawn_blocking(move || {
+            for path in &removing_paths[index..end] {
+                removing_spool.remove(path)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("Observe spool removal task panicked")??;
         delivered += end - index;
         index = end;
     }
@@ -828,29 +967,277 @@ fn batch_from(paths: &[PathBuf], start: usize, limit: usize) -> Result<(Vec<u8>,
     Ok((body, end))
 }
 
-fn record_success(paths: &ObservePaths) -> Result<()> {
-    let now = mj_core::clock::epoch_millis();
-    let mut state = ObserveDeliveryState::load(&paths.state, now)?;
-    state.mark_success(now);
-    state.save(&paths.state)
+async fn save_delivery(
+    paths: &ObservePaths,
+    delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
+    outcome: std::result::Result<(), String>,
+) -> Result<()> {
+    let path = paths.state.clone();
+    let delivery = Arc::clone(delivery);
+    tokio::task::spawn_blocking(move || {
+        let mut state = delivery
+            .lock()
+            .map_err(|_| anyhow!("Observe state lock poisoned"))?;
+        match outcome {
+            Ok(()) => state.mark_success(mj_core::clock::epoch_millis()),
+            Err(error) => state.mark_failure(mj_core::clock::epoch_millis(), error),
+        }
+        state.save(&path)
+    })
+    .await
+    .context("Observe state save task panicked")?
 }
 
-fn record_failure(paths: &ObservePaths, error: &anyhow::Error) -> Result<()> {
-    let now = mj_core::clock::epoch_millis();
-    let mut state = ObserveDeliveryState::load(&paths.state, now)?;
-    state.mark_failure(now, format!("{error:#}"));
-    state.save(&paths.state)
+async fn record_success(
+    paths: &ObservePaths,
+    delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
+) -> Result<()> {
+    save_delivery(paths, delivery, Ok(())).await
+}
+
+async fn record_failure(
+    paths: &ObservePaths,
+    delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
+    error: &anyhow::Error,
+) -> Result<()> {
+    save_delivery(paths, delivery, Err(format!("{error:#}"))).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::ObserveEmittedIds;
     use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
     use mj_core::state::{
         MaterializedExecutionState, MaterializedSession, SessionConfiguration, TranscriptBody,
         TranscriptItem,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn projected_stop(session_id: &str, text: &str) -> mj_core::observe::ObserveEnvelope {
+        let session = ObserveSession {
+            id: session_id.into(),
+            harness: "codex".into(),
+            ..Default::default()
+        };
+        let transcript = crate::server::api::TranscriptResponse {
+            session_id: session_id.into(),
+            latest_seq: 1,
+            next_after_seq: 1,
+            execution: MaterializedExecutionState::Idle,
+            items: vec![crate::server::api::TranscriptItemView {
+                stable_id: "agent-1".into(),
+                position: 1,
+                seq: 1,
+                role: "assistant".into(),
+                text: text.into(),
+                created_at_ms: 10,
+                last_changed_at_ms: 10,
+                body: TranscriptBody::Agent {
+                    chunks: vec![],
+                    streaming: false,
+                },
+            }],
+        };
+        envelopes_for_transcript(&session, &transcript)
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+
+    fn replay_stop(
+        spool: &ObserveSpool,
+        delivery: &mut ObserveDeliveryState,
+        envelope: mj_core::observe::ObserveEnvelope,
+    ) -> usize {
+        let session_id = envelope.event["session_id"].as_str().unwrap().to_owned();
+        let ids = spool.emitted_ids();
+        enqueue_envelopes(
+            &session_id,
+            vec![envelope],
+            ObserveBatch {
+                revision: "after-replay",
+                materialized_event_ordinal: 7,
+                execution: MaterializedExecutionState::Idle,
+                historical: false,
+                checkpoint_sha256: None,
+                reported_git: None,
+            },
+            spool,
+            delivery,
+            ids.load(&session_id).unwrap(),
+        )
+        .unwrap()
+    }
+
+    // Hard-won: Observe spool replay after a crash rejected a grown Stop forever.
+    #[test]
+    fn observe_crash_after_spooling_keeps_first_version_and_advances_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("delivery.json");
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let original = projected_stop("recover-native-opus", "partial answer");
+        let first = spool.enqueue(&original).unwrap();
+        drop(spool);
+        // Restart without recording an id, then project a longer message.
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let changed = projected_stop("recover-native-opus", "complete answer");
+        let mut delivery = ObserveDeliveryState::load(&path, 1).unwrap();
+        assert_eq!(replay_stop(&spool, &mut delivery, changed.clone()), 1);
+        assert_eq!(
+            delivery.sessions["recover-native-opus"].record_updated_at,
+            "after-replay"
+        );
+        assert_eq!(spool.pending().unwrap(), vec![first.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(first).unwrap(),
+            original.to_ndjson().unwrap()
+        );
+        spool.remove(&spool.pending().unwrap()[0]).unwrap();
+        // A lost cursor after delivery is filtered by the durable id log.
+        delivery = ObserveDeliveryState::load(&path, 1).unwrap();
+        assert_eq!(replay_stop(&spool, &mut delivery, changed), 0);
+        assert!(spool.pending().unwrap().is_empty());
+    }
+
+    // Hard-won: 66409e7c5: a post-link sync failure let delivery outrun its id log.
+    #[cfg(unix)]
+    #[test]
+    fn observe_post_link_failure_retains_spool_until_ids_are_durable() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root bypasses the permission error this filesystem regression needs.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("requires an unprivileged Unix user to exercise directory fsync denial");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("delivery.json");
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let session_id = "post-link-sync-failure";
+        let envelope = projected_stop(session_id, "first answer");
+        let mut delivery = ObserveDeliveryState::load(&path, 1).unwrap();
+        let permissions = std::fs::metadata(spool.root()).unwrap().permissions();
+        // Creating/removing directory entries still works, but opening this
+        // directory for its fsync fails after the final spool link is visible.
+        std::fs::set_permissions(spool.root(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = enqueue_envelopes(
+            session_id,
+            vec![envelope.clone()],
+            ObserveBatch {
+                revision: "before-sync",
+                materialized_event_ordinal: 1,
+                execution: MaterializedExecutionState::Idle,
+                historical: false,
+                checkpoint_sha256: None,
+                reported_git: None,
+            },
+            &spool,
+            &mut delivery,
+            BTreeSet::new(),
+        );
+        std::fs::set_permissions(spool.root(), permissions).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<ObserveIdsNotDurable>()
+                .is_some()
+        );
+        assert!(!delivery.sessions.contains_key(session_id));
+        assert!(spool.emitted_ids().load(session_id).unwrap().is_empty());
+        let queued = spool.pending().unwrap();
+        assert_eq!(queued.len(), 1);
+        spool.cancellation().cancel();
+        // Hard-won: 098571603: cancellation must stop a session batch without committing its cursor.
+        assert_eq!(
+            replay_stop(
+                &spool,
+                &mut delivery,
+                projected_stop(session_id, "longer answer")
+            ),
+            0
+        );
+        assert!(!delivery.sessions.contains_key(session_id));
+        assert_eq!(spool.pending().unwrap(), queued);
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let replay = projected_stop(session_id, "longer answer");
+        assert_eq!(replay_stop(&spool, &mut delivery, replay), 1);
+        assert_eq!(spool.pending().unwrap(), queued);
+        assert_eq!(
+            std::fs::read_to_string(&queued[0]).unwrap(),
+            envelope.to_ndjson().unwrap()
+        );
+        assert_eq!(
+            spool.emitted_ids().load(session_id).unwrap(),
+            BTreeSet::from([envelope.meta.event_id])
+        );
+    }
+
+    #[test]
+    fn observe_v1_migration_preserves_ids_across_reprojection() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("delivery.json");
+        let session_id = "../imported/native-opus-recovery";
+        let envelope = projected_stop(session_id, "already sent");
+        let legacy = serde_json::json!({
+            "version": 1, "initialized_at_ms": 10, "last_failure": "offline", "last_failure_ms": 20,
+            "sessions": { session_id: { "record_updated_at": "before", "emitted_event_ids": [envelope.meta.event_id] } }
+        });
+        let body = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&path, &body).unwrap();
+        assert_eq!(
+            ObserveDeliveryState::diagnostics(&path, 30)
+                .unwrap()
+                .last_failure
+                .as_deref(),
+            Some("offline")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), body); // diagnostics cannot migrate.
+        let ids = ObserveEmittedIds::new(&path);
+        ids.append(session_id, &["partial-migration".into()])
+            .unwrap();
+        let mut interrupted = legacy.clone();
+        interrupted["sessions"]["zz-invalid-session"] =
+            serde_json::json!({"record_updated_at": 7, "emitted_event_ids": []});
+        let interrupted_body = serde_json::to_vec(&interrupted).unwrap();
+        std::fs::write(&path, &interrupted_body).unwrap();
+        assert!(ObserveDeliveryState::load(&path, 30).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), interrupted_body);
+        std::fs::write(&path, &body).unwrap();
+        let delivery = ObserveDeliveryState::load(&path, 30).unwrap();
+        assert_eq!(delivery.version, 2);
+        assert_eq!(delivery.initialized_at_ms, 10);
+        assert_eq!(
+            ids.load(session_id).unwrap(),
+            BTreeSet::from([envelope.meta.event_id.clone()])
+        );
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            persisted["sessions"][session_id]
+                .get("emitted_event_ids")
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path().join("emitted"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let mut reloaded = ObserveDeliveryState::load(&path, 40).unwrap();
+        let paths = ObservePaths {
+            root: root.path().to_owned(),
+            state: path.clone(),
+            spool: root.path().join("spool"),
+        };
+        #[cfg(unix)]
+        let relocated_spool = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(relocated_spool.path(), &paths.spool).unwrap();
+        // Hard-won: d91380c89: a relocated spool must use the migrated id log.
+        let spool = ObserveSpool::open_for_delivery(&paths, &CancellationToken::new()).unwrap();
+
+        assert_eq!(replay_stop(&spool, &mut reloaded, envelope), 0);
+        assert!(spool.pending().unwrap().is_empty());
+    }
 
     #[test]
     fn batches_fill_the_server_limit_without_splitting_an_envelope() {
@@ -902,6 +1289,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(emitted >= 2);
+        assert_eq!(
+            publish_checkpoint("observe-archived-session", &spool, &mut delivery).unwrap(),
+            Some(0)
+        );
         let uploaded = spool
             .pending()
             .unwrap()
@@ -1019,9 +1410,6 @@ mod tests {
             ObserveDeliveryState::load(&root.path().join("delivery.json"), 1_800_000_000_000)
                 .unwrap();
         let state = mj_core::state::State::default();
-        let mut publish = |record: &SessionRecord| {
-            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
-        };
         // Every head in the spool, in delivery order, with the event carrying it.
         let heads = || {
             spool
@@ -1060,12 +1448,49 @@ mod tests {
                 record.updated_at = revision.into();
             };
 
-        // The session starts before anything says where its checkout is.
-        assert!(publish(&record) >= 2);
+        // The first export starts before the launch commit is known, then
+        // fails after the projected envelopes are queued but before its cursor.
+        let materialized = mj_controller::database::load_materialized_session(&record.id)
+            .unwrap()
+            .unwrap();
+        let transcript = transcript_response_from_materialized(&record.id, &materialized).unwrap();
+        let session = ObserveSession {
+            id: record.id.clone(),
+            harness: record.harness_kind.id().to_owned(),
+            ..Default::default()
+        };
+        let mut envelopes = envelopes_for_transcript(&session, &transcript).unwrap();
+        let mut invalid = envelopes[0].clone();
+        invalid.meta.event_id.clear();
+        envelopes.push(invalid);
+        // Hard-won: e2421d353: partial first export lost the launch commit on retry.
+        let partial = enqueue_envelopes(
+            &record.id,
+            envelopes,
+            ObserveBatch {
+                revision: &record.updated_at,
+                materialized_event_ordinal: materialized.applied_event_ordinal,
+                execution: materialized.execution,
+                historical: false,
+                checkpoint_sha256: None,
+                reported_git: None,
+            },
+            &spool,
+            &mut delivery,
+            BTreeSet::new(),
+        );
+        assert!(partial.is_err());
+        assert!(!delivery.sessions.contains_key(&record.id));
+        assert!(spool.emitted_ids().load(&record.id).unwrap().contains(
+            &mj_core::observe::event_id(&record.id, 0, "SessionStart", 0)
+        ));
         for path in spool.pending().unwrap() {
             spool.remove(&path).unwrap();
         }
 
+        let mut publish = |record: &SessionRecord| {
+            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
+        };
         // Its first checkpoint reports the launch commit ahead of the head, so
         // Observe's first head is the start and its newest is the end.
         checkpointed(&mut record, 1, &first, "2026-08-14T12:00:01Z");
@@ -1227,10 +1652,23 @@ mod tests {
             timeout_ms: 3_000,
         };
         let client = reqwest::Client::new();
+        let corrupt_archive = root.path().join("corrupt-checkpoint.tar.zst");
+        std::fs::write(&corrupt_archive, b"not a checkpoint archive").unwrap();
+        let failed_export = mj_checkpoint::archive::verify_archive_streaming(&corrupt_archive)
+            .map(|_| ())
+            .context("export another session's checkpoint");
+        assert!(failed_export.is_err());
+        // Hard-won: 098571603: one corrupt session blocked delivery for every healthy session.
         assert!(
-            flush_spool(&paths, &config, &client, &CancellationToken::new())
-                .await
-                .unwrap()
+            flush_after_export(
+                &failed_export,
+                &paths,
+                &config,
+                &client,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
                 >= 2
         );
         assert!(spool.pending().unwrap().is_empty());
