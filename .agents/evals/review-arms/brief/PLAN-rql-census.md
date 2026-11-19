@@ -28,7 +28,7 @@ A positive result shows that the information helps when it's delivered this way.
 
 **Window.**
 - Test bugs have both the introducing change and the fix on or after 2025-01-01.
-- If a candidate repo's 2025+ window can't reach the target, its test window extends to 2024-01-01 before its eligibility (the 8-diff floor) is judged, and before its development sample is drawn. The extension is recorded.
+- If a candidate repo's 2025+ window can't reach the target, its test window extends to 2024-01-01 before its eligibility (the 8-diff floor) is judged, and before its development sample is drawn. The extension is recorded. The extended pool keeps the 2025 order as its prefix and appends the fixes that only the wider window admits, in seeded order. Fixes rejected earlier only because their introduction predates 2025 are re-evaluated at their original positions, so the stop still falls where the seeded order reaches the 25th relation diff. Rows past that stop are set aside, not counted.
 - Contamination: a memorized bug tends to be caught in every arm, which shrinks the paired difference. An RQL row can also cue recall of a bug the reviewer missed without a brief, which inflates it, so the direction isn't guaranteed. Sensitivity checks are the after-cutoff subset (cutoffs: Sol 2026-04-30, Terra 2026-06-01, Opus June 2026) and the no-brief catch rate by fix date. The latter is descriptive only, because difficulty and repo mix confound it.
 
 **Development and test split.**
