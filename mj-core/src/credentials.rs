@@ -698,6 +698,88 @@ impl CredentialSyncCause {
     }
 }
 
+/// Blocking. Runs `read` while holding the native lock every writer of the
+/// profile's login takes (the renewer holds it for its whole exchange with the
+/// provider), so a renewal in progress finishes first and `read` sees the login
+/// it wrote. `None` when the lock could not be taken within `lock_wait`: the
+/// answer is unknown, never a reading of a login that is about to change.
+///
+/// Needs a Tokio runtime to be running, as the locks do. Call it from
+/// `tokio::task::spawn_blocking` or another thread that is not an event loop.
+pub fn read_login_under_native_lock<T>(
+    kind: HarnessKind,
+    store: &crate::config::HarnessLoginStore,
+    lock_wait: Duration,
+    read: impl FnOnce() -> T,
+) -> Option<T> {
+    let marker = match store.lock_marker() {
+        Ok(marker) => marker,
+        Err(error) => {
+            tracing::warn!(%error, "could not find the login's lock directory");
+            return None;
+        }
+    };
+    let acquired = tokio::runtime::Handle::current().block_on(
+        CredentialWriteGuard::acquire_within(kind, &marker, lock_wait),
+    );
+    match acquired {
+        Ok(guard) => {
+            let value = read();
+            drop(guard);
+            Some(value)
+        }
+        Err(error) => {
+            tracing::info!(%error, "could not take the login lock; the login's identity is unknown");
+            None
+        }
+    }
+}
+
+/// Blocking. Whether the token the provider rejected is the host login's
+/// current one, read under the native login lock (see
+/// [`read_login_under_native_lock`]). `Some(true)`: it is, so the provider
+/// refused the profile's current login. `Some(false)`: it is an older login,
+/// renewed since. `None`: unknown (the lock or the login could not be read).
+///
+/// Reads the login from its file. A macOS Keychain login is read by callers
+/// that can run `security`, through [`read_login_under_native_lock`].
+pub fn rejected_login_is_current(
+    profile: &HarnessProfile,
+    rejected_fingerprint: &str,
+    lock_wait: Duration,
+) -> Option<bool> {
+    if profile.kind != HarnessKind::Claude || !profile.auth_scheme().uses_native_login_file() {
+        return None;
+    }
+    let store = profile
+        .kind
+        .login_store(crate::config::HarnessHost::current(), &profile.home);
+    file_login_is_rejected_token(profile.kind, &store, rejected_fingerprint, lock_wait)
+}
+
+fn file_login_is_rejected_token(
+    kind: HarnessKind,
+    store: &crate::config::HarnessLoginStore,
+    rejected_fingerprint: &str,
+    lock_wait: Duration,
+) -> Option<bool> {
+    let crate::config::HarnessLoginStore::File { marker } = store else {
+        return None;
+    };
+    read_login_under_native_lock(
+        kind,
+        store,
+        lock_wait,
+        || match LoginFingerprint::read_file(kind, marker) {
+            Ok(Some(LoginFingerprint::AccessToken(current))) => {
+                Some(current == rejected_fingerprint)
+            }
+            _ => None,
+        },
+    )
+    .flatten()
+}
+
 /// What an authentication failure means, decided once against the profile's
 /// current login (#1547). Every consumer (the push, the refusal, the notice)
 /// reads this answer instead of comparing logins on its own snapshot.
@@ -1612,9 +1694,14 @@ impl RejectedLogins {
     /// login is still the one the provider refused.
     pub fn refusal(&self, profile_id: &str) -> Option<String> {
         let (kind, marker, refused) = self.profiles.get(profile_id)?;
+        // This only re-checks a refusal that a reconciliation already
+        // established, and its callers run on async threads, so it reads the
+        // login without waiting for the native lock: during a renewal it can
+        // only keep a refusal a moment longer, never create one.
         let current = LoginFingerprint::read_file(*kind, marker).ok().flatten();
-        (self.wake_verdict(refused, current.as_ref()) == LoginFailureVerdict::Refused)
-            .then(|| crate::subagent::login_invalid_reason(profile_id))
+        let refused_now =
+            self.wake_verdict(refused, current.as_ref()) == LoginFailureVerdict::Refused;
+        refused_now.then(|| crate::subagent::login_invalid_reason(profile_id))
     }
 }
 

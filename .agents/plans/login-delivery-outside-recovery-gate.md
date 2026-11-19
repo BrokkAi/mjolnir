@@ -17,7 +17,7 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
 - [x] (2026-11-19 04:10Z) Diagnosis from live logs; design from the Advisor session; read-only code map of the gate, actor, coordinator, classification and tests.
 - [x] (2026-11-19) Milestone 1: credential sync leaves the RecoveryGate; the actor owns the "login owed" wake; gate-only deferral and backoff code deleted; hard-won integration test passes.
 - [ ] Milestone 2: a daemon that finds a login renewed by another process syncs at once.
-- [ ] Milestone 3: the refused-or-stale decision reads the host login under the native login lock.
+- [x] (2026-11-19) Milestone 3: the refused-or-stale decision reads the host login under the native login lock.
 - [ ] Milestone 4: notices reduced to the cases that need the user; code made unreachable by Milestones 1-3 deleted.
 - [ ] Clippy and formatting on touched crates; review; commit; push.
 
@@ -98,6 +98,11 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
   Date/Author: 2026-11-19, implementer.
 
 - Decision: tests removed because they only pinned gate behaviour: `credential_sync_preempted_by_lifecycle_does_not_report_a_login_result` (c8d27f3c; a sync no longer opens its own connection), `the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skipped`, `a_cycle_that_cannot_reach_the_session_is_deferred_and_changes_nothing`, `a_queued_job_releases_its_hold_as_soon_as_admission_is_cancelled`, `a_running_credential_job_stops_when_its_admission_is_cancelled`, `a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one`. Their text is in the implementer's report directory (`removed_tests.txt`). No reconnect-wake phase was added to the lease test: the reconnect branch sets the same `credentials_owed` flag that the lease branch sets and the same loop check clears.
+  Date/Author: 2026-11-19, implementer.
+- Decision (Milestone 3): `mj-core` offers `read_login_under_native_lock` (runs a reader while holding the native lock, `None` if the lock times out) and `rejected_login_is_current` (the plan's function, for file-stored Claude logins). The readers that can produce a refused verdict take their reading through the first: the sync pass re-reads the login under the lock for the session whose failure triggered it (replacing the pass's cached `current_access_token`), and `mj_controller::worker_client::current_claude_access_token`, which `current_profile_login` (and so the child hold in `api.rs`) uses for every Claude profile, file or Keychain. `sync_conclusion` and `failure_verdict` stay pure, because the policy's tick calls `conclude` on a daemon loop and must not wait for a lock. Reason for not calling `rejected_login_is_current` directly there: those sites need the current fingerprint itself (to compare with the failed turn's, and to hand to `wake_verdict`), and macOS Keychain logins cannot be read from `mj-core`. `rejected_login_is_current` has no production caller yet; it is covered by its test and is the form to use where only a yes or no is needed.
+  Date/Author: 2026-11-19, implementer.
+
+- Decision (Milestone 3): `RejectedLogins::refusal` keeps its plain file read. It only re-checks a refusal that reconciliation already established, and its callers hold a mutex on async threads, so it cannot wait for the lock. During a renewal it can only keep an existing refusal a moment longer, never create one. `CredentialWriteGuard::acquire_within` takes the Claude lock budget as a parameter (`acquire` passes `CLAUDE_REFRESH_LOCK_WAIT`).
   Date/Author: 2026-11-19, implementer.
 
 ## Outcomes & Retrospective

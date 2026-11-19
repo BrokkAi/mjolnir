@@ -25,6 +25,16 @@ pub struct CredentialWriteGuard {
 
 impl CredentialWriteGuard {
     pub async fn acquire(kind: HarnessKind, marker: &Path) -> Result<Self> {
+        Self::acquire_within(kind, marker, CLAUDE_REFRESH_LOCK_WAIT).await
+    }
+
+    /// [`CredentialWriteGuard::acquire`] with `claude_wait` as the budget for
+    /// Claude's native locks. Other harnesses keep their own budgets.
+    pub async fn acquire_within(
+        kind: HarnessKind,
+        marker: &Path,
+        claude_wait: Duration,
+    ) -> Result<Self> {
         let marker = marker.to_owned();
         let home = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
             let parent = marker.parent().context("credential marker has no parent")?;
@@ -53,7 +63,7 @@ impl CredentialWriteGuard {
                 // and Mjolnir's existing shared acquisition budget.
                 let mut legacy = home.as_os_str().to_os_string();
                 legacy.push(".lock");
-                let deadline = tokio::time::Instant::now() + CLAUDE_REFRESH_LOCK_WAIT;
+                let deadline = tokio::time::Instant::now() + claude_wait;
                 for path in [home.join(".oauth_refresh.lock"), PathBuf::from(legacy)] {
                     guard._directories.push(
                         OAuthRefreshLock::acquire(

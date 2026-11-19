@@ -105,15 +105,19 @@ pub(crate) async fn current_profile_login(
     profile: &mj_core::config::HarnessProfile,
 ) -> anyhow::Result<Option<LoginFingerprint>> {
     let kind = profile.kind;
-    let marker = match kind.login_store(mj_core::config::HarnessHost::current(), &profile.home) {
-        mj_core::config::HarnessLoginStore::MacKeychain => {
-            return Ok(
-                mj_controller::worker_client::current_claude_access_token(profile)
-                    .await
-                    .map(LoginFingerprint::AccessToken),
-            );
-        }
-        mj_core::config::HarnessLoginStore::File { marker } => marker,
+    if kind == mj_core::config::HarnessKind::Claude {
+        // Read under the native login lock, so a renewal in progress is not
+        // mistaken for the login that was rejected (also for the Keychain).
+        return Ok(
+            mj_controller::worker_client::current_claude_access_token(profile)
+                .await
+                .map(LoginFingerprint::AccessToken),
+        );
+    }
+    let mj_core::config::HarnessLoginStore::File { marker } =
+        kind.login_store(mj_core::config::HarnessHost::current(), &profile.home)
+    else {
+        return Ok(None);
     };
     let profile = profile.clone();
     tokio::task::spawn_blocking(move || {

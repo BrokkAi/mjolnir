@@ -1367,7 +1367,7 @@ async fn reconcile_target(
     // the actor itself releases the AWS/relay turn before handing us its result.
     let _delivery = profile.deliveries.enter(&target.session_id).await;
     let requested = profile.fingerprint(target);
-    let result = async {
+    let mut result = async {
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
         let github = if target.sync_github_token {
@@ -1398,6 +1398,22 @@ async fn reconcile_target(
         .await
     }
     .await;
+    // The session whose authentication failure asked for this sync learns
+    // whether its rejected token is the profile's current one from a reading
+    // taken under the native login lock, not from the pass's earlier one: a
+    // renewal in progress would otherwise make the old login look refused.
+    if *triggered_by == Some(target.session_id.as_str())
+        && target.harness == mj_core::config::HarnessKind::Claude
+        && !target.skips_login_file_sync
+        && let Ok(Some(sync)) = &mut result
+        && sync.current_access_token.is_some()
+    {
+        sync.current_access_token = claude_access_token_under_lock(target.harness.login_store(
+            mj_core::config::HarnessHost::current(),
+            &target.profile_home,
+        ))
+        .await;
+    }
     let deferred = matches!(&result, Err(error) if RelayJobDeferred::marks(error));
     let awaits_worker_observation = runtime.is_some()
         && matches!(&result, Ok(Some(sync)) if sync.reports_held_login
@@ -2370,6 +2386,11 @@ pub(super) enum PassLogin {
 /// it now, or `None` when the profile is not a Claude login or it cannot be
 /// read. This is the answer to "is the token that failed still current?" for
 /// every consumer that is not itself a sync pass (#1547).
+///
+/// The login is read under the native login lock, which a renewal holds for
+/// its whole exchange with the provider: a plain read during a renewal returns
+/// the login being replaced, and a token that failed because of the renewal
+/// would then look refused. A lock that cannot be taken in time is `None`.
 pub async fn current_claude_access_token(
     profile: &mj_core::config::HarnessProfile,
 ) -> Option<String> {
@@ -2378,13 +2399,30 @@ pub async fn current_claude_access_token(
     {
         return None;
     }
-    let store = profile
-        .kind
-        .login_store(mj_core::config::HarnessHost::current(), &profile.home);
-    let (_, bytes) = LoginAccess::bounded(store)
-        .read_blocking(profile.kind)
-        .await
-        .ok()?;
+    claude_access_token_under_lock(
+        profile
+            .kind
+            .login_store(mj_core::config::HarnessHost::current(), &profile.home),
+    )
+    .await
+}
+
+async fn claude_access_token_under_lock(
+    store: mj_core::config::HarnessLoginStore,
+) -> Option<String> {
+    let kind = mj_core::config::HarnessKind::Claude;
+    let access = LoginAccess::bounded(store.clone());
+    let (_, bytes) = tokio::task::spawn_blocking(move || {
+        mj_core::credentials::read_login_under_native_lock(
+            kind,
+            &store,
+            mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT,
+            || access.read(kind),
+        )
+    })
+    .await
+    .ok()??
+    .ok()?;
     mj_core::credentials::claude_access_token_fingerprint(&bytes)
 }
 
