@@ -233,7 +233,7 @@ class Server:
                 # Read the Result only now, after every process in the scope has exited, so an
                 # OOM kill of a child during shutdown is caught too (the uncollected failed
                 # scope keeps it until reset-failed).
-                self.sample["scope_result"] = subprocess.run(
+                self.sample["scope_result"] = run_bounded(
                     ["systemctl", "--user", "show", scope, "-p", "Result", "--value"],
                     capture_output=True, text=True).stdout.strip()
                 break
@@ -318,7 +318,7 @@ def require_ec2():
     if cap_kib > 0.8 * mem_total_kib:
         sys.exit(f"memory cap {MEMORY_MAX} exceeds 80% of this host's {mem_total_kib // 2**20} GiB")
     probe = f"rql-cap-probe-{os.getpid()}"
-    subprocess.run(["systemd-run", "--user", "--scope", "--quiet", f"--unit={probe}", "-p", "MemoryMax=64M",
+    run_bounded(["systemd-run", "--user", "--scope", "--quiet", f"--unit={probe}", "-p", "MemoryMax=64M",
                     "-p", "MemorySwapMax=0", sys.executable, "-c", "x = bytearray(256 * 2**20)"], capture_output=True)
     result = run_bounded(["systemctl", "--user", "show", f"{probe}.scope", "-p", "Result", "--value"],
                             capture_output=True, text=True).stdout.strip()
@@ -392,7 +392,7 @@ def main():
             r = json.loads(l)
             latest[r["repo"]] = r
     done = {repo for repo, r in latest.items()
-            if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
+            if repo in pins and not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
             and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
             and r.get("head") == pins[repo][0]}
     for repo in repos:
