@@ -153,6 +153,30 @@ pub fn append_staged_instructions(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "",
         Err(error) => return Err(error.into()),
     };
+    // This is our fresh copy: make it owner-writable without changing the
+    // source profile or granting write access to other users.
+    match std::fs::metadata(&path) {
+        Ok(metadata) => {
+            let mut permissions = metadata.permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(permissions.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            if permissions != metadata.permissions() {
+                std::fs::set_permissions(&path, permissions).with_context(|| {
+                    format!(
+                        "make staged harness instructions {} writable",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     use std::io::Write;
 
     let mut file = std::fs::OpenOptions::new()

@@ -91,3 +91,13 @@ pub fn stage_memory_replica<'a>(
     copy_profile_entry(&canonical, &profile_stage.join(baseline))?;
     Ok([replica, baseline])
 }
+
+/// Read the canonical-memory snapshot already copied into this launch's stage.
+pub fn staged_memory_index(
+    memory: &ProjectMemoryLaunchConfig,
+    target_profile_home: &Path,
+    profile_stage: &Path,
+) -> Result<Option<String>> {
+    let root = profile_stage.join(memory.root.strip_prefix(target_profile_home)?);
+    mj_core::project_memory::ProjectMemoryStore::new(root).startup_index()
+}

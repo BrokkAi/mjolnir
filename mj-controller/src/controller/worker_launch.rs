@@ -284,36 +284,6 @@ impl Controller {
             self.config.subagents.max_concurrent,
             launch.subtle_subagents,
         )?;
-        if mj_core::session_instructions::delivered_by_staging(profile.kind) {
-            let index = if let Some(memory) = &project_memory {
-                let canonical = canonical_memory_root(&memory.project_key);
-                let index = mj_core::project_memory::resolve_canonical_root(&canonical)
-                    .and_then(|root| {
-                        mj_core::project_memory::ProjectMemoryStore::new(root).startup_index()
-                    })
-                    .map(|contents| contents.unwrap_or_default())
-                    .map_err(|error| format!("{error:#}"));
-                if let Err(reason) = &index {
-                    executor.notify_notice(&format!(
-                        "Warning: Project memory index {} unavailable: {reason}",
-                        canonical
-                            .join(mj_core::project_memory::MEMORY_INDEX)
-                            .display()
-                    ));
-                }
-                index
-            } else {
-                Ok(String::new())
-            };
-            append_composed_session_instructions(
-                &launch,
-                &profile_stage,
-                index.as_deref().map_err(String::as_str),
-            )?;
-        }
-        // The notes above can make instructions the profile alone could
-        // deliver too long, so the staged file is checked before it travels.
-        profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         if let Some(reviewer) = &launch.reviewer_launch
             && mj_core::worker_launch::ReviewMcpDelivery::for_harness(profile.kind)
@@ -348,6 +318,34 @@ impl Controller {
                 )?;
             }
         }
+        if mj_core::session_instructions::delivered_by_staging(profile.kind) {
+            let index = if let Some(memory) = &project_memory {
+                let index =
+                    staged_memory_index(memory, Path::new(&target_profile_home), &profile_stage)
+                        .map(|contents| contents.unwrap_or_default())
+                        .map_err(|error| format!("{error:#}"));
+                if let Err(reason) = &index {
+                    executor.notify_notice(&format!(
+                        "Warning: Project memory index {} unavailable: {reason}",
+                        memory
+                            .root
+                            .join(mj_core::project_memory::MEMORY_INDEX)
+                            .display()
+                    ));
+                }
+                index
+            } else {
+                Ok(String::new())
+            };
+            append_composed_session_instructions(
+                &launch,
+                &profile_stage,
+                index.as_deref().map_err(String::as_str),
+            )?;
+        }
+        // The notes above can make instructions the profile alone could
+        // deliver too long, so the staged file is checked before it travels.
+        profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
         let shared_login = shared_profile_login(profile, backend);
         if preparation != WorkerFilePreparation::Install {
             // A shared symlink stays live across boot. Only a copied login

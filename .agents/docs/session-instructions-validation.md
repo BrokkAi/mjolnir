@@ -334,3 +334,18 @@ Validation ran outside the sandbox on the dev profile with inherited MJ_CONFIG_D
 Mechanical compile fixes during extraction: shared child tool output contract remains independent of optional harness selection; removed an ambiguous fixture Path.into(); updated the old delegation constant reference to its shared location. Corrected failure logs: memory-instructions-staging-golden-update.log, memory-instructions-staging-golden-update-fixed.log, memory-instructions-staging-worker-tests.log. No still-failing checks. Source checkpoints preceded long builds and are amended into one coherent final commit.
 
 No default instance, schema/wire changes, pushes, or Milestone 3 acceptance. Logs remain untracked. Submit one review round; per parent instructions fix only concrete correctness/security defects in this change, override other findings with reasons, and hand back without a second review.
+
+
+## One-round staging review: copied modes and replica consistency
+
+Confirmed and fixed the two staging defects. append_staged_instructions makes only its fresh copied file owner-writable on Unix (retaining other mode bits), or clears its read-only attribute elsewhere. The user's source file and permissions remain unchanged. The golden now uses real read-only source files for all three harnesses and restores the fixture's original permissions only for temporary-directory cleanup after assertions.
+
+Parent approved reading the staged canonical-memory replica instead of a separate earlier read from the live canonical store. Native composition and instruction-size validation now run after stage_memory_replica. The staged_memory_index helper reads that exact copied index; a deterministic golden interleaving changes canonical memory after copying and verifies the persistent text still describes the delivered snapshot. No additional restage or retained-profile write is introduced.
+
+Checks outside sandbox, dev profile, inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared:
+
+- `cargo test -p brokk-mj-worker-staging golden_session_instructions_are_appended_once_to_each_fresh_native_stage`: 1 passed across three harnesses (`memory-instructions-staging-review-golden-final.log`).
+- `cargo clippy -p brokk-mj-worker-staging -p brokk-mj-controller --all-targets -- -D warnings`: passed (`memory-instructions-staging-review-clippy.log`).
+- `cargo clippy -p brokk-mj-worker-staging --all-targets -- -D warnings`: passed after fixture cleanup portability adjustment (`memory-instructions-staging-review-clippy-final.log`).
+
+No overrides or failing checks. The third finding, concerning earlier mailbox settlement, is confirmed in scope by the parent and follows as a separate ownership fix. No further review request, per parent instruction. Logs remain untracked.
