@@ -965,7 +965,7 @@ pub struct DashboardState {
     paste_revision: u64,
     /// A press on a question's answer control is both the form's pending click
     /// and a selection candidate; see route_question_press.
-    question_press: bool,
+    question_press: Option<(u16, u16)>,
     pending_welcome: Option<welcome::WelcomeDialog>,
     operator_presence: operator_away::OperatorPresence,
     #[cfg(test)]
@@ -1347,7 +1347,7 @@ impl DashboardState {
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
             paste_revision: 0,
-            question_press: false,
+            question_press: None,
             profile_login_generation: 0,
             pending_setup_login: None,
             profile_hydration_requests: Default::default(),

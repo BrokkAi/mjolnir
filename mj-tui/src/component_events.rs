@@ -22,13 +22,17 @@ impl DashboardState {
         };
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.question_press = false;
+                self.question_press = None;
                 let surfaces = self.frame_surfaces();
                 let answer_row = !self.modal_open()
                     && surfaces
                         .surface_at(mouse.column, mouse.row)
                         .is_some_and(|surface| match surface.id {
-                            SurfaceId::NotificationFormBody(_) => true,
+                            // A boolean question's title and description lie
+                            // inside its checkbox hitbox.
+                            SurfaceId::NotificationFormBody(_)
+                            | SurfaceId::NotificationText(_)
+                            | SurfaceId::ElicitationMessage => true,
                             SurfaceId::ModalBody => {
                                 surfaces.surface(SurfaceId::ElicitationMessage).is_some()
                             }
@@ -38,13 +42,19 @@ impl DashboardState {
                     return None;
                 }
                 selection.on_mouse_down(mouse.column, mouse.row, self.frame_surfaces());
-                self.question_press = selection.owns_pointer();
+                self.question_press = selection
+                    .owns_pointer()
+                    .then_some((mouse.column, mouse.row));
                 Some(event.clone())
             }
-            // No movement: the release is the form's click.
+            // A release in the press cell is the form's click. One anywhere
+            // else goes to the selection engine, which tracks its position
+            // even when the terminal sent no drag event.
             MouseEventKind::Up(MouseButton::Left)
-                if std::mem::take(&mut self.question_press) && selection.range().is_none() =>
+                if self.question_press == Some((mouse.column, mouse.row))
+                    && selection.range().is_none() =>
             {
+                self.question_press = None;
                 selection.clear();
                 Some(event.clone())
             }
@@ -52,15 +62,18 @@ impl DashboardState {
         }
     }
 
-    /// Once movement has made the press a text selection the form gets no
-    /// click, so release its armed control.
+    /// Once the press became a text selection, or the gesture ended without
+    /// reaching the form, the form gets no click, so release its armed
+    /// control.
     pub fn settle_question_press(
         &mut self,
         selection: &mj_chat::selection::SelectionState,
         chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
     ) {
-        if self.question_press && selection.range().is_some() {
-            self.question_press = false;
+        if self.question_press.is_some()
+            && (selection.range().is_some() || !selection.owns_pointer())
+        {
+            self.question_press = None;
             self.cancel_all_component_pointers(chats);
         }
     }

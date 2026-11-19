@@ -3386,6 +3386,51 @@ pub(crate) mod tests {
         );
         assert!(chats["session-1"].elicitation_pointer_surface().is_none());
 
+        // A release in another cell with no drag event in between is still
+        // a selection, not a click.
+        let mut selection = SelectionState::new();
+        let forwarded = dashboard
+            .route_question_press(&mut selection, true, &press)
+            .expect("the press reaches the form");
+        dashboard
+            .handle_notification_form_event(&mut chats, &forwarded)
+            .unwrap();
+        let moved_release = event(MouseEventKind::Up(MouseButton::Left), x + 6, y);
+        assert!(
+            dashboard
+                .route_question_press(&mut selection, true, &moved_release)
+                .is_none(),
+            "a moved release is not forwarded as a click"
+        );
+        assert!(matches!(
+            selection.on_mouse_up(x + 6, y, &surfaces),
+            SelectionAction::CopyRequested { .. }
+        ));
+        dashboard.settle_question_press(&selection, &mut chats);
+        assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+
+        // The question's own text can start a selection too.
+        let (text_x, text_row) = point(&lines[usize::from(form.y)..], "Choose a path");
+        let text_y = form.y + text_row;
+        assert!(
+            matches!(
+                surfaces.surface_at(text_x, text_y).map(|frame| frame.id),
+                Some(SurfaceId::NotificationText(_) | SurfaceId::ElicitationMessage)
+            ),
+            "{lines:#?}"
+        );
+        let mut selection = SelectionState::new();
+        assert!(
+            dashboard
+                .route_question_press(
+                    &mut selection,
+                    true,
+                    &event(MouseEventKind::Down(MouseButton::Left), text_x, text_y),
+                )
+                .is_some()
+        );
+        dashboard.settle_question_press(&SelectionState::new(), &mut chats);
+
         // A press and release in place is still a click.
         let mut selection = SelectionState::new();
         let release = event(MouseEventKind::Up(MouseButton::Left), x, y);
