@@ -377,9 +377,14 @@ def git(*args, cwd=None):
     # Its own systemd scope, like a server: cancelling stops git and its transport and
     # index-pack children, and a git left by a killed driver is reaped (and proven gone) by
     # the next run before it touches the clone or worktree.
+    if cancelled():  # no further git mutation (worktree add, checkout) once cancelled
+        raise Cancelled(f"cancelled before git {args[0]}")
     unit = f"rql-git-{os.getpid()}-{time.monotonic_ns()}"
     proc = subprocess.Popen(["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
-                             "git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             # No automatic gc or maintenance: a detached repack could outlive
+                             # this call and run outside any memory cap during a measurement.
+                             "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
+                            cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             pass_fds=HOST_LOCK_FDS)
     while True:
         try:
@@ -585,14 +590,24 @@ def main():
                 rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
             else:  # a warm restart on a failed cold cache measures nothing usable
                 rec["warm_restart"] = {"ready": False, "skipped": "cold index failed"}
-            git("worktree", "remove", "--force", str(wt), cwd=clone)
-            shutil.rmtree(cache, ignore_errors=True)  # cache size is recorded; keep disk bounded
         except Exception as e:
             import traceback
             rec["error"] = repr(e)[:1000]
             rec["traceback"] = traceback.format_exc()[-2000:]
             rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
             rec["cancelled"] = isinstance(e, Cancelled)
+        # Keep disk bounded after success and recoverable failures alike (sizes are recorded).
+        # After an unconfirmed teardown a server may still use these files: leave them for the
+        # next run's reaper. After cancellation, no further git runs; the reaper handles it too.
+        if not rec.get("teardown_unconfirmed") and not rec.get("cancelled"):
+            wt_dir, cache_dir = out / "wt" / repo, out / "cache" / repo
+            try:
+                if wt_dir.exists() and (clones / repo).exists():
+                    git("worktree", "remove", "--force", "--force", str(wt_dir), cwd=clones / repo)
+            except (subprocess.CalledProcessError, Cancelled):
+                pass
+            shutil.rmtree(wt_dir, ignore_errors=True)
+            shutil.rmtree(cache_dir, ignore_errors=True)
         append_record(results, rec)
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
