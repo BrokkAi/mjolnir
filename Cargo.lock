@@ -1174,6 +1174,7 @@ name = "brokk-mj-transcript"
 version = "2.72.0"
 dependencies = [
  "agent-client-protocol",
+ "aho-corasick",
  "anyhow",
  "brokk-mj-core",
  "chrono",

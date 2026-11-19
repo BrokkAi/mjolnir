@@ -1049,45 +1049,73 @@ pub fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Result<()> {
     })
 }
 
-/// One read-only snapshot shared by all pairs for a session in a poll. Raw JSON
-/// preserves persisted tool-call field order for the frozen Python renderer.
-#[allow(dead_code)] // Wired by the relevance-policy integration milestone.
-pub fn load_github_history_snapshot(
+/// Reads one session's transcript twice from a single read snapshot and
+/// streams it through `history`, which renders it for every item of the
+/// session: a light pass that counts rows for the headers, then the bodies in
+/// order, one at a time. Nothing is collected: memory does not grow with the
+/// transcript. Raw JSON preserves persisted tool-call field order for the
+/// frozen Python renderer.
+pub fn scan_github_history<S: mj_transcript::github_history::TextSink>(
     session_id: &str,
-) -> Result<Vec<mj_transcript::github_history::HistoryRow>> {
-    load_github_history_snapshot_from(&database_path(), session_id)
+    history: &mut mj_transcript::github_history::SessionHistory<S>,
+) -> Result<()> {
+    scan_github_history_from(&database_path(), session_id, history)
 }
 
-fn load_github_history_snapshot_from(
+fn scan_github_history_from<S: mj_transcript::github_history::TextSink>(
     path: &std::path::Path,
     session_id: &str,
-) -> Result<Vec<mj_transcript::github_history::HistoryRow>> {
-    let connection = open_reader(path)?;
-    let mut statement = connection.prepare("SELECT stable_id, position, created_at_ms, last_changed_at_ms, body_json FROM materialized_transcript_items WHERE session_id=?1 ORDER BY position, stable_id")?;
-    let rows = statement
-        .query_map(params![session_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.into_iter()
-        .map(
-            |(stable_id, position, created_at_ms, last_changed_at_ms, body)| {
-                Ok(mj_transcript::github_history::HistoryRow {
-                    stable_id,
-                    position,
-                    created_at_ms,
-                    last_changed_at_ms,
-                    body: serde_json::from_str(&body)?,
+    history: &mut mj_transcript::github_history::SessionHistory<S>,
+) -> Result<()> {
+    use mj_transcript::github_history::RowMeta;
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    {
+        // SQLite parses each body to extract these fields; none is copied out
+        // except the few message fields.
+        let mut statement = connection.prepare(
+            "SELECT created_at_ms, last_changed_at_ms, json_extract(body_json, '$.kind'),
+                    json_extract(body_json, '$.event.body.type'),
+                    json_extract(body_json, '$.event.body.number'),
+                    json_extract(body_json, '$.event.body.repo')
+             FROM materialized_transcript_items WHERE session_id=?1",
+        )?;
+        let mut rows = statement.query(params![session_id])?;
+        while let Some(row) = rows.next()? {
+            let text = |index: usize| -> rusqlite::Result<Option<&str>> {
+                Ok(match row.get_ref(index)? {
+                    rusqlite::types::ValueRef::Text(bytes) => Some(
+                        std::str::from_utf8(bytes)
+                            .map_err(|e| rusqlite::Error::Utf8Error(index, e))?,
+                    ),
+                    _ => None,
                 })
-            },
-        )
-        .collect()
+            };
+            history.count_row(&RowMeta {
+                created_at_ms: row.get(0)?,
+                last_changed_at_ms: row.get(1)?,
+                kind: text(2)?.unwrap_or(""),
+                event_type: text(3)?.unwrap_or(""),
+                // A JSON integer; a float such as 42.0 is not one for serde_json.
+                event_number: match row.get_ref(4)? {
+                    rusqlite::types::ValueRef::Integer(n) => u64::try_from(n).ok(),
+                    _ => None,
+                },
+                event_repo: text(5)?,
+            });
+        }
+    }
+    history.begin()?;
+    let mut statement = connection.prepare(
+        "SELECT created_at_ms, last_changed_at_ms, body_json FROM materialized_transcript_items
+         WHERE session_id=?1 ORDER BY position, stable_id",
+    )?;
+    let mut rows = statement.query(params![session_id])?;
+    while let Some(row) = rows.next()? {
+        let body = row.get_ref(2)?.as_str()?;
+        history.row(row.get(0)?, row.get(1)?, body)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1308,10 +1336,17 @@ mod history_snapshot_tests {
         ] {
             connection.execute("INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json) VALUES ('session-1',?1,?2,?3,?4,?5)",params![id,position,created,changed,body]).unwrap();
         }
-        let rows = load_github_history_snapshot_from(&path, "session-1").unwrap();
-        let rendered =
-            mj_transcript::github_history::render("session-1", &rows, 2000, "owner/repo", 42)
-                .unwrap();
+        let mut history = mj_transcript::github_history::SessionHistory::new(
+            "session-1",
+            vec![mj_transcript::github_history::HistoryPairSpec {
+                cutoff_ms: 2000,
+                repo: "owner/repo".into(),
+                number: 42,
+                sink: String::new(),
+            }],
+        );
+        scan_github_history_from(&path, "session-1", &mut history).unwrap();
+        let rendered = history.finish().unwrap().pop().unwrap();
         assert_eq!(
             rendered,
             "Session transcript as of 1970-01-01T00:00:02.000Z (UTC)\nSession id: session-1\nTranscript rows included: 2; withheld because changed after cutoff: 2; excluded because created later: 1; item-specific GitHub mailbox notices removed: 1.\nRows come only from Mjolnir materialized transcript records; timestamps are row creation times.\n\n[1970-01-01T00:00:01.000Z] USER\nbefore\ncutoff\n\n[1970-01-01T00:00:01.000Z] TOOL EXECUTE\nTITLE: first\nCALL: {\"title\":\"first\",\"kind\":\"execute\",\"toolCallId\":\"c\"}\n"
