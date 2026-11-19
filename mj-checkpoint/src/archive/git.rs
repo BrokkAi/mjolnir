@@ -2102,21 +2102,16 @@ pub(crate) fn unquote_git_path(path: &[u8]) -> Result<PathBuf> {
     mj_core::path_input::from_git_bytes(&decoded)
 }
 
-/// The linked worktrees of `repository`'s checkout that live inside it, at any
-/// depth, parents before children.
-///
-/// A worktree is "ours" by Git's own definition of the same repository: the
-/// common Git directory that `git rev-parse` names inside it is the checkout's.
-/// A registered worktree outside the checkout, or whose directory is gone,
-/// holds nothing this checkout's session owns and is left out; this never
-/// prunes a registration.
-pub(crate) fn discover_linked_worktrees(
+/// Read Git's registered checkout paths without pruning them. Capture scopes
+/// old-Git path checks to its checkout; restore also needs outside registrations
+/// before it can claim ownership of shared refs.
+pub(crate) fn registered_worktree_paths(
     runner: &dyn GitCommandRunner,
     repository: &Path,
-) -> Result<Vec<LinkedWorktreeDirectory>> {
+    scoped: bool,
+) -> Result<Vec<PathBuf>> {
     let top_level = fs::canonicalize(repository)
         .with_context(|| format!("resolve {}", repository.display()))?;
-    let (_, common_directory) = git_directories(runner, repository)?;
     let mut listed = run_git(
         runner,
         repository,
@@ -2130,6 +2125,7 @@ pub(crate) fn discover_linked_worktrees(
             !top_level.as_os_str().as_encoded_bytes().contains(&b'\n'),
             "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"
         );
+        let (_, common_directory) = git_directories(runner, repository)?;
         match fs::read_dir(common_directory.join("worktrees")) {
             Ok(entries) => {
                 for entry in entries {
@@ -2147,7 +2143,10 @@ pub(crate) fn discover_linked_worktrees(
                         let checkout = registered
                             .parent()
                             .context("worktree registration has no checkout")?;
-                        if !checkout.starts_with(repository) && !checkout.starts_with(&top_level) {
+                        if scoped
+                            && !checkout.starts_with(repository)
+                            && !checkout.starts_with(&top_level)
+                        {
                             continue;
                         }
                         ensure!(
@@ -2170,7 +2169,7 @@ pub(crate) fn discover_linked_worktrees(
         "{}",
         git_failure("list linked worktrees", &listed)
     );
-    let mut found = Vec::new();
+    let mut paths = Vec::new();
     for line in listed.stdout.split(|byte| *byte == delimiter) {
         let Some(path) = line.strip_prefix(b"worktree ") else {
             continue;
@@ -2180,6 +2179,28 @@ pub(crate) fn discover_linked_worktrees(
         } else {
             mj_core::path_input::from_git_bytes(path)?
         };
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// The linked worktrees of `repository`'s checkout that live inside it, at any
+/// depth, parents before children.
+///
+/// A worktree is "ours" by Git's own definition of the same repository: the
+/// common Git directory that `git rev-parse` names inside it is the checkout's.
+/// A registered worktree outside the checkout, or whose directory is gone,
+/// holds nothing this checkout's session owns and is left out; this never
+/// prunes a registration.
+pub(crate) fn discover_linked_worktrees(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Vec<LinkedWorktreeDirectory>> {
+    let top_level = fs::canonicalize(repository)
+        .with_context(|| format!("resolve {}", repository.display()))?;
+    let (_, common_directory) = git_directories(runner, repository)?;
+    let mut found = Vec::new();
+    for path in registered_worktree_paths(runner, repository, true)? {
         // `worktree list` names the user's worktrees anywhere on disk. Only a
         // path that can lie inside the checkout may fail the capture, so
         // decide that lexically, against the top level as given and resolved.

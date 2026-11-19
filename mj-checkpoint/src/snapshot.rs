@@ -890,21 +890,34 @@ fn tracked_stash(
     })
 }
 fn read_stash(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<Vec<SnapshotStashEntry>> {
+    Ok(named_stash(runner, checkout)?
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect())
+}
+fn named_stash(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<Vec<(String, SnapshotStashEntry)>> {
     let bytes = git_bytes(
         runner,
         checkout,
-        ["stash", "list", "--format=%H%x00%gs"],
+        ["stash", "list", "--format=%gd%x00%H%x00%gs"],
         &[],
         "read stash list",
     )?;
     let mut entries = std::str::from_utf8(&bytes)?
         .lines()
         .map(|line| {
-            let (commit, message) = line.split_once('\0').context("malformed stash entry")?;
-            Ok(SnapshotStashEntry {
-                commit: commit.to_owned(),
-                message: message.to_owned(),
-            })
+            let (name, entry) = line.split_once('\0').context("missing stash selector")?;
+            let (commit, message) = entry.split_once('\0').context("malformed stash entry")?;
+            Ok((
+                name.to_owned(),
+                SnapshotStashEntry {
+                    commit: commit.to_owned(),
+                    message: message.to_owned(),
+                },
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     let current = run_git(
@@ -920,13 +933,19 @@ fn read_stash(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<Vec<Snap
     );
     if current.status == 0 {
         let commit = std::str::from_utf8(&current.stdout)?.trim();
-        if entries.first().is_none_or(|entry| entry.commit != commit) {
+        if entries
+            .first()
+            .is_none_or(|(_, entry)| entry.commit != commit)
+        {
             entries.insert(
                 0,
-                SnapshotStashEntry {
-                    commit: commit.to_owned(),
-                    message: git_text(runner, checkout, ["show", "-s", "--format=%s", commit])?,
-                },
+                (
+                    "refs/stash".to_owned(),
+                    SnapshotStashEntry {
+                        commit: commit.to_owned(),
+                        message: git_text(runner, checkout, ["show", "-s", "--format=%s", commit])?,
+                    },
+                ),
             );
         }
     }
@@ -1613,26 +1632,7 @@ fn absolute_url_rule(checkout: &Path, rule: &SnapshotConfigEntry) -> Result<Snap
         value: rule.value.clone(),
     })
 }
-/// Let Git own rewrite selection. Anchoring may merge distinct URL spellings,
-/// so a transfer refuses when that would change its effective destination.
-pub(crate) fn validate_origin_rewrite_anchoring(
-    runner: &dyn GitCommandRunner,
-    checkout: &Path,
-    origin_override: Option<&str>,
-) -> Result<()> {
-    let mut urls = config_values(runner, checkout, "remote.origin.url")?;
-    let has_origin = !urls.is_empty();
-    if !has_origin {
-        urls.extend(origin_override.map(str::to_owned));
-    }
-    if urls.is_empty() {
-        return Ok(());
-    }
-    let pushes = if has_origin {
-        config_values(runner, checkout, "remote.origin.pushurl")?
-    } else {
-        Vec::new()
-    };
+fn url_probe_name(runner: &dyn GitCommandRunner, checkout: &Path) -> Result<String> {
     static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = loop {
         let name = format!(
@@ -1655,6 +1655,181 @@ pub(crate) fn validate_origin_rewrite_anchoring(
             break name;
         }
     };
+    Ok(name)
+}
+fn configured_push_destinations(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    origins: &[String],
+    pushes: &[String],
+) -> Result<Vec<String>> {
+    if origins.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure!(
+        !origins
+            .iter()
+            .chain(pushes)
+            .any(|url| url.contains(['\t', '\n'])),
+        "saved push URLs contain ambiguous tab/newline delimiters"
+    );
+    let name = url_probe_name(runner, checkout)?;
+    let mut arguments = Vec::new();
+    for (key, values) in [("url", origins), ("pushurl", pushes)] {
+        for value in values {
+            arguments.extend(["-c".into(), format!("remote.{name}.{key}={value}").into()]);
+        }
+    }
+    arguments.extend(["remote".into(), "-v".into()]);
+    let output = runner.run(
+        checkout,
+        &GitCommand {
+            arguments,
+            ..Default::default()
+        },
+    )?;
+    ensure!(
+        output.status == 0,
+        "{}",
+        git_failure("resolve saved push destinations", &output)
+    );
+    let prefix = format!("{name}\t");
+    let mut destinations = Vec::new();
+    for row in std::str::from_utf8(&output.stdout)?
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix))
+    {
+        let value = row
+            .strip_suffix(" (push)")
+            .or_else(|| row.strip_suffix(" (fetch)"));
+        ensure!(
+            value.is_some_and(|value| !value.contains('\t')),
+            "Git returned ambiguous saved push destinations"
+        );
+        if row.ends_with(" (push)") {
+            destinations.push(stored_remote(
+                runner,
+                checkout,
+                value.context("missing saved push URL")?,
+            )?);
+        }
+    }
+    ensure!(
+        !destinations.is_empty(),
+        "Git did not resolve saved push destinations"
+    );
+    Ok(destinations)
+}
+fn current_push_destinations(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<Vec<String>> {
+    let origins = config_values(runner, checkout, "remote.origin.url")?;
+    let pushes = config_values(runner, checkout, "remote.origin.pushurl")?;
+    let safe = configured_push_destinations(runner, checkout, &origins, &pushes)?;
+    let output = run_git(
+        runner,
+        checkout,
+        ["remote", "get-url", "--push", "--all", "origin"],
+        &[],
+    )?;
+    ensure!(
+        output.status == 0,
+        "{}",
+        git_failure("read effective push destinations", &output)
+    );
+    let text = std::str::from_utf8(&output.stdout)?
+        .strip_suffix('\n')
+        .context("Git returned ambiguous destination push URLs")?;
+    let actual = text
+        .split('\n')
+        .map(|value| stored_remote(runner, checkout, value))
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        actual == safe,
+        "Git returned ambiguous destination push URLs"
+    );
+    Ok(actual)
+}
+fn notice_destination_push_routes(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    origins: &[String],
+    pushes: &[String],
+) -> Result<()> {
+    let expected = configured_push_destinations(runner, checkout, origins, pushes)?;
+    let actual = current_push_destinations(runner, checkout)?;
+    let extra = actual
+        .iter()
+        .filter(|value| !expected.contains(value))
+        .collect::<std::collections::BTreeSet<_>>();
+    if extra.is_empty() {
+        return Ok(());
+    }
+    for key in ["remote.origin.pushurl", "remote.origin.url"] {
+        let output = run_git(
+            runner,
+            checkout,
+            ["config", "--null", "--show-origin", "--get-all", key],
+            &[],
+        )?;
+        if output.status == 1 {
+            continue;
+        }
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure("locate destination push configuration", &output)
+        );
+        let fields = output
+            .stdout
+            .strip_suffix(b"\0")
+            .unwrap_or(&output.stdout)
+            .split(|byte| *byte == 0)
+            .collect::<Vec<_>>();
+        ensure!(
+            fields.len().is_multiple_of(2),
+            "malformed Git config origin output"
+        );
+        for pair in fields.as_chunks::<2>().0 {
+            let source = std::str::from_utf8(pair[0])?;
+            let value = std::str::from_utf8(pair[1])?.to_owned();
+            let resolved = if key == "remote.origin.pushurl" {
+                configured_push_destinations(runner, checkout, origins, &[value])?
+            } else {
+                configured_push_destinations(runner, checkout, &[value], &[])?
+            };
+            for destination in resolved {
+                if extra.contains(&destination) {
+                    tracing::warn!(checkout = %checkout.display(), %source, %key, extra_destination = %destination,
+                        "destination-owned Git configuration adds a push destination beyond the snapshot; restore kept that configuration");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+/// Let Git own rewrite selection. Anchoring may merge distinct URL spellings,
+/// so a transfer refuses when that would change its effective destination.
+pub(crate) fn validate_origin_rewrite_anchoring(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    origin_override: Option<&str>,
+) -> Result<()> {
+    let mut urls = config_values(runner, checkout, "remote.origin.url")?;
+    let has_origin = !urls.is_empty();
+    if !has_origin {
+        urls.extend(origin_override.map(str::to_owned));
+    }
+    if urls.is_empty() {
+        return Ok(());
+    }
+    let pushes = if has_origin {
+        config_values(runner, checkout, "remote.origin.pushurl")?
+    } else {
+        Vec::new()
+    };
+    let name = url_probe_name(runner, checkout)?;
     let resolve = |url: &str, push: bool, explicit_push: bool| -> Result<String> {
         let mut arguments = vec!["-c".into(), format!("remote.{name}.url={url}").into()];
         let push_listing = push && !explicit_push;
@@ -4552,6 +4727,181 @@ fn same_checkout_cut(left: &WorkspaceInventory, right: &WorkspaceInventory) -> b
             },
         )
 }
+fn protect_checkout_paths(
+    runner: &dyn GitCommandRunner,
+    directory: &Path,
+    head: &str,
+    retry_overlay: Option<&str>,
+) -> Result<()> {
+    // Let Git own case folding and file/directory collision detection. A
+    // private index makes the dry run unable to rewrite the real index.
+    let index = private_index(runner, directory)?;
+    let inspect = |args: &[&str]| {
+        let mut command = provisioned_state_command(args);
+        command
+            .env
+            .push(("GIT_INDEX_FILE".into(), index.path().as_os_str().to_owned()));
+        runner.run(directory, &command)
+    };
+    if let Some(state) = retry_overlay {
+        let output = inspect(&["read-tree", state])?;
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure("load saved retry working tree", &output)
+        );
+    }
+    if retry_overlay.is_some() {
+        let refreshed = inspect(&["update-index", "--refresh", "--ignore-submodules"])?;
+        ensure!(
+            refreshed.status == 0,
+            "{}",
+            git_failure("refresh private saved-overlay index", &refreshed)
+        );
+    }
+    let baseline = inspect(&["write-tree"])?;
+    ensure!(
+        baseline.status == 0,
+        "{}",
+        git_failure("read private checkout baseline", &baseline)
+    );
+    let baseline = std::str::from_utf8(&baseline.stdout)?.trim_end_matches('\n');
+    let changed = inspect(&[
+        "diff-tree",
+        "--raw",
+        "--no-commit-id",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--diff-filter=AMT",
+        "--ignore-submodules=none",
+        baseline,
+        head,
+    ])?;
+    ensure!(
+        changed.status == 0,
+        "{}",
+        git_failure("find destination checkout paths", &changed)
+    );
+    let fields = changed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    ensure!(
+        fields.len().is_multiple_of(2),
+        "malformed checkout tree diff"
+    );
+    let mut intent = std::collections::BTreeSet::new();
+    for pair in fields.as_chunks::<2>().0 {
+        let gitlink =
+            pair[0].split(|byte| byte.is_ascii_whitespace()).nth(1) == Some(b"160000".as_slice());
+        let full = pair[1];
+        for end in full
+            .iter()
+            .enumerate()
+            .filter_map(|(i, byte)| (*byte == b'/').then_some(i))
+            .chain(std::iter::once(full.len()))
+        {
+            let prefix = &full[..end];
+            let path = mj_core::path_input::from_git_bytes(prefix)?;
+            let metadata = match fs::symlink_metadata(directory.join(&path)) {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error).context("inspect destination checkout path"),
+            };
+            if !metadata.is_dir() {
+                // Intent entries make even ignored files visible to Git's
+                // merge safety checks. Existing tracked files keep their OIDs.
+                intent.insert(prefix.to_vec());
+                break;
+            }
+            if end == full.len() && !gitlink {
+                // A saved file replaces this directory. Ask Git for its
+                // untracked contents, including ignored files, without walking
+                // unrelated ignored directories elsewhere in the checkout.
+                let root = fs::canonicalize(directory)?;
+                let actual = fs::canonicalize(directory.join(&path))?;
+                let actual = actual
+                    .strip_prefix(&root)
+                    .context("checkout directory escaped destination")?;
+                let mut command = provisioned_state_command(&[
+                    "--literal-pathspecs",
+                    "ls-files",
+                    "--others",
+                    "--directory",
+                    "-z",
+                    "--",
+                ]);
+                command.arguments.push(actual.as_os_str().to_owned());
+                command
+                    .env
+                    .push(("GIT_INDEX_FILE".into(), index.path().as_os_str().to_owned()));
+                let contents = runner.run(directory, &command)?;
+                ensure!(
+                    contents.status == 0,
+                    "{}",
+                    git_failure("inspect overwritten directory", &contents)
+                );
+                ensure!(
+                    contents.stdout.is_empty(),
+                    "restore would overwrite destination files in {} at {}; move these untracked directory contents aside, then retry",
+                    directory.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+    if !intent.is_empty() {
+        let mut command = provisioned_state_command(&[
+            "--literal-pathspecs",
+            "add",
+            "--intent-to-add",
+            "--force",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ]);
+        command
+            .env
+            .push(("GIT_INDEX_FILE".into(), index.path().as_os_str().to_owned()));
+        for path in intent {
+            command.stdin.extend(path);
+            command.stdin.push(0);
+        }
+        let output = runner.run(directory, &command)?;
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure(
+                "protect destination ignored paths in private index",
+                &output
+            )
+        );
+    }
+    let output = inspect(&[
+        "read-tree",
+        "--dry-run",
+        "--no-recurse-submodules",
+        "-m",
+        "-u",
+        baseline,
+        head,
+    ])?;
+    ensure!(
+        output.status == 0,
+        "restore would overwrite destination files in {}; move the reported untracked paths aside, or save tracked edits outside the destination, then retry; {}",
+        directory.display(),
+        git_failure("check destination checkout collisions", &output)
+    );
+    Ok(())
+}
 fn checkout_head(
     runner: &dyn GitCommandRunner,
     destination: &Path,
@@ -4642,9 +4992,212 @@ fn validate_restore_worktree_root(runner: &dyn GitCommandRunner, directory: &Pat
         directory.display(),
         root.display()
     );
+    let overrides = git_history_overrides(runner, directory)?;
+    ensure!(
+        overrides.is_empty(),
+        "provisioned worktree {} has {}; preserve the override objects outside this restore, remove these Git history overrides, and retry",
+        directory.display(),
+        overrides.join(", ")
+    );
     require_full_restore_history(runner, directory, false)
 }
 
+pub(crate) fn git_history_overrides(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    let replacements = git_text(runner, checkout, ["replace", "--list"])?;
+    if !replacements.is_empty() {
+        found.push(format!(
+            "Git replacement refs ({})",
+            replacements.replace('\n', ", ")
+        ));
+    }
+    let path = git_path(runner, checkout, "info/grafts")?;
+    let contents = match fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).context("read Git grafts"),
+    };
+    if contents.split(|byte| *byte == b'\n').any(|line| {
+        line.iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|byte| byte != b'#')
+    }) {
+        found.push(format!("Git grafts at {}", path.display()));
+    }
+    Ok(found)
+}
+fn provisioned_state_command(arguments: &[&str]) -> GitCommand {
+    GitCommand {
+        arguments: arguments.iter().map(OsString::from).collect(),
+        env: vec![
+            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+            ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+        ],
+        stdin: Vec::new(),
+    }
+}
+fn provisioned_tracked_paths(
+    runner: &dyn GitCommandRunner,
+    directory: &Path,
+) -> Result<Vec<PathBuf>> {
+    let hidden = crate::archive::hidden_tracked_paths(runner, directory)?;
+    ensure!(
+        hidden.is_empty(),
+        "provisioned worktree {} has hidden tracked paths at {}; preserve any edits and clear their assume-unchanged/skip-worktree flags with git update-index, then retry",
+        directory.display(),
+        display_restore_paths(&hidden)
+    );
+    // clone --no-checkout can have neither an index nor a promised HEAD tree.
+    // With no working files there is no destination state for reset to destroy.
+    if !git_path(runner, directory, "index")?.try_exists()? {
+        let mut unbuilt = true;
+        for entry in fs::read_dir(directory)? {
+            if entry?.file_name() != ".git" {
+                unbuilt = false;
+                break;
+            }
+        }
+        if unbuilt {
+            return Ok(Vec::new());
+        }
+    }
+    let output = runner.run(
+        directory,
+        &provisioned_state_command(&[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+        ]),
+    )?;
+    ensure!(
+        output.status == 0,
+        "{}",
+        git_failure("inspect provisioned tracked state", &output)
+    );
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            ensure!(
+                entry.len() > 3 && entry[2] == b' ',
+                "malformed provisioned Git status"
+            );
+            mj_core::path_input::from_git_bytes(&entry[3..])
+        })
+        .collect()
+}
+fn display_restore_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("{path:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+fn validate_provisioned_stash(
+    runner: &dyn GitCommandRunner,
+    directory: &Path,
+    saved: &[SnapshotStashEntry],
+) -> Result<()> {
+    let current = named_stash(runner, directory)?;
+    let mut remaining = BTreeMap::new();
+    for entry in saved {
+        *remaining
+            .entry((entry.commit.as_str(), entry.message.as_str()))
+            .or_insert(0usize) += 1;
+    }
+    let mut foreign = Vec::new();
+    for (name, entry) in &current {
+        match remaining.get_mut(&(entry.commit.as_str(), entry.message.as_str())) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => foreign.push(format!("{name} ({})", entry.message)),
+        }
+    }
+    ensure!(
+        foreign.is_empty(),
+        "provisioned destination {} has stash entries absent from the snapshot: {}; save these entries outside the destination (including binary and untracked data) before removing the backed-up entries and retrying; for tracked changes, export `git stash show --binary -p <stash-selector> > <file outside destination>` or copy them to an independent repository; restore replaces this repository's stash list",
+        directory.display(),
+        foreign.join(", ")
+    );
+    Ok(())
+}
+fn validate_provisioned_worktree_state(
+    runner: &dyn GitCommandRunner,
+    directory: &Path,
+    head: &SnapshotHead,
+    working_state: Option<&str>,
+) -> Result<Option<String>> {
+    let paths = provisioned_tracked_paths(runner, directory)?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let inspect = |args: &[&str]| runner.run(directory, &provisioned_state_command(args));
+    if let Some(state) = working_state {
+        let current = inspect(&["rev-parse", "--verify", "HEAD"])?;
+        let index_tree = format!("{state}^2");
+        let available = inspect(&["cat-file", "-e", &format!("{index_tree}^{{tree}}")])?;
+        if current.status == 0
+            && current
+                .stdout
+                .strip_suffix(b"\n")
+                .unwrap_or(&current.stdout)
+                == head.commit().as_bytes()
+            && available.status == 0
+            && inspect(&[
+                "diff",
+                "--cached",
+                "--quiet",
+                "--ignore-submodules=all",
+                "--no-ext-diff",
+                &index_tree,
+                "--",
+            ])?
+            .status
+                == 0
+            && inspect(&[
+                "diff",
+                "--quiet",
+                "--ignore-submodules=all",
+                "--no-ext-diff",
+                state,
+                "--",
+            ])?
+            .status
+                == 0
+        {
+            // Only our exact saved HEAD/index/worktree state may be discarded
+            // during a retry. No marker is needed, and gitlinks remain owned by
+            // the existing explicit overlay restoration.
+            return Ok(Some(state.to_owned()));
+        }
+    }
+    anyhow::bail!(
+        "provisioned worktree {} has tracked edits at {}; save the edits outside this destination before retrying: export `git diff --binary > <file outside destination>` and `git diff --cached --binary > <staged file outside destination>`, or copy them to an independent repository; a local stash or commit is not a backup because restore replaces the stash list and local refs; restore only replaces clean state or this snapshot's exact saved overlay",
+        directory.display(),
+        display_restore_paths(&paths)
+    )
+}
+
+fn restored_module_admin_path(
+    runner: &dyn GitCommandRunner,
+    owner: &Path,
+    name: &str,
+) -> Result<PathBuf> {
+    crate::archive::slash_path(Path::new(name))?;
+    let modules = git_path(runner, owner, "modules")?;
+    crate::archive::ensure_no_symlink_ancestors(
+        modules.parent().context("module store has no parent")?,
+        &Path::new("modules").join(name),
+    )?;
+    Ok(modules.join(name))
+}
 fn validate_restored_module_admin(
     runner: &dyn GitCommandRunner,
     owner: &Path,
@@ -4652,13 +5205,7 @@ fn validate_restored_module_admin(
     name: &str,
 ) -> Result<PathBuf> {
     validate_restore_worktree_root(runner, directory)?;
-    crate::archive::slash_path(Path::new(name))?;
-    let modules = git_path(runner, owner, "modules")?;
-    crate::archive::ensure_no_symlink_ancestors(
-        modules.parent().context("module store has no parent")?,
-        &Path::new("modules").join(name),
-    )?;
-    let expected = modules.join(name);
+    let expected = restored_module_admin_path(runner, owner, name)?;
     let (private, common) = crate::archive::git::git_directories(runner, directory)?;
     let private = fs::canonicalize(private)?;
     let common = fs::canonicalize(common)?;
@@ -4675,33 +5222,12 @@ fn validate_restored_module_admin(
         private.display(),
         common.display()
     );
-    // Snapshot modules preserve their recorded clean tracked files. A normal
-    // same-commit checkout preserves destination edits instead of restoring them.
-    // Ignore gitlinks: their intentionally staged positions are restored below.
-    let status = runner.run(
-        directory,
-        &GitCommand {
-            arguments: [
-                "status",
-                "--porcelain",
-                "--untracked-files=no",
-                "--ignore-submodules=all",
-            ]
-            .map(Into::into)
-            .to_vec(),
-            env: vec![("GIT_OPTIONAL_LOCKS".into(), "0".into())],
-            stdin: Vec::new(),
-        },
-    )?;
+    let paths = provisioned_tracked_paths(runner, directory)?;
     ensure!(
-        status.status == 0,
-        "{}",
-        git_failure("inspect provisioned submodule tracked state", &status)
-    );
-    ensure!(
-        status.stdout.is_empty(),
-        "provisioned submodule {} has tracked edits that conflict with the saved clean state; stash or commit these edits in that submodule, then retry; destination untracked files are kept",
-        directory.display()
+        paths.is_empty(),
+        "provisioned submodule {} has tracked edits at {} that conflict with the saved clean state; stash or commit these edits in that submodule, then retry; destination untracked files are kept",
+        directory.display(),
+        display_restore_paths(&paths)
     );
     Ok(private)
 }
@@ -5009,22 +5535,7 @@ fn restore_submodules(
             let admin = if directory.join(".git").try_exists()? {
                 validate_restored_module_admin(runner, &owner, &directory, &submodule.name)?
             } else {
-                let modules = git_path(runner, &owner, "modules")?;
-                let relative = Path::new("modules").join(&submodule.name);
-                crate::archive::ensure_no_symlink_ancestors(
-                    modules.parent().context("module store has no parent")?,
-                    &relative,
-                )?;
-                let admin = modules.join(&submodule.name);
-                match fs::symlink_metadata(&admin) {
-                    Ok(metadata) => ensure!(
-                        !metadata.file_type().is_symlink(),
-                        "submodule admin path is a symlink"
-                    ),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error).context("inspect submodule admin path"),
-                }
-                admin
+                restored_module_admin_path(runner, &owner, &submodule.name)?
             };
             let first_origin = submodule.origin_urls.first().with_context(|| {
                 format!(
@@ -5070,6 +5581,13 @@ fn restore_submodules(
                         git_failure("reattach provisioned submodule", &output)
                     );
                 }
+                let overrides = git_history_overrides(runner, &directory)?;
+                ensure!(
+                    overrides.is_empty(),
+                    "provisioned submodule {} has {}; preserve the override objects, remove these Git history overrides, and retry",
+                    directory.display(),
+                    overrides.join(", ")
+                );
                 restore_url_rules(runner, &directory, &submodule.url_rules)?;
                 if submodule.worktree_config_enabled {
                     git_text(
@@ -5149,9 +5667,14 @@ fn restore_submodules(
             // Give Git a real HEAD before registering/absorbing the module. Its
             // index gitlink can intentionally differ from this checked-out commit.
             let mut command = GitCommand {
-                arguments: ["checkout", "--detach", "--no-recurse-submodules"]
-                    .map(Into::into)
-                    .to_vec(),
+                arguments: [
+                    "checkout",
+                    "--detach",
+                    "--no-recurse-submodules",
+                    "--no-overwrite-ignore",
+                ]
+                .map(Into::into)
+                .to_vec(),
                 ..Default::default()
             };
             if !had_worktree {
@@ -5175,6 +5698,12 @@ fn restore_submodules(
                     &format!("submodule.{}.url", submodule.name),
                     &submodule.url,
                 ],
+            )?;
+            notice_destination_push_routes(
+                runner,
+                &directory,
+                &submodule.origin_urls,
+                &submodule.push_urls,
             )?;
             // absorbgitdirs resolves its path through the index, even when the
             // saved index intentionally deletes this still-initialized checkout.
@@ -5741,7 +6270,8 @@ pub fn restore_workspace_snapshot(
     }
     let destination = std::path::absolute(destination)?;
     let destination = destination.as_path();
-    if matches!(base, RestoreBase::Provisioned { .. }) {
+    let mut retry_overlays = BTreeMap::new();
+    let existing_worktrees = if matches!(base, RestoreBase::Provisioned { .. }) {
         validate_restore_worktree_root(runner, destination)?;
         let root = fs::canonicalize(destination)?;
         let (private, common) = crate::archive::git::git_directories(runner, destination)?;
@@ -5753,6 +6283,60 @@ pub fn restore_workspace_snapshot(
             private.display(),
             common.display()
         );
+        for registered in
+            crate::archive::git::registered_worktree_paths(runner, destination, false)?
+        {
+            let location = teardown_path_dependency(&registered, std::slice::from_ref(&root))?;
+            let represented = location.as_ref().is_some_and(|(path, inside)| {
+                *inside
+                    && (path == &root
+                        || snapshot
+                            .worktrees
+                            .iter()
+                            .any(|tree| root.join(&tree.relative_path) == *path))
+            });
+            ensure!(
+                represented,
+                "provisioned destination shares Git refs with worktree {} outside the saved restore; preserve its work outside this restore, then remove that worktree with `git worktree remove --force <path>` or, once safe, `git worktree prune`; alternatively provision an independent clone, then retry",
+                registered.display()
+            );
+        }
+        // The common stash stack is shared by all worktrees. Check it once,
+        // beside tracked-state ownership, before replacing config or any ref.
+        validate_provisioned_stash(runner, destination, &snapshot.stash)?;
+        if let Some(state) = validate_provisioned_worktree_state(
+            runner,
+            destination,
+            &snapshot.head,
+            snapshot.working_state.as_deref(),
+        )? {
+            retry_overlays.insert(PathBuf::new(), state);
+        }
+        let existing = discover_linked_worktrees(runner, destination)?;
+        for tree in &snapshot.worktrees {
+            if existing
+                .iter()
+                .any(|registered| registered.relative == tree.relative_path)
+            {
+                crate::archive::ensure_no_symlink_ancestors(destination, &tree.relative_path)?;
+                let path = destination.join(&tree.relative_path);
+                validate_restore_worktree_root(runner, &path)?;
+                let (_, nested_common) = crate::archive::git::git_directories(runner, &path)?;
+                ensure!(
+                    fs::canonicalize(nested_common)? == fs::canonicalize(&common)?,
+                    "provisioned nested worktree {} does not belong to this destination",
+                    path.display()
+                );
+                if let Some(state) = validate_provisioned_worktree_state(
+                    runner,
+                    &path,
+                    &tree.head,
+                    tree.working_state.as_deref(),
+                )? {
+                    retry_overlays.insert(tree.relative_path.clone(), state);
+                }
+            }
+        }
         for (tree_path, modules) in
             std::iter::once((Path::new(""), snapshot.initialized_submodules.as_slice())).chain(
                 snapshot.worktrees.iter().map(|tree| {
@@ -5781,10 +6365,36 @@ pub fn restore_workspace_snapshot(
                         &directory,
                         &module.name,
                     )?;
+                } else {
+                    let parent = modules
+                        .iter()
+                        .filter(|parent| {
+                            parent.path != module.path && module.path.starts_with(&parent.path)
+                        })
+                        .max_by_key(|parent| parent.path.components().count())
+                        .map(|parent| parent.path.as_path())
+                        .unwrap_or_else(|| Path::new(""));
+                    let owner = tree.join(parent);
+                    // An omitted parent has no local module store to inspect.
+                    if owner.is_dir() && owner.join(".git").try_exists()? {
+                        let admin = restored_module_admin_path(runner, &owner, &module.name)?;
+                        if admin.is_dir() {
+                            let overrides = git_history_overrides(runner, &admin)?;
+                            ensure!(
+                                overrides.is_empty(),
+                                "provisioned cached submodule {} has {}; preserve the override objects, remove these Git history overrides, and retry",
+                                admin.display(),
+                                overrides.join(", ")
+                            );
+                        }
+                    }
                 }
             }
         }
-    }
+        existing
+    } else {
+        Vec::new()
+    };
     let allow_origin_fetch = match base {
         RestoreBase::Clone { origin, seed } => {
             initialize_repository(
@@ -5934,54 +6544,6 @@ pub fn restore_workspace_snapshot(
         snapshot.refs.keys().cloned().collect::<Vec<_>>().join(", "),
         fetch_failures.join("; ")
     );
-    // Origin tags remain available to raw conversions, except when replaced,
-    // deleted, or prefix-conflicting with a saved tag.
-    let fetched_tags = git_text(
-        runner,
-        destination,
-        [
-            "for-each-ref",
-            "--format=%(refname)%00%(objectname)",
-            "refs/tags",
-            "refs/heads",
-            "refs/notes",
-            "refs/mj",
-        ],
-    )?;
-    for line in fetched_tags.lines() {
-        let (name, oid) = line.split_once('\0').context("malformed clone ref")?;
-        let conflict = snapshot.refs.iter().any(|(saved, saved_oid)| {
-            (saved == name && saved_oid != oid)
-                || saved
-                    .strip_prefix(name)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-                || name
-                    .strip_prefix(saved)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        });
-        if conflict
-            || (snapshot.refs_complete
-                && local_snapshot_ref(name)
-                && !snapshot.refs.contains_key(name))
-        {
-            git_text(
-                runner,
-                destination,
-                ["update-ref", "--no-deref", "-d", name],
-            )?;
-        }
-    }
-    for name in &snapshot.deleted_refs {
-        ensure!(
-            local_snapshot_ref(name),
-            "deleted snapshot ref {name} is outside the local-ref allowlist"
-        );
-        git_text(
-            runner,
-            destination,
-            ["update-ref", "--no-deref", "-d", name],
-        )?;
-    }
     let mut restore_refs = snapshot.refs.clone();
     for head in
         std::iter::once(&snapshot.head).chain(snapshot.worktrees.iter().map(|tree| &tree.head))
@@ -5989,10 +6551,6 @@ pub fn restore_workspace_snapshot(
         if let SnapshotHead::Branch { name, commit } = head {
             restore_refs.insert(name.clone(), commit.clone());
         }
-    }
-    for (name, oid) in &restore_refs {
-        require_object(runner, destination, name, oid)?;
-        git_text(runner, destination, ["update-ref", "--no-deref", name, oid])?;
     }
     require_full_restore_history(runner, destination, false)?;
     let graph_command = GitCommand {
@@ -6055,6 +6613,80 @@ pub fn restore_workspace_snapshot(
             ""
         }
     );
+
+    // Decide filesystem collisions before ref cleanup changes what HEAD means.
+    // A refused checkout remains retryable after its untracked blocker is moved.
+    protect_checkout_paths(
+        runner,
+        destination,
+        snapshot.head.commit(),
+        retry_overlays.get(Path::new("")).map(String::as_str),
+    )?;
+    for tree in &snapshot.worktrees {
+        if existing_worktrees
+            .iter()
+            .any(|existing| existing.relative == tree.relative_path)
+        {
+            protect_checkout_paths(
+                runner,
+                &destination.join(&tree.relative_path),
+                tree.head.commit(),
+                retry_overlays.get(&tree.relative_path).map(String::as_str),
+            )?;
+        }
+    }
+    // Origin tags remain available to raw conversions, except when replaced,
+    // deleted, or prefix-conflicting with a saved tag.
+    let fetched_tags = git_text(
+        runner,
+        destination,
+        [
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)",
+            "refs/tags",
+            "refs/heads",
+            "refs/notes",
+            "refs/mj",
+        ],
+    )?;
+    for line in fetched_tags.lines() {
+        let (name, oid) = line.split_once('\0').context("malformed clone ref")?;
+        let conflict = snapshot.refs.iter().any(|(saved, saved_oid)| {
+            (saved == name && saved_oid != oid)
+                || saved
+                    .strip_prefix(name)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || name
+                    .strip_prefix(saved)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        });
+        if conflict
+            || (snapshot.refs_complete
+                && local_snapshot_ref(name)
+                && !snapshot.refs.contains_key(name))
+        {
+            git_text(
+                runner,
+                destination,
+                ["update-ref", "--no-deref", "-d", name],
+            )?;
+        }
+    }
+    for name in &snapshot.deleted_refs {
+        ensure!(
+            local_snapshot_ref(name),
+            "deleted snapshot ref {name} is outside the local-ref allowlist"
+        );
+        git_text(
+            runner,
+            destination,
+            ["update-ref", "--no-deref", "-d", name],
+        )?;
+    }
+    for (name, oid) in &restore_refs {
+        require_object(runner, destination, name, oid)?;
+        git_text(runner, destination, ["update-ref", "--no-deref", name, oid])?;
+    }
     let restored_branches = restore_refs
         .keys()
         .filter_map(|name| name.strip_prefix("refs/heads/"))
@@ -6157,6 +6789,14 @@ pub fn restore_workspace_snapshot(
         require_object(runner, destination, "working state", state)?;
         git_text(runner, destination, ["stash", "apply", "--index", state])?;
     }
+    if snapshot.source_had_origin || matches!(base, RestoreBase::Clone { .. }) {
+        notice_destination_push_routes(
+            runner,
+            destination,
+            &snapshot.origin_urls,
+            &snapshot.push_urls,
+        )?;
+    }
     restore_submodules(
         runner,
         destination,
@@ -6166,7 +6806,6 @@ pub fn restore_workspace_snapshot(
     )?;
     // A provisioned retry may have created some of these before a later
     // module needed provisioning. Reuse only this repository's registrations.
-    let existing_worktrees = discover_linked_worktrees(runner, destination)?;
     for tree in &snapshot.worktrees {
         ensure!(
             !tree.relative_path.as_os_str().is_empty()
@@ -6230,6 +6869,14 @@ pub fn restore_workspace_snapshot(
             snapshot.source_had_origin || matches!(base, RestoreBase::Clone { .. }),
         )?;
         clear_worktree_upstreams(runner, &path, &restored_branches)?;
+        if snapshot.source_had_origin || matches!(base, RestoreBase::Clone { .. }) {
+            notice_destination_push_routes(
+                runner,
+                &path,
+                &snapshot.origin_urls,
+                &snapshot.push_urls,
+            )?;
+        }
         restore_submodules(
             runner,
             &path,
@@ -6253,6 +6900,35 @@ mod tests {
         }
         arguments
     }
+    struct RestoreNotices(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl tracing::Subscriber for RestoreNotices {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!("{}={value:?} ", field.name()));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     struct FileGit;
     impl GitCommandRunner for FileGit {
         fn run(
@@ -14707,36 +15383,8 @@ mod tests {
         let diff = git(&child, &["diff"]);
         let staged = git(&child, &["diff", "--cached"]);
         // Observe the notice on the same real restore path without changing its API.
-        struct Notices(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-        impl tracing::Subscriber for Notices {
-            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                struct Fields(String);
-                impl tracing::field::Visit for Fields {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        self.0.push_str(&format!("{}={value:?} ", field.name()));
-                    }
-                }
-                let mut fields = Fields(String::new());
-                event.record(&mut fields);
-                self.0.lock().unwrap().push(fields.0);
-            }
-            fn enter(&self, _: &tracing::span::Id) {}
-            fn exit(&self, _: &tracing::span::Id) {}
-        }
         let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        tracing::subscriber::with_default(Notices(notices.clone()), || {
+        tracing::subscriber::with_default(RestoreNotices(notices.clone()), || {
             restore_workspace_snapshot(
                 &FileGit,
                 &snapshot,
@@ -17676,5 +18324,585 @@ mod tests {
                 "destination-owned notes\n"
             );
         }
+    }
+    // Hard-won: 571917f05: root and reused nested hard resets discarded foreign tracked edits.
+    #[test]
+    fn review_fifteenth_provisioned_worktrees_preserve_foreign_edits_and_allow_own_overlay() {
+        for nested_target in [false, true] {
+            for mode in ["unstaged", "staged", "cancelled-in-worktree"] {
+                let root = Repo::new();
+                let nested = root.checkout.join("lane");
+                git(
+                    &root.checkout,
+                    &["worktree", "add", "--detach", nested.to_str().unwrap()],
+                );
+                for directory in [&root.checkout, &nested] {
+                    fs::write(directory.join("file"), "saved index\n").unwrap();
+                    git(directory, &["add", "file"]);
+                    fs::write(directory.join("file"), "saved worktree\n").unwrap();
+                }
+                let snapshot = root.capture(&CheckoutOwnership::Managed);
+                let destination = root.restore(&snapshot, None);
+                let target = if nested_target {
+                    destination.join("lane")
+                } else {
+                    destination.clone()
+                };
+                git(&target, &["reset", "--hard", "HEAD"]);
+                let original = fs::read(target.join("file")).unwrap();
+                fs::write(target.join("file"), "foreign provisioned edit\n").unwrap();
+                if mode != "unstaged" {
+                    git(&target, &["add", "file"]);
+                }
+                if mode == "cancelled-in-worktree" {
+                    fs::write(target.join("file"), original).unwrap();
+                }
+                let config = fs::read(destination.join(".git/config")).unwrap();
+                let parent_index = fs::read(destination.join(".git/index")).unwrap();
+                let index_path = git_path(&FileGit, &target, "index").unwrap();
+                let index = fs::read(&index_path).unwrap();
+                let file = fs::read(target.join("file")).unwrap();
+                let refs = git(&destination, &["show-ref"]);
+                let error = restore_workspace_snapshot(
+                    &FileGit,
+                    &snapshot,
+                    &destination,
+                    &RestoreBase::Provisioned {
+                        allow_origin_fetch: false,
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(target.to_str().unwrap())
+                        && format!("{error:#}").contains("tracked edits at")
+                        && format!("{error:#}").contains("file"),
+                    "{mode}, nested={nested_target}: {error:#}"
+                );
+                assert_eq!(fs::read(destination.join(".git/config")).unwrap(), config);
+                assert_eq!(
+                    fs::read(destination.join(".git/index")).unwrap(),
+                    parent_index
+                );
+                assert_eq!(fs::read(index_path).unwrap(), index);
+                assert_eq!(fs::read(target.join("file")).unwrap(), file);
+                assert_eq!(git(&destination, &["show-ref"]), refs);
+                git(&target, &["reset", "--hard", "HEAD"]);
+                restore_workspace_snapshot(
+                    &FileGit,
+                    &snapshot,
+                    &destination,
+                    &RestoreBase::Provisioned {
+                        allow_origin_fetch: false,
+                    },
+                )
+                .unwrap();
+                for directory in [&destination, &destination.join("lane")] {
+                    assert_eq!(
+                        fs::read(directory.join("file")).unwrap(),
+                        b"saved worktree\n"
+                    );
+                    assert!(git(directory, &["diff", "--cached"]).contains("saved index"));
+                }
+            }
+        }
+    }
+
+    // Hard-won: 571917f05: an owned primary Git directory still shared refs with unrepresented worktrees.
+    #[test]
+    fn review_fifteenth_unrepresented_destination_worktrees_keep_their_refs() {
+        for inside in [false, true] {
+            for gone in [false, true] {
+                let root = Repo::new();
+                let snapshot = root.capture(&CheckoutOwnership::Managed);
+                let destination = root.restore(&snapshot, None);
+                let extra = if inside {
+                    destination.join("provider")
+                } else {
+                    root.temp.path().join("provider\tquoted\"")
+                };
+                git(
+                    &destination,
+                    &["worktree", "add", "-b", "provider", extra.to_str().unwrap()],
+                );
+                fs::write(extra.join("file"), "provider-only commit\n").unwrap();
+                git(&extra, &["commit", "-am", "provider work"]);
+                let tip = git(&extra, &["rev-parse", "HEAD"]);
+                if gone {
+                    fs::remove_dir_all(&extra).unwrap();
+                }
+                let refs = git(&destination, &["show-ref"]);
+                let config = fs::read(destination.join(".git/config")).unwrap();
+                let index = fs::read(destination.join(".git/index")).unwrap();
+                let runner: &dyn GitCommandRunner = if !inside && !gone {
+                    &crate::test_support::Git231
+                } else {
+                    &FileGit
+                };
+                let error = restore_workspace_snapshot(
+                    runner,
+                    &snapshot,
+                    &destination,
+                    &RestoreBase::Provisioned {
+                        allow_origin_fetch: false,
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(extra.to_str().unwrap())
+                        && format!("{error:#}").contains("git worktree prune")
+                        && format!("{error:#}").contains("independent clone"),
+                    "{error:#}"
+                );
+                assert_eq!(git(&destination, &["rev-parse", "provider"]), tip);
+                assert_eq!(git(&destination, &["show-ref"]), refs);
+                assert_eq!(fs::read(destination.join(".git/config")).unwrap(), config);
+                assert_eq!(fs::read(destination.join(".git/index")).unwrap(), index);
+            }
+        }
+    }
+
+    // Hard-won: 571917f05: reset --hard overwrote provisioned untracked files that the saved HEAD added.
+    #[test]
+    fn review_fifteenth_untracked_checkout_collisions_preserve_files_and_retry() {
+        for (nested_target, ignored, directory_blocker) in [
+            (false, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, false, false),
+        ] {
+            let root = Repo::new();
+            let source = if nested_target {
+                let nested = root.checkout.join("lane");
+                git(
+                    &root.checkout,
+                    &["worktree", "add", "--detach", nested.to_str().unwrap()],
+                );
+                nested
+            } else {
+                root.checkout.clone()
+            };
+            fs::write(source.join("settings.toml"), "saved settings\n").unwrap();
+            git(&source, &["add", "settings.toml"]);
+            git(&source, &["commit", "-m", "saved tracked settings"]);
+            let snapshot = root.capture(&CheckoutOwnership::Managed);
+            let destination = root.temp.path().join("provisioned");
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    root.origin.to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            );
+            let target = if nested_target {
+                let nested = destination.join("lane");
+                git(
+                    &destination,
+                    &["worktree", "add", "--detach", nested.to_str().unwrap()],
+                );
+                nested
+            } else {
+                destination.clone()
+            };
+            let blocker = target.join("settings.toml");
+            let personal = if directory_blocker {
+                fs::create_dir(&blocker).unwrap();
+                blocker.join("notes")
+            } else {
+                blocker.clone()
+            };
+            fs::write(&personal, "provider-owned settings\n").unwrap();
+            if ignored {
+                fs::write(destination.join(".git/info/exclude"), "settings.toml\n").unwrap();
+            }
+            let head = git(&target, &["rev-parse", "HEAD"]);
+            let index_path = git_path(&FileGit, &target, "index").unwrap();
+            let index = fs::read(&index_path).unwrap();
+            let error = restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .expect_err(&format!(
+                "nested={nested_target}, ignored={ignored}, directory={directory_blocker}"
+            ));
+            assert!(
+                format!("{error:#}").contains("would overwrite destination files")
+                    && format!("{error:#}").contains("settings.toml"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(&personal).unwrap(), b"provider-owned settings\n");
+            assert_eq!(fs::read(&index_path).unwrap(), index);
+            assert_eq!(git(&target, &["rev-parse", "HEAD"]), head);
+            let kept = root.temp.path().join("kept-settings");
+            fs::rename(&blocker, &kept).unwrap();
+            restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(target.join("settings.toml")).unwrap(),
+                b"saved settings\n"
+            );
+            let personal = if directory_blocker {
+                kept.join("notes")
+            } else {
+                kept
+            };
+            assert_eq!(fs::read(personal).unwrap(), b"provider-owned settings\n");
+        }
+        let root = Repo::new();
+        fs::create_dir(root.checkout.join("settings")).unwrap();
+        let mut paths_bytes = 0;
+        for n in 0..3000 {
+            let name = format!("settings/configuration-{n:04}.toml");
+            paths_bytes += name.len() + 1;
+            fs::write(root.checkout.join(name), b"saved configuration\n").unwrap();
+        }
+        assert!(paths_bytes > 64 * 1024);
+        git(&root.checkout, &["add", "settings"]);
+        git(
+            &root.checkout,
+            &["commit", "-m", "many saved configuration files"],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let destination = root.temp.path().join("bulk-provisioned");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                root.origin.to_str().unwrap(),
+                destination.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir(destination.join("settings")).unwrap();
+        fs::write(destination.join(".git/info/exclude"), b"settings/\n").unwrap();
+        for n in 0..3000 {
+            fs::write(
+                destination.join(format!("settings/configuration-{n:04}.toml")),
+                b"provider configuration\n",
+            )
+            .unwrap();
+        }
+        let index = fs::read(destination.join(".git/index")).unwrap();
+        let error = restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("would overwrite destination files"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(destination.join(".git/index")).unwrap(), index);
+        for n in [0, 2999] {
+            assert_eq!(
+                fs::read(destination.join(format!("settings/configuration-{n:04}.toml"))).unwrap(),
+                b"provider configuration\n"
+            );
+        }
+    }
+
+    // Hard-won: 571917f05: destination replacement refs could substitute a different tree for a saved object ID.
+    #[test]
+    fn review_fifteenth_destination_history_overrides_refuse_before_writes() {
+        for (in_module, cached) in [(false, false), (true, false), (true, true)] {
+            let root = Repo::new();
+            let module = Repo::new();
+            if in_module {
+                add_submodule(&root, &module);
+            }
+            let snapshot = root.capture(&CheckoutOwnership::Managed);
+            let destination = root.restore(&snapshot, None);
+            let target = if in_module {
+                destination.join("sub")
+            } else {
+                destination.clone()
+            };
+            let original = git(&target, &["rev-parse", "HEAD"]);
+            git(&target, &["checkout", "--orphan", "override"]);
+            fs::write(target.join("file"), "replacement content\n").unwrap();
+            git(&target, &["commit", "-am", "replacement tree"]);
+            let replacement = git(&target, &["rev-parse", "HEAD"]);
+            git(&target, &["checkout", "--detach", &original]);
+            git(&target, &["branch", "-D", "override"]);
+            git(&target, &["replace", &original, &replacement]);
+            let index_path = git_path(&FileGit, &target, "index").unwrap();
+            let index = fs::read(&index_path).unwrap();
+            let config = fs::read(destination.join(".git/config")).unwrap();
+            let refs = git(&destination, &["show-ref"]);
+            if cached {
+                git(&destination, &["submodule", "deinit", "-f", "sub"]);
+            }
+            let config = if cached {
+                fs::read(destination.join(".git/config")).unwrap()
+            } else {
+                config
+            };
+            let error = restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("Git replacement refs"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(&index_path).unwrap(), index);
+            assert_eq!(fs::read(destination.join(".git/config")).unwrap(), config);
+            assert_eq!(git(&destination, &["show-ref"]), refs);
+            if !cached {
+                assert_eq!(
+                    fs::read(target.join("file")).unwrap(),
+                    b"first\nsecond\nthird\n"
+                );
+            }
+        }
+    }
+
+    // Hard-won: 571917f05: module status hid edits behind assume-unchanged and skip-worktree flags.
+    #[test]
+    fn review_fifteenth_hidden_destination_edits_refuse_without_changing_flags() {
+        for in_module in [false, true] {
+            for flag in ["--assume-unchanged", "--skip-worktree"] {
+                let root = Repo::new();
+                let module = Repo::new();
+                if in_module {
+                    add_submodule(&root, &module);
+                }
+                let snapshot = root.capture(&CheckoutOwnership::Managed);
+                let destination = root.restore(&snapshot, None);
+                let target = if in_module {
+                    destination.join("sub")
+                } else {
+                    destination.clone()
+                };
+                git(&target, &["update-index", flag, "file"]);
+                fs::write(target.join("file"), "hidden provider edits\n").unwrap();
+                assert!(
+                    git(&target, &["status", "--porcelain", "--untracked-files=no"]).is_empty()
+                );
+                let index_path = git_path(&FileGit, &target, "index").unwrap();
+                let index = fs::read(&index_path).unwrap();
+                let config = fs::read(destination.join(".git/config")).unwrap();
+                let error = restore_workspace_snapshot(
+                    &FileGit,
+                    &snapshot,
+                    &destination,
+                    &RestoreBase::Provisioned {
+                        allow_origin_fetch: false,
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("hidden tracked paths")
+                        && format!("{error:#}").contains("file"),
+                    "{error:#}"
+                );
+                assert_eq!(fs::read(&index_path).unwrap(), index);
+                assert_eq!(
+                    fs::read(target.join("file")).unwrap(),
+                    b"hidden provider edits\n"
+                );
+                assert_eq!(fs::read(destination.join(".git/config")).unwrap(), config);
+            }
+        }
+    }
+
+    // Hard-won: 571917f05: included origin push URLs remained effective without any restore notice.
+    #[test]
+    fn review_fifteenth_destination_included_push_urls_are_kept_and_reported() {
+        for explicit in [false, true] {
+            for in_module in [false, true] {
+                let root = Repo::new();
+                let module = Repo::new();
+                let extra = Repo::new();
+                let saved = Repo::new();
+                if in_module {
+                    add_submodule(&root, &module);
+                }
+                let source = if in_module {
+                    root.checkout.join("sub")
+                } else {
+                    root.checkout.clone()
+                };
+                if explicit {
+                    git(
+                        &source,
+                        &[
+                            "config",
+                            "remote.origin.pushurl",
+                            saved.origin.to_str().unwrap(),
+                        ],
+                    );
+                }
+                let snapshot = root.capture(&CheckoutOwnership::Managed);
+                let destination = root.restore(&snapshot, None);
+                let target = if in_module {
+                    destination.join("sub")
+                } else {
+                    destination.clone()
+                };
+                let included = root.temp.path().join("destination-push.config");
+                git(
+                    root.temp.path(),
+                    &[
+                        "config",
+                        "--file",
+                        included.to_str().unwrap(),
+                        "remote.origin.pushurl",
+                        extra.origin.to_str().unwrap(),
+                    ],
+                );
+                git(
+                    &target,
+                    &["config", "include.path", included.to_str().unwrap()],
+                );
+                let before = fs::read(&included).unwrap();
+                let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                tracing::subscriber::with_default(RestoreNotices(notices.clone()), || {
+                    restore_workspace_snapshot(
+                        &FileGit,
+                        &snapshot,
+                        &destination,
+                        &RestoreBase::Provisioned {
+                            allow_origin_fetch: false,
+                        },
+                    )
+                })
+                .unwrap();
+                assert_eq!(fs::read(&included).unwrap(), before);
+                let effective = git(&target, &["remote", "get-url", "--push", "--all", "origin"]);
+                assert!(
+                    effective
+                        .lines()
+                        .any(|url| url == extra.origin.to_str().unwrap())
+                );
+                if explicit {
+                    assert!(
+                        effective
+                            .lines()
+                            .any(|url| url == saved.origin.to_str().unwrap())
+                    );
+                }
+                let notices = notices.lock().unwrap();
+                assert!(
+                    notices
+                        .iter()
+                        .any(|notice| notice.contains(included.to_str().unwrap())
+                            && notice.contains("remote.origin.pushurl")
+                            && notice.contains(extra.origin.to_str().unwrap())),
+                    "{notices:?}"
+                );
+            }
+        }
+    }
+    // Hard-won: 571917f05: following a local-stash remedy lost that stash when restore rebuilt the saved stack.
+    #[test]
+    fn review_fifteenth_foreign_destination_stashes_require_an_external_backup() {
+        let root = Repo::new();
+        fs::write(root.checkout.join("file"), b"saved stash data\n").unwrap();
+        git(&root.checkout, &["stash", "push", "-m", "saved entry"]);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let destination = root.restore(&snapshot, None);
+        fs::write(destination.join("file"), b"\0binary provider work\xff").unwrap();
+        fs::write(
+            destination.join("provider-note"),
+            b"untracked provider work",
+        )
+        .unwrap();
+        git(
+            &destination,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "provider-only entry",
+            ],
+        );
+        let before = read_stash(&FileGit, &destination).unwrap();
+        let config = fs::read(destination.join(".git/config")).unwrap();
+        let index = fs::read(destination.join(".git/index")).unwrap();
+        let error = restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stash@{0}")
+                && format!("{error:#}").contains("provider-only entry")
+                && format!("{error:#}").contains("outside the destination"),
+            "{error:#}"
+        );
+        assert_eq!(read_stash(&FileGit, &destination).unwrap(), before);
+        assert_eq!(fs::read(destination.join(".git/config")).unwrap(), config);
+        assert_eq!(fs::read(destination.join(".git/index")).unwrap(), index);
+        let patch = git(
+            &destination,
+            &["stash", "show", "--binary", "-p", "stash@{0}"],
+        );
+        assert!(patch.contains("GIT binary patch"));
+        fs::write(root.temp.path().join("provider-work.patch"), patch).unwrap();
+        let archive = run_git(&FileGit, &destination, ["archive", "stash@{0}^3"], &[]).unwrap();
+        assert_eq!(archive.status, 0);
+        fs::write(
+            root.temp.path().join("provider-untracked.tar"),
+            archive.stdout,
+        )
+        .unwrap();
+        git(&destination, &["stash", "drop", "stash@{0}"]);
+        restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(read_stash(&FileGit, &destination).unwrap(), snapshot.stash);
+        // Identical entries still have occurrence counts: one extra occurrence
+        // must not disappear merely because its OID and message match a saved one.
+        let saved = snapshot.stash[0].clone();
+        fs::write(destination.join("file"), b"temporary transition\n").unwrap();
+        git(&destination, &["stash", "push", "-m", "temporary"]);
+        git(
+            &destination,
+            &["stash", "store", "-m", &saved.message, &saved.commit],
+        );
+        git(&destination, &["stash", "drop", "stash@{1}"]);
+        let before = read_stash(&FileGit, &destination).unwrap();
+        let error = restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("stash@{1}"), "{error:#}");
+        assert_eq!(read_stash(&FileGit, &destination).unwrap(), before);
     }
 }
