@@ -137,7 +137,7 @@ fn inspect_checkout(
     managed: bool,
 ) -> Result<()> {
     if snapshot.is_some() {
-        crate::snapshot::validate_origin_rewrite_anchoring(runner, checkout)?;
+        crate::snapshot::validate_origin_rewrite_anchoring(runner, checkout, None)?;
     }
     let mut gitlinks = gitlinks(runner, checkout)?;
     if snapshot.is_some() {

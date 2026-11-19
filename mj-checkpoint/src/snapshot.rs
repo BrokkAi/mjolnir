@@ -244,6 +244,8 @@ pub(crate) struct UninitializedOrigin {
 pub struct OriginDependency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_url_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_provider: Option<PathBuf>,
     pub route: PathBuf,
     pub canonical_path: PathBuf,
     pub target_is_removed: bool,
@@ -289,6 +291,11 @@ impl std::fmt::Display for SnapshotRefused {
             Self::OriginRemovedByTeardown(origins) => {
                 for (index, origin) in origins.iter().enumerate() {
                     if index != 0 { write!(f, "; ")?; }
+                    if let Some(provider) = &origin.value.object_provider {
+                        let path = mj_core::targets::posix_quote(&origin.value.canonical_path.to_string_lossy());
+                        write!(f, "local origin {} relies on provider {} inside the managed teardown; make the origin an independent repository outside that set; to dissociate borrowed objects run `git -C {path} repack -a -d`, then remove its objects/info/alternates, and suspend again, or use `mj suspend --without-checkpoint`", origin.value.route.display(), provider.display())?;
+                        continue;
+                    }
                     let directory = if origin.checkout.checkout_path.as_os_str().is_empty() { String::new() }
                         else { format!(" -C {}", mj_core::targets::posix_quote(&origin.checkout.checkout_path.to_string_lossy())) };
                     write!(f, "origin route {} for {}:{} depends on the managed teardown; ", origin.value.route.display(), origin.checkout.repository_id, origin.checkout.checkout_path.display())?;
@@ -1150,48 +1157,48 @@ pub(crate) fn intent_to_add_paths(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
 ) -> Result<Vec<PathBuf>> {
-    let mut invisible = std::collections::BTreeSet::new();
-    for path in git_bytes(
-        runner,
-        checkout,
-        [
-            "diff",
-            "--cached",
-            "--name-only",
-            "--no-renames",
-            "--no-ext-diff",
-            "--ignore-submodules=all",
-            "--ita-invisible-in-index",
-            "-z",
-        ],
-        &[],
-        "inspect intent-to-add index entries",
-    )?
-    .split(|byte| *byte == 0)
-    .filter(|path| !path.is_empty())
-    {
-        invisible.insert(path.to_vec());
-    }
-    git_bytes(
-        runner,
-        checkout,
-        [
-            "diff",
-            "--cached",
-            "--name-only",
-            "--no-renames",
-            "--no-ext-diff",
-            "--ignore-submodules=all",
-            "--ita-visible-in-index",
-            "-z",
-        ],
-        &[],
-        "inspect intent-to-add index entries",
-    )?
-    .split(|byte| *byte == 0)
-    .filter(|path| !path.is_empty() && !invisible.contains(*path))
-    .map(mj_core::path_input::from_git_bytes)
-    .collect()
+    let changes = |visibility| -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        let raw = git_bytes(
+            runner,
+            checkout,
+            [
+                "diff",
+                "--cached",
+                "--raw",
+                "--no-abbrev",
+                "--no-renames",
+                "--no-ext-diff",
+                "--ignore-submodules=all",
+                visibility,
+                "-z",
+            ],
+            &[],
+            "inspect intent-to-add index entries",
+        )?;
+        let fields = raw
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        let (pairs, remainder) = fields.as_chunks::<2>();
+        ensure!(remainder.is_empty(), "malformed intent-to-add index diff");
+        Ok(pairs
+            .iter()
+            .map(|pair| (pair[1].to_vec(), pair[0].to_vec()))
+            .collect())
+    };
+    let invisible = changes("--ita-invisible-in-index")?;
+    let visible = changes("--ita-visible-in-index")?;
+    // Compare complete entry identities in both directions. For a HEAD path,
+    // ITA can be a modification when visible and a deletion when invisible;
+    // an empty HEAD blob may disappear from the visible diff altogether.
+    invisible
+        .keys()
+        .chain(visible.keys())
+        .filter(|path| invisible.get(*path) != visible.get(*path))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|path| mj_core::path_input::from_git_bytes(path))
+        .collect()
 }
 
 /// A private index beside the real one preserves split-index lookup while
@@ -1608,12 +1615,21 @@ fn absolute_url_rule(checkout: &Path, rule: &SnapshotConfigEntry) -> Result<Snap
 pub(crate) fn validate_origin_rewrite_anchoring(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
+    origin_override: Option<&str>,
 ) -> Result<()> {
-    let urls = config_values(runner, checkout, "remote.origin.url")?;
+    let mut urls = config_values(runner, checkout, "remote.origin.url")?;
+    let has_origin = !urls.is_empty();
+    if !has_origin {
+        urls.extend(origin_override.map(str::to_owned));
+    }
     if urls.is_empty() {
         return Ok(());
     }
-    let pushes = config_values(runner, checkout, "remote.origin.pushurl")?;
+    let pushes = if has_origin {
+        config_values(runner, checkout, "remote.origin.pushurl")?
+    } else {
+        Vec::new()
+    };
     static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = loop {
         let name = format!(
@@ -1690,7 +1706,7 @@ pub(crate) fn validate_origin_rewrite_anchoring(
         .map(|url| (url, false, false))
         .chain(
             urls.iter()
-                .filter(|_| pushes.is_empty())
+                .filter(|_| has_origin && pushes.is_empty())
                 .map(|url| (url, true, false)),
         )
         .chain(pushes.iter().map(|url| (url, true, true)))
@@ -1704,11 +1720,12 @@ pub(crate) fn validate_origin_rewrite_anchoring(
         };
         ensure!(
             original_outcome == anchored_outcome,
-            "anchoring origin {} URL {} changes Git's destination from {} to {}; configure an absolute URL with `git remote set-url {}origin <absolute>` and adjust its URL rewrite rule to retain the intended destination, then retry",
+            "anchoring origin {} URL {} changes Git's destination from {} to {}; configure an absolute URL with `git remote {}{}origin <absolute>` and adjust its URL rewrite rule to retain the intended destination, then retry",
             if push { "push" } else { "fetch" },
             redact_snapshot_url(url)?,
             redact_snapshot_url(&original_outcome)?,
             redact_snapshot_url(&anchored_outcome)?,
+            if has_origin { "set-url " } else { "add " },
             if push { "--push " } else { "" }
         );
     }
@@ -2492,20 +2509,29 @@ pub(crate) fn config_values(
         .map(|value| String::from_utf8(value.to_vec()).map_err(Into::into))
         .collect()
 }
+type BranchOwners<'a> = BTreeMap<&'a str, (&'a str, &'a Path)>;
+
 fn branch_tracking(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     refs: &BTreeMap<String, String>,
+    owners: &BranchOwners<'_>,
 ) -> Result<BTreeMap<String, BranchTracking>> {
     let mut tracking = BTreeMap::new();
     for reference in refs.keys() {
         let Some(name) = reference.strip_prefix("refs/heads/") else {
             continue;
         };
-        let remote = config_values(runner, checkout, &format!("branch.{name}.remote"))?
+        let owner = checkout.join(
+            owners
+                .get(reference.as_str())
+                .map(|(_, path)| *path)
+                .unwrap_or_else(|| Path::new("")),
+        );
+        let remote = config_values(runner, &owner, &format!("branch.{name}.remote"))?
             .into_iter()
             .last();
-        let merge = config_values(runner, checkout, &format!("branch.{name}.merge"))?;
+        let merge = config_values(runner, &owner, &format!("branch.{name}.merge"))?;
         if remote.is_some() || !merge.is_empty() {
             tracking.insert(name.to_owned(), BranchTracking { remote, merge });
         }
@@ -2522,7 +2548,7 @@ fn unset_config(runner: &dyn GitCommandRunner, checkout: &Path, key: &str) -> Re
     Ok(())
 }
 // Choose once per cut: primary first, then nested checkout discovery order.
-fn branch_owners(cut: &PinnedWorkspaceCut) -> BTreeMap<&str, (&str, &Path)> {
+fn branch_owners(cut: &PinnedWorkspaceCut) -> BranchOwners<'_> {
     let mut owners = BTreeMap::new();
     for (head, path) in std::iter::once((&cut.head, Path::new(""))).chain(
         cut.worktrees
@@ -3406,7 +3432,7 @@ fn capture_prepared_workspace(
                 &repository_inventory(runner, repository)?,
                 consent,
             )?;
-            let mut tracking = branch_tracking(runner, checkout, &snapshot_refs)?;
+            let mut tracking = branch_tracking(runner, checkout, &snapshot_refs, &owners)?;
             let dropped = tracking
                 .iter()
                 .filter(|(_, tracking)| tracking.remote.as_deref() != Some("origin"))
@@ -3853,6 +3879,141 @@ pub(crate) fn local_origin_route(repository: &Path, text: &str) -> Result<Option
     }
 }
 
+fn teardown_path_dependency(absolute: &Path, roots: &[PathBuf]) -> Result<Option<(PathBuf, bool)>> {
+    let mut cursor = absolute;
+    let mut missing = Vec::new();
+    let mut canonical = loop {
+        match fs::canonicalize(cursor) {
+            Ok(path) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    cursor
+                        .components()
+                        .next_back()
+                        .context("local origin has no component")?
+                        .as_os_str()
+                        .to_owned(),
+                );
+                cursor = cursor
+                    .parent()
+                    .context("local origin has no existing ancestor")?;
+            }
+            Err(error) => return Err(error).context("resolve local origin dependency"),
+        }
+    };
+    for component in missing.into_iter().rev() {
+        if component == ".." {
+            canonical.pop();
+        } else if component != "." {
+            canonical.push(component);
+        }
+    }
+    let target_is_removed = roots.iter().any(|root| canonical.starts_with(root));
+    if target_is_removed || origin_route_is_removed(absolute, roots, &mut Default::default())? {
+        canonical
+            .to_str()
+            .context("origin dependency must be UTF-8; rename it before suspending")?;
+        Ok(Some((canonical, target_is_removed)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Native Git expands recursive object providers. Retain literal alternates
+/// routes too: canonical provider names alone hide symlinks through teardown.
+enum LocalOriginProviders {
+    Unavailable(String),
+    Ready(Vec<PathBuf>),
+}
+
+fn local_origin_object_providers(
+    runner: &dyn GitCommandRunner,
+    context: &Path,
+    origin: &Path,
+) -> Result<LocalOriginProviders> {
+    let marker = if origin.is_dir() && origin.join(".git").try_exists()? {
+        origin.join(".git")
+    } else {
+        origin.to_path_buf()
+    };
+    let output = runner.run(
+        context,
+        &GitCommand {
+            arguments: vec![
+                "rev-parse".into(),
+                "--resolve-git-dir".into(),
+                marker.as_os_str().to_owned(),
+            ],
+            ..Default::default()
+        },
+    )?;
+    if output.status != 0 {
+        return Ok(LocalOriginProviders::Unavailable(format!(
+            "{:#}",
+            git_failure("resolve local origin Git directory", &output)
+        )));
+    }
+    let private = crate::archive::git::absolute_git_path(context, &output.stdout)?;
+    let query = |args: &[&str]| -> Result<Vec<u8>> {
+        let mut arguments = vec!["--git-dir".into(), private.as_os_str().to_owned()];
+        arguments.extend(args.iter().map(OsString::from));
+        let output = runner.run(
+            context,
+            &GitCommand {
+                arguments,
+                ..Default::default()
+            },
+        )?;
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure("inspect local origin object providers", &output)
+        );
+        Ok(output.stdout)
+    };
+    let common = crate::archive::git::absolute_git_path(
+        context,
+        &query(&["rev-parse", "--git-common-dir"])?,
+    )?;
+    let objects = crate::archive::git::absolute_git_path(
+        context,
+        &query(&["rev-parse", "--git-path", "objects"])?,
+    )?;
+    let listing = query(&["count-objects", "-v"])?;
+    let mut object_directories = std::collections::BTreeSet::from([objects.clone()]);
+    for line in listing.split(|byte| *byte == b'\n') {
+        if let Some(path) = line.strip_prefix(b"alternate: ") {
+            object_directories.insert(context.join(crate::archive::git::unquote_git_path(path)?));
+        }
+    }
+    let mut providers =
+        std::collections::BTreeSet::from([marker, private.clone(), common, objects]);
+    if private.join("commondir").try_exists()? {
+        providers.insert(private.join("commondir"));
+    }
+    for directory in object_directories {
+        providers.insert(directory.clone());
+        let alternates = directory.join("info/alternates");
+        let entries = match fs::read(&alternates) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("read local origin alternates routes"),
+        };
+        providers.insert(alternates.clone());
+        for path in entries
+            .split(|byte| *byte == b'\n')
+            .filter(|path| !path.is_empty())
+        {
+            providers.insert(directory.join(
+                crate::archive::git::unquote_git_path(path).with_context(|| {
+                    format!("invalid alternate route in {}", alternates.display())
+                })?,
+            ));
+        }
+    }
+    Ok(LocalOriginProviders::Ready(providers.into_iter().collect()))
+}
+
 fn inventory_origin_dependencies(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -3925,51 +4086,54 @@ fn inventory_origin_dependencies(
             candidates.push((key, None, local));
         }
     }
+    let mut provider_cache = BTreeMap::new();
     for (key, module_url_key, local) in candidates {
         let absolute = std::path::absolute(&local)?;
-        let mut cursor = absolute.as_path();
-        let mut missing = Vec::new();
-        let mut canonical = loop {
-            match fs::canonicalize(cursor) {
-                Ok(path) => break path,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    missing.push(
-                        cursor
-                            .components()
-                            .next_back()
-                            .context("local origin has no component")?
-                            .as_os_str()
-                            .to_owned(),
-                    );
-                    cursor = cursor
-                        .parent()
-                        .context("local origin has no existing ancestor")?;
-                }
-                Err(error) => return Err(error).context("resolve local origin dependency"),
-            }
-        };
-        for component in missing.into_iter().rev() {
-            if component == ".." {
-                canonical.pop();
-            } else if component != "." {
-                canonical.push(component);
-            }
-        }
-        let target_is_removed = roots.iter().any(|root| canonical.starts_with(root));
-        if target_is_removed || origin_route_is_removed(&absolute, roots, &mut Default::default())?
-        {
-            canonical.to_str().context(
-                "canonical origin path must be UTF-8; rename the mirror before suspending",
-            )?;
+        if let Some((canonical, target_is_removed)) = teardown_path_dependency(&absolute, roots)? {
             inventory.origins_removed_by_teardown.push(scoped(
                 &key,
                 OriginDependency {
                     module_url_key,
+                    object_provider: None,
                     route: absolute,
                     canonical_path: canonical,
                     target_is_removed,
                 },
             ));
+            continue;
+        }
+        if !absolute.try_exists()? {
+            continue;
+        }
+        let providers = match provider_cache.entry(absolute.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let providers = match local_origin_object_providers(runner, checkout, &absolute).with_context(|| format!("cannot inspect local origin object storage at {}; repair its objects/info/alternates, or make it independent with `git -C {} repack -a -d` and remove its alternates file, then retry", absolute.display(), mj_core::targets::posix_quote(&absolute.to_string_lossy())))? {
+                    LocalOriginProviders::Ready(providers) => providers,
+                    LocalOriginProviders::Unavailable(error) => {
+                        // Only an absent/unresolvable repository uses the
+                        // existing offline policy. Errors after resolution
+                        // must never masquerade as an empty provider set.
+                        inventory.notices.push(format!("could not inspect local origin object storage at {}: {error}", absolute.display()));
+                        Vec::new()
+                    }
+                };
+                entry.insert(providers)
+            }
+        };
+        for provider in providers {
+            if teardown_path_dependency(provider, roots)?.is_some() {
+                inventory.origins_removed_by_teardown.push(scoped(
+                    &key,
+                    OriginDependency {
+                        module_url_key: module_url_key.clone(),
+                        object_provider: Some(provider.clone()),
+                        route: absolute.clone(),
+                        canonical_path: fs::canonicalize(&absolute)?,
+                        target_is_removed: false,
+                    },
+                ));
+            }
         }
     }
     Ok(())
@@ -3984,6 +4148,12 @@ fn workspace_inventory_scoped(
 ) -> Result<WorkspaceInventory> {
     if in_place_only_mode(runner, checkout, ownership, origin_override)? {
         return in_place_only_inventory(runner, checkout, key);
+    }
+    if origin_override.is_some() && config_values(runner, checkout, "remote.origin.url")?.is_empty()
+    {
+        // Validate the caller's original spelling before deriving the anchored
+        // origin used solely as the relative-submodule base below.
+        validate_origin_rewrite_anchoring(runner, checkout, origin_override)?;
     }
     fn collect(
         runner: &dyn GitCommandRunner,
@@ -6565,6 +6735,16 @@ mod tests {
         fs::rename(&r.origin, &away).unwrap();
         let snapshot = r.capture(&CheckoutOwnership::Managed);
         assert!(snapshot.remote_refs_stale);
+        fs::create_dir(&r.origin).unwrap();
+        let unresolvable = r.capture(&CheckoutOwnership::Managed);
+        assert!(unresolvable.remote_refs_stale);
+        assert!(
+            unresolvable
+                .notices
+                .iter()
+                .any(|notice| notice.contains("could not inspect local origin object storage"))
+        );
+        fs::remove_dir(&r.origin).unwrap();
         fs::rename(&away, &r.origin).unwrap();
         let restored = r.restore(&snapshot, None);
         assert_eq!(
@@ -15182,8 +15362,8 @@ mod tests {
                             == format!("source-synthetic\t{} (push)", target.origin.display())),
                         "{listing}"
                     );
-                    let error =
-                        validate_origin_rewrite_anchoring(runner, &root.checkout).unwrap_err();
+                    let error = validate_origin_rewrite_anchoring(runner, &root.checkout, None)
+                        .unwrap_err();
                     assert!(
                         error.to_string().contains(target.origin.to_str().unwrap()),
                         "{error:#}"
@@ -15209,8 +15389,8 @@ mod tests {
                             &["remote", "set-url", "origin", "../origin.git\nambiguous"],
                         );
                     }
-                    let error =
-                        validate_origin_rewrite_anchoring(&FileGit, &root.checkout).unwrap_err();
+                    let error = validate_origin_rewrite_anchoring(&FileGit, &root.checkout, None)
+                        .unwrap_err();
                     assert!(
                         error
                             .to_string()
@@ -15615,5 +15795,420 @@ mod tests {
                     .is_some_and(|extension| extension == "pack")
             }));
         }
+    }
+    // Hard-won: 58c5ca099: an external shared origin lost its only objects during source teardown.
+    #[test]
+    fn review_tenth_shared_origin_and_recursive_alternates_must_be_independent() {
+        let mut root = Repo::new();
+        let moved = root.temp.path().join(if cfg!(unix) {
+            "checkout\towned"
+        } else {
+            "checkout-owned"
+        });
+        fs::rename(&root.checkout, &moved).unwrap();
+        root.checkout = moved;
+        root.commit("only source owns this commit\n");
+        let first = root.temp.path().join("shared-first.git");
+        let last = root.temp.path().join("shared-recursive.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--shared",
+                "--bare",
+                root.checkout.to_str().unwrap(),
+                first.to_str().unwrap(),
+            ],
+        );
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--shared",
+                "--bare",
+                first.to_str().unwrap(),
+                last.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &["remote", "set-url", "origin", last.to_str().unwrap()],
+        );
+        let inventory =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        assert!(inventory.origins_removed_by_teardown.iter().any(|origin| {
+            origin
+                .value
+                .object_provider
+                .as_ref()
+                .is_some_and(|provider| provider.starts_with(&root.checkout))
+        }));
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::OriginRemovedByTeardown(_))
+            ),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("repack -a -d")
+                && error.to_string().contains("objects/info/alternates")
+                && error.to_string().contains(last.to_str().unwrap()),
+            "{error:#}"
+        );
+        assert!(
+            workspace_inventory(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Raw { launch: None }
+            )
+            .unwrap()
+            .origins_removed_by_teardown
+            .is_empty()
+        );
+        let alternates = first.join("objects/info/alternates");
+        let original = fs::read(&alternates).unwrap();
+        let mut malformed = original.clone();
+        malformed.extend_from_slice(b"\"unterminated\n");
+        fs::write(&alternates, malformed).unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("invalid-provider.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("cannot inspect local origin object storage")
+                && message.contains(last.to_str().unwrap())
+                && message.contains("repair its objects/info/alternates"),
+            "{message}"
+        );
+        fs::write(alternates, original).unwrap();
+        git(&last, &["repack", "-a", "-d"]);
+        fs::remove_file(last.join("objects/info/alternates")).unwrap();
+        #[cfg(unix)]
+        {
+            // Native provider names are canonical. The literal route can
+            // still cross a deleted symlink even when its target survives.
+            let route = root.checkout.join("borrowed-objects");
+            std::os::unix::fs::symlink(root.origin.join("objects"), &route).unwrap();
+            fs::write(
+                last.join("objects/info/alternates"),
+                format!("{}\n", route.display()),
+            )
+            .unwrap();
+            let inventory =
+                workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+            assert!(
+                inventory
+                    .origins_removed_by_teardown
+                    .iter()
+                    .any(|origin| origin.value.object_provider.as_ref() == Some(&route))
+            );
+            fs::remove_file(last.join("objects/info/alternates")).unwrap();
+            fs::remove_file(route).unwrap();
+        }
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert!(snapshot.pack.is_none());
+        let saved = snapshot.head.commit().to_owned();
+        fs::remove_dir_all(&root.checkout).unwrap();
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(git(&restored, &["rev-parse", "HEAD"]), saved);
+        assert_eq!(
+            fs::read(restored.join("file")).unwrap(),
+            b"only source owns this commit\n"
+        );
+    }
+
+    // Hard-won: 58c5ca099: module origins outside the clone could borrow their objects from its admin store.
+    #[test]
+    fn review_tenth_module_origins_cannot_borrow_from_initialized_or_cached_admins() {
+        for initialized in [true, false] {
+            let root = Repo::new();
+            let module = Repo::new();
+            let directory = add_submodule(&root, &module);
+            let mirror = root.temp.path().join("module-shared.git");
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    "--shared",
+                    "--bare",
+                    directory.to_str().unwrap(),
+                    mirror.to_str().unwrap(),
+                ],
+            );
+            git(
+                &directory,
+                &["remote", "set-url", "origin", mirror.to_str().unwrap()],
+            );
+            if !initialized {
+                git(
+                    &root.checkout,
+                    &[
+                        "config",
+                        "-f",
+                        ".gitmodules",
+                        "submodule.sub.url",
+                        mirror.to_str().unwrap(),
+                    ],
+                );
+                git(&root.checkout, &["add", ".gitmodules"]);
+                git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+            }
+            let inventory =
+                workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+            assert!(inventory.origins_removed_by_teardown.iter().any(|origin| {
+                origin
+                    .value
+                    .object_provider
+                    .as_ref()
+                    .is_some_and(|provider| {
+                        provider.starts_with(root.checkout.join(".git/modules"))
+                    })
+            }));
+            let error = capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Managed,
+                &root.temp.path().join("refused.pack"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::Any,
+                },
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<SnapshotRefused>(),
+                    Some(SnapshotRefused::OriginRemovedByTeardown(_))
+                ),
+                "{error:#}"
+            );
+            git(&mirror, &["repack", "-a", "-d"]);
+            fs::remove_file(mirror.join("objects/info/alternates")).unwrap();
+            if !initialized {
+                fs::remove_dir_all(root.checkout.join(".git/modules")).unwrap();
+            }
+            let snapshot = root.capture(&CheckoutOwnership::Managed);
+            fs::remove_dir_all(&root.checkout).unwrap();
+            fs::rename(&module.origin, module.temp.path().join("offline.git")).unwrap();
+            let restored = root.restore(&snapshot, None);
+            if !initialized {
+                git(
+                    &restored,
+                    &[
+                        "-c",
+                        "protocol.file.allow=always",
+                        "submodule",
+                        "update",
+                        "--init",
+                        "sub",
+                    ],
+                );
+            }
+            assert_eq!(
+                git(&restored.join("sub"), &["rev-parse", "HEAD"]),
+                git(&module.checkout, &["rev-parse", "HEAD"])
+            );
+            assert_eq!(
+                git(&restored.join("sub"), &["remote", "get-url", "origin"]),
+                mirror.to_str().unwrap()
+            );
+        }
+    }
+
+    // Hard-won: 58c5ca099: an origin-less override bypassed literal rewrite anchoring preflight.
+    #[test]
+    fn review_tenth_source_override_anchoring_is_checked_before_aborting() {
+        let root = Repo::new();
+        let mirror = root.temp.path().join("mirror.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                root.checkout.to_str().unwrap(),
+                mirror.to_str().unwrap(),
+            ],
+        );
+        git(&root.checkout, &["remote", "remove", "origin"]);
+        git(
+            &root.checkout,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", mirror.display()),
+                "../source.git",
+            ],
+        );
+        root.conflict();
+        root.start_conflict("merge");
+        let consent = CaptureConsent {
+            untracked: UntrackedConsent::Any,
+            operations: OperationConsent::Any,
+        };
+        for ownership in [
+            CheckoutOwnership::Managed,
+            CheckoutOwnership::Raw { launch: None },
+        ] {
+            let error = capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &ownership,
+                &root.temp.path().join("refused.pack"),
+                &consent,
+                Some("../source.git".into()),
+            )
+            .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("../source.git")
+                    && message.contains(mirror.to_str().unwrap())
+                    && message.contains("git remote add origin"),
+                "{error:#}"
+            );
+            assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+        }
+        let in_place = root.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(in_place.origin_urls.is_empty());
+        assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+        let snapshot = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("accepted.pack"),
+            &consent,
+            Some(mirror.to_str().unwrap().into()),
+        )
+        .unwrap();
+        assert!(!root.checkout.join(".git/MERGE_HEAD").exists());
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD"]),
+            snapshot.head.commit()
+        );
+    }
+
+    // Hard-won: 58c5ca099: name-only ITA subtraction missed tracked nonempty and empty HEAD paths.
+    #[test]
+    fn review_tenth_existing_head_paths_with_intent_to_add_refuse_before_abort() {
+        for empty in [false, true] {
+            let root = Repo::new();
+            if empty {
+                fs::write(root.checkout.join("file"), b"").unwrap();
+                git(&root.checkout, &["commit", "-am", "empty HEAD path"]);
+            }
+            git(&root.checkout, &["checkout", "-b", "side"]);
+            fs::write(root.checkout.join("other"), b"side\n").unwrap();
+            git(&root.checkout, &["add", "other"]);
+            git(&root.checkout, &["commit", "-m", "side path"]);
+            git(&root.checkout, &["checkout", "main"]);
+            fs::write(root.checkout.join("other"), b"main\n").unwrap();
+            git(&root.checkout, &["add", "other"]);
+            git(&root.checkout, &["commit", "-m", "main path"]);
+            root.start_conflict("merge");
+            git(&root.checkout, &["rm", "--cached", "file"]);
+            git(&root.checkout, &["add", "-N", "file"]);
+            let index = fs::read(root.checkout.join(".git/index")).unwrap();
+            let inventory =
+                workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+            assert!(
+                inventory
+                    .intent_to_add
+                    .iter()
+                    .any(|entry| entry.value == Path::new("file"))
+            );
+            let error = capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Managed,
+                &root.temp.path().join("refused.pack"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::Any,
+                },
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<SnapshotRefused>(),
+                    Some(SnapshotRefused::IntentToAdd(_))
+                ),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(root.checkout.join(".git/index")).unwrap(), index);
+            assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+        }
+    }
+
+    // Hard-won: 58c5ca099: primary-scope reads dropped upstreams defined by the branch's linked worktree.
+    #[test]
+    fn review_tenth_nested_branch_upstreams_come_from_the_owning_worktree() {
+        let root = Repo::new();
+        git(
+            &root.checkout,
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        let nested = root.checkout.join("lanes/upstream");
+        git(
+            &root.checkout,
+            &["worktree", "add", "-b", "lane", nested.to_str().unwrap()],
+        );
+        git(
+            &nested,
+            &["config", "--worktree", "branch.lane.remote", "origin"],
+        );
+        git(
+            &nested,
+            &[
+                "config",
+                "--worktree",
+                "branch.lane.merge",
+                "refs/heads/main",
+            ],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert_eq!(
+            snapshot.branch_tracking["lane"],
+            BranchTracking {
+                remote: Some("origin".into()),
+                merge: vec!["refs/heads/main".into()]
+            }
+        );
+        let restored = root.restore(&snapshot, None);
+        let restored_lane = restored.join("lanes/upstream");
+        assert_eq!(
+            git(
+                &restored_lane,
+                &["rev-parse", "--abbrev-ref", "@{upstream}"]
+            ),
+            "origin/main"
+        );
+        git(&restored_lane, &["pull", "--ff-only"]);
+        assert_eq!(
+            git(&restored_lane, &["symbolic-ref", "HEAD"]),
+            "refs/heads/lane"
+        );
     }
 }

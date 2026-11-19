@@ -2057,8 +2057,8 @@ struct PreparedWorktree {
     operation: Option<operation::CollectedOperation>,
 }
 
-/// Without -z, Git C-quotes paths (including octal-escaped raw bytes).
-fn legacy_worktree_path(path: &[u8]) -> Result<PathBuf> {
+/// Decode Git C-quoted paths, including octal-escaped native bytes.
+pub(crate) fn unquote_git_path(path: &[u8]) -> Result<PathBuf> {
     let Some(quoted) = path.strip_prefix(b"\"") else {
         return mj_core::path_input::from_git_bytes(path);
     };
@@ -2176,7 +2176,7 @@ pub(crate) fn discover_linked_worktrees(
             continue;
         };
         let path = if delimiter == b'\n' {
-            legacy_worktree_path(path)?
+            unquote_git_path(path)?
         } else {
             mj_core::path_input::from_git_bytes(path)?
         };
