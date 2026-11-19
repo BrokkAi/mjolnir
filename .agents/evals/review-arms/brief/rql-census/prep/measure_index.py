@@ -420,8 +420,13 @@ def git(*args, cwd=None):
                              # No automatic gc or maintenance: a detached repack could outlive
                              # this call and run outside any memory cap during a measurement.
                              # No hooks either: a post-checkout hook could leave a job behind.
+                             # A transfer whose remote stops sending without closing would
+                             # otherwise hang forever: git's own low-speed abort reacts to that
+                             # condition (under 1 KB/s for 10 minutes), not to a guessed total
+                             # duration, so a slow but live clone of a large repo still finishes.
                              "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
-                             "-c", "core.hooksPath=/dev/null", *args],
+                             "-c", "core.hooksPath=/dev/null",
+                             "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=600", *args],
                             cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace", pass_fds=HOST_LOCK_FDS)
     out = err = ""
