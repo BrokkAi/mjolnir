@@ -1121,11 +1121,17 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
         // few fields that decide notices; rows of other kinds only have their
         // timestamps counted, because a pair with an earlier cutoff withholds
         // them as changed or later whatever they are.
+        // json_type keeps the renderer's typing: `as_str` accepts only JSON
+        // strings and `as_u64` only integers, while json_extract would turn
+        // `true` into 1 and an object or array into text.
         let mut statement = connection.prepare(
             "SELECT created_at_ms, last_changed_at_ms, kind,
-                    CASE WHEN kind = 'message' THEN json_extract(body_json, '$.event.body.type') END,
-                    CASE WHEN kind = 'message' THEN json_extract(body_json, '$.event.body.number') END,
-                    CASE WHEN kind = 'message' THEN json_extract(body_json, '$.event.body.repo') END
+                    CASE WHEN kind = 'message' AND json_type(body_json, '$.event.body.type') = 'text'
+                         THEN json_extract(body_json, '$.event.body.type') END,
+                    CASE WHEN kind = 'message' AND json_type(body_json, '$.event.body.number') = 'integer'
+                         THEN json_extract(body_json, '$.event.body.number') END,
+                    CASE WHEN kind = 'message' AND json_type(body_json, '$.event.body.repo') = 'text'
+                         THEN json_extract(body_json, '$.event.body.repo') END
              FROM (SELECT created_at_ms, last_changed_at_ms, body_json,
                           json_extract(body_json, '$.kind') AS kind
                    FROM materialized_transcript_items
@@ -1457,6 +1463,14 @@ mod history_snapshot_tests {
             ("b", 2, 5000, "{not json"),
             // Never shown, but a pair with an earlier cutoff still counts it as later.
             ("c", 3, 3000, r#"{"kind":"thought","text":"x"}"#),
+            // The renderer reads a non-string repo as absent, so this is a
+            // notice for #42; json_extract alone would return the object as text.
+            (
+                "d",
+                4,
+                1000,
+                r#"{"kind":"message","event":{"body":{"type":"new_github_item","number":42,"repo":{"x":1}}}}"#,
+            ),
         ] {
             connection.execute("INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json) VALUES ('session-1',?1,?2,?3,?3,?4)", params![id, position, created, body]).unwrap();
         }
@@ -1476,8 +1490,8 @@ mod history_snapshot_tests {
         };
         // Hard-won: review of 331d49d5f: SQL kind filtering dropped rows of unshown kinds from the later/changed counts of earlier cutoffs.
         let rendered = scan_github_history_from(&path, "session-1", history(), &|| false).unwrap();
-        assert!(rendered[0].done.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 2;"));
-        assert!(rendered[1].done.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 1;"));
+        assert!(rendered[0].done.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 2; item-specific GitHub mailbox notices removed: 1."));
+        assert!(rendered[1].done.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 1; item-specific GitHub mailbox notices removed: 1."));
         let error = scan_github_history_from(&path, "session-1", history(), &|| true).unwrap_err();
         assert!(error.downcast_ref::<GithubHistoryScanCancelled>().is_some());
     }
