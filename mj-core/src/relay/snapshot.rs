@@ -1997,6 +1997,16 @@ impl RelaySnapshot {
         }
     }
 
+    /// Choose recovery identity from this ledger so occupied generations cannot
+    /// reject a restart transfer. Replay sees the same ledger and choice.
+    pub fn restart_continuation_id(&self, command_id: &str) -> String {
+        let mut id = crate::continuation::restart_continuation_id(command_id);
+        while self.handled_commands.contains_key(&id) {
+            id = crate::continuation::restart_continuation_id(&id);
+        }
+        id
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
             assessment: self.assessment.clone(),

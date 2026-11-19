@@ -1,6 +1,7 @@
 use super::*;
 
 use mj_core::continuation::is_restart_continuation;
+#[cfg(test)]
 pub(super) use mj_core::continuation::restart_continuation_id;
 
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
@@ -304,14 +305,6 @@ impl DurableRelay {
         command_id: &str,
         command: RelayCommand,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
-        if mj_core::continuation::is_restart_continuation(command_id) {
-            return Ok(Err(relay_protocol_error(
-                RelayErrorCode::InvalidRequest,
-                "command ID prefix auto-continue-restart- is reserved for worker restart recovery",
-                false,
-                None,
-            )));
-        }
         if let Err(error) =
             ensure_serialized_budget(&command, RELAY_COMMAND_BYTE_BUDGET, "relay command")
         {
@@ -2080,7 +2073,7 @@ impl DurableRelay {
         {
             return None;
         }
-        Some(restart_continuation_id(command_id))
+        Some(self.snapshot.restart_continuation_id(command_id))
     }
 
     pub fn record_checkpoint_ready(&mut self, command_id: &str) -> Result<u64> {

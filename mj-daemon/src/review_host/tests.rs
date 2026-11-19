@@ -3345,11 +3345,25 @@ async fn a_reviewer_that_ends_with_an_undelivered_handback_resolves_with_it() {
     let manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    let handback = stored_handback(&environment, "reviewer-1", "real defect").unwrap();
+    let recovered = mj_core::continuation::restart_continuation_id(&handback.command_id);
+    // Hard-won: ebb2e9611: the original handback did not answer its recovered turn.
+    assert_eq!(
+        ChildStanding {
+            ended: None,
+            handback: Some(handback.clone())
+        }
+        .answer_to(&recovered)
+        .as_deref(),
+        Some("real defect")
+    );
+    let mut handback = handback;
+    handback.command_id = recovered;
     environment.standings.lock().unwrap().insert(
         children[0].clone(),
         ChildStanding {
             ended: Some("stopped".into()),
-            handback: stored_handback(&environment, "reviewer-1", "real defect"),
+            handback: Some(handback),
         },
     );
 

@@ -1575,7 +1575,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         ..
                     }
                 ) || *observed_command != RelayCommandKind::Prompt
-                    || recovery_id != crate::continuation::restart_continuation_id(command_id)
+                    || recovery_id != snapshot.restart_continuation_id(command_id)
                     || snapshot.handled_commands.contains_key(recovery_id)
                 {
                     bail!("invalid interrupted prompt recovery {recovery_id}");

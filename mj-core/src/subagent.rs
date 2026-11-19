@@ -1289,7 +1289,8 @@ impl SubagentHandback {
     /// an earlier or later task of the same child answers none of the others.
     #[must_use]
     pub fn answers(&self, command_id: &str) -> bool {
-        self.command_id == command_id
+        crate::continuation::carried_command(&self.command_id)
+            == crate::continuation::carried_command(command_id)
     }
 }
 
@@ -1507,7 +1508,7 @@ pub fn report_state(
     if let Some(handback) = report
         .handback
         .as_ref()
-        .filter(|handback| handback.command_id == turn.command_id)
+        .filter(|handback| handback.answers(&turn.command_id))
     {
         return ReportState::Delivered(handback.message.clone());
     }
@@ -2256,12 +2257,26 @@ mod tests {
         );
     }
 
+    // Hard-won: ebb2e9611: a handback recorded before restart lost its completed turn.
     #[test]
     fn a_handback_for_the_last_turn_is_the_report_whatever_the_turn_did() {
         let report = SubagentReport {
             handback: handback("task"),
             ..SubagentReport::default()
         };
+        let recovered = crate::continuation::restart_continuation_id("task");
+        assert!(report.handback.as_ref().unwrap().answers(&recovered));
+        assert_eq!(
+            report_state(
+                true,
+                &report,
+                Some(&finished(&recovered, "end_turn")),
+                &Liveness::Known(None),
+                &[],
+                0
+            ),
+            ReportState::Delivered("the report".into())
+        );
         for stop_reason in ["end_turn", "cancelled", "refusal"] {
             assert_eq!(
                 report_state(

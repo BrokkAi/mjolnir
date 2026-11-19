@@ -1805,6 +1805,7 @@ fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
 
 // Hard-won: 1c150431b: a never-delivered request vanished from the recovery prompt.
 // Hard-won: 00050db89: caller-owned recovery IDs could prevent every subsequent restart.
+// Hard-won: ebb2e9611: a caller-held generation wedged restart recovery.
 #[test]
 fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blocks() {
     use crate::relay::commands::restart_continuation_id;
@@ -1831,21 +1832,16 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
         );
         relay.claim_pending_commands(true).unwrap();
         submit_relay(&mut relay, "later-user-input", prompt("next task"));
-        let recovery_id = restart_continuation_id(&original_id);
-        // The caller cannot occupy worker recovery IDs, even before recovery.
-        let ordinal = relay.latest_ordinal();
-        let refused = relay
-            .submit_command(&recovery_id, prompt("caller payload"))
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(refused.code, RelayErrorCode::InvalidRequest);
-        assert!(
-            refused
-                .message
-                .contains("reserved for worker restart recovery")
-        );
-        assert_eq!(relay.latest_ordinal(), ordinal);
-        assert!(!relay.snapshot.handled_commands.contains_key(&recovery_id));
+        let occupied = restart_continuation_id(&original_id);
+        let occupied_next = restart_continuation_id(&occupied);
+        for id in [&occupied, &occupied_next] {
+            submit_relay(
+                &mut relay,
+                id,
+                RelayCommand::NotificationsRead { through: 0 },
+            );
+        }
+        let recovery_id = restart_continuation_id(&occupied_next);
         if cut == 1 {
             relay
                 .record_command_interrupted(
