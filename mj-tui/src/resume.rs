@@ -2268,7 +2268,15 @@ fn resume_bands(inner: Rect, preview: bool) -> Vec<Rect> {
         Constraint::Length(1), // tabs, gap
         Constraint::Length(1),
         Constraint::Length(1), // search, gap
-        Constraint::Min(LIST_MINIMUM_ROWS + LIST_CHROME_ROWS),
+        // With a preview the list takes what the preview leaves, so a short
+        // terminal shrinks the list rather than the transcript's readable
+        // minimum; `preview_height` already reserves the list's rows when
+        // there is room for both.
+        Constraint::Min(if preview {
+            1
+        } else {
+            LIST_MINIMUM_ROWS + LIST_CHROME_ROWS
+        }),
         Constraint::Length(1), // list, gap
     ];
     if preview {
