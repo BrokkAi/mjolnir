@@ -1960,11 +1960,15 @@ pub(crate) async fn sessions(
     };
     let mut list = client.sessions_in_workspace(workspace, args.all).await?;
     // The daemon's host table is the one place that says which machine a
-    // target runs on.
-    let rows = crate::daemon::connect_or_start()
-        .await?
-        .host_capacity()
-        .await?;
+    // target runs on. Unfiltered JSON does not use it.
+    let rows = if args.json && args.target.is_none() && args.host.is_none() {
+        Vec::new()
+    } else {
+        crate::daemon::connect_or_start()
+            .await?
+            .host_capacity()
+            .await?
+    };
     list.sessions = select_sessions(
         std::mem::take(&mut list.sessions),
         &rows,
