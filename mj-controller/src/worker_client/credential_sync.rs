@@ -870,7 +870,8 @@ async fn reconcile_profile_observed(
         return Vec::new();
     };
     // The reading this pass took, which an authentication failure's session
-    // is delivered and judged against (see `SessionCanonical::pinned`).
+    // supplies the lock evidence for the failed session's verdict (see
+    // `SessionCanonical::pinned`).
     let mut own_login = None;
     if let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync) {
         let (changed, published) = profile.refresh(runtime, target, log.cause.is_some()).await;
@@ -2630,10 +2631,10 @@ fn read_canonical_login(
 pub(super) struct SessionCanonical {
     profile: Option<Arc<ProfileLogin>>,
     pub(super) login: Result<Arc<CanonicalLogin>, String>,
-    /// The reading an authentication-triggered pass took at its start. The
-    /// session that failed is delivered it, and its failure is judged against
-    /// it, instead of whatever another pass has published since: the evidence
-    /// that it was read under the native lock belongs to this failure only.
+    /// The reading an authentication-triggered pass took at its start, for
+    /// the session that failed. Only its evidence is used (that it was read
+    /// under the native lock, after this failure); the session is delivered
+    /// the newest login. See `reconcile_on`.
     pub(super) pinned: Option<Arc<CanonicalLogin>>,
     pub(super) skills: Arc<CanonicalSkills>,
     pub(super) github: GithubSync,
@@ -2827,29 +2828,31 @@ pub(super) async fn reconcile_on(
     // Profiles without a harness login file already receive credentials
     // through their environment or target credential chain.
     if !target.skips_login_file_sync {
-        let fresh = match &canonical.pinned {
-            Some(pinned) => Some(Ok(pinned.clone())),
-            None => canonical.profile.as_ref().map(|owner| {
-                owner
-                    .for_target(target)
-                    .map_err(|error| format!("{error:#}"))
-            }),
-        };
+        let fresh = canonical.profile.as_ref().map(|owner| {
+            owner
+                .for_target(target)
+                .map_err(|error| format!("{error:#}"))
+        });
         match fresh.as_ref().unwrap_or(&canonical.login) {
             Ok(login) => {
-                // Only a Claude login that this failure's own pass read under
-                // the native lock can say whether the rejected token was the
-                // profile's current one: a renewal in progress would
-                // otherwise make the old login look refused. The reading is
-                // the pass's own (`pinned`), so another pass's unlocked
-                // reading cannot erase the evidence and an earlier failure's
-                // locked reading cannot stand in for a timed-out one.
+                // The session whose failure asked for this pass is delivered the
+                // newest login, like every session. Whether that login is the
+                // rejected one is only known from a reading under the native
+                // lock (a renewal in progress would otherwise make the old
+                // login look refused): either the newest reading itself was
+                // read under it, or this pass's own pinned reading was and
+                // holds the same bytes. The pinned reading was taken after
+                // this failure, so evidence from an earlier failure's pass
+                // can never count. Otherwise the verdict is unknown.
                 *current_access_token = canonical
                     .pinned
                     .as_ref()
-                    .filter(|pinned| pinned.read_under_lock)
-                    .and_then(|pinned| {
-                        mj_core::credentials::claude_access_token_fingerprint(&pinned.bytes)
+                    .filter(|pinned| {
+                        login.read_under_lock
+                            || (pinned.read_under_lock && pinned.bytes == login.bytes)
+                    })
+                    .and_then(|_| {
+                        mj_core::credentials::claude_access_token_fingerprint(&login.bytes)
                     });
                 match reconcile_credentials(
                     client,
@@ -3126,6 +3129,11 @@ impl RelayConnectionJob for CredentialSyncJob {
     }
 
     fn refuse(self: Box<Self>, error: anyhow::Error) {
+        tracing::debug!(
+            session_id = %self.target.session_id,
+            reason = %format!("{error:#}"),
+            "credential sync job refused by the session actor"
+        );
         if self.reply.send(Err(error)).is_err() {
             tracing::debug!(
                 session_id = %self.target.session_id,

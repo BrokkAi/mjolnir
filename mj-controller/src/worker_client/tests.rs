@@ -5099,6 +5099,10 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
         .run();
         return;
     }
+    // The coordinator's own disposition line is how this test sees its job
+    // refused, so the log is captured for every thread.
+    let log = CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
     let _writer = crate::database::install_isolated_test_writer();
     crate::database::save_session(&crate::controller::test_support::checkpoint_test_session(
         SESSION_ID,
@@ -5160,33 +5164,18 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     );
     let sync_handle = sync.handle();
     sync_handle.set_targets(vec![target]);
-    // A job that asks for a wake, queued behind the coordinator's own: the
-    // actor refuses it while capture holds its connection, so the session is
-    // owed a sync whatever the coordinator's job did.
-    struct Probe(Option<tokio::sync::oneshot::Sender<String>>);
-    impl crate::session_manager::RelayConnectionJob for Probe {
-        fn wake_when_usable(&self) -> bool {
-            true
+    // The coordinator's own job is refused while capture holds the actor's
+    // connection; the actor then owes the session a sync.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !log.at_or_above(tracing::Level::DEBUG).iter().any(|line| {
+            line.contains("credential sync job refused by the session actor")
+                && line.contains("holds the relay connection")
+        }) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        fn run<'a>(
-            self: Box<Self>,
-            _client: &'a mut RelayClient,
-        ) -> futures::future::BoxFuture<'a, ()> {
-            Box::pin(async { panic!("the lease must keep the job from running") })
-        }
-        fn refuse(mut self: Box<Self>, error: anyhow::Error) {
-            let _ = self.0.take().unwrap().send(format!("{error:#}"));
-        }
-    }
-    let (refused_tx, refused_rx) = tokio::sync::oneshot::channel();
-    handle
-        .run_on_connection(Box::new(Probe(Some(refused_tx))))
-        .await;
-    let reason = tokio::time::timeout(Duration::from_secs(5), refused_rx)
-        .await
-        .expect("the actor must refuse a job while capture holds its connection")
-        .unwrap();
-    assert!(reason.contains("holds the relay connection"), "{reason}");
+    })
+    .await
+    .expect("the credential sync job must be refused while capture holds the connection");
     assert!(!received.exists());
     assert!(!copy.load(Ordering::Acquire));
     let released = tokio::time::Instant::now();
@@ -5451,6 +5440,30 @@ async fn a_failures_verdict_uses_its_own_locked_reading_not_a_later_unlocked_one
         judged_token(&profile, &target, own).await,
         Some(fingerprint),
         "another pass's reading erased the pass's own lock evidence"
+    );
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_newest_login_is_delivered_and_judged_when_another_pass_replaced_the_pinned_one() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (profile, target, fingerprint_a) = claude_profile_and_target(scratch.path());
+    let (_, own) = profile.refresh(None, &target, true).await;
+    // The login is replaced (B) and another pass publishes it. Delivery is
+    // the newest login, so the verdict compares the rejected A with B.
+    let login_b = claude_login(6_000_000_000_000, "access-b", Some("refresh-b"));
+    std::fs::write(scratch.path().join(".credentials.json"), &login_b).unwrap();
+    let fingerprint_b = mj_core::credentials::claude_access_token_fingerprint(&login_b).unwrap();
+    assert_ne!(fingerprint_a, fingerprint_b);
+    // B read without the lock is not evidence, and the pinned A does not
+    // describe it: unknown.
+    profile.refresh(None, &target, false).await;
+    assert_eq!(judged_token(&profile, &target, own.clone()).await, None);
+    // B read under the lock is: the verdict sees B, not the rejected A.
+    profile.refresh(None, &target, true).await;
+    assert_eq!(
+        judged_token(&profile, &target, own).await,
+        Some(fingerprint_b)
     );
 }
 
