@@ -1664,7 +1664,9 @@ fn session_name_prefers_override_then_acp_title_then_created_title() {
 #[test]
 fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    let mut target = test_capacity_target();
+    target.target_ids = vec!["podman".into(), "localhost".into()];
+    dashboard.set_deployment_capacity_targets(vec![target]);
     let render_text = |dashboard: &mut DashboardState| {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -1686,6 +1688,66 @@ fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
 
     let rendered = render_text(&mut dashboard);
     assert!(rendered.contains("podman (unavailable)"), "{rendered}");
+}
+
+/// A machine whose every listed target is unavailable says so once, after the
+/// host name: no target list, no capacity cells, no Disks button, and no
+/// clickable region for one.
+#[test]
+fn targets_row_collapses_when_every_target_is_unavailable() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut target = precision_capacity_target();
+    target.target_ids = vec!["podman".into()];
+    dashboard.set_deployment_capacity_targets(vec![target]);
+    dashboard.apply_deployment_capacity(
+        "ssh:precision-3260",
+        Ok(Some(host_capacity_usage())),
+        now_epoch_seconds(),
+    );
+    dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
+
+    // While the target is available the row has a Disks button.
+    let before = drawn_dashboard(&mut dashboard, 120);
+    assert!(before.contains("Disks ▾"), "{before}");
+    assert!(
+        dashboard
+            .capacity_disks_areas
+            .borrow()
+            .iter()
+            .any(Option::is_some),
+        "a Disks hitbox while a target is available"
+    );
+
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["podman"], &[])
+    });
+    let rendered = drawn_dashboard(&mut dashboard, 120);
+    let row = rendered
+        .lines()
+        .find(|line| line.contains("precision-3260"))
+        .expect("collapsed row");
+    let cells = row
+        .split("  ")
+        .map(str::trim)
+        .filter(|cell| !cell.is_empty());
+    assert!(
+        cells
+            .skip_while(|cell| !cell.contains("precision-3260"))
+            .map(|cell| cell.trim_matches('│').trim())
+            .filter(|cell| !cell.is_empty())
+            .eq(["precision-3260", "unavailable"]),
+        "{row:?}"
+    );
+    assert!(!rendered.contains("Disks"), "{rendered}");
+    assert!(!rendered.contains("podman (unavailable)"), "{rendered}");
+    assert!(
+        dashboard
+            .capacity_disks_areas
+            .borrow()
+            .iter()
+            .all(Option::is_none),
+        "no Disks hitbox on a collapsed row"
+    );
 }
 
 /// A default candidate whose engine is missing (the user has no Docker and
