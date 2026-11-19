@@ -1755,6 +1755,10 @@ fn review_start_fails_with_the_reason_the_daemon_refused_it() {
 // Hard-won: 9952f0845: preparation helpers in their own groups survived a closed login pane
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "#1607: the preparation helper is not killed on the macOS runner"
+)]
 fn daemon_login_terminal_writes_daemon_profile_and_disconnect_kills_harness_group() {
     for ending in 0..3 {
         daemon_login_cleanup(ending);

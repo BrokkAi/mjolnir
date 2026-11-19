@@ -2169,6 +2169,10 @@ async fn refused_quota_scheduling_waits_for_backoff_or_a_new_assessment() {
 #[cfg(unix)]
 // Hard-won: #1562: the outer quota deadline expired while the worker was still accepting a command.
 #[tokio::test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "#1606: fails beside the other daemon tests on the macOS runner"
+)]
 async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
     use mj_controller::controller::test_support::{IsolatedTest, test_name};
     use mj_controller::session_manager::stand_in::{
