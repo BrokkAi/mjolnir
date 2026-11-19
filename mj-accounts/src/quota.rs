@@ -146,10 +146,6 @@ impl QuotaRefreshRequest {
             CodexQuotaSource::Unreadable(_) => hash.update(b"unreadable\0"),
         }
         hash.update([u8::from(self.opencode_usage_priced)]);
-        // A changed pool set is a different report, so it is read afresh.
-        for pool in &self.antigravity_pools {
-            hash.update(pool.bucket_prefix().as_bytes());
-        }
         mj_core::hex::lower_hex(hash.finalize())
     }
 
