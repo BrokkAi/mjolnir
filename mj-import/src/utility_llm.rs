@@ -490,7 +490,6 @@ fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequ
         profile_id,
         profile,
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        crate::quota::QuotaRuntimeConfig::host(),
     )
 }
 

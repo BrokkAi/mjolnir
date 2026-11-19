@@ -1,3 +1,5 @@
+> Reverted 2026-11-19: quota probes now run host harnesses, preparing the pinned managed installation when needed. Starting containers duplicated that mechanism and made the daemon pull the multi-GB release image even when probes ran on the host. This plan is historical.
+
 # Run harness quota checks inside the agent-dev image
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It is maintained in accordance with `.agents/PLANS.md`.

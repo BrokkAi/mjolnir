@@ -909,3 +909,28 @@ pub(crate) fn answer_availability(
     let answer = answer(dashboard);
     dashboard.apply_availability_check(generation, Ok(answer));
 }
+
+/// Publish authoritative form provenance, as the daemon runtime feed does.
+pub(crate) fn serve_form_card(
+    dashboard: &mut DashboardState,
+    owner: &str,
+    holder: Option<&str>,
+    request: &mj_core::elicitation::ElicitationRequest,
+) {
+    use mj_client::runtime_feed::{CardForm, NotificationCard};
+    dashboard.set_notification_cards(Some(
+        [(
+            owner.to_owned(),
+            NotificationCard {
+                since_ms: 0,
+                badge: mj_core::attention::NotificationKind::NeedsInput,
+                entries: Vec::new(),
+                dismissal: None,
+                holder: holder.map(str::to_owned),
+                form: Some(CardForm::elicitation(request, 0)),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    ));
+}

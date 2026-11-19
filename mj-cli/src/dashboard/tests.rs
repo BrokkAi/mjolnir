@@ -8,6 +8,7 @@ fn detaching_hidden_chat_preserves_unread_background_events() {
 use super::*;
 use mj_chat::chat::{ActiveChat, Notices, SessionHeaderIdentity};
 use mj_core::state::State;
+use mj_tui::render_combined;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
@@ -212,11 +213,18 @@ fn route(dashboard: &mut DashboardState, keys: &[crossterm::event::KeyEvent]) ->
 
 #[test]
 fn escape_cancels_opening_without_stealing_modal_or_quit_keys() {
-    assert!(opening_cancel_event(&escape(), true, false));
-    assert!(!opening_cancel_event(&escape(), true, true));
-    assert!(!opening_cancel_event(&escape(), false, false));
+    assert!(opening_cancel_event(&escape(), true, false, false));
+    assert!(!opening_cancel_event(&escape(), true, true, false));
+    assert!(!opening_cancel_event(&escape(), false, false, false));
+    // Hard-won: 4c23909e0: attaching a conversation stole Esc from the focused inline form.
+    assert!(!opening_cancel_event(
+        &Event::Key(plain_key(KeyCode::Esc)),
+        true,
+        false,
+        true
+    ));
     let quit = Event::Key(plain_key(KeyCode::Char('q')));
-    assert!(!opening_cancel_event(&quit, true, false));
+    assert!(!opening_cancel_event(&quit, true, false, false));
     let mut dashboard = populated_dashboard();
     assert_eq!(
         route(
@@ -237,7 +245,7 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     let pane = dashboard.focused_pane();
     let assignment = dashboard.pane_assignment(pane).unwrap();
     let mut attachment = attachment::SessionAttachment::default();
-    attachment.bind(Some(assignment));
+    attachment.bind(pane, assignment);
     let (finish, wait) = tokio::sync::oneshot::channel();
     let (report, received) = tokio::sync::oneshot::channel();
     attachment.spawn(
@@ -254,13 +262,16 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     finish.send(()).unwrap();
     let (generation, result) = received.await.unwrap();
     assert!(result.is_ok());
+    // Hard-won: a882023b6: reconciliation rebound an old task to a new A-to-B-to-A assignment.
+    attachment.observe_pane(&dashboard, pane, "session-1");
     assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
+    assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     assert_eq!(dashboard.selected_session_id(), Some("session-1"));
 
     // A new attempt for the current assignment can complete, even if another
     // pane became active while it was loading.
     let current = dashboard.pane_assignment(pane).unwrap();
-    attachment.bind(Some(current));
+    attachment.bind(pane, current);
     let (report, received) = tokio::sync::oneshot::channel();
     attachment.spawn(
         "session-1",
@@ -275,6 +286,7 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
         .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
         .unwrap();
     assert!(attachment.accepts_pane_result(generation, current, &dashboard, pane, "session-1"));
+    assert!(attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     assert_eq!(dashboard.selected_session_id(), Some("session-2"));
     assert_eq!(dashboard.focused_pane(), other);
 
@@ -286,6 +298,139 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     let restored = dashboard.pane_assignment(pane).unwrap();
     dashboard.close_pane(pane);
     assert!(!attachment.accepts_pane_result(generation, restored, &dashboard, pane, "session-1"));
+    // Hard-won: 9739e9996: a queued result joined a restored pane that had never bound an interest.
+    dashboard.set_pane_session(other, Some("session-1"));
+    assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
+    attachment.observe_pane(&dashboard, other, "session-1");
+    assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
+    // Hard-won: e1b4abc81: departed session records accumulated; retiring them must not revive queued old results.
+    let mut attachments = BTreeMap::from([("session-1".into(), attachment)]);
+    dashboard.set_pane_session(other, Some("session-2"));
+    attachment::retire_unused_attachments(&dashboard, &mut attachments);
+    assert!(attachments.is_empty());
+    dashboard.set_pane_session(other, Some("session-1"));
+    let fresh = attachments.entry("session-1".into()).or_default();
+    fresh.observe_pane(&dashboard, other, "session-1");
+    let (report, received) = tokio::sync::oneshot::channel();
+    fresh.spawn(
+        "session-1",
+        Duration::from_secs(5),
+        async { Ok(()) },
+        move |generation, _| {
+            report.send(generation).unwrap();
+        },
+    );
+    let new_generation = received.await.unwrap();
+    assert!(fresh.accepts_surface_result(new_generation, &dashboard, "session-1"));
+    assert!(!fresh.accepts_surface_result(generation, &dashboard, "session-1"));
+}
+
+// Hard-won: a882023b6: Esc on a pane cancelled the notification's shared attachment and left its form loading forever.
+#[tokio::test]
+async fn cancelling_a_pane_attachment_preserves_the_notification_lease() {
+    use mj_client::runtime_feed::{CardForm, NotificationCard};
+    let mut dashboard = populated_dashboard();
+    dashboard.select_active_session("session-1");
+    let pane = dashboard.focused_pane();
+    let assignment = dashboard.pane_assignment(pane).unwrap();
+    let card = NotificationCard {
+        since_ms: 1,
+        badge: mj_core::attention::NotificationKind::NeedsInput,
+        entries: Vec::new(),
+        dismissal: None,
+        holder: None,
+        form: Some(CardForm {
+            source: mj_client::runtime_feed::CardFormSource::Elicitation,
+            raised_at_ms: 1,
+            request_id: "form".into(),
+            message: "Answer".into(),
+        }),
+    };
+    dashboard.set_notification_cards(Some([("session-1".into(), card)].into_iter().collect()));
+    assert_eq!(
+        dashboard.notification_form_session().as_deref(),
+        Some("session-1")
+    );
+    let mut attachment = attachment::SessionAttachment::default();
+    attachment.bind(pane, assignment);
+    attachment.bind_notification(true);
+    let (finish, wait) = tokio::sync::oneshot::channel();
+    let (report, received) = tokio::sync::oneshot::channel();
+    attachment.spawn(
+        "session-1",
+        Duration::from_secs(5),
+        async move { wait.await.map_err(|error| error.to_string()) },
+        move |generation, result| {
+            report.send((generation, result)).unwrap();
+        },
+    );
+    attachment.release_pane(&dashboard, pane, "session-1");
+    assert!(attachment.pending());
+    assert!(!attachment.pane_pending(pane));
+    // Refreshes retain the cancellation, and never create a competing attach.
+    attachment.bind(pane, assignment);
+    attachment.bind_notification(true);
+    assert!(!attachment.select("session-1"));
+    assert!(!attachment.pane_pending(pane));
+    finish.send(()).unwrap();
+    let (generation, result) = received.await.unwrap();
+    assert!(result.is_ok());
+    assert!(attachment.accepts_surface_result(generation, &dashboard, "session-1"));
+    assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
+    attachment.finish();
+    // Hard-won: b817d9202: a notification completion made the cancelled conversation visible again.
+    let mut chats = BTreeMap::from([("session-1".into(), open_test_chat("session-1"))]);
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    let allowed = attachment.pane_can_show(&dashboard, pane);
+    assert!(!allowed);
+    terminal
+        .draw(|frame| {
+            let drawn = mj_tui::render_combined_with_chat_access(
+                frame,
+                &mut dashboard,
+                &mut chats,
+                &BTreeMap::new(),
+                false,
+                &|_, _| allowed,
+            );
+            assert!(drawn.is_empty());
+        })
+        .unwrap();
+    // The notification still owns this chat after its pane closes. Retirement
+    // consults this same owner instead of removing the session unconditionally.
+    attachment.request_pane(pane, assignment);
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .unwrap();
+    dashboard.close_pane(pane);
+    let attachments = BTreeMap::from([("session-1".into(), attachment)]);
+    assert!(
+        attachment::wanted_chat_sessions(&dashboard, &attachments, &chats).contains("session-1")
+    );
+    let mut attachment = attachments.into_values().next().unwrap();
+    // Restore the original assignment to continue the cancellation transitions.
+    dashboard.set_pane_session(dashboard.focused_pane(), Some("session-1"));
+    let pane = dashboard.focused_pane();
+    let assignment = dashboard.pane_assignment(pane).unwrap();
+    attachment.bind(pane, assignment);
+    attachment.select("session-1");
+    // Without the notification, Esc really cancels. A later notification
+    // request or explicit pane retry can still start its own accepted work.
+    dashboard.set_notification_cards(Some(Default::default()));
+    attachment.bind_notification(false);
+    attachment.release_pane(&dashboard, pane, "session-1");
+    assert!(!attachment.pending());
+    assert!(!attachment.select("session-1"));
+    // Hard-won: 4c23909e0: discarding the last notification completion rearmed a cancelled pane.
+    attachment.defer();
+    attachment.observe_pane(&dashboard, pane, "session-1");
+    assert!(!attachment.select_for_pane(pane, "session-1"));
+    attachment.bind_notification(true);
+    assert!(attachment.select("session-1"));
+    attachment.bind_notification(false);
+    attachment.release_pane(&dashboard, pane, "session-1");
+    attachment.request_pane(pane, assignment);
+    assert!(attachment.select("session-1"));
 }
 
 #[tokio::test]
@@ -1693,8 +1838,7 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
     assert!(!captured.is_current(&chats, &attachments));
 
     let captured = attachment::ChatRetirement::capture("session", &chats, &attachments);
-    let pane = populated_dashboard().browse_pane();
-    let attachment = attachments.entry(pane).or_default();
+    let attachment = attachments.entry("session".to_owned()).or_default();
     attachment.spawn(
         "session",
         Duration::from_secs(30),
@@ -1704,7 +1848,7 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
     assert!(!captured.is_current(&chats, &attachments));
     captured.retire_attachments(&mut attachments);
     // Retiring an old operation leaves the new attachment selected and alive.
-    assert!(!attachments.get_mut(&pane).unwrap().select("session"));
+    assert!(!attachments.get_mut("session").unwrap().select("session"));
 }
 
 /// The runtime feed carries only live sessions, so a chat can still be

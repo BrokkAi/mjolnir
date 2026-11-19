@@ -221,12 +221,16 @@ impl DashboardState {
         action
     }
 
+    /// A pointer press abandons keyboard-only navigation modes on every surface.
+    pub(crate) fn begin_pointer_press(&mut self) {
+        self.notices.dismiss(Instant::now());
+        self.prefix_pending = false;
+        self.resize_mode = false;
+    }
+
     pub(crate) fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> DashboardAction {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            self.notices.dismiss(Instant::now());
-            // Reaching for the mouse abandons a half-typed chord.
-            self.prefix_pending = false;
-            self.resize_mode = false;
+            self.begin_pointer_press();
         }
         if self.pane_menu.is_some() {
             return self.handle_pane_menu_event(Event::Mouse(mouse));

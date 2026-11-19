@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The `[daemon]` table, chosen the way `[quota] runtime` is.
+/// The `[daemon]` table selects where the daemon runs.
 ///
 /// ```toml
 /// [daemon]

@@ -69,12 +69,15 @@ impl ChatState {
 
     pub(crate) fn finish_reviewer_elicitation_response(
         &mut self,
-        request: ElicitationRequest,
+        form: super::elicitation::ElicitationDraft,
         response: ElicitationResponse,
     ) -> ChatAction {
         ChatAction::RespondReviewerElicitation {
-            role: self.elicitation_role.take(),
-            elicitation_id: request.id,
+            draft: super::ChatElicitationDraft {
+                form,
+                reviewer: true,
+                reviewer_role: self.elicitation_role.take(),
+            },
             response,
         }
     }

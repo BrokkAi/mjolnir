@@ -140,6 +140,11 @@ impl DashboardContext {
         if self.startup.pick_pending() {
             return;
         }
+        let notification = self.dashboard.notification_form_session();
+        for (session, attachment) in &mut self.attachments {
+            attachment.prune_assignments(&self.dashboard, session);
+            attachment.bind_notification(notification.as_deref() == Some(session.as_str()));
+        }
         // A transition finishing may make an assigned conversation attachable.
         // Selection changes from refresh never assign a different session. A
         // lifecycle release already emptied its pane. A historical session
@@ -150,32 +155,50 @@ impl DashboardContext {
             {
                 continue;
             }
-            let assignment = self.dashboard.pane_assignment(pane);
-            if self.attachments.entry(pane).or_default().bind(assignment) {
-                self.selection.clear();
-                self.opening_chat_sessions.remove(&pane);
-            }
+            self.attachments
+                .entry(session.clone())
+                .or_default()
+                .observe_pane(&self.dashboard, pane, &session);
             if self.dashboard.pane_session_is_suspended(&session) {
                 self.cancel_chat_open_in(pane);
                 continue;
             }
             if self.dashboard.pane_session_can_attach(&session)
-                && self.attachments.entry(pane).or_default().select(&session)
+                && self
+                    .attachments
+                    .entry(session.clone())
+                    .or_default()
+                    .select_for_pane(pane, &session)
             {
                 self.open_chat_session_into(pane, &session);
             }
         }
-        let stale: Vec<_> = self
-            .opening_chat_sessions
-            .iter()
-            .filter(|(pane, session)| self.dashboard.pane_session(**pane) != Some(session.as_str()))
-            .map(|(pane, _)| *pane)
-            .collect();
-        for pane in stale {
-            self.cancel_chat_open_in(pane);
+        if let Some(session) = notification
+            && self.dashboard.pane_session_can_attach(&session)
+        {
+            let attachment = self.attachments.entry(session.clone()).or_default();
+            attachment.bind_notification(true);
+            if attachment.select(&session) {
+                self.start_chat_attach(&session);
+            }
         }
+        attachment::retire_unused_attachments(&self.dashboard, &mut self.attachments);
+        self.opening_chat_sessions = self
+            .dashboard
+            .pane_sessions()
+            .into_iter()
+            .filter(|(pane, session)| {
+                self.attachments
+                    .get(session)
+                    .is_some_and(|attachment| attachment.pane_pending(*pane))
+            })
+            .collect();
         self.retire_chats_outside_the_layout();
         self.sync_opening_session();
+    }
+
+    pub(super) fn wanted_chat_sessions(&self) -> BTreeSet<String> {
+        attachment::wanted_chat_sessions(&self.dashboard, &self.attachments, &self.chats)
     }
 
     /// Stops the focused pane's attach. A failed or cancelled open stays
@@ -185,7 +208,11 @@ impl DashboardContext {
     }
 
     pub(crate) fn cancel_chat_open_in(&mut self, pane: PaneId) {
-        self.attachments.entry(pane).or_default().cancel();
+        if let Some(session) = self.dashboard.pane_session(pane)
+            && let Some(attachment) = self.attachments.get_mut(session)
+        {
+            attachment.release_pane(&self.dashboard, pane, session);
+        }
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
     }
@@ -203,7 +230,11 @@ impl DashboardContext {
     /// Gives up this pane's attach in a way that allows one fresh
     /// attempt when whatever owns the session has finished with it.
     pub(crate) fn defer_chat_open_in(&mut self, pane: PaneId) {
-        self.attachments.entry(pane).or_default().defer();
+        if let Some(session) = self.dashboard.pane_session(pane)
+            && let Some(attachment) = self.attachments.get_mut(session)
+        {
+            attachment.defer();
+        }
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
     }
@@ -219,9 +250,18 @@ impl DashboardContext {
         let Self {
             chats,
             opening_chat_sessions,
+            attachments,
             dashboard,
             ..
         } = self;
+        if attachments
+            .get(dashboard.current_session_id()?)
+            .is_some_and(|attachment| {
+                !attachment.pane_can_show(dashboard, dashboard.focused_pane())
+            })
+        {
+            return None;
+        }
         let opening = opening_chat_sessions
             .get(&dashboard.focused_pane())
             .map(String::as_str);
@@ -230,10 +270,7 @@ impl DashboardContext {
             .filter(|chat| {
                 chat.has_live_composer()
                     && chat_is_visible(opening, chat.session_id())
-                    && dashboard.transition_kind(chat.session_id()).is_none()
-                    && dashboard
-                        .transition_failure_kind(chat.session_id())
-                        .is_none()
+                    && dashboard.chat_input_available(chat.session_id())
             })
     }
 
@@ -248,15 +285,19 @@ impl DashboardContext {
         let Self {
             chats,
             opening_chat_sessions,
+            attachments,
             dashboard,
             ..
         } = self;
         let opening = opening_chat_sessions.get(&pane).map(String::as_str);
         let session_id = dashboard.pane_session(pane)?;
-        if !chat_is_visible(opening, session_id)
-            || dashboard.transition_kind(session_id).is_some()
-            || dashboard.transition_failure_kind(session_id).is_some()
+        if attachments
+            .get(session_id)
+            .is_some_and(|attachment| !attachment.pane_can_show(dashboard, pane))
         {
+            return None;
+        }
+        if !chat_is_visible(opening, session_id) || !dashboard.chat_input_available(session_id) {
             return None;
         }
         chats

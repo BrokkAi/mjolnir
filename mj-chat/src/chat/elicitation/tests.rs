@@ -167,11 +167,15 @@ fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
         rendered_in_pane(&dialog, old_width, 18);
         dialog.scroll_message(8);
         let before = rendered_in_pane(&dialog, old_width, 18);
-        let area = dialog.message_area.get().expect("message area");
+        let area = dialog.view.message_area.get().expect("message area");
         let before_row = buffer_row(&before, area.y, area.x, area.right());
         let anchor = before_row.split_whitespace().next().expect("visible word");
         let after = rendered_in_pane(&dialog, new_width, 18);
-        let area = dialog.message_area.get().expect("resized message area");
+        let area = dialog
+            .view
+            .message_area
+            .get()
+            .expect("resized message area");
         let after_row = buffer_row(&after, area.y, area.x, area.right());
         assert!(
             after_row.contains(anchor),
@@ -187,10 +191,10 @@ fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
     let dialog = plan_review_message(&message);
     rendered_in_pane(&dialog, 42, 18);
     dialog.scroll_message(8);
-    let anchor = dialog.message_anchor.get().expect("scroll anchor");
+    let anchor = dialog.view.message_anchor.get().expect("scroll anchor");
     for width in [34, 62, 42] {
         rendered_in_pane(&dialog, width, 18);
-        assert_eq!(dialog.message_anchor.get(), Some(anchor));
+        assert_eq!(dialog.view.message_anchor.get(), Some(anchor));
     }
 
     let boundary_message = (0..400).map(|n| format!("w{n:04}")).collect::<String>();
@@ -198,10 +202,10 @@ fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
     rendered_in_pane(&dialog, 42, 18);
     dialog.scroll_message(8);
     let before = rendered_in_pane(&dialog, 42, 18);
-    let area = dialog.message_area.get().unwrap();
+    let area = dialog.view.message_area.get().unwrap();
     let before_row = buffer_row(&before, area.y, area.x, area.right());
     let after = rendered_in_pane(&dialog, 34, 18);
-    let area = dialog.message_area.get().unwrap();
+    let area = dialog.view.message_area.get().unwrap();
     let after_row = buffer_row(&after, area.y, area.x, area.right());
     assert!(
         after_row.starts_with(&before_row[..8]),
@@ -429,7 +433,7 @@ fn a_range_inside_one_wrapped_line_rejoins_the_rows_word_wrap_split() {
 fn mouse_wheel_scrolls_the_plan_without_moving_the_decision() {
     let mut dialog = plan_review(80);
     rendered(&dialog);
-    let area = dialog.message_area.get().expect("rendered plan area");
+    let area = dialog.view.message_area.get().expect("rendered plan area");
 
     dialog.handle_mouse(MouseEvent {
         kind: MouseEventKind::ScrollDown,
@@ -438,7 +442,7 @@ fn mouse_wheel_scrolls_the_plan_without_moving_the_decision() {
         modifiers: KeyModifiers::NONE,
     });
 
-    assert_eq!(dialog.message_scroll.get(), 3);
+    assert_eq!(dialog.view.message_scroll.get(), 3);
     assert_eq!(dialog.focus_index(), 0);
     assert!(rendered(&dialog).contains("plan-line-03"));
 }
@@ -1326,7 +1330,26 @@ fn false_is_an_answer_but_optional_whitespace_is_not() {
 fn empty_forms_still_submit_and_button_focus_keeps_the_question_visible() {
     let mut empty = paired_request(0, false);
     empty.message = "Continue?".into();
+    // Hard-won: 9739e9996: compact fieldless and confirmation forms lost their clickable action row.
+    for height in [3, 4] {
+        let mut dialog = ElicitationDialog::new(empty.clone());
+        let buffer = rendered_in_pane(&dialog, 100, height);
+        let (column, row) = (0..height)
+            .find_map(|row| {
+                let line = buffer_row(&buffer, row, 0, 100);
+                line.find("Answer & Next")
+                    .map(|byte| (line[..byte].chars().count() as u16, row))
+            })
+            .expect("compact action button remains visible");
+        assert_eq!(
+            click_cell_at(&mut dialog, column, row, std::time::Instant::now()),
+            Some(ElicitationResponse::Accept {
+                content: BTreeMap::new()
+            })
+        );
+    }
     let mut dialog = ElicitationDialog::new(empty);
+    assert!(buffer_text(&rendered_in_pane(&dialog, 60, 4)).contains("Continue?"));
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -1430,8 +1453,17 @@ fn mouse_navigation_and_submission_share_the_keyboard_confirmation_rules() {
     assert_eq!(click_question_button(&mut dialog, "Answer & Next"), None);
     assert_eq!(click_question_button(&mut dialog, "Answer & Next"), None);
     assert!(dialog.confirming_unanswered);
+    // Hard-won: 9739e9996: compact confirmations had no mouse action to finish the answer.
+    let buffer = rendered_in_pane(&dialog, 100, 4);
+    let (column, row) = (0..4)
+        .find_map(|row| {
+            let line = buffer_row(&buffer, row, 0, 100);
+            line.find("Answer & Next")
+                .map(|byte| (line[..byte].chars().count() as u16, row))
+        })
+        .expect("confirmation action remains visible");
     assert_eq!(
-        click_question_button(&mut dialog, "Answer & Next"),
+        click_cell_at(&mut dialog, column, row, std::time::Instant::now()),
         Some(ElicitationResponse::Accept {
             content: BTreeMap::from([(
                 "question_1".into(),
@@ -1488,6 +1520,102 @@ fn warning_buttons_do_not_edit_the_custom_answer_behind_them() {
                 "question_1__other".into(),
                 ElicitationValue::String("custom answer".into())
             )])
+        })
+    );
+}
+
+#[test]
+fn simultaneous_surfaces_keep_hitboxes_capture_and_scroll_independent() {
+    let mut req = request(
+        ElicitationFieldKind::Boolean {
+            default: Some(false),
+        },
+        true,
+    );
+    req.fields[0].title = (0..30)
+        .map(|i| format!("Question line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut dialog = ElicitationDialog::new(req);
+    let mut terminal = Terminal::new(TestBackend::new(110, 44)).unwrap();
+    let mut notification_field = Rect::default();
+    let mut conversation_field = Rect::default();
+    // Both presentations are rendered in the same frame, as in the dashboard.
+    terminal
+        .draw(|frame| {
+            for (surface, bounds) in [
+                (ElicitationSurface::Notification, Rect::new(0, 0, 70, 18)),
+                (ElicitationSurface::Conversation, Rect::new(0, 22, 110, 22)),
+            ] {
+                dialog.select_surface(surface);
+                let mut surfaces = FrameSurfaces::new();
+                render_elicitation_in(frame, &dialog, &mut surfaces, bounds, true);
+                let field = surfaces.surface(SurfaceId::ModalBody).unwrap().rect;
+                match surface {
+                    ElicitationSurface::Notification => notification_field = field,
+                    ElicitationSurface::Conversation => conversation_field = field,
+                }
+            }
+        })
+        .unwrap();
+    let event = |kind, area: Rect| MouseEvent {
+        kind,
+        column: area.x + 1,
+        row: area.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    dialog.select_surface(ElicitationSurface::Notification);
+    dialog.handle_mouse(event(
+        MouseEventKind::Down(MouseButton::Left),
+        notification_field,
+    ));
+    assert_eq!(
+        dialog.pointer_surface(),
+        Some(ElicitationSurface::Notification)
+    );
+    dialog.select_surface(ElicitationSurface::Conversation);
+    assert_eq!(
+        dialog.pointer_surface(),
+        Some(ElicitationSurface::Notification)
+    );
+    dialog.select_surface(ElicitationSurface::Notification);
+    dialog.handle_mouse(event(
+        MouseEventKind::Up(MouseButton::Left),
+        notification_field,
+    ));
+    assert!(matches!(dialog.values[0], FieldValue::Boolean(true)));
+    dialog.scroll_message(3);
+    let notification_scroll = dialog.view.message_scroll.get();
+    assert!(notification_scroll > 0);
+    dialog.select_surface(ElicitationSurface::Conversation);
+    assert_eq!(dialog.view.message_scroll.get(), 0);
+    assert!(dialog.component_handles_mouse_at(conversation_field.x + 1, conversation_field.y));
+    click_cell_at(
+        &mut dialog,
+        conversation_field.x + 1,
+        conversation_field.y,
+        Instant::now(),
+    );
+    assert!(matches!(dialog.values[0], FieldValue::Boolean(false)));
+    dialog.select_surface(ElicitationSurface::Notification);
+    assert_eq!(dialog.view.message_scroll.get(), notification_scroll);
+    // Hard-won: a882023b6: a notification-only draft restored its scroll into the conversation slot.
+    // Hard-won: 4c23909e0: the conversation's later render overwrote the notification viewport in the saved draft.
+    dialog.select_surface(ElicitationSurface::Conversation);
+    let stored = serde_json::to_string(&dialog.draft()).unwrap();
+    let mut restored = ElicitationDialog::from_draft(
+        dialog.request().clone(),
+        serde_json::from_str(&stored).unwrap(),
+    )
+    .unwrap();
+    restored.select_surface(ElicitationSurface::Notification);
+    assert_eq!(restored.view.message_scroll.get(), notification_scroll);
+    restored.select_surface(ElicitationSurface::Conversation);
+    assert_eq!(restored.view.message_scroll.get(), 0);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([("question_0".into(), ElicitationValue::Boolean(false))]),
         })
     );
 }

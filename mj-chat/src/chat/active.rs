@@ -104,10 +104,6 @@ enum ChatIoUpdate {
         result: std::result::Result<Vec<String>, String>,
     },
     SessionReconnected(std::result::Result<ManagedSessionHandle, String>),
-    /// The chosen reviewer is running and the review can begin.
-    ReviewerStarted(std::result::Result<(), String>),
-    /// A sentence about a reviewer form answer, for the conversation.
-    ReviewerNotice(String),
     /// The system browser could not be started for a clicked link.
     LinkOpenFailed {
         url: String,
@@ -255,9 +251,6 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
             tracing::warn!(%url, %error, "browser launch for a transcript link failed");
             chat.set_notice(format!("Could not open {url}: {error}"));
         }
-        // Reviewer updates are handled where the session handle is, because
-        // acting on one starts more reviewer work.
-        ChatIoUpdate::ReviewerStarted(_) | ChatIoUpdate::ReviewerNotice(_) => {}
         ChatIoUpdate::SessionReconnected(_) => {
             unreachable!("session reconnects are applied by ActiveChat")
         }
@@ -408,7 +401,7 @@ pub struct ActiveChat {
     /// A cached question may arrive in the newly attached review stream a few
     /// ticks after the chat itself opens. Keep it here until that exact source
     /// form surfaces, instead of dropping it or applying it to the primary.
-    deferred_elicitation_draft: Option<ChatElicitationDraft>,
+    deferred_elicitation_drafts: Vec<ChatElicitationDraft>,
     earlier_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -435,7 +428,14 @@ impl PreparedChat {
 
     /// Constructs the view without filesystem or database access.
     pub fn open(self) -> ActiveChat {
-        ActiveChat::from_prepared(self)
+        ActiveChat::from_prepared(self, None)
+    }
+
+    /// Open with the composer a surface held while this attachment was in
+    /// flight. The chat adopts it before starting its own reads, so session
+    /// history loads once, into the composer it keeps.
+    pub fn open_with_composer(self, composer: super::LiveComposer) -> ActiveChat {
+        ActiveChat::from_prepared(self, Some(composer))
     }
 
     /// A same-session handoff keeps the latest local composer, not the saved
@@ -533,7 +533,7 @@ impl ActiveChat {
         }
     }
 
-    fn from_prepared(prepared: PreparedChat) -> Self {
+    fn from_prepared(prepared: PreparedChat, composer: Option<super::LiveComposer>) -> Self {
         let PreparedChat {
             session,
             bundle_id,
@@ -618,8 +618,16 @@ impl ActiveChat {
         state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
+        let adopted = composer.is_some();
+        if let Some(composer) = composer {
+            state.adopt_live_composer(composer);
+        }
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
-        state.request_session_history();
+        // See `adopt_live_composer`: a composer a warm chat handed over
+        // carries its history or its in-flight read.
+        if !state.session_history_requested() {
+            state.request_session_history();
+        }
         state.dispatch_composer_requests(
             || std::future::ready(Ok(session.clone())),
             persistence.as_ref(),
@@ -671,9 +679,14 @@ impl ActiveChat {
             session_retiring: false,
             reconnect_notice_pending_sync: false,
             persistence,
-            deferred_elicitation_draft: None,
+            deferred_elicitation_drafts: Vec::new(),
             earlier_task: None,
         };
+        if adopted {
+            // As in `adopt_live_composer`: the view may have advanced while
+            // the composer was parked.
+            chat.apply_session_view(Ok(chat.session.view()));
+        }
         chat.refresh_voice_availability();
         chat
     }
@@ -681,6 +694,13 @@ impl ActiveChat {
     /// Reconcile transferred local state with this attachment's authoritative view.
     pub fn adopt_live_composer(&mut self, composer: super::LiveComposer) {
         self.state.adopt_live_composer(composer);
+        // A standby composer never asked for this session's history. One a
+        // chat parked carries its loaded history or its in-flight read, which
+        // a new request would abort.
+        if !self.state.session_history_requested() {
+            self.state.request_session_history();
+            self.dispatch_composer_requests();
+        }
         // The view may have advanced while the composer was parked. Applying
         // it restores the authoritative queue and uses the same submission
         // reconciliation as every feed update, without retaining another copy.
@@ -722,14 +742,8 @@ impl ActiveChat {
     /// replacement. A reviewer form can be deferred while the sidecar stream
     /// catches up, so it lives alongside the currently visible form.
     pub fn elicitation_drafts(&self) -> Vec<ChatElicitationDraft> {
-        let mut drafts = self
-            .state
-            .elicitation_draft()
-            .into_iter()
-            .collect::<Vec<_>>();
-        if let Some(draft) = self.deferred_elicitation_draft.clone() {
-            drafts.push(draft);
-        }
+        let mut drafts = self.state.elicitation_drafts();
+        drafts.extend(self.deferred_elicitation_drafts.iter().cloned());
         drafts
     }
 
@@ -745,12 +759,23 @@ impl ActiveChat {
     /// Restore a draft only when the newly attached projection is already
     /// showing the exact same pending request.
     pub fn restore_elicitation_draft(&mut self, draft: ChatElicitationDraft) -> bool {
+        if draft.reviewer && !self.state.review_projection_known {
+            self.deferred_elicitation_drafts
+                .retain(|saved| saved.identity() != draft.identity());
+            self.deferred_elicitation_drafts.push(draft);
+            return true;
+        }
+        if draft.reviewer && !self.state.pending_reviewer_matches(&draft) {
+            return false;
+        }
         if self.state.restore_elicitation_draft(draft.clone()) {
             true
         } else if self.state.pending_reviewer_matches(&draft) {
             // The review projection is present, but its native form has not
             // yet been surfaced by `surface_reviewer_elicitations`.
-            self.deferred_elicitation_draft = Some(draft);
+            self.deferred_elicitation_drafts
+                .retain(|saved| saved.identity() != draft.identity());
+            self.deferred_elicitation_drafts.push(draft);
             true
         } else {
             false
@@ -758,16 +783,10 @@ impl ActiveChat {
     }
 
     fn apply_deferred_elicitation_draft(&mut self) {
-        let Some(draft) = self.deferred_elicitation_draft.take() else {
-            return;
-        };
-        if !self.state.restore_elicitation_draft(draft.clone()) {
-            // Keep it only while the review projection still names this exact
-            // request. An answer, removal, or changed request invalidates it
-            // immediately, including when the primary currently has no form.
-            if self.state.pending_reviewer_matches(&draft) {
-                self.deferred_elicitation_draft = Some(draft);
-            }
+        for draft in std::mem::take(&mut self.deferred_elicitation_drafts) {
+            // Matching reviewer drafts wait behind the current form; ended
+            // requests are discarded by the same restoration decision.
+            self.restore_elicitation_draft(draft);
         }
     }
 

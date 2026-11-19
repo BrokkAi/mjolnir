@@ -730,6 +730,7 @@ function wikiContext(overrides = {}) {
   let nextTimerId = 1;
   const context = vm.createContext({
     encodeURIComponent,
+    AbortController,
     JSON,
     route: { name: 'resume' },
     renders: 0,
@@ -741,7 +742,7 @@ function wikiContext(overrides = {}) {
       return id;
     },
     clearTimeout: id => timers.delete(id),
-    request: async () => ({ rows: [], status: { state: 'ready', topping_up: false } }),
+    request: async () => ({ rows: [], status: { state: 'ready' } }),
     resumeSearch: { disabled: false, placeholder: '' },
     ...overrides,
   });
@@ -784,9 +785,9 @@ test('wiki search waits out a burst of typing and drops an overtaken answer', as
   const second = fire();
   assert.equal(urls.length, 2);
 
-  pending[1]({ rows: [{ id: 'new' }], status: { state: 'ready', topping_up: false } });
+  pending[1]({ rows: [{ id: 'new' }], status: { state: 'ready' } });
   await second;
-  pending[0]({ rows: [{ id: 'stale' }], status: { state: 'ready', topping_up: false } });
+  pending[0]({ rows: [{ id: 'stale' }], status: { state: 'ready' } });
   await first;
   assert.deepEqual(
     vm.runInContext('wikiState.rows.map(row => row.id)', context),
@@ -818,32 +819,11 @@ test('a daemon without the wiki routes stops being asked', async () => {
   assert.equal(timers.size, 0, 'an index that is not there is not asked again');
 });
 
-test('a building index closes the search box and is asked again every five seconds', async () => {
-  let status = { state: 'indexing', topping_up: true };
-  const { context, timers, fire } = wikiContext({
-    request: async () => ({ rows: [], status }),
-  });
 
-  vm.runInContext("scheduleWikiSearch('')", context);
-  await fire();
-  assert.equal(vm.runInContext('wikiSearchPlaceholder()', context), 'Indexing…');
-  vm.runInContext('renderWikiSearchBox()', context);
-  assert.equal(context.resumeSearch.disabled, true);
-  assert.equal(context.resumeSearch.placeholder, 'Indexing…');
-  assert.equal(timers.size, 1, 'the page asks again by itself');
-  assert.equal([...timers.values()][0].ms, 5000);
-
-  status = { state: 'ready', topping_up: false };
-  await fire();
-  assert.equal(vm.runInContext('wikiSearchPlaceholder()', context), null);
-  vm.runInContext('renderWikiSearchBox()', context);
-  assert.equal(context.resumeSearch.disabled, false, 'the box opens without a reload');
-  assert.equal(timers.size, 0, 'a ready, idle index is not polled');
-});
 
 test('an index at another version is reported and never polled', async () => {
   const { context, timers, fire } = wikiContext({
-    request: async () => ({ rows: [], status: { state: 'version_mismatch', topping_up: false } }),
+    request: async () => ({ rows: [], status: { state: 'version_mismatch' } }),
   });
   vm.runInContext("scheduleWikiSearch('')", context);
   await fire();
@@ -854,26 +834,7 @@ test('an index at another version is reported and never polled', async () => {
   assert.equal(timers.size, 0);
 });
 
-test('a running top-up repeats the query at most ten times', async () => {
-  const { context, timers, fire } = wikiContext({
-    request: async () => ({ rows: [], status: { state: 'ready', topping_up: true } }),
-  });
-  vm.runInContext("scheduleWikiSearch('pomegranate')", context);
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    await fire();
-    assert.equal(timers.size, 1, `repeat ${attempt} was not scheduled`);
-    assert.equal([...timers.values()][0].ms, 2000);
-  }
-  await fire();
-  assert.equal(timers.size, 0, 'the repeats are bounded');
-  assert.equal(vm.runInContext('wikiState.topUps', context), 10);
 
-  // A new query gets its own budget.
-  vm.runInContext("scheduleWikiSearch('something else')", context);
-  assert.equal(vm.runInContext('wikiState.topUps', context), 0);
-  await fire();
-  assert.equal(timers.size, 1);
-});
 
 test('wiki rows split into archived rows and snippets for live sessions', () => {
   const { context } = wikiContext();
@@ -1342,7 +1303,7 @@ function delegationContext(kind = 'codex', configured = true) {
 
 test('Create gives a YOLO target its own configured Mjolnir choices', () => {
   const context = delegationContext('codex', true);
-  context.snapshot.targets = [{ id: 'yolo', permission_mode: 'yolo', subagents_configured: false }];
+  context.snapshot.targets = [{ id: 'yolo', yolo: true, subagents_configured: false }];
   const available = () => vm.runInContext(
     `mjolnirAvailable({ profileId: 'profile', targetId: 'yolo', subagents: { mode: 'mjolnir' } })`,
     context,
@@ -1350,8 +1311,8 @@ test('Create gives a YOLO target its own configured Mjolnir choices', () => {
   assert.equal(available(), false);
   context.snapshot.targets[0].subagents_configured = true;
   assert.equal(available(), true);
-  // A container target has no permission mode and keeps the shared choices.
-  context.snapshot.targets[0] = { id: 'yolo', subagents_configured: true };
+  // A target that keeps approvals uses the shared choices.
+  context.snapshot.targets[0] = { id: 'yolo', yolo: false, subagents_configured: true };
   context.snapshot.subagents_configured = false;
   assert.equal(available(), true);
 });

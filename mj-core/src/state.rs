@@ -2098,7 +2098,8 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
-    /// Whether this session's recorded target runs with `permissions = "yolo"`.
+    /// Whether this session's harness runs without approvals on its recorded
+    /// target (a container, or `permissions = "yolo"`).
     pub fn is_yolo_target(&self, config: &Config) -> bool {
         self.target_runtime_settings(config)
             .is_ok_and(|settings| settings.is_yolo())

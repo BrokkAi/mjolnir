@@ -15,7 +15,6 @@ pub(crate) use mj_accounts::claude_login;
 pub use mj_accounts::claude_usage;
 pub mod launch_timing;
 pub use mj_accounts::login_terminal;
-pub use mj_accounts::quota_runtime;
 
 pub use mj_import::compaction;
 pub mod controller;
