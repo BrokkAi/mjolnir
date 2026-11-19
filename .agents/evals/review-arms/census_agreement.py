@@ -12,11 +12,20 @@ from census_label import LABELS, RUST, exclude_families, item_sets, rows
 
 
 def match_facts(primary, replication):
-    """Maximize paired facts, then maximize pairs that cite identical sites."""
+    """Maximize paired facts, then pairs that cite identical sites, then pairs whose categories
+    agree, so equally good site pairings never depend on the order facts are listed in."""
     left = [set(fact["sites"]) for fact in primary]
     right = [set(fact["sites"]) for fact in replication]
+
+    def category_misses(a, b):
+        first, second = categories(a), categories(b)
+        return sum(first[key] != second[key] for key in first)
+
+    # A containment pair outweighs every possible category difference in a matching, so exact
+    # pairs still come first; category agreement only breaks ties between equal site costs.
+    weight = 1 + 4 * (len(left) + len(right))
     # Vertex indices for the replication side start after the primary side.
-    edges = [(i, j, int(a != b))
+    edges = [(i, j, weight * int(a != b) + category_misses(primary[i], replication[j - len(left)]))
              for i, a in enumerate(left)
              for j, b in enumerate(right, start=len(left))
              if a <= b or b <= a]
@@ -24,7 +33,7 @@ def match_facts(primary, replication):
     vertex_count = len(left) + len(right)
     while True:
         # Find the cheapest augmenting path from any unpaired primary fact.
-        # A containment pair costs one and an exact pair costs zero. Reversing
+        # Containment costs more than any category difference; exact pairs cost least. Reversing
         # an assigned edge refunds its cost, so each augmentation maximizes
         # exact pairs among matchings of the resulting size.
         paired_left = set(assigned.values())

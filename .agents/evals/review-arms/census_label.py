@@ -28,14 +28,15 @@ def rows(path):
     with path.open() as source:
         for number, line in enumerate(source, 1):
             if line.strip():
+                # An interrupted append leaves at most one unterminated final line. Treat it as
+                # incomplete even if it parses, as append_rows does when it drops it, so its item
+                # is labelled again instead of being counted and then removed.
+                if not line.endswith("\n"):
+                    print(f"{path}:{number}: skipping an incomplete final line", file=sys.stderr)
+                    return
                 try:
                     yield json.loads(line)
                 except ValueError as error:
-                    # An interrupted append leaves at most one unterminated final line; skip it so
-                    # the complete rows stay usable and its items are labelled again.
-                    if not line.endswith("\n"):
-                        print(f"{path}:{number}: skipping an incomplete final line", file=sys.stderr)
-                        return
                     raise ValueError(f"{path}:{number}: {error}") from error
 
 
