@@ -2067,17 +2067,15 @@ pub(crate) fn discover_linked_worktrees(
     let top_level = fs::canonicalize(repository)
         .with_context(|| format!("resolve {}", repository.display()))?;
     let (_, common_directory) = git_directories(runner, repository)?;
-    // Git 2.31 has no `worktree list -z`; a path with a newline in it cannot
-    // be listed there, and is left out like any other unlistable directory.
     let listed = git_bytes(
         runner,
         repository,
-        ["worktree", "list", "--porcelain"],
+        ["worktree", "list", "--porcelain", "-z"],
         &[],
         "list linked worktrees",
     )?;
     let mut found = Vec::new();
-    for line in listed.split(|byte| *byte == b'\n') {
+    for line in listed.split(|byte| *byte == 0) {
         let Some(path) = line.strip_prefix(b"worktree ") else {
             continue;
         };

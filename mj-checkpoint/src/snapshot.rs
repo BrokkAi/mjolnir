@@ -906,12 +906,28 @@ fn working_state(
     if skipped {
         return Ok(None);
     }
+    // stash create refreshes and writes its index even with optional locks off.
+    // Give it a private copy beside the real index (also preserving split-index
+    // lookup), so estimation and raw capture never write or lock the live index.
+    let index = git_path(runner, checkout, "index")?;
+    let temporary =
+        tempfile::NamedTempFile::new_in(index.parent().context("index has no parent")?)?;
+    if index.try_exists()? {
+        fs::copy(&index, temporary.path())?;
+    } else {
+        fs::remove_file(temporary.path())?;
+    }
+    let mut env = synthetic_git_commit_identity();
+    env.push((
+        "GIT_INDEX_FILE".into(),
+        temporary.path().as_os_str().to_owned(),
+    ));
     // Editing files needs no user identity; synthetic stash commits use ours.
     let output = runner.run(
         checkout,
         &GitCommand {
             arguments: vec!["stash".into(), "create".into()],
-            env: synthetic_git_commit_identity(),
+            env,
             ..Default::default()
         },
     )?;
@@ -1544,8 +1560,10 @@ fn check_consent(inventory: &WorkspaceInventory, consent: &CaptureConsent) -> Re
                     message: entry.value.message.clone(),
                 }
             }));
-            hidden.extend(inventory.hidden_tracked_edits.clone());
-            intent.extend(inventory.intent_to_add.clone());
+            if !(inventory.raw && inventory.operation.is_some()) {
+                hidden.extend(inventory.hidden_tracked_edits.clone());
+                intent.extend(inventory.intent_to_add.clone());
+            }
             dirty_submodules.extend(inventory.dirty_submodules.clone());
             local_work.extend(inventory.submodule_local_work.clone());
             if let Some(operation) = &inventory.operation {
@@ -4438,6 +4456,7 @@ mod tests {
         let restored = r.restore(&snapshot, None);
         assert_eq!(read_stash(&FileGit, &restored).unwrap(), before);
     }
+    // Hard-won: 42f6271ee: stash create writes and locks the real index even with optional locks disabled.
     #[test]
     fn staged_and_unstaged_edits_to_same_file_survive() {
         let r = Repo::new();
@@ -4458,7 +4477,25 @@ mod tests {
                 .status,
             0
         );
-        let snapshot = r.capture(&CheckoutOwnership::Managed);
+        let index_path = git_path(&FileGit, &r.checkout, "index").unwrap();
+        let index_before = fs::read(&index_path).unwrap();
+        let lock = index_path.with_extension("lock");
+        fs::write(&lock, "another Git process owns the index\n").unwrap();
+        estimate_delta(
+            &FileGit,
+            &r.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+            None,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&index_path).unwrap(), index_before);
+        let snapshot = r.capture(&CheckoutOwnership::Raw { launch: None });
+        assert_eq!(fs::read(&index_path).unwrap(), index_before);
+        assert_eq!(
+            fs::read_to_string(&lock).unwrap(),
+            "another Git process owns the index\n"
+        );
+        fs::remove_file(lock).unwrap();
         let inventory =
             workspace_inventory(&FileGit, &r.checkout, &CheckoutOwnership::Managed).unwrap();
         assert_eq!(
@@ -4481,10 +4518,11 @@ mod tests {
         assert!(!restored.join("untracked\n spaced").exists());
         assert!(!restored.join("ignored").exists());
     }
+    // Hard-won: 42f6271ee: newline worktree paths disappeared from line-delimited discovery.
     #[test]
     fn nested_detached_worktree_and_dirty_state_survive() {
         let r = Repo::new();
-        let nested = r.checkout.join("lanes/nested");
+        let nested = r.checkout.join("lanes/nested\nline");
         git(
             &r.checkout,
             &["worktree", "add", "--detach", nested.to_str().unwrap()],
@@ -4493,22 +4531,29 @@ mod tests {
         git(&nested, &["commit", "-am", "nested"]);
         fs::write(nested.join("file"), "nested working state\n").unwrap();
         let encoded = serde_json::to_value(r.capture(&CheckoutOwnership::Managed)).unwrap();
-        assert_eq!(encoded["worktrees"][0]["relative_path"], "lanes/nested");
+        assert_eq!(
+            encoded["worktrees"][0]["relative_path"],
+            "lanes/nested\nline"
+        );
         let snapshot: WorkspaceSnapshot = serde_json::from_value(encoded).unwrap();
         let inventory =
             workspace_inventory(&FileGit, &r.checkout, &CheckoutOwnership::Managed).unwrap();
         assert!(inventory.untracked.is_empty());
         assert_eq!(inventory.worktrees.len(), 1);
-        let restored = r.restore(&snapshot, None).join("lanes/nested");
+        let restored = r.restore(&snapshot, None).join("lanes/nested\nline");
         assert_eq!(
             git(&restored, &["rev-parse", "HEAD"]),
             git(&nested, &["rev-parse", "HEAD"])
         );
         assert_eq!(git(&restored, &["diff"]), git(&nested, &["diff"]));
     }
+    // Hard-won: 42f6271ee: raw operation capture rejected index state it deliberately skips.
     #[test]
     fn conflicted_merge_aborts_managed_and_leaves_raw_untouched() {
         let r = Repo::new();
+        fs::write(r.checkout.join("base"), "hidden marker\n").unwrap();
+        git(&r.checkout, &["add", "base"]);
+        git(&r.checkout, &["commit", "-m", "hidden marker"]);
         r.conflict();
         r.start_conflict("merge");
         let before = fs::read(r.checkout.join("file")).unwrap();
@@ -4516,8 +4561,20 @@ mod tests {
             estimate_delta(&FileGit, &r.checkout, &CheckoutOwnership::Managed, None).unwrap();
         assert!(estimate.working_state_bytes.is_none());
         assert!(r.checkout.join(".git/MERGE_HEAD").exists());
+        fs::write(r.checkout.join("draft"), "intent during merge\n").unwrap();
+        git(&r.checkout, &["add", "-N", "draft"]);
+        git(&r.checkout, &["update-index", "--assume-unchanged", "base"]);
+        let index_path = git_path(&FileGit, &r.checkout, "index").unwrap();
+        let index_before = fs::read(&index_path).unwrap();
         let raw = r.capture(&CheckoutOwnership::Raw { launch: None });
+        assert_eq!(fs::read(&index_path).unwrap(), index_before);
         assert!(raw.working_state_skipped);
+        git(
+            &r.checkout,
+            &["update-index", "--no-assume-unchanged", "base"],
+        );
+        git(&r.checkout, &["reset", "--", "draft"]);
+        fs::remove_file(r.checkout.join("draft")).unwrap();
         assert!(r.checkout.join(".git/MERGE_HEAD").exists());
         assert_eq!(fs::read(r.checkout.join("file")).unwrap(), before);
         let managed = r.capture(&CheckoutOwnership::Managed);
@@ -6296,6 +6353,20 @@ mod tests {
             &r.checkout,
             &["stash", "push", "-m", "unrelated user stash"],
         );
+        let module = Repo::new();
+        add_submodule(&r, &module);
+        let primary_module = r.checkout.join("sub");
+        git(&primary_module, &["checkout", "--detach"]);
+        fs::write(
+            primary_module.join("file"),
+            "unrelated primary module work\n",
+        )
+        .unwrap();
+        git(
+            &primary_module,
+            &["commit", "-am", "unrelated primary module work"],
+        );
+        git(&r.checkout, &["rm", "-f", "sub"]);
         let scope = crate::archive::session_start_scope(&FileGit, &legacy).unwrap();
         let own_pin = crate::archive::push_review_base_ref(&scope);
         git(&legacy, &["update-ref", &own_pin, "HEAD"]);
@@ -7062,6 +7133,38 @@ mod tests {
         let error = capture(&CheckoutOwnership::Managed).unwrap_err();
         assert!(
             error.to_string().contains("linked-worktree") && error.to_string().contains(&only_head),
+            "{error:#}"
+        );
+        git(&own_linked, &["checkout", "--detach", "origin/main"]);
+        let missing = root.checkout.join("gone-lane");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", missing.to_str().unwrap()],
+        );
+        git(
+            &missing,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        let missing_module = missing.join("sub");
+        git(&missing_module, &["checkout", "--detach"]);
+        fs::write(missing_module.join("file"), "prunable module HEAD only\n").unwrap();
+        git(
+            &missing_module,
+            &["commit", "-am", "prunable module HEAD only"],
+        );
+        let missing_head = git(&missing_module, &["rev-parse", "HEAD"]);
+        git(&missing, &["rm", "-f", "sub"]);
+        fs::remove_dir_all(&missing).unwrap();
+        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
+        assert!(
+            error.to_string().contains("gone-lane") && error.to_string().contains(&missing_head),
             "{error:#}"
         );
     }

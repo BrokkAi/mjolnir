@@ -87,6 +87,36 @@ pub(crate) fn inspect_snapshot_submodules(
     )?;
     let modules = crate::snapshot::git_path(runner, repository, "modules")?;
     inspect_cached_children(runner, &modules, Path::new(""), &mut snapshot)?;
+    // A missing checkout is omitted from worktree discovery, but its module
+    // stores still disappear when the owning managed repository is removed.
+    let (_, common) = crate::archive::git::git_directories(runner, repository)?;
+    // Legacy linked teardown removes only its own private admin entry.
+    if std::fs::canonicalize(&common)?.starts_with(std::fs::canonicalize(repository)?) {
+        inspect_cached_children(
+            runner,
+            &common.join("modules"),
+            Path::new(""),
+            &mut snapshot,
+        )?;
+        match std::fs::read_dir(common.join("worktrees")) {
+            Ok(entries) => {
+                let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+                entries.sort_by_key(|entry| entry.file_name());
+                for entry in entries {
+                    if entry.file_type()?.is_dir() {
+                        inspect_cached_children(
+                            runner,
+                            &entry.path().join("modules"),
+                            &Path::new("worktrees").join(entry.file_name()),
+                            &mut snapshot,
+                        )?;
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect retained worktree module stores"),
+        }
+    }
     snapshot.dirty = inspection.dirty;
     snapshot.unregistered = inspection.unregistered;
     Ok(snapshot)
