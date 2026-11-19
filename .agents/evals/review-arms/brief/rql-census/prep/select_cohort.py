@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Rank measured repos for the test cohort by expected relation diffs.
+
+Usage: select_cohort.py INDEX_COST.jsonl YIELD.json > cohort.md
+
+Rule (PLAN-rql-census.md, Data, revised 2026-11-19): rank by B, the repo's capped
+2025+ relation estimate (yield.json, wide_2025.per_repo_relation_estimate_capped).
+The index measurement only excludes: a repo whose cold index or warm restart did not
+reach ready (over the cap, or a Bifrost failure) can't be selected. Indexing CPU-hours,
+cold + (B - 1) x warm from the scope cgroup's cpu_to_ready_usec, are reported and break
+ties. Walking down the ranking, at most one repo per shared-history group is
+provisionally selected; every member stays ranked. A repo enters the test set only
+after tracing admits at least 8 relation diffs, so tracing walks this list and a repo
+that misses the floor gives its place to the next.
+"""
+import json
+import sys
+
+COHORT = 12
+
+
+def main():
+    measured = {}
+    for line in open(sys.argv[1]):
+        r = json.loads(line)
+        if r.get("cold") is not None:  # later records supersede earlier ones
+            measured[r["repo"]] = r
+    y = json.load(open(sys.argv[2]))
+    estimate = y["windows"]["wide_2025"]["per_repo_relation_estimate_capped"]
+    group_of = y["group_of"]
+
+    rows = []
+    for repo, r in measured.items():
+        cold, warm = r["cold"], r.get("warm_restart") or {}
+        b = estimate.get(repo, 0.0)
+        failure = None
+        if not cold.get("ready"):
+            failure = cold.get("error") or "cold index not ready"
+        elif not warm.get("ready"):
+            failure = warm.get("error") or warm.get("skipped") or "warm restart not ready"
+        c_h = cold.get("cpu_to_ready_usec", 0) / 3.6e9
+        w_h = warm.get("cpu_to_ready_usec", 0) / 3.6e9
+        hours = c_h + max(b - 1, 0) * w_h
+        rows.append({"repo": repo, "b": b, "cold_h": c_h, "warm_h": w_h, "hours": hours,
+                     "peak_gib": max(cold.get("peak_tree_kib") or 0,
+                                     warm.get("peak_tree_kib") or 0) / 2**20,
+                     "failure": failure, "group": tuple(group_of.get(repo) or ())})
+    rows.sort(key=lambda x: (x["failure"] is not None, -x["b"], x["hours"], x["repo"]))
+
+    taken, picked = set(), 0
+    print("| Rank | Repo | B (capped est.) | Cold CPU-h | Warm CPU-h | Index CPU-h | Peak GiB | Status |")
+    print("|---|---|---|---|---|---|---|---|")
+    for i, x in enumerate(rows, 1):
+        if x["failure"]:
+            status = "failed measurement: " + x["failure"].split("\n")[0][:120]
+        elif x["group"] and x["group"] in taken:
+            status = "reserve (shared-history group already selected)"
+        elif picked < COHORT:
+            picked += 1
+            status = f"provisional cohort #{picked}"
+            if x["group"]:
+                taken.add(x["group"])
+        else:
+            status = "reserve"
+        print(f"| {i} | {x['repo']} | {x['b']:.1f} | {x['cold_h']:.3f} | {x['warm_h']:.3f} | "
+              f"{x['hours']:.2f} | {x['peak_gib']:.1f} | {status} |")
+    total = sum(x["hours"] for x in rows if not x["failure"])
+    print(f"\nIndexing CPU-hours, all measured repos that reached ready: {total:.1f}")
+    not_measured = sorted(set(estimate) - set(measured), key=lambda r: -estimate[r])[:10]
+    print(f"Top unmeasured by estimate: {', '.join(not_measured)}")
+
+
+if __name__ == "__main__":
+    main()
