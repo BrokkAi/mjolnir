@@ -40,6 +40,7 @@ pub(super) fn derive(
             command,
             message,
             reason,
+            ..
         } if *command != RelayCommandKind::Prompt => {
             if let Some(reason) = reason
                 && *reason != OutcomeReason::LegacyUnclassified

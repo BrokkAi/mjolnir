@@ -223,8 +223,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Delegation Native ▾                                                              │                           │
-│                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
-│                           │                                                                                  │                           │
+│                           │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
+│                           │ subagents on all targets")                                                       │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
 │                           │                                                                                  │                           │
@@ -455,9 +455,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                      │
   │                                                      │
   │ Delegation Native ▾                                  │
-  │ Set up Mjolnir sub-agents in Settings -> Sub-agents  │
-  │                                                      │
-  │                                                      │
+  │ Set up YOLO target sub-agents in Settings ->         │
+  │ Sub-agents (uncheck "Use the same subagents on all   │
+  │ targets")                                            │
   │                                                      │
   │                                                      │
   │   Cancel     Back     Add directory…     Create      │
@@ -699,8 +699,8 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │ Delegation Native ▾                                                              │  ─────────────────────────╮
-│                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
-│                           │                                                                                  │                           │
+│                           │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
+│                           │ subagents on all targets")                                                       │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │

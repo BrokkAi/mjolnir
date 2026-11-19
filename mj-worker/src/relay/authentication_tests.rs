@@ -272,3 +272,37 @@ fn a_revision_24_snapshot_with_the_quota_flag_keeps_the_auth_retry_blocked() {
     );
     assert!(upgraded.authentication_retry_intent().is_none());
 }
+
+// Hard-won: 70b45ac58: restart recovery appeared newer than an already queued auth-failed prompt.
+#[test]
+fn restart_recovery_preserves_queued_authentication_retry_intent() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "prompt-original", prompt("first task"));
+    relay.claim_pending_commands(true).unwrap();
+    let accepted = relay.snapshot.handled_commands["prompt-original"].accepted_ordinal;
+    submit_relay(&mut relay, "prompt-queued", prompt("next task"));
+    let latest_input = relay.snapshot.latest_prompt_accepted_ordinal;
+    drop(relay);
+    let mut relay = open(root.path());
+    let recovered = relay.claim_pending_commands(true).unwrap().pop().unwrap();
+    assert_eq!(
+        relay.snapshot.handled_commands[&recovered.command_id].accepted_ordinal,
+        accepted
+    );
+    assert_eq!(relay.snapshot.latest_prompt_accepted_ordinal, latest_input);
+    // The newer queued request must still withdraw retries of recovered A.
+    auth_failure(&mut relay, &recovered.command_id, "old-access-hash");
+    assert!(relay.authentication_retry_intent().is_none());
+    let queued = relay.claim_pending_commands(true).unwrap().pop().unwrap();
+    assert_eq!(queued.command_id, "prompt-queued");
+    auth_failure(&mut relay, &queued.command_id, "old-access-hash");
+    let (ordinal, _) = relay
+        .authentication_retry_intent()
+        .expect("B still owns its authentication retry");
+    assert!(
+        relay
+            .submit_authentication_retry(ordinal, "new-access-hash")
+            .unwrap()
+    );
+}

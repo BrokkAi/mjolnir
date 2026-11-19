@@ -632,7 +632,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("send"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: notification_available,
+        available: notification_reply_available,
     },
     CommandSpec {
         id: CommandId::NotificationRestore,
@@ -656,7 +656,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("send/session"),
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
-        available: notification_available,
+        available: notification_reply_available,
     },
     CommandSpec {
         id: CommandId::NotificationClear,
@@ -732,7 +732,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("scroll"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: notification_available,
+        available: |dashboard| {
+            if dashboard.notification_form_owns_keyboard() {
+                Availability::Hidden
+            } else {
+                notification_available(dashboard)
+            }
+        },
     },
     CommandSpec {
         id: CommandId::NotificationScrollDown,
@@ -744,7 +750,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: notification_available,
+        available: |dashboard| {
+            if dashboard.notification_form_owns_keyboard() {
+                Availability::Hidden
+            } else {
+                notification_available(dashboard)
+            }
+        },
     },
     CommandSpec {
         id: CommandId::ChangeGoSetup,
@@ -1460,7 +1472,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         pane_keys: &[KeyHint::plain(KeyCode::Tab, "Tab")],
         action: Some(KeyAction::NextPane),
-        footer: footer_word!("pane"),
+        footer: focus_cycle_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
         available: always_ready,
@@ -1771,8 +1783,20 @@ fn notification_available(dashboard: &DashboardState) -> Availability {
         Availability::Ready
     }
 }
+fn focus_cycle_footer(dashboard: &DashboardState) -> Option<String> {
+    (!dashboard.notification_form_owns_keyboard()).then(|| "pane".to_owned())
+}
+fn notification_reply_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.notification_form_session().is_some() {
+        Availability::Hidden
+    } else {
+        notification_available(dashboard)
+    }
+}
 fn notification_restore_available(dashboard: &DashboardState) -> Availability {
-    if dashboard.notification_has_recoverable_reply() {
+    if dashboard.notification_form_session().is_none()
+        && dashboard.notification_has_recoverable_reply()
+    {
         Availability::Ready
     } else {
         Availability::Hidden

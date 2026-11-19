@@ -1482,6 +1482,7 @@ mod tests {
             page(
                 &path,
                 vec![RelayObservation::CommandInterrupted {
+                    continuation_id: None,
                     command_id: id.into(),
                     command: RelayCommandKind::BeginCheckpoint,
                     reason: Some(reason),
@@ -1571,6 +1572,7 @@ mod tests {
             ),
             (
                 RelayObservation::CommandInterrupted {
+                    continuation_id: None,
                     command_id: "prompt-1".into(),
                     command: RelayCommandKind::Prompt,
                     reason: Some(OutcomeReason::RuntimeStopped),

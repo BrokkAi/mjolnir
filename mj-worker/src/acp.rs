@@ -6,7 +6,9 @@
 
 mod air_tasks;
 pub(crate) mod drive;
+mod instructions;
 mod launch;
+pub use instructions::InstructionRole;
 mod native_agents;
 mod opencode_logins;
 mod operator_away;

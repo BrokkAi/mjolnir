@@ -924,7 +924,15 @@ fn validate_action_against(
             queue_id,
         } => {
             validate_public_id(session_id)?;
-            validate_public_id(queue_id)?;
+            // A restart continuation wraps a queued prompt's own ID in the
+            // worker's envelope, which can exceed the public length; the
+            // root it carries is what must be a valid public ID.
+            let queue_root = if mj_core::continuation::valid_command_id(queue_id) {
+                mj_core::continuation::carried_command(queue_id)
+            } else {
+                queue_id.as_str()
+            };
+            validate_public_id(queue_root)?;
             require_session_record(snapshot, session_id)?;
         }
         ControllerAction::RespondElicitation {

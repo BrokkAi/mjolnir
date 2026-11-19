@@ -124,19 +124,26 @@ pub(crate) fn presentation_attention(
 pub(crate) struct SessionsTextSearch {
     /// Bumped for every search asked for, and for a filter that no longer has
     /// text, so an answer to an older search is recognised and dropped.
-    request_id: u64,
+    pub(crate) request_id: u64,
+    pub(crate) sync: Option<crate::wiki_sync::SyncEpisode>,
     /// The text last asked about. `matches` answers it, or an earlier prefix
     /// of it while the newer search is out.
-    asked: String,
+    pub(crate) asked: String,
     /// A search is out and has not answered.
-    pending: bool,
+    pub(crate) pending: Option<SessionsTextQuery>,
     matches: BTreeMap<String, SessionTextMatchKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionsTextQuery {
+    Typed,
+    SyncRefresh,
 }
 
 impl SessionsTextSearch {
     /// Whether a conversation search is out and has not answered.
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending
+        self.pending.is_some()
     }
 }
 
@@ -391,6 +398,12 @@ impl DashboardState {
             self.clamp_selections();
             return None;
         }
+        if search.sync.is_none() {
+            search.sync = Some(crate::wiki_sync::SyncEpisode {
+                id: search.request_id,
+                status: None,
+            });
+        }
         // Matches for what was typed so far still hold for a longer text
         // among the rows they name; for any other text they do not.
         if !query
@@ -400,7 +413,7 @@ impl DashboardState {
             search.matches.clear();
         }
         search.asked.clone_from(&query);
-        search.pending = true;
+        search.pending = Some(SessionsTextQuery::Typed);
         Some((search.request_id, query))
     }
 
@@ -415,7 +428,13 @@ impl DashboardState {
         if request_id != self.sessions_text.request_id {
             return;
         }
-        self.sessions_text.pending = false;
+        if let Err(error) = &result
+            && self.sessions_text.pending == Some(SessionsTextQuery::SyncRefresh)
+            && let Some(sync) = &mut self.sessions_text.sync
+        {
+            sync.status = Some(Err(error.clone()));
+        }
+        self.sessions_text.pending = None;
         match result {
             Ok(matches) => {
                 self.sessions_text.matches = matches
@@ -453,7 +472,7 @@ impl DashboardState {
         if let Some(state) = filter.state {
             parts.push(state.label().to_owned());
         }
-        if self.sessions_text.pending {
+        if self.sessions_text.is_pending() {
             parts.push("searching…".to_owned());
         }
         parts.join(" · ")

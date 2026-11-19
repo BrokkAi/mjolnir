@@ -79,15 +79,15 @@ Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · A
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (2) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? Newest question · hel · age unknown 2 of 2 Previous Alt+PgUp  Next Alt+PgDn │
-│                                      ││                                                                              │
+│                                      ││ Loading form…                                                                │
 │                                      ││ Which approach should we take?                                               │
 │                                      ││ The question stays here until you answer or clear it.                        │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││Quick reply: I'll investigate.                                           Send │
+│                                      ││                                                                              │
 │                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (1)                        │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll │ ctrl+b then : / ? palette
+Alt+g session · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · : / ? palette
 notification header color: Rgb(158, 194, 238)
 open Rename action: None
 === Rename modal over dashboard (120x30) ===
@@ -418,7 +418,7 @@ dashboard geometry at 59 columns: (None, None, false)
 │  Host / fleet  Targets  CPU          RAM                           │
 │  local         podman   unavailable                                │
 ╰────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                           ▐
 │  claude-1: refreshing…                                             ▐
 │OPENAI                                                              ▐

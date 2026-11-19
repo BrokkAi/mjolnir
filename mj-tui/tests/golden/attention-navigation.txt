@@ -32,7 +32,7 @@
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -75,7 +75,7 @@ attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -161,7 +161,7 @@ rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││                                                                              │
 │                                      ││ Choose a path                                                                │
-│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -205,7 +205,7 @@ workspace badge cells: ?1; marker fg=Rgb(240, 205, 145); failure color=false
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││                                                                              │
 │                                      ││ Choose a path                                                                │
-│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -249,7 +249,7 @@ workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││                                                                              │
 │                                      ││ Choose a path                                                                │
-│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -336,7 +336,7 @@ workspace summary: None; badge: absent
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -379,7 +379,7 @@ action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: tru
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -422,7 +422,7 @@ action: SelectWorkspace { workspace_id: "other" }
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -465,7 +465,7 @@ selected: Some("remote")
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -508,7 +508,7 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -551,7 +551,7 @@ selected: Some("asks")
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -594,7 +594,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││? ACP pretty name · remote · age unknown                                                    │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -646,7 +646,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -688,7 +688,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -730,7 +730,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││? ACP pretty name · remote · <age>                                                          │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -816,7 +816,7 @@ action: None; notice: Some("Nothing is waiting for you.")
 │                                                                ││? ACP pretty name · asks · <age>                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││ Choose a path                                                                                                                      │
-│                                                                ││ Clear unavailable: answer this request in the session.                                                                             │
+│                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││Quick reply:                                                                                                                   Send │
@@ -902,7 +902,7 @@ footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ c
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││                                                                              │
 │                                      ││ Choose a path                                                                │
-│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -945,7 +945,7 @@ workspace tabs: │ Default ?1  Other ?1               ≡ ││               
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││                                                                              │
 │                                      ││ Choose a path                                                                │
-│                                      ││ Clear unavailable: answer this request in the session.                       │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
@@ -988,7 +988,7 @@ folded heading: │[2] done ✓1 ───────────────�
 │                  ││? ACP pretty name · asks · <age>                                                                  │
 │                  ││                                                                                                  │
 │                  ││ Choose a path                                                                                    │
-│                  ││ Clear unavailable: answer this request in the session.                                           │
+│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││Quick reply:                                                                                 Send │
@@ -1030,7 +1030,7 @@ Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u w
 │                  ││? ACP pretty name · asks · <age>                                                                  │
 │                  ││                                                                                                  │
 │                  ││ Choose a path                                                                                    │
-│                  ││ Clear unavailable: answer this request in the session.                                           │
+│                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││                                                                                                  │
 │                  ││Quick reply:                                                                                 Send │
@@ -1073,7 +1073,7 @@ attention dropdown action: SelectWorkspace { workspace_id: "other" }
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -1116,7 +1116,7 @@ priority session ids: ["asks", "done", "quiet"]; project headings: false
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -1159,7 +1159,7 @@ notice: Some("Projects are not grouped in priority order; see Settings → Advan
 │                                            ││? ACP pretty name · remote · <age>                                                          │
 │                                            ││                                                                                            │
 │                                            ││ Choose a path                                                                              │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │
@@ -1203,7 +1203,7 @@ Important notices: [Notification { session_id: "done", session_title: "ACP prett
 │                                            ││! ACP pretty name · done · <age>                                                            │
 │                                            ││                                                                                            │
 │                                            ││ Review the deployment result                                                               │
-│                                            ││ Clear unavailable: answer this request in the session.                                     │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││Quick reply:                                                                           Send │

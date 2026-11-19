@@ -107,7 +107,32 @@ fn initial_fifo_completes_a_crashed_prefix_and_keeps_mail_after_the_brief() {
     let mut relay =
         DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
             .unwrap();
-    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(
+        recovery[0].command_id,
+        super::commands::restart_continuation_id("initial-brief")
+    );
+    let blocks = recovery[0]
+        .command
+        .prompt_blocks_for_command(&recovery[0].command_id)
+        .unwrap();
+    assert_eq!(
+        &blocks[1..],
+        commands[3].command.prompt_blocks().unwrap().as_ref()
+    );
+    assert!(
+        matches!(&blocks[0], ContentBlock::Text(note) if note.text.starts_with("[HARNESS NOTE: interrupted turn recovery]"))
+    );
+    assert_eq!(
+        relay.snapshot.handled_commands["initial-brief"].accepted_ordinal,
+        brief_ordinal
+    );
 }
 
 #[test]
@@ -815,6 +840,18 @@ fn claude_automatic_steer_is_delivered_and_completed_by_post_tool_batch() {
         replayed.operational_state().steering.unwrap().status,
         SteeringStatus::Applied
     );
+    // Restart recovery waits for the replacement bridge; acknowledged steering
+    // remains compacted and must not become another queued request.
+    assert_eq!(replayed.snapshot.queued_prompts.len(), 1);
+    assert!(mj_core::continuation::is_restart_continuation(
+        &replayed.snapshot.queued_prompts[0].command_id
+    ));
+    replayed
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    replayed.claim_pending_commands(true).unwrap();
     assert!(replayed.snapshot.queued_prompts.is_empty());
     assert_eq!(drain_post_tool_batch(&mut replayed).1, 0);
 }
@@ -2382,10 +2419,31 @@ fn relay_runs_queued_prompts_in_order_without_a_controller() {
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].command_id, "command-two");
 
-    // A relay/process restart interrupts only the command actually handed
-    // to ACP and then continues the durable offline queue.
+    // Recovery resumes the interrupted turn before the durable offline queue.
     drop(relay);
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let continuation = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(continuation.len(), 1);
+    assert_eq!(
+        continuation[0].command_id,
+        super::commands::restart_continuation_id("command-two")
+    );
+    relay
+        .record_command_completed(
+            &continuation[0].command_id,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                work_facts: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
     let third = relay.claim_pending_commands(true).unwrap();
     assert_eq!(third.len(), 1);
     assert_eq!(third[0].command_id, "command-three");
@@ -6040,7 +6098,15 @@ fn goal_controls_bypass_work_and_checkpoints_without_consuming_prompts() {
         }
         drop(relay);
         let relay = DurableRelay::open_for_checkpoint(temp.path(), SESSION, "1.0.0").unwrap();
-        assert_eq!(queued_command_ids(&relay), vec!["queued-work"]);
+        let expected = if autonomous {
+            vec!["queued-work".to_owned()]
+        } else {
+            vec![
+                super::commands::restart_continuation_id("active-work"),
+                "queued-work".to_owned(),
+            ]
+        };
+        assert_eq!(queued_command_ids(&relay), expected);
         let replay = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
         assert!(replay.starts_with(&events));
         assert!(!relay.snapshot.dispatches.contains_key("goal-resume"));
@@ -6702,6 +6768,12 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
             },
         )
         .unwrap();
+    assert!(
+        relay.snapshot.handled_commands["queued-prompt"]
+            .command
+            .is_none()
+    );
+    assert!(!relay.snapshot.dispatches.contains_key("queued-prompt"));
     let before = evidence(&relay);
     assert_eq!(before.user_prompt_tail, "DELIVERED CORRECTION");
     assert!(before.transcript_summary.contains("DELIVERED CORRECTION"));
@@ -6711,6 +6783,20 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     let after = evidence(&relay);
     assert_eq!(after.user_prompt_tail, before.user_prompt_tail);
     assert_eq!(after.transcript_summary, before.transcript_summary);
+    let mut relay = relay;
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    let blocks = recovery[0]
+        .command
+        .prompt_blocks_for_command(&recovery[0].command_id)
+        .unwrap();
+    assert!(
+        matches!(&blocks[0], ContentBlock::Text(note) if note.text.contains("take precedence"))
+    );
 }
 
 /// I1-11: a finished turn leaves its compact receipt in the ledger until the

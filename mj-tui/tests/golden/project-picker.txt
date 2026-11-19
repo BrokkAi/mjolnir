@@ -233,8 +233,8 @@ action: None
 │       │                                                                                  │  ─────╯
 │       │                                                                                  │  ─────╮
 │       │ Delegation Native ▾                                                              │       │
-│       │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │  d    │
-╰─────  │                                                                                  │  ─────╯
+│       │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │  d    │
+╰─────  │ subagents on all targets")                                                       │  ─────╯
 ╭ Targ  │                                                                                  │     ▄ ╮
 │  Hos  │                                                                                  │       │
 ╰─────  │                                                                                  │  ─────╯

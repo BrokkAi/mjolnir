@@ -83,6 +83,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
         harness_failure: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
+        launches: mpsc::unbounded_channel().0,
         session_cpu: watch::channel(SessionCpuTable::new()).1,
     };
     let request = tokio::spawn(async move {

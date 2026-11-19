@@ -951,6 +951,40 @@ mod tests {
         // Only the tool-only session is held back, and the title says so.
         assert_eq!(dashboard.sessions_hidden_count(), 1);
 
+        let episode = dashboard.wiki_sync_episode(false).unwrap();
+        assert!(dashboard.apply_wiki_sync(
+            false,
+            episode,
+            Ok(mj_client::daemon::WikiSyncStatus {
+                epoch: "fixture".into(),
+                target: Some(1),
+                finished: 1,
+                successful: 1,
+                ..Default::default()
+            })
+        ));
+
+        let (refresh, _) = dashboard.refresh_sessions_text_search().unwrap();
+        assert_eq!(
+            dashboard.sessions_sync_label().as_deref(),
+            Some("Searching…")
+        );
+        dashboard.apply_sessions_text(refresh, Ok(Vec::new()));
+        // Hard-won: 7d06e3b: ordinary query failures incorrectly became permanent sync failures.
+        dashboard.sessions_filter.as_mut().unwrap().query =
+            mj_chat::text_input::TextInput::from_value("new query");
+        let (typed, _) = dashboard.next_sessions_text_search().unwrap();
+        dashboard.apply_sessions_text(typed, Err("ordinary query failed".into()));
+        assert!(dashboard.sessions_sync_label().is_none());
+        dashboard.apply_sessions_text(typed, Ok(Vec::new()));
+        assert!(dashboard.sessions_sync_label().is_none());
+        let (refresh, _) = dashboard.refresh_sessions_text_search().unwrap();
+        dashboard.apply_sessions_text(refresh, Err("final read failed".into()));
+        assert_eq!(
+            dashboard.sessions_sync_label().as_deref(),
+            Some("Index sync failed: final read failed")
+        );
+
         // Clearing the filter restores the list and forgets the matches.
         dashboard.clear_sessions_filter();
         assert_eq!(dashboard.next_sessions_text_search(), None);

@@ -677,6 +677,7 @@ mod tests {
             .unwrap();
         card.holder = Some("child".into());
         card.form = Some(CardForm {
+            source: mj_client::runtime_feed::CardFormSource::Elicitation,
             raised_at_ms: 0,
             request_id: "form:1".into(),
             message: "Accept changes?".into(),

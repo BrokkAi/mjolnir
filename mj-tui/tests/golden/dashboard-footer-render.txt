@@ -2029,7 +2029,7 @@ Need at least 60 columns.
 │  Host / fleet  Targets  CPU          RAM                 │
 │  local         podman   unavailable                      │
 ╰──────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)──────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                 ▐
 │  claude-1: refreshing…                                   ▐
 │OPENAI                                                    ▐
@@ -2060,7 +2060,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                  │
 │  local         podman   unavailable                       │
 ╰───────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)───────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                  ▐
 │  claude-1: refreshing…                                    ▐
 │OPENAI                                                     ▐
@@ -2091,7 +2091,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                   │
 │  local         podman   unavailable                        │
 ╰────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                   ▐
 │  claude-1: refreshing…                                     ▐
 │OPENAI                                                      ▐
@@ -2122,7 +2122,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                    │
 │  local         podman   unavailable                         │
 ╰─────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                    ▐
 │  claude-1: refreshing…                                      ▐
 │OPENAI                                                       ▐
@@ -2153,7 +2153,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                     │
 │  local         podman   unavailable                          │
 ╰──────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                     ▐
 │  claude-1: refreshing…                                       ▐
 │OPENAI                                                        ▐
@@ -2184,7 +2184,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                      │
 │  local         podman   unavailable                           │
 ╰───────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                      ▐
 │  claude-1: refreshing…                                        ▐
 │OPENAI                                                         ▐
@@ -2215,7 +2215,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                       │
 │  local         podman   unavailable                            │
 ╰────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                       ▐
 │  claude-1: refreshing…                                         ▐
 │OPENAI                                                          ▐
@@ -2246,7 +2246,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                        │
 │  local         podman   unavailable                             │
 ╰─────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                        ▐
 │  claude-1: refreshing…                                          ▐
 │OPENAI                                                           ▐
@@ -2277,7 +2277,7 @@ Enter open │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                         │
 │  local         podman   unavailable                              │
 ╰──────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                         ▐
 │  claude-1: refreshing…                                           ▐
 │OPENAI                                                            ▐
@@ -2308,7 +2308,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                          │
 │  local         podman   unavailable                               │
 ╰───────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                          ▐
 │  claude-1: refreshing…                                            ▐
 │OPENAI                                                             ▐
@@ -2339,7 +2339,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                           │
 │  local         podman   unavailable                                │
 ╰────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                           ▐
 │  claude-1: refreshing…                                             ▐
 │OPENAI                                                              ▐
@@ -2370,7 +2370,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                            │
 │  local         podman   unavailable                                 │
 ╰─────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                            ▐
 │  claude-1: refreshing…                                              ▐
 │OPENAI                                                               ▐
@@ -2401,7 +2401,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                             │
 │  local         podman   unavailable                                  │
 ╰──────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                             ▐
 │  claude-1: refreshing…                                               ▐
 │OPENAI                                                                ▐
@@ -2432,7 +2432,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                              │
 │  local         podman   unavailable                                   │
 ╰───────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                              ▐
 │  claude-1: refreshing…                                                ▐
 │OPENAI                                                                 ▐
@@ -2463,7 +2463,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                               │
 │  local         podman   unavailable                                    │
 ╰────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                               ▐
 │  claude-1: refreshing…                                                 ▐
 │OPENAI                                                                  ▐
@@ -2494,7 +2494,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                                │
 │  local         podman   unavailable                                     │
 ╰─────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                                ▐
 │  claude-1: refreshing…                                                  ▐
 │OPENAI                                                                   ▐
@@ -2525,7 +2525,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                                 │
 │  local         podman   unavailable                                      │
 ╰──────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                                 ▐
 │  claude-1: refreshing…                                                   ▐
 │OPENAI                                                                    ▐
@@ -2556,7 +2556,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                                  │
 │  local         podman   unavailable                                       │
 ╰───────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)───────────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                                  ▐
 │  claude-1: refreshing…                                                    ▐
 │OPENAI                                                                     ▐
@@ -2587,7 +2587,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                                   │
 │  local         podman   unavailable                                        │
 ╰────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)────────────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                                   ▐
 │  claude-1: refreshing…                                                     ▐
 │OPENAI                                                                      ▐
@@ -2618,7 +2618,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  Host / fleet  Targets  CPU          RAM                                    │
 │  local         podman   unavailable                                         │
 ╰─────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (not refreshed)─────────────────────────────────────────── ▁   ▄ ╮
+╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▄   □ ╮
 │ANTHROPIC                                                                    ▐
 │  claude-1: refreshing…                                                      ▐
 │OPENAI                                                                       ▐

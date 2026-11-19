@@ -7,6 +7,29 @@ pub(super) enum ManagerCommand {
     },
 }
 
+pub(super) enum StartingEvent {
+    Restore {
+        session_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Register {
+        session_id: String,
+        launches: mpsc::UnboundedSender<StartingEvent>,
+        reply: oneshot::Sender<Result<StartingSessionRegistration>>,
+    },
+    Published {
+        session_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Aborted {
+        session_id: String,
+    },
+    Route {
+        session_id: String,
+        reply: oneshot::Sender<mj_client::session::ParentMessageRoute>,
+    },
+}
+
 #[allow(clippy::large_enum_variant)] // Submit owns its relay command; the other requests are small.
 pub(super) enum ActorCommand {
     Submit {
