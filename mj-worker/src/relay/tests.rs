@@ -6942,6 +6942,20 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     relay.claim_pending_commands(true).unwrap();
     submit_relay(&mut relay, "queued-prompt", prompt("DELIVERED CORRECTION"));
     assert_eq!(evidence(&relay).user_prompt_tail, "ORIGINAL REQUEST");
+    // Hard-won: 655be2b: a later removed queue receipt hid delivered text after ACK.
+    submit_relay(
+        &mut relay,
+        "removed-undelivered",
+        prompt("NEVER DELIVER THIS"),
+    );
+    submit_relay(
+        &mut relay,
+        "remove-undelivered",
+        RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: "removed-undelivered".into(),
+        },
+    );
+
     assert!(
         !evidence(&relay)
             .transcript_summary
@@ -9648,7 +9662,7 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         );
         relay.claim_pending_user_shell_commands_up_to(1).unwrap();
     }
-    relay.lock().unwrap().native_goal_resume_sent(Some(
+    relay.lock().unwrap().native_goal_resume_sent(1, Some(
         serde_json::from_value(
             serde_json::json!({"objective":"resume this goal", "createdAt":1, "status":"paused"}),
         )
@@ -9729,7 +9743,7 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
     assert!(cut.try_recv().unwrap().is_ok());
     // A local request error/timeout is not proof of rejection. A later goal
     // clear is authoritative and supersedes the already-sent resume.
-    relay.lock().unwrap().native_goal_resume_sent(None);
+    relay.lock().unwrap().native_goal_resume_sent(2, None);
     let mut rejected_cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(rejected_cut.try_recv().is_err());
     relay
@@ -9743,7 +9757,15 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         )
         .unwrap();
     assert!(rejected_cut.try_recv().unwrap().is_ok());
-    relay.lock().unwrap().native_goal_resume_sent(None);
+    // Hard-won: 655be2b: a definitive refusal must not retire another request.
+    relay.lock().unwrap().native_goal_resume_sent(3, None);
+    relay.lock().unwrap().native_goal_resume_sent(4, None);
+    let mut refused_cut = relay.lock().unwrap().reserve_live_baseline();
+    relay.lock().unwrap().native_goal_resume_rejected(3);
+    assert!(refused_cut.try_recv().is_err());
+    relay.lock().unwrap().native_goal_resume_rejected(4);
+    assert!(refused_cut.try_recv().unwrap().is_ok());
+    relay.lock().unwrap().native_goal_resume_sent(5, None);
     let mut exited_cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(exited_cut.try_recv().is_err());
     relay

@@ -33,8 +33,8 @@ pub struct AdoptionPublication {
 
 pub struct AdoptionOutcome {
     pub result: Result<()>,
-    /// Bounded failure publication may retain its owners through the reply.
-    /// Successful installation transfers them with AdoptionPublication.
+    /// Bounded failure or connected-state publication owns the final reply.
+    /// Earlier installation transfers its holders with AdoptionPublication.
     pub admission: Option<AdoptionInstall>,
 }
 
@@ -495,9 +495,11 @@ impl Controller {
         self.state
             .sessions
             .insert(session_id.to_owned(), current.clone());
-        self.finish_adoption_attachment(&spec, client, current, guard, executor, control)
-            .await
-            .context("worker adopted; reattaching failed")?;
+        *install_admission = Some(
+            self.finish_adoption_attachment(&spec, client, current, guard, executor, control)
+                .await
+                .context("worker adopted; reattaching failed")?,
+        );
         Ok(())
     }
 
@@ -509,7 +511,7 @@ impl Controller {
         guard: AdoptionInstall,
         executor: &(impl CommandExecutor + Sync),
         control: &mut AdoptionControl,
-    ) -> Result<()> {
+    ) -> Result<AdoptionInstall> {
         let session_id = expected.id.clone();
         let installed = control.installed.take();
         if let Some(installed) = installed {
@@ -532,15 +534,27 @@ impl Controller {
             .await
             .context("worker adopted; could not close preparation connection")?;
         let attach = async {
+            let ready = async {
+                let mut connection = StandaloneSession::connect_command(spec, &session_id).await?;
+                loop {
+                    ensure_adoptable_worker(connection.operational())?;
+                    if connection.operational().native_session_id.is_some() {
+                        return Ok::<_, anyhow::Error>(connection);
+                    }
+                    // Startup is worker-owned; wait without lifecycle admission,
+                    // using the ordinary busy-session synchronization cadence.
+                    tokio::time::sleep(crate::session_manager::SESSION_SYNC_INTERVAL).await;
+                    connection.sync().await?;
+                }
+            };
             tokio::select! {
                 biased;
                 _ = control.cancelled.cancelled() => bail!("attachment interrupted"),
                 _ = crate::upgrade::gate().wait_until_draining() => bail!("attachment interrupted for daemon handoff"),
-                connection = StandaloneSession::connect_command(spec, &session_id) => connection,
+                connection = ready => connection,
             }
         };
         let connection = attach.await.context("worker adopted; reattaching failed")?;
-        ensure_adoptable_worker(connection.operational())?;
         let native = connection.operational().native_session_id.clone();
         // Close this ordinary connection before another actor attaches.
         connection
@@ -567,8 +581,9 @@ impl Controller {
         let (result, guard) = accepted.finish().await?;
         let current = result?;
         self.state.sessions.insert(session_id.to_owned(), current);
-        drop(guard);
-        Ok(())
+        // The short connected-publication holder spans runtime refresh and
+        // the final reply; ordinary catch-up above owns no lifecycle holder.
+        Ok(guard)
     }
 
     fn revalidate_adoption_resource(&mut self, expected: &SessionRecord) -> Result<()> {

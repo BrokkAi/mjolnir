@@ -52,7 +52,7 @@ pub use mj_client::session::{
     ManagedSessionView, ReviewerAction, ReviewerOutcome, ViewError, new_command_id,
 };
 /// Sync cadence while the worker owns work, so streamed events show promptly.
-const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
+pub(crate) const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
 /// Sync cadence while the worker is quiet. See `actor::sync_delay`.
 const QUIET_SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 /// A quiet session whose worker reports changes as they happen is synced as

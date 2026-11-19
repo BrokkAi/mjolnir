@@ -6,12 +6,37 @@ async fn record_resume_sent(
     owner: Option<&std::sync::Weak<crate::relay::RelayCell>>,
     events: &mpsc::Sender<RuntimeEvent>,
     goal: Option<GoalSnapshot>,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     if let Some(owner) = owner {
         owner
             .upgrade()
             .context("native resume relay owner disappeared")?;
-        emit_runtime_event(events, RuntimeEvent::NativeGoalResumeSent { goal }).await?;
+        static NEXT_RESUME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let resume_id = NEXT_RESUME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        emit_runtime_event(
+            events,
+            RuntimeEvent::NativeGoalResumeSent { resume_id, goal },
+        )
+        .await?;
+        return Ok(Some(resume_id));
+    }
+    Ok(None)
+}
+
+async fn record_resume_rejection(
+    events: &mpsc::Sender<RuntimeEvent>,
+    resume_id: Option<u64>,
+    error: &agent_client_protocol::Error,
+) -> Result<()> {
+    // SDK failed sends and lost response channels use INTERNAL_ERROR, never
+    // these remote method/parameter rejections (jsonrpc PreparedRequest/block_task).
+    if matches!(
+        error.code,
+        agent_client_protocol::ErrorCode::INVALID_PARAMS
+            | agent_client_protocol::ErrorCode::METHOD_NOT_FOUND
+    ) && let Some(resume_id) = resume_id
+    {
+        emit_runtime_event(events, RuntimeEvent::NativeGoalResumeRejected { resume_id }).await?;
     }
     Ok(())
 }
@@ -59,20 +84,26 @@ impl PendingControls {
                 let admission = if action == mj_core::goal::GoalControlAction::Resume {
                     record_resume_sent(owner.as_ref(), &events, resume_goal).await
                 } else {
-                    Ok(())
+                    Ok(None)
                 };
                 let response = match admission {
-                    Ok(()) => {
+                    Ok(resume_id) => {
                         let request = connection.send_request(control_request(
                             &session,
                             action,
                             expected.as_ref(),
                         ));
                         sending.store(true, std::sync::atomic::Ordering::Release);
-                        request
-                            .block_task()
-                            .await
-                            .map_err(|error| anyhow::anyhow!("{error}"))
+                        match request.block_task().await {
+                            Ok(value) => Ok(value),
+                            Err(error) => {
+                                match record_resume_rejection(&events, resume_id, &error).await {
+                                    Ok(()) => Err(anyhow::anyhow!("{error}")),
+                                    Err(recording) => Err(recording
+                                        .context(format!("goal request rejected: {error}"))),
+                                }
+                            }
+                        }
                     }
                     Err(error) => Err(error),
                 };
@@ -288,13 +319,18 @@ async fn control(
     } else {
         mj_core::goal::GoalControlAction::Pause
     };
-    if resume {
-        record_resume_sent(spec.terminal_owner.as_ref(), events, Some(goal.clone())).await?;
+    let resume_id = if resume {
+        record_resume_sent(spec.terminal_owner.as_ref(), events, Some(goal.clone())).await?
+    } else {
+        None
+    };
+    // Timeout and SDK internal errors cannot prove rejection.
+    let response = tokio::time::timeout(Duration::from_secs(30), connection.send_request(control_request(session, action, Some(goal))).block_task())
+        .await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")?;
+    if let Err(error) = response {
+        record_resume_rejection(events, resume_id, &error).await?;
+        return Err(error.into());
     }
-    // SDK errors also include lost responses. Neither those nor this timeout
-    // prove rejection; only subsequent owner state or process exit settles it.
-    tokio::time::timeout(Duration::from_secs(30), connection.send_request(control_request(session, action, Some(goal))).block_task())
-        .await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")??;
     Ok(())
 }
 
@@ -507,18 +543,22 @@ mod tests {
 
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
-        for (asking, running, answer, expected_resumes, status, decision, timed_out) in [
-            (false, false, None, 1, "active", false, false),
-            (false, true, None, 0, "active", false, false),
-            (true, false, Some(true), 1, "active", false, false),
-            (true, false, Some(false), 0, "active", false, false),
-            (false, false, None, 0, "paused", false, false),
-            (false, false, None, 0, "blocked", false, false),
-            (false, false, None, 0, "limited", false, false),
-            (false, false, None, 0, "complete", false, false),
-            (true, false, None, 0, "complete", false, false),
-            (false, false, None, 1, "paused", true, false),
-            (false, false, None, 1, "active", false, true),
+        for (asking, running, answer, expected_resumes, status, decision, timed_out, reject_code) in [
+            (false, false, None, 1, "active", false, false, None),
+            (false, true, None, 0, "active", false, false, None),
+            (true, false, Some(true), 1, "active", false, false, None),
+            (true, false, Some(false), 0, "active", false, false, None),
+            (false, false, None, 0, "paused", false, false, None),
+            (false, false, None, 0, "blocked", false, false, None),
+            (false, false, None, 0, "limited", false, false, None),
+            (false, false, None, 0, "complete", false, false, None),
+            (true, false, None, 0, "complete", false, false, None),
+            (false, false, None, 1, "paused", true, false, None),
+            (false, false, None, 1, "active", false, true, None),
+            // Hard-won: 655be2b: only proven peer rejection releases its own resume.
+            (false, false, None, 1, "active", false, false, Some(-32602)),
+            (false, false, None, 1, "active", false, false, Some(-32601)),
+            (false, false, None, 1, "active", false, false, Some(-32603)),
         ] {
             let root = tempfile::tempdir().unwrap();
             let script = root.path().join("goal.py");
@@ -547,6 +587,9 @@ for line in sys.stdin:
             with open('resumes','a') as f: f.write('resume\n')
             if os.environ.get('WAIT_FOR_CUT') == 'true':
                 while not os.path.exists('release-resume'): time.sleep(0.01)
+            if os.environ.get('REJECT_CODE'):
+                emit({'jsonrpc':'2.0','id':ident,'error':{'code':int(os.environ['REJECT_CODE']),'message':'recorded rejection'}})
+                continue
             goal['status']='active'; update({'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'running','turnId':'resumed'}})
         else:
             goal['status']='paused'; update({'jetbrains':{'air':{'goal':goal}}})
@@ -589,6 +632,12 @@ for line in sys.stdin:
                 environment: BTreeMap::from([
                     ("ASKING".into(), asking.to_string()),
                     ("WAIT_FOR_CUT".into(), track_cut.to_string()),
+                    (
+                        "REJECT_CODE".into(),
+                        reject_code
+                            .map(|code: i32| code.to_string())
+                            .unwrap_or_default(),
+                    ),
                     ("RUNNING".into(), running.to_string()),
                     ("GOAL_STATUS".into(), status.into()),
                 ]),
@@ -666,26 +715,62 @@ for line in sys.stdin:
                     );
                 }
                 std::fs::write(root.path().join("release-resume"), "").unwrap();
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while !relay.observe().unwrap().turn_in_progress() {
-                        let event = receive.recv().await.unwrap();
-                        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
+                if let Some(code) = reject_code {
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            let event = receive.recv().await.unwrap();
+                            let question =
+                                matches!(&event, RuntimeEvent::ElicitationRequested { .. });
+                            crate::worker_runtime::record_runtime_event(
+                                &relay,
+                                &mut in_flight,
+                                event,
+                            )
                             .unwrap();
-                    }
-                })
-                .await
-                .unwrap();
-                assert!(cut.try_recv().is_err());
-                relay
-                    .lock()
-                    .unwrap()
-                    .record_observation(mj_core::relay::RelayObservation::HarnessTurnSettled {
-                        autonomous: None,
-                        origin: None,
-                        prompt_in_flight: false,
+                            if question {
+                                break;
+                            }
+                        }
                     })
+                    .await
                     .unwrap();
-                assert!(cut.try_recv().unwrap().is_ok());
+                    if code == -32603 {
+                        assert!(
+                            cut.try_recv().is_err(),
+                            "an internal error remains ambiguous"
+                        );
+                    } else {
+                        assert!(
+                            cut.try_recv().unwrap().is_ok(),
+                            "peer rejected resume without a turn update"
+                        );
+                    }
+                } else {
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while !relay.observe().unwrap().turn_in_progress() {
+                            let event = receive.recv().await.unwrap();
+                            crate::worker_runtime::record_runtime_event(
+                                &relay,
+                                &mut in_flight,
+                                event,
+                            )
+                            .unwrap();
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(cut.try_recv().is_err());
+                    relay
+                        .lock()
+                        .unwrap()
+                        .record_observation(mj_core::relay::RelayObservation::HarnessTurnSettled {
+                            autonomous: None,
+                            origin: None,
+                            prompt_in_flight: false,
+                        })
+                        .unwrap();
+                    assert!(cut.try_recv().unwrap().is_ok());
+                }
             }
             let mut bytes = 0;
             if let Some(accept) = answer {

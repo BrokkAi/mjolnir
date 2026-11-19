@@ -128,6 +128,7 @@ pub(crate) struct PendingLiveBaseline {
 }
 
 struct PendingNativeResume {
+    resume_id: u64,
     goal: Option<mj_core::goal::GoalSnapshot>,
 }
 
@@ -414,9 +415,19 @@ impl DurableRelay {
         }
     }
 
-    pub(crate) fn native_goal_resume_sent(&mut self, goal: Option<mj_core::goal::GoalSnapshot>) {
+    pub(crate) fn native_goal_resume_sent(
+        &mut self,
+        resume_id: u64,
+        goal: Option<mj_core::goal::GoalSnapshot>,
+    ) {
         self.pending_native_resumes
-            .push(PendingNativeResume { goal });
+            .push(PendingNativeResume { resume_id, goal });
+    }
+
+    pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
+        self.pending_native_resumes
+            .retain(|pending| pending.resume_id != resume_id);
+        self.service_live_baselines();
     }
 
     pub(crate) fn quiescent_for_adoption(&self) -> bool {
@@ -1069,6 +1080,7 @@ impl DurableRelay {
                     .turn_context
                     .observe_relay(&event.observation, prompt.as_deref());
             }
+            let authorization = relay.snapshot.authorization_context();
             let prompt_receipt = |receipt: &mj_core::relay::HandledRelayCommand| {
                 receipt.terminal_ordinal.is_some()
                     && (receipt
@@ -1084,7 +1096,19 @@ impl DurableRelay {
                 .snapshot
                 .handled_commands
                 .iter()
-                .filter(|(_, receipt)| prompt_receipt(receipt))
+                .filter(|(id, receipt)| {
+                    prompt_receipt(receipt)
+                        // Removed/rejected queue entries were never delivered.
+                        // A failed turn may still have durable delivery proof in
+                        // the worker's authorization history.
+                        && (receipt.failure.is_none()
+                            // Generated work intentionally has no human history;
+                            // keep its identity so old human tails cannot revive.
+                            || mj_core::continuation::is_generated_prompt(id)
+                            || authorization.as_ref().is_some_and(|history| {
+                                history.messages.iter().any(|message| message.role == "user" && message.id == format!("user:{id}"))
+                            }))
+                })
                 .max_by_key(|(_, receipt)| receipt.accepted_ordinal);
             let prompt_owner = relay
                 .snapshot
@@ -1108,13 +1132,8 @@ impl DurableRelay {
                     None => Some(owner),
                 }
             });
-            let last_prompt_terminal = relay
-                .snapshot
-                .handled_commands
-                .values()
-                .filter(|receipt| prompt_receipt(receipt))
-                .filter_map(|receipt| receipt.terminal_ordinal)
-                .max();
+            let last_prompt_terminal =
+                terminal_prompt.and_then(|(_, receipt)| receipt.terminal_ordinal);
             let later_autonomous_turn = relay.snapshot.autonomous_harness_turn().is_some()
                 || relay.snapshot.active_prompt.is_none()
                     && relay

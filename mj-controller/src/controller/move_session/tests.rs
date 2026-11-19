@@ -269,6 +269,27 @@ fn move_queue_relay_child() {
             .unwrap();
             continue;
         }
+        if root.join("release-native-identity").exists()
+            && relay.operational_state().native_session_id.is_none()
+        {
+            relay
+                .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                    native_session_id: "ready-after-adoption".into(),
+                    resumed: false,
+                    native_continuity_lost: false,
+                    replaced_unused_native_session_id: None,
+                })
+                .unwrap();
+        }
+        if root.join("watch-native-readiness").exists()
+            && matches!(
+                request.request,
+                RelayRequest::Status | RelayRequest::Attach { .. }
+            )
+            && relay.operational_state().native_session_id.is_none()
+        {
+            fs::write(root.join("native-readiness-polled"), b"1").unwrap();
+        }
         if let RelayRequest::Submit {
             command_id,
             command,
@@ -353,9 +374,9 @@ fn move_queue_relay_child() {
             }
         }
         if let Ok(kind) = fs::read_to_string(root.join("unusable-worker"))
-            && let RelayResponseBody::Ok {
-                payload: RelayResponsePayload::Status(state),
-            } = &mut response.body
+            && let RelayResponseBody::Ok { payload } = &mut response.body
+            && let RelayResponsePayload::Status(state)
+            | RelayResponsePayload::Attached { state, .. } = payload
         {
             match kind.as_str() {
                 "checkpoint-only" => state.checkpoint_only = true,
@@ -370,6 +391,17 @@ fn move_queue_relay_child() {
                 }
                 _ => panic!("unknown unavailable worker state"),
             }
+        }
+        if let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::Attached {
+                    state,
+                    state_digest,
+                    ..
+                },
+        } = &mut response.body
+        {
+            *state_digest = Some(mj_core::relay::relay_state_digest(state).unwrap());
         }
         response.protocol_version = wire_protocol;
         write_relay_frame(&mut output, &response).expect("write relay response");
@@ -7282,6 +7314,7 @@ enum AdoptionProbe {
     Drain,
     Disconnect,
     Install,
+    PreparingFails,
     Unusable(&'static str),
 }
 
@@ -7373,7 +7406,11 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
     let stopped = cancellation.clone();
     runtime.block_on(async {
         let (installed, notice) = tokio::sync::oneshot::channel();
-        let send_notice = matches!(disposition, AdoptionProbe::Install).then_some(installed);
+        let send_notice = matches!(
+            disposition,
+            AdoptionProbe::Install | AdoptionProbe::PreparingFails
+        )
+        .then_some(installed);
         let work = tokio::spawn(async move {
             controller
                 .adopt_orphan_worker_controlled(
@@ -7406,7 +7443,10 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             );
             return;
         }
-        if matches!(disposition, AdoptionProbe::Install) {
+        if matches!(
+            disposition,
+            AdoptionProbe::Install | AdoptionProbe::PreparingFails
+        ) {
             let publication = tokio::time::timeout(std::time::Duration::from_secs(5), notice)
                 .await
                 .unwrap()
@@ -7453,22 +7493,83 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     .iter()
                     .all(|label| !label.contains("adoption"))
             );
+            fs::write(root.join("watch-native-readiness"), b"1").unwrap();
             fs::write(root.join("release-ordinary-attach"), b"1").unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !root.join("native-readiness-polled").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                !work.is_finished(),
+                "a preparing worker is installed but not connected"
+            );
+            let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.state, SessionState::Disconnected);
+            assert!(current.native_session_id.is_none());
+            drop(
+                gate.try_start(
+                    MOVE_QUEUE_SESSION_ID,
+                    crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                )
+                .expect("waiting for harness startup owns no admission"),
+            );
+            if matches!(disposition, AdoptionProbe::PreparingFails) {
+                fs::write(root.join("unusable-worker"), b"failed").unwrap();
+            } else {
+                fs::write(root.join("release-native-identity"), b"1").unwrap();
+            }
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
                 .await
                 .unwrap()
                 .unwrap();
+            if matches!(disposition, AdoptionProbe::PreparingFails) {
+                let error = format!("{:#}", outcome.result.unwrap_err());
+                assert!(error.contains("recorded native startup failure"), "{error}");
+                let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.state, SessionState::Disconnected);
+                assert!(current.native_session_id.is_none());
+                return;
+            }
             outcome.result.unwrap();
             assert!(
-                outcome.admission.is_none(),
-                "final reply is ordinary after connected publication"
+                outcome.admission.is_some(),
+                "connected publication owns admission through the final reply"
             );
+            let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.state, SessionState::Running);
             assert_eq!(
-                crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
-                    .unwrap()
-                    .unwrap()
-                    .state,
-                SessionState::Running
+                current.native_session_id.as_deref(),
+                Some("ready-after-adoption")
+            );
+            let refused = gate
+                .try_start(
+                    MOVE_QUEUE_SESSION_ID,
+                    crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                )
+                .err()
+                .expect("final reply still owns publication");
+            assert!(refused.holders.contains(&"adoption connected publication"));
+            assert!(
+                crate::upgrade::active_labels()
+                    .iter()
+                    .any(|label| label.contains("adoption connected publication"))
+            );
+            drop(outcome.admission);
+            drop(
+                gate.try_start(
+                    MOVE_QUEUE_SESSION_ID,
+                    crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                )
+                .expect("reply delivery releases publication"),
             );
             return;
         }
@@ -7552,6 +7653,17 @@ fn adoption_install_keeps_both_owners_through_the_installed_notice() {
 }
 
 #[cfg(unix)]
+// Hard-won: 655be2b: adoption published Running before the preparing harness failed.
+#[test]
+fn adoption_install_stays_disconnected_when_harness_startup_fails() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::PreparingFails,
+        "adoption_install_stays_disconnected_when_harness_startup_fails",
+    );
+}
+
+#[cfg(unix)]
 // Hard-won: f30ad64: a failed adoption assertion left a proxy, relay child and grep running.
 #[test]
 fn proxy_fixture_reaps_its_pipeline_when_an_assertion_unwinds() {
@@ -7631,6 +7743,14 @@ fn adoption_genesis_replay_failure_stays_disconnected_and_retryable() {
     let _proxy_guard =
         install_move_queue_relay_worker(&root, &directory.path().join("served"), true);
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "current").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "surviving-native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
     for index in 0..160 {
         relay
             .record_observation(mj_core::relay::RelayObservation::Warning {

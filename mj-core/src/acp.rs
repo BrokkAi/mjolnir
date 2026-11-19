@@ -542,7 +542,11 @@ pub enum AirTaskUpdate {
 pub enum RuntimeEvent {
     /// Ordered before the native request and its updates on the worker FIFO.
     NativeGoalResumeSent {
+        resume_id: u64,
         goal: Option<crate::goal::GoalSnapshot>,
+    },
+    NativeGoalResumeRejected {
+        resume_id: u64,
     },
     NativeAgent {
         event: crate::native_agent::NativeAgentEvent,
