@@ -89,13 +89,9 @@ pub(crate) fn capacity_table_rows(
         .collect()
 }
 
-/// Whether the row lists targets and every one of them is unavailable. Targets
-/// that are not listed (a never-installed standard runtime) do not count.
+/// Whether the row lists targets and every one of them is unavailable.
 fn all_listed_targets_unavailable(target_ids: &[String], dashboard: &DashboardState) -> bool {
-    let mut listed = target_ids
-        .iter()
-        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent))
-        .peekable();
+    let mut listed = super::sessions::listed_capacity_targets(target_ids, dashboard).peekable();
     listed.peek().is_some() && listed.all(|id| dashboard.target_missing(id).is_some())
 }
 
