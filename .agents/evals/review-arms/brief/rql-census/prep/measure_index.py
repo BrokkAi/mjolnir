@@ -50,7 +50,7 @@ class Server:
         # memory.peak is the tree's peak, not just the parent's VmHWM.
         self.unit = f"rql-bifrost-{os.getpid()}-{time.monotonic_ns()}"
         self.proc = subprocess.Popen(
-            ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={self.unit}",
+            ["systemd-run", "--user", "--scope", "--quiet", f"--unit={self.unit}",
              "-p", f"MemoryMax={MEMORY_MAX}", "-p", "MemorySwapMax=0",
              binary, "--root", str(root), "--mcp", "extended|workspace"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env, cwd=root)
@@ -74,16 +74,22 @@ class Server:
     def _sample(self):
         while self.sampling and self.proc.poll() is None:
             d = self._cgroup_dir()
-            if d:
+            if d:  # each file on its own, so one unreadable file can't hide the others
                 try:
                     self.sample["peak_tree_kib"] = int(open(f"{d}/memory.peak").read()) // 1024
+                except (OSError, ValueError):
+                    pass
+                try:
                     events = dict(l.split() for l in open(f"{d}/memory.events"))
                     self.sample["oom_kill"] = int(events.get("oom_kill", 0))
+                except (OSError, ValueError):
+                    pass
+                try:
                     cpu = dict(l.split() for l in open(f"{d}/cpu.stat"))
                     self.sample["tree_cpu_usec"] = int(cpu["usage_usec"])
                 except (OSError, ValueError, KeyError):
                     pass
-            time.sleep(2)
+            time.sleep(1)
 
     def _read(self):
         for line in self.proc.stdout:
@@ -141,16 +147,35 @@ class Server:
 
 
     def stop(self):
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
         try:
             rc = self.proc.wait(timeout=STOP_SECONDS)
         except subprocess.TimeoutExpired:
             rc = None
+        scope = f"{self.unit}.scope"
+        # systemd records an OOM kill as the scope's Result; the scope isn't collected, so the
+        # result survives the process.
+        show = subprocess.run(["systemctl", "--user", "show", scope, "-p", "Result", "-p", "ActiveState"],
+                              capture_output=True, text=True).stdout
+        self.sample["scope_result"] = dict(l.split("=", 1) for l in show.split() if "=" in l).get("Result")
         # Stop the scope in every case: it kills the whole process tree (Bifrost and anything it
-        # started) before the caller touches the worktree or cache.
-        subprocess.run(["systemctl", "--user", "stop", f"{self.unit}.scope"], capture_output=True)
+        # started). Then verify the tree is gone before the caller touches the worktree or cache.
+        subprocess.run(["systemctl", "--user", "stop", scope], capture_output=True)
         if rc is None:
-            rc = self.proc.wait()
+            try:
+                rc = self.proc.wait(timeout=STOP_SECONDS)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                rc = self.proc.wait(timeout=STOP_SECONDS)
+        deadline = time.monotonic() + STOP_SECONDS
+        while subprocess.run(["systemctl", "--user", "is-active", "--quiet", scope]).returncode == 0:
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"{scope} still active after stop; refusing to touch its worktree")
+            time.sleep(1)
+        subprocess.run(["systemctl", "--user", "reset-failed", scope], capture_output=True)
         self.sampling = False
         self.log.close()
         return rc
@@ -220,7 +245,7 @@ def main():
         for l in open(results):
             r = json.loads(l)
             if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart")) \
-                    and r.get("binary_sha256") == binary_sha \
+                    and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX \
                     and (r["repo"] not in pins or r.get("head") == pins[r["repo"]][0]):
                 done.add(r["repo"])
     for repo in repos:
@@ -244,7 +269,7 @@ def main():
             if wt.exists():
                 git("worktree", "remove", "--force", str(wt), cwd=clone)
             git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
-            rec.update(head=head, base=base, binary_sha256=binary_sha,
+            rec.update(head=head, base=base, binary_sha256=binary_sha, memory_max=MEMORY_MAX,
                        rust_files=len([p for p in subprocess.run(
                            ["git", "-C", str(wt), "ls-files", "-z", "*.rs"], check=True,
                            capture_output=True).stdout.split(b"\0") if p]))
@@ -254,7 +279,10 @@ def main():
             rec["cold"] = phase(binary, wt, cache, out / f"{repo}.cold.log")
             git("checkout", "-q", "--detach", head, cwd=wt)
             rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
-            rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
+            if rec["cold"].get("ready"):
+                rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
+            else:  # a warm restart on a failed cold cache measures nothing usable
+                rec["warm_restart"] = {"ready": False, "skipped": "cold index failed"}
             git("worktree", "remove", "--force", str(wt), cwd=clone)
             shutil.rmtree(cache, ignore_errors=True)  # cache size is recorded; keep disk bounded
         except Exception as e:
