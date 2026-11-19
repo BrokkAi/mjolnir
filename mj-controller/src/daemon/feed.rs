@@ -411,56 +411,67 @@ impl RuntimeState {
         // during capture remains pending, so attachment cannot lose its wakeup.
         let mut revisions = self.revisions.subscribe();
         revisions.borrow_and_update();
-        let mut current = self.capture_runtime()?;
-        current.subagent_parents = subagent_parents.clone();
-        if wait
-            && cursor.as_ref().is_some_and(|cursor| {
-                cursor.incarnation == current.incarnation
-                    && cursor.sequence == current.sequence
-                    && cursor.subagent_parents == current.subagent_parents
-            })
-        {
-            let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
+        let mut may_wait = wait;
+        loop {
             self.capture_runtime()?;
-        }
-        // Read outside the feed lock and off the runtime thread. The durable
-        // cursor survives a daemon incarnation; history retention never caps alerts.
-        let after = cursor.as_ref().map(|cursor| cursor.alert_sequence);
-        let (high, events) =
-            crate::web_push::blocking(move || crate::database::alert_events_since(after)).await?;
-        let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
-        let metadata = history.full.metadata.clone();
-        let mut frame = history.frame_for_subagent_parents(cursor.as_ref(), &subagent_parents);
-        if matches!(frame, RuntimeFrame::ResetRequired) {
-            let mut cursor = history.cursor();
-            cursor.subagent_parents = subagent_parents.clone();
-            let projection = history
-                .scoped(cursor.sequence, &subagent_parents)
-                .context("current runtime scope")?
-                .projection
-                .clone();
-            frame = RuntimeFrame::Snapshot {
-                cursor,
-                projection: Box::new(projection),
+            let (mut frame, same_runtime) = {
+                let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+                let current = history.cursor();
+                let same_runtime = cursor.as_ref().is_some_and(|cursor| {
+                    cursor.incarnation == current.incarnation
+                        && cursor.sequence == current.sequence
+                        && cursor.subagent_parents == subagent_parents
+                });
+                let metadata = history.full.metadata.clone();
+                let mut frame =
+                    history.frame_for_subagent_parents(cursor.as_ref(), &subagent_parents);
+                if matches!(frame, RuntimeFrame::ResetRequired) {
+                    let mut cursor = history.cursor();
+                    cursor.subagent_parents = subagent_parents.clone();
+                    let projection = history
+                        .scoped(cursor.sequence, &subagent_parents)
+                        .context("current runtime scope")?
+                        .projection
+                        .clone();
+                    frame = RuntimeFrame::Snapshot {
+                        cursor,
+                        projection: Box::new(projection),
+                    };
+                }
+                if let RuntimeFrame::Delta { changes, .. } = &mut frame {
+                    changes.metadata.get_or_insert(metadata);
+                }
+                (frame, same_runtime)
             };
-        }
-        match &mut frame {
-            RuntimeFrame::Snapshot { cursor, projection } => {
-                cursor.alert_sequence = high;
-                projection.metadata.alert_high_sequence = high;
-                projection.metadata.alert_events = events;
+            // A frozen frame can receive a newer alert frontier, never an older
+            // frontier paired with a newer runtime cursor. Subscribe before both.
+            let after = cursor.as_ref().map(|cursor| cursor.alert_sequence);
+            let (high, events) =
+                crate::web_push::blocking(move || crate::database::alert_events_since(after))
+                    .await?;
+            if may_wait && same_runtime && after == Some(high) {
+                let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
+                may_wait = false;
+                continue;
             }
-            RuntimeFrame::Delta {
-                cursor, changes, ..
-            } => {
-                cursor.alert_sequence = high;
-                let metadata = changes.metadata.get_or_insert(metadata);
-                metadata.alert_high_sequence = high;
-                metadata.alert_events = events;
+            match &mut frame {
+                RuntimeFrame::Snapshot { cursor, projection } => {
+                    cursor.alert_sequence = high;
+                    projection.metadata.alert_high_sequence = high;
+                    projection.metadata.alert_events = events;
+                }
+                RuntimeFrame::Delta {
+                    cursor, changes, ..
+                } => {
+                    cursor.alert_sequence = high;
+                    let metadata = changes.metadata.as_mut().expect("frame metadata");
+                    metadata.alert_high_sequence = high;
+                    metadata.alert_events = events;
+                }
+                RuntimeFrame::ResetRequired => {}
             }
-            RuntimeFrame::ResetRequired => {}
+            return Ok(frame);
         }
-        Ok(frame)
     }
 }
 
@@ -490,9 +501,21 @@ mod tests {
         );
         let _writer = crate::database::install_isolated_test_writer();
         let state = super::super::tests::test_runtime_state();
+        let mut config = super::super::tests::runtime_test_config();
+        config.phone.enabled = false;
+        state.owner().install_config(config);
+        assert!(
+            !state
+                .runtime_publication()
+                .unwrap()
+                .metadata
+                .config
+                .phone
+                .enabled
+        );
         let mut publication = RuntimeProjection::default();
         publication.metadata.notification_cards = Some(Default::default());
-        crate::web_push::blocking(move || crate::database::push_reconcile(publication))
+        crate::web_push::blocking(move || crate::database::notification_reconcile(publication))
             .await
             .unwrap();
         let mut replica = RuntimeReplica::default();
@@ -517,15 +540,20 @@ mod tests {
                     }),
                 },
             )]));
-        crate::web_push::blocking(move || crate::database::push_reconcile(publication))
+        crate::web_push::blocking(move || crate::database::notification_reconcile(publication))
             .await
             .unwrap();
         // Alert publication may race the runtime snapshot: advancing the alert
         // frontier is valid even when the runtime sequence has not changed.
-        let frame = state
-            .runtime_changes(attached.clone(), false)
-            .await
-            .unwrap();
+        // The existing server long-poll expires after 30 seconds. A committed
+        // alert must return before that expiry, even without a runtime revision.
+        let frame = tokio::time::timeout(
+            Duration::from_secs(30),
+            state.runtime_changes(attached.clone(), true),
+        )
+        .await
+        .expect("a committed alert must not wait for long-poll expiry")
+        .unwrap();
         let wire = serde_json::to_vec(&frame).unwrap();
         replica
             .apply(serde_json::from_slice(&wire).unwrap())
@@ -605,6 +633,9 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let mut served_record = hidden.records["hidden"].clone();
+        served_record.notifications_ignored = false;
+        let served_view = hidden.sessions["hidden"].clone();
         crate::web_push::blocking(move || crate::database::push_reconcile(hidden))
             .await
             .unwrap();
@@ -642,6 +673,33 @@ mod tests {
             .unwrap();
         assert_eq!(fresh.projection.metadata.alert_high_sequence, high);
         assert!(fresh.projection.metadata.alert_events.is_empty());
+        let mut config = super::super::tests::runtime_test_config();
+        config.phone.enabled = false;
+        assert!(!config.phone.enabled);
+        state.owner().install_config(config);
+        state.owner().edit_sessions(|sessions| {
+            sessions.insert("hidden".into(), served_record);
+        });
+        state.owner().sessions.insert("hidden".into(), served_view);
+        let mut revisions = state.revisions();
+        revisions.borrow_and_update();
+        let cancellation = CancellationToken::new();
+        let observer = tokio::spawn(crate::web_push::run_alerts(
+            state.clone(),
+            cancellation.clone(),
+        ));
+        revisions.changed().await.unwrap();
+        let (_, events) =
+            crate::web_push::blocking(move || crate::database::alert_events_since(Some(high)))
+                .await
+                .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "the standalone daemon service produces alerts with phone disabled"
+        );
+        cancellation.cancel();
+        observer.await.unwrap().unwrap();
     }
 
     #[test]
@@ -771,6 +829,13 @@ mod tests {
 
     #[tokio::test]
     async fn draft_hydration_publishes_shared_capabilities_without_adopting_the_draft() {
+        if super::super::tests::isolate_runtime_feed_test(
+            module_path!(),
+            "draft_hydration_publishes_shared_capabilities_without_adopting_the_draft",
+        ) {
+            return;
+        }
+
         use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, test_config};
         use mj_core::config::HarnessKind;
         use mj_core::profile_capabilities::CapabilityState;
@@ -825,6 +890,13 @@ mod tests {
 
     #[tokio::test]
     async fn attaching_and_then_changing_owner_state_yields_an_incremental_frame() {
+        if super::super::tests::isolate_runtime_feed_test(
+            module_path!(),
+            "attaching_and_then_changing_owner_state_yields_an_incremental_frame",
+        ) {
+            return;
+        }
+
         let state = super::super::tests::test_runtime_state_with(Controller {
             config: super::super::tests::runtime_test_config(),
             state: Default::default(),

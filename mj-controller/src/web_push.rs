@@ -277,7 +277,8 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
                 .get(holder)
                 .is_some_and(|record| record.notifications_ignored)
         {
-            let identity = serde_json::json!(["form", holder, form.request_id]).to_string();
+            let identity =
+                serde_json::json!(["form", holder, form.request_id, form.raised_at_ms]).to_string();
             entries.insert(
                 identity,
                 PushEntry {
@@ -322,6 +323,31 @@ impl PushEntry<'_> {
     }
 }
 
+/// Durable notify decisions belong to the daemon, independently of phone delivery.
+pub(crate) async fn run_alerts(
+    state: Arc<RuntimeState>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        _ = cancellation.cancelled() => return Ok(()),
+        _ = crate::upgrade::wait_for_startup_recovery() => {},
+    }
+    let mut revisions = state.revisions();
+    loop {
+        revisions.borrow_and_update();
+        let runtime = state.runtime_publication()?;
+        if blocking(move || db::notification_reconcile(runtime)).await? {
+            state.publish_revision();
+        }
+        // Subscription and presence changes can enqueue deliveries without an alert.
+        wake();
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            changed = revisions.changed() => { changed.context("notification runtime feed closed")?; },
+        }
+    }
+}
+
 pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     // Let the startup owner settle before the first map can consume cutover.
     crate::upgrade::wait_for_startup_recovery().await;
@@ -334,10 +360,7 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     blocking(db::push_recover).await?;
     loop {
         let runtime = state.runtime_publication()?;
-        let (due, next, alerts_changed) = blocking(move || db::push_reconcile(runtime)).await?;
-        if alerts_changed {
-            state.publish_revision();
-        }
+        let (due, next) = blocking(move || db::push_ready(runtime)).await?;
         for delivery in due {
             let client = client.clone();
             let vapid = vapid.clone();

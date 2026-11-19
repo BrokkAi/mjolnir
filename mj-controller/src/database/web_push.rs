@@ -93,7 +93,7 @@ fn alert_events_since_with(
 ) -> Result<(u64, Vec<mj_client::runtime_feed::AlertEvent>)> {
     let tx = db.unchecked_transaction()?;
     let high = tx.query_row(
-        "SELECT coalesce(max(sequence),0) FROM alert_events",
+        "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='alert_events'),0)",
         [],
         |r| r.get::<_, u64>(0),
     )?;
@@ -105,14 +105,34 @@ fn alert_events_since_with(
     Ok((high, events))
 }
 
+/// The daemon notification service is the sole observer of published items.
+pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<bool> {
+    submit_database_write("observe notification entries", move |db| {
+        let before = alert_events_since_with(db, None)?.0;
+        let tx = db.transaction()?;
+        if let Some(entries) = card_entries(&runtime) {
+            push_observe_in(&tx, &runtime, &entries, Utc::now().timestamp())?;
+        }
+        tx.commit()?;
+        Ok(alert_events_since_with(db, None)?.0 != before)
+    })
+}
+
+pub(crate) fn push_ready(runtime: RuntimeProjection) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+    submit_database_write("claim Web Push deliveries", move |db| {
+        push_reconcile_with(db, &runtime, Utc::now().timestamp(), false)
+    })
+}
+
 /// Reconcile the authoritative card snapshot and admit its sends in one
 /// transaction. Presence controls delivery and never changes entry identity.
+#[cfg(test)]
 pub(crate) fn push_reconcile(
     runtime: RuntimeProjection,
 ) -> Result<(Vec<PushDelivery>, Option<i64>, bool)> {
     submit_database_write("reconcile Web Push entries", move |db| {
         let before = alert_events_since_with(db, None)?.0;
-        let (due, next) = push_reconcile_with(db, &runtime, Utc::now().timestamp())?;
+        let (due, next) = push_reconcile_with(db, &runtime, Utc::now().timestamp(), true)?;
         let changed = alert_events_since_with(db, None)?.0 != before;
         Ok((due, next, changed))
     })
@@ -122,17 +142,22 @@ fn push_reconcile_with(
     db: &mut Connection,
     runtime: &RuntimeProjection,
     now: i64,
+    observe: bool,
 ) -> Result<(Vec<PushDelivery>, Option<i64>)> {
     let entries = card_entries(runtime);
     let automatic = runtime.metadata.operator_presence.away && entries.is_some();
     let tx = db.transaction()?;
-    if let Some(entries) = &entries {
-        push_observe_in(&tx, runtime, entries, automatic, now)?;
+    if let Some(entries) = &entries
+        && observe
+    {
+        push_observe_in(&tx, runtime, entries, now)?;
     }
     let due = push_claim_in(&tx, runtime, entries.as_ref(), automatic, now)?;
     let next = tx.query_row(
-        &format!("{READY_PUSH} SELECT min(due) FROM ranked WHERE rank=1"),
-        [automatic],
+        // Ready entries absent from this snapshot await the observer's wake,
+        // rather than spinning on an already-expired delivery deadline.
+        &format!("{READY_PUSH} SELECT min(due) FROM ranked WHERE rank=1 AND due>?2"),
+        params![automatic, now],
         |r| r.get(0),
     )?;
     tx.commit()?;
@@ -143,7 +168,6 @@ fn push_observe_in(
     tx: &Transaction<'_>,
     runtime: &RuntimeProjection,
     entries: &BTreeMap<String, PushEntry<'_>>,
-    away: bool,
     now: i64,
 ) -> Result<()> {
     // The cutover baseline applies even to devices enrolled later. An absent
@@ -196,14 +220,6 @@ fn push_observe_in(
         tx.execute(
             "INSERT INTO alert_events(identity,destination,session_title,text,kind) VALUES(?1,?2,?3,?4,?5)",
             params![identity, entry.holder, notice.title, notice.body, serde_json::to_string(&entry.kind)?],
-        )?;
-    }
-    if away {
-        tx.execute(
-            "INSERT OR IGNORE INTO push_entry_deliveries(endpoint,identity)
-             SELECT d.endpoint,e.identity FROM push_entries e CROSS JOIN push_devices d
-             WHERE e.visible=1 AND e.session IS NOT NULL AND e.baseline=0",
-            [],
         )?;
     }
     Ok(())
@@ -273,6 +289,14 @@ fn push_claim_in(
     automatic: bool,
     now: i64,
 ) -> Result<Vec<PushDelivery>> {
+    if automatic {
+        tx.execute(
+            "INSERT OR IGNORE INTO push_entry_deliveries(endpoint,identity)
+             SELECT d.endpoint,e.identity FROM push_entries e CROSS JOIN push_devices d
+             WHERE e.visible=1 AND e.session IS NOT NULL AND e.baseline=0",
+            [],
+        )?;
+    }
     let due = tx
         .prepare(&format!(
             "{READY_PUSH} SELECT subscription,enrollment,identity,failures,session
@@ -292,10 +316,12 @@ fn push_claim_in(
     let mut notices = BTreeMap::new();
     for (subscription, enrollment, identity, failures, session) in due {
         let subscription: Subscription = serde_json::from_str(&subscription)?;
-        let payload = if let Some(session) = &session {
-            let entry = entries
-                .and_then(|entries| entries.get(&identity))
-                .with_context(|| format!("missing current Web Push entry for session {session}"))?;
+        let payload = if session.is_some() {
+            let Some(entry) = entries.and_then(|entries| entries.get(&identity)) else {
+                // The delivery snapshot can advance before the notification
+                // owner hides its ledger row. Its reconciliation wakes us.
+                continue;
+            };
             if let Some(payload) = notices.get(&identity) {
                 String::clone(payload)
             } else {
@@ -556,7 +582,7 @@ mod tests {
     }
 
     fn claim(db: &mut Connection, runtime: &RuntimeProjection, now: i64) -> Vec<PushDelivery> {
-        push_reconcile_with(db, runtime, now).unwrap().0
+        push_reconcile_with(db, runtime, now, true).unwrap().0
     }
 
     fn add_message(transcript: &mut MaterializedSession, id: &str, ordinal: u64, text: &str) {
@@ -771,7 +797,40 @@ mod tests {
         assert_eq!(
             alert_events_since_with(&db, Some(0)).unwrap().0,
             high,
-            "push identifies forms by holder and request id, even across a restart"
+            "one live form remains one identity across a restart"
+        );
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("parent")
+            .unwrap()
+            .form
+            .as_mut()
+            .unwrap()
+            .raised_at_ms = 4;
+        claim(&mut db, &runtime, 4);
+        claim(&mut db, &runtime, 5);
+        let (new_high, events) = alert_events_since_with(&db, Some(high)).unwrap();
+        assert!(new_high > high);
+        assert_eq!(
+            events.len(),
+            1,
+            "a new incarnation of elicitation-1 alerts exactly once"
+        );
+        sessions::save_session_to(&path, &crate::database::tests::session("parent", "project"))
+            .unwrap();
+        db.execute("DELETE FROM sessions WHERE session_id='parent'", [])
+            .unwrap();
+        let (after_destroy, remaining) = alert_events_since_with(&db, Some(0)).unwrap();
+        assert_eq!(
+            after_destroy, new_high,
+            "sqlite_sequence preserves the durable frontier after deleting the last event"
+        );
+        assert!(
+            remaining.is_empty(),
+            "destroyed session titles and text cannot replay"
         );
     }
 
@@ -816,6 +875,14 @@ mod tests {
         });
         assert!(claim(&mut db, &runtime, 0).is_empty()); // Presence.
         runtime.metadata.operator_presence.away = true;
+        let mut ahead = runtime.clone();
+        ahead.metadata.notification_cards.as_mut().unwrap().clear();
+        let (deferred, next) = push_reconcile_with(&mut db, &ahead, 0, false).unwrap();
+        assert!(deferred.is_empty());
+        assert!(
+            next.is_none(),
+            "a delivery snapshot ahead of the observer waits for reconciliation, not an expired timer"
+        );
         let first = claim(&mut db, &runtime, 0);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].identity, r#"["completion","s",3]"#);
@@ -852,7 +919,7 @@ mod tests {
         result(&db, &second[0], Some(413), i64::MAX); // Permanently retires only this intent.
         let form = claim(&mut db, &runtime, 10);
         assert_eq!(form.len(), 1);
-        assert_eq!(form[0].identity, r#"["form","child","form:1"]"#);
+        assert_eq!(form[0].identity, r#"["form","child","form:1",0]"#);
         let notice: Notice = serde_json::from_str(&form[0].payload).unwrap();
         assert_eq!(notice.body, "Accept changes?");
         assert_eq!(notice.url, "/#conversation/child");

@@ -292,7 +292,7 @@ pub(super) async fn notification_message(
                     holder: holder.to_owned(),
                     text: form.message.clone(),
                 }
-            } else if let Some(entry) = card.entries.last() {
+            } else if let Some(entry) = card.shown_question().or_else(|| card.entries.last()) {
                 let has_legacy_identity = expected.holder.is_some()
                     || !expected.requests.is_empty()
                     || !expected.question.is_empty()

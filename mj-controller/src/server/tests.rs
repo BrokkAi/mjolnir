@@ -5977,6 +5977,12 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
                         kind: NotificationKind::NeedsInput,
                         message: message.clone(),
                     },
+                    NotificationStackEntry {
+                        completed_at_ms: 0,
+                        completed_ordinal: 8,
+                        kind: NotificationKind::Important,
+                        message: EntryMessage::Found("agent:7".into()),
+                    },
                 ],
                 dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 10 }),
                 holder: None,

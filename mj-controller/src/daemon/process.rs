@@ -677,6 +677,11 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     ));
 
+    let mut alert_task = tokio::spawn(crate::web_push::run_alerts(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut alert_outcome = None;
     let mut cache_outcome = None;
     let mut mailbox_outcome = None;
     let mut github_watch_outcome = None;
@@ -709,6 +714,10 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut alert_task, &mut alert_outcome, &cancellation, "notification service") => {
                     result?;
                     break;
                 }
@@ -920,6 +929,17 @@ pub(super) async fn run_daemon_runtime(
             None => github_watch_task
                 .await
                 .context("GitHub watch service failed")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join notification service",
+        match alert_outcome {
+            Some(result) => result,
+            None => alert_task
+                .await
+                .context("notification service failed")
                 .and_then(|result| result),
         },
     );

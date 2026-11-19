@@ -1007,6 +1007,13 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
 
 #[tokio::test]
 async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
+    if isolate_runtime_feed_test(
+        module_path!(),
+        "published_quota_reaches_an_attached_client_through_the_runtime_feed",
+    ) {
+        return;
+    }
+
     use mj_client::quota::QuotaSnapshot;
     let state = test_runtime_state();
     let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
@@ -11484,6 +11491,13 @@ async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
 // Hard-won: 8b3a7286: a failed Move left the TUI unable to open a session because actor and feed ownership disagreed.
 #[tokio::test]
 async fn a_session_without_a_relay_actor_has_no_runtime_view() {
+    if isolate_runtime_feed_test(
+        module_path!(),
+        "a_session_without_a_relay_actor_has_no_runtime_view",
+    ) {
+        return;
+    }
+
     let state = test_runtime_state();
     state.owner().edit_sessions(|sessions| {
         sessions.insert(
@@ -12368,6 +12382,13 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
 /// afterwards is given the session under the new workspace only.
 #[tokio::test]
 async fn changing_a_sessions_workspace_reaches_the_published_projection() {
+    if isolate_runtime_feed_test(
+        module_path!(),
+        "changing_a_sessions_workspace_reaches_the_published_projection",
+    ) {
+        return;
+    }
+
     let Some(_writer) =
         startup_prompt_test_store("changing_a_sessions_workspace_reaches_the_published_projection")
     else {
@@ -12445,6 +12466,13 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
 /// published projection an attached dashboard reads.
 #[tokio::test]
 async fn ignoring_notifications_persists_and_reaches_the_published_projection() {
+    if isolate_runtime_feed_test(
+        module_path!(),
+        "ignoring_notifications_persists_and_reaches_the_published_projection",
+    ) {
+        return;
+    }
+
     let Some(_writer) = startup_prompt_test_store(
         "ignoring_notifications_persists_and_reaches_the_published_projection",
     ) else {
@@ -12777,6 +12805,13 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
 /// whose actor retires takes its tail out of the feed.
 #[tokio::test]
 async fn published_transcripts_reach_a_client_as_item_changes() {
+    if isolate_runtime_feed_test(
+        module_path!(),
+        "published_transcripts_reach_a_client_as_item_changes",
+    ) {
+        return;
+    }
+
     let state = test_runtime_state();
     state.owner().edit_sessions(|sessions| {
         sessions.insert(
@@ -16007,4 +16042,19 @@ async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
         "{error:#}"
     );
     assert!(state.owner().lifecycle.is_empty());
+}
+
+pub(super) fn isolate_runtime_feed_test(module: &str, name: &str) -> bool {
+    const KEY: &str = "MJ_TEST_RUNTIME_FEED_ISOLATED";
+    if std::env::var(KEY).ok().as_deref() == Some(name) {
+        return false;
+    }
+    let root = tempfile::tempdir().unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module, name,
+    ))
+    .env(KEY, name)
+    .isolated_store(root.path())
+    .run();
+    true
 }
