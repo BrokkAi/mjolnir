@@ -130,6 +130,17 @@ fn move_queue_relay_child() {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
+        if matches!(request.request, RelayRequest::Attach { .. })
+            && root.join("block-ordinary-attach").exists()
+        {
+            fs::write(root.join("ordinary-attach-reached"), b"waiting").unwrap();
+            while !root.join("release-ordinary-attach").exists() {
+                if !root.join("block-ordinary-attach").exists() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
         let payload = match &request.request {
             RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
                 negotiated: wire_protocol,
@@ -350,6 +361,13 @@ fn move_queue_relay_child() {
                 "checkpoint-only" => state.checkpoint_only = true,
                 "closed" => state.execution = mj_core::relay::RelayExecutionState::Closed,
                 "closing" => state.execution = mj_core::relay::RelayExecutionState::Closing,
+                "failed" => {
+                    state.harness_preparation = Some(mj_core::relay::HarnessPreparation::Failed {
+                        step: "launch".into(),
+                        error: "recorded native startup failure".into(),
+                        at_ms: 1,
+                    })
+                }
                 _ => panic!("unknown unavailable worker state"),
             }
         }
@@ -7354,6 +7372,8 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
     let cancellation = tokio_util::sync::CancellationToken::new();
     let stopped = cancellation.clone();
     runtime.block_on(async {
+        let (installed, notice) = tokio::sync::oneshot::channel();
+        let send_notice = matches!(disposition, AdoptionProbe::Install).then_some(installed);
         let work = tokio::spawn(async move {
             controller
                 .adopt_orphan_worker_controlled(
@@ -7362,6 +7382,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     crate::controller::AdoptionControl {
                         cancelled: stopped,
                         progress: None,
+                        installed: send_notice,
                         lifecycle_gate: owner_gate,
                     },
                 )
@@ -7386,28 +7407,23 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             return;
         }
         if matches!(disposition, AdoptionProbe::Install) {
-            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+            let publication = tokio::time::timeout(std::time::Duration::from_secs(5), notice)
                 .await
                 .unwrap()
                 .unwrap();
-            outcome.result.unwrap();
-            let admission = outcome.admission.unwrap();
             let refused = gate
                 .try_start(
                     MOVE_QUEUE_SESSION_ID,
                     crate::recovery_gate::BackgroundWork::WorkerReplacement,
                 )
                 .err()
-                .expect("install must retain session ownership until reply");
+                .expect("install owns the session through installed notice delivery");
             assert!(refused.holders.contains(&"adoption install"));
             let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
                 .unwrap()
                 .unwrap();
-            assert_eq!(current.state, SessionState::Running);
-            assert!(
-                current.native_session_id.is_none(),
-                "adoption must not wait for native readiness"
-            );
+            assert_eq!(current.state, SessionState::Disconnected);
+            assert!(current.native_session_id.is_none());
             assert!(
                 crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
                     .unwrap()
@@ -7415,13 +7431,44 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     .0
                     > 0
             );
-            drop(admission);
+            fs::write(root.join("block-ordinary-attach"), b"1").unwrap();
+            drop(publication.admission);
+            publication.acknowledged.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !root.join("ordinary-attach-reached").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
             drop(
                 gate.try_start(
                     MOVE_QUEUE_SESSION_ID,
                     crate::recovery_gate::BackgroundWork::WorkerReplacement,
                 )
-                .expect("reply releases session ownership"),
+                .expect("ordinary catch-up holds no install permit"),
+            );
+            assert!(
+                crate::upgrade::active_labels()
+                    .iter()
+                    .all(|label| !label.contains("adoption"))
+            );
+            fs::write(root.join("release-ordinary-attach"), b"1").unwrap();
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+                .await
+                .unwrap()
+                .unwrap();
+            outcome.result.unwrap();
+            assert!(
+                outcome.admission.is_none(),
+                "final reply is ordinary after connected publication"
+            );
+            assert_eq!(
+                crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                SessionState::Running
             );
             return;
         }
@@ -7496,11 +7543,11 @@ fn adoption_disconnecting_cancels_the_existence_probe_and_releases_ownership() {
 
 #[cfg(unix)]
 #[test]
-fn adoption_install_keeps_both_owners_through_publication_until_the_reply() {
+fn adoption_install_keeps_both_owners_through_the_installed_notice() {
     adoption_interrupted_probe(
         true,
         AdoptionProbe::Install,
-        "adoption_install_keeps_both_owners_through_publication_until_the_reply",
+        "adoption_install_keeps_both_owners_through_the_installed_notice",
     );
 }
 
@@ -7561,11 +7608,138 @@ fn adoption_rejects_checkpoint_only_and_closed_workers() {
     if !isolated_test_child(&name, "MJ_ADOPT_DRAINING_PROBE_CHILD") {
         return;
     }
-    for kind in ["checkpoint-only", "closed", "closing"] {
+    for kind in ["checkpoint-only", "closed", "closing", "failed"] {
         adoption_interrupted_probe(
             true,
             AdoptionProbe::Unusable(kind),
             "adoption_rejects_checkpoint_only_and_closed_workers",
         );
     }
+}
+
+#[cfg(unix)]
+// Hard-won: 419a22f: a readable first replay page claimed Running before a later corrupt segment failed.
+#[test]
+fn adoption_genesis_replay_failure_stays_disconnected_and_retryable() {
+    let name = test_name("adoption_genesis_replay_failure_stays_disconnected_and_retryable");
+    if !isolated_test_child(&name, "MJ_ADOPT_LATE_CORRUPTION_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    let _proxy_guard =
+        install_move_queue_relay_worker(&root, &directory.path().join("served"), true);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "current").unwrap();
+    for index in 0..160 {
+        relay
+            .record_observation(mj_core::relay::RelayObservation::Warning {
+                message: format!("history-{index}:{}", "x".repeat(64 * 1024)),
+            })
+            .unwrap();
+    }
+    let frontier = relay.latest_ordinal();
+    drop(relay);
+    let mut sealed = fs::read_dir(root.join(mj_core::relay::RELAY_JOURNAL_DIR))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "gz"))
+        .collect::<Vec<_>>();
+    sealed.sort();
+    assert!(
+        sealed.len() >= 9,
+        "corruption must be beyond the first bounded replay page"
+    );
+    // Leave enough later records for startup's hot tail; the failure must
+    // happen in a later replay page, not while the worker itself reopens.
+    let corrupt = &sealed[sealed.len() - 4];
+    let saved = fs::read(corrupt).unwrap();
+    fs::write(corrupt, b"not a gzip stream").unwrap();
+    let mut record = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    record.state = SessionState::Disconnected;
+    record.native_session_id = None;
+    record.checkpoint = None;
+    record.target_template_id = "local-bare".into();
+    record.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    }));
+    crate::database::save_session(&record).unwrap();
+    let mut config = Config::default();
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut controller = Controller {
+        config,
+        state: crate::database::load_state().unwrap(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let error = controller
+            .adopt_orphan_worker(
+                MOVE_QUEUE_SESSION_ID,
+                "local-bare",
+                None,
+                None,
+                false,
+                &ProcessExecutor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("worker adopted; reattaching failed"),
+            "{error:#}"
+        );
+        let row = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, SessionState::Disconnected);
+        assert!(row.native_session_id.is_none());
+        assert!(
+            row.last_error
+                .as_deref()
+                .unwrap()
+                .contains("reattaching failed")
+        );
+        assert!(
+            crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap()
+                .0
+                < frontier
+        );
+        fs::write(corrupt, saved).unwrap();
+        controller
+            .adopt_orphan_worker(
+                MOVE_QUEUE_SESSION_ID,
+                "local-bare",
+                None,
+                None,
+                false,
+                &ProcessExecutor,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap()
+                .state,
+            SessionState::Running
+        );
+        assert_eq!(
+            crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID)
+                .unwrap()
+                .unwrap()
+                .0,
+            frontier
+        );
+    });
+    assert!(
+        !root.join("baseline-frontier").exists(),
+        "intact genesis uses ordinary replay on every retry"
+    );
 }

@@ -716,6 +716,17 @@ pub struct RecoveryAdoptionRequest {
     pub all_instances: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAdoptionProgress {
+    Waiting {
+        blockers: Vec<String>,
+        destroy_command: Option<String>,
+    },
+    Installed {
+        session_id: String,
+    },
+}
+
 /// `Ping`, `Status`, and `Stop` form the frozen management subset: their wire
 /// encoding — together with `RequestEnvelope`, `ResponseEnvelope`,
 /// `DaemonStatus`, and `WebViewerStatus` — must never change shape, because
@@ -1343,6 +1354,9 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    AdoptionInstalled {
+        session_id: String,
+    },
     AdoptionWaiting {
         blockers: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2874,7 +2888,7 @@ impl DaemonClient {
     pub async fn adopt_recovery(
         &mut self,
         adoption: RecoveryAdoptionRequest,
-        mut progress: impl FnMut(Vec<String>, Option<String>),
+        mut progress: impl FnMut(RecoveryAdoptionProgress),
     ) -> Result<()> {
         let mut stream = self.take_stream()?;
         let request_id = self.next_request_id;
@@ -2902,13 +2916,22 @@ impl DaemonClient {
                 "daemon crossed request IDs: expected {request_id}, received {}",
                 response.request_id
             );
-            if let Ok(DaemonReply::AdoptionWaiting {
-                blockers,
-                destroy_command,
-            }) = response.result
-            {
-                progress(blockers, destroy_command);
-                continue;
+            match response.result {
+                Ok(DaemonReply::AdoptionWaiting {
+                    blockers,
+                    destroy_command,
+                }) => {
+                    progress(RecoveryAdoptionProgress::Waiting {
+                        blockers,
+                        destroy_command,
+                    });
+                    continue;
+                }
+                Ok(DaemonReply::AdoptionInstalled { session_id }) => {
+                    progress(RecoveryAdoptionProgress::Installed { session_id });
+                    continue;
+                }
+                _ => {}
             }
             self.stream = Some(stream);
             return match response.result {
@@ -4139,6 +4162,18 @@ mod tests {
                         &ResponseEnvelope {
                             request_id: request.request_id,
                             protocol_version: request.protocol_version,
+                            result: Ok(DaemonReply::AdoptionInstalled {
+                                session_id: "orphan".into(),
+                            }),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            request_id: request.request_id,
+                            protocol_version: request.protocol_version,
                             result: Ok(DaemonReply::Done),
                         },
                     )
@@ -4147,6 +4182,7 @@ mod tests {
                 }
             });
             let mut client = DaemonClient::connect(metadata).await.unwrap();
+            let mut installed_notice = None;
             let (observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
             {
                 let work = client.adopt_recovery(
@@ -4157,8 +4193,14 @@ mod tests {
                         bundle: None,
                         all_instances: false,
                     },
-                    |blockers, destroy_command| {
-                        observed.send((blockers, destroy_command)).unwrap();
+                    |event| match event {
+                        RecoveryAdoptionProgress::Waiting {
+                            blockers,
+                            destroy_command,
+                        } => observed.send((blockers, destroy_command)).unwrap(),
+                        RecoveryAdoptionProgress::Installed { session_id } => {
+                            installed_notice = Some(session_id);
+                        }
                     },
                 );
                 tokio::pin!(work);
@@ -4171,6 +4213,7 @@ mod tests {
                     work.await.unwrap();
                 }
             }
+            assert_eq!(installed_notice.as_deref(), (!cancel).then_some("orphan"));
             assert_eq!(client.stream.is_none(), cancel);
             server.await.unwrap();
         }

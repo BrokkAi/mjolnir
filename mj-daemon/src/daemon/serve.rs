@@ -402,6 +402,8 @@ pub(super) async fn serve_client(
                     &adoption.target_id,
                     adoption.all_instances,
                 );
+                let (installed, mut installation) = tokio::sync::oneshot::channel();
+                let mut installation_open = true;
                 let work_state = state.clone();
                 let work_adoption = adoption.clone();
                 let work_cancelled = cancelled.clone();
@@ -418,13 +420,12 @@ pub(super) async fn serve_client(
                             mj_controller::controller::AdoptionControl {
                                 cancelled: work_wait_cancel,
                                 progress: Some(progress),
+                                installed: Some(installed),
                                 lifecycle_gate: work_state.session_gate.clone(),
                             },
                         )
                         .await;
-                    if outcome.result.is_ok() {
-                        refresh_runtime_controller(&work_state).await;
-                    }
+                    refresh_runtime_controller(&work_state).await;
                     Ok::<_, anyhow::Error>(outcome)
                 };
                 let mut work = mj_core::runtime::spawn_off_async_workers(async move {
@@ -471,6 +472,25 @@ pub(super) async fn serve_client(
                             draining = true;
                             cancelled.store(true, Ordering::Release);
                             wait_cancel.cancel();
+                        }
+                        publication = &mut installation, if installation_open => {
+                            installation_open = false;
+                            progress_open = false;
+                            if let Ok(publication) = publication {
+                                refresh_runtime_controller(&state).await;
+                                let delivered = write_response(&mut stream, ResponseEnvelope {
+                                    protocol_version: request.protocol_version, request_id,
+                                    result: Ok(DaemonReply::AdoptionInstalled { session_id: adoption.session_id.clone() }),
+                                }).await;
+                                if let Err(error) = delivered {
+                                    tracing::debug!(%error, "adoption installed notice connection closed");
+                                    disconnected = true;
+                                    cancelled.store(true, Ordering::Release);
+                                    wait_cancel.cancel();
+                                }
+                                drop(publication.admission);
+                                let _ = publication.acknowledged.send(());
+                            }
                         }
                         changed = waiting.changed(), if progress_open => {
                             if changed.is_ok() {

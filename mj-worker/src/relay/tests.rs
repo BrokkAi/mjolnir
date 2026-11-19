@@ -9648,7 +9648,12 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         );
         relay.claim_pending_user_shell_commands_up_to(1).unwrap();
     }
-    let resume = NativeGoalResume::begin(&std::sync::Arc::downgrade(&relay), Some(serde_json::from_value(serde_json::json!({"objective":"resume this goal", "createdAt":1, "status":"paused"})).unwrap())).unwrap();
+    relay.lock().unwrap().native_goal_resume_sent(Some(
+        serde_json::from_value(
+            serde_json::json!({"objective":"resume this goal", "createdAt":1, "status":"paused"}),
+        )
+        .unwrap(),
+    ));
     let mut cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(cut.try_recv().is_err());
     assert!(
@@ -9685,7 +9690,6 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
             .unwrap();
         assert!(!relay.pending_native_resumes.is_empty());
     }
-    resume.accepted();
     assert!(
         cut.try_recv().is_err(),
         "native acknowledgement does not settle the resumed turn"
@@ -9702,7 +9706,7 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
                 prompt_in_flight: false,
             })
             .unwrap();
-        relay.record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"different goal", "createdAt":2, "status":"active"}, "execution":{"version":1,"status":"running","turnId":"other-goal"}}})).unwrap()).unwrap();
+
         assert!(!relay.pending_native_resumes.is_empty());
         assert!(cut.try_recv().is_err());
     }
@@ -9723,9 +9727,29 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         })
         .unwrap();
     assert!(cut.try_recv().unwrap().is_ok());
-    let resume = NativeGoalResume::begin(&std::sync::Arc::downgrade(&relay), None).unwrap();
-    let mut failed_cut = relay.lock().unwrap().reserve_live_baseline();
-    assert!(failed_cut.try_recv().is_err());
-    drop(resume);
-    assert!(failed_cut.try_recv().unwrap().is_ok());
+    // A local request error/timeout is not proof of rejection. A later goal
+    // clear is authoritative and supersedes the already-sent resume.
+    relay.lock().unwrap().native_goal_resume_sent(None);
+    let mut rejected_cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(rejected_cut.try_recv().is_err());
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(
+            serde_json::from_value(
+                serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":null}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(rejected_cut.try_recv().unwrap().is_ok());
+    relay.lock().unwrap().native_goal_resume_sent(None);
+    let mut exited_cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(exited_cut.try_recv().is_err());
+    relay
+        .lock()
+        .unwrap()
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(exited_cut.try_recv().unwrap().is_ok());
 }

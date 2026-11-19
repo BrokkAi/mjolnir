@@ -305,7 +305,7 @@ impl StandaloneSession {
         self.client.reserve_idle(command_id).await
     }
 
-    pub(super) async fn detach(self) -> Result<()> {
+    pub(crate) async fn detach(self) -> Result<()> {
         self.client.detach().await
     }
 

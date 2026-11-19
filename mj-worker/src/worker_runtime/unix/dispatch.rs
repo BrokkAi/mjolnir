@@ -1050,6 +1050,9 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::NativeAgent { event } => {
             relay.record_observation(RelayObservation::NativeAgent { event })?;
         }
+        RuntimeEvent::NativeGoalResumeSent { goal } => {
+            relay.native_goal_resume_sent(goal);
+        }
         RuntimeEvent::SessionUpdate { update } => {
             let typed = serde_json::from_value::<SessionUpdate>(update).map_err(|error| {
                 anyhow::anyhow!("decode ACP session update for relay journal: {error}")

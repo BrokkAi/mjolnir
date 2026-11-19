@@ -540,6 +540,10 @@ pub enum AirTaskUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    /// Ordered before the native request and its updates on the worker FIFO.
+    NativeGoalResumeSent {
+        goal: Option<crate::goal::GoalSnapshot>,
+    },
     NativeAgent {
         event: crate::native_agent::NativeAgentEvent,
     },

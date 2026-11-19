@@ -2,25 +2,18 @@
 use super::*;
 use mj_core::goal::{GoalSnapshot, RECOVERY_ID};
 
-fn resume_admission(
-    spec: &LaunchSpec,
-    resume: bool,
-) -> Result<Option<crate::relay::NativeGoalResume>> {
-    if resume {
-        let goal = spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .state
-            .snapshot
-            .clone();
-        spec.terminal_owner
-            .as_ref()
-            .map(|owner| crate::relay::NativeGoalResume::begin(owner, goal))
-            .transpose()
-    } else {
-        Ok(None)
+async fn record_resume_sent(
+    owner: Option<&std::sync::Weak<crate::relay::RelayCell>>,
+    events: &mpsc::Sender<RuntimeEvent>,
+    goal: Option<GoalSnapshot>,
+) -> Result<()> {
+    if let Some(owner) = owner {
+        owner
+            .upgrade()
+            .context("native resume relay owner disappeared")?;
+        emit_runtime_event(events, RuntimeEvent::NativeGoalResumeSent { goal }).await?;
     }
+    Ok(())
 }
 
 type PendingControl = Pin<Box<dyn Future<Output = RuntimeEvent> + Send>>;
@@ -28,7 +21,7 @@ type PendingControl = Pin<Box<dyn Future<Output = RuntimeEvent> + Send>>;
 /// Polled by both command loops. Dropping the session drops all request waits;
 /// the relay reports their commands interrupted rather than replaying them.
 #[derive(Default)]
-pub(super) struct PendingControls(Vec<PendingControl>);
+pub(super) struct PendingControls(Vec<(Arc<std::sync::atomic::AtomicBool>, PendingControl)>);
 
 impl PendingControls {
     pub(super) fn is_empty(&self) -> bool {
@@ -38,13 +31,15 @@ impl PendingControls {
     pub(super) fn start(
         &mut self,
         spec: &LaunchSpec,
+        events: &mpsc::Sender<RuntimeEvent>,
         connection: &ConnectionTo<Agent>,
         session: &SessionId,
-        request_id: String,
-        action: mj_core::goal::GoalControlAction,
+        request: (String, mj_core::goal::GoalControlAction),
         expected: Option<GoalSnapshot>,
     ) {
+        let (request_id, action) = request;
         let owner = spec.terminal_owner.clone();
+        let events = events.clone();
         let resume_goal = spec
             .goal_recovery
             .lock()
@@ -54,50 +49,57 @@ impl PendingControls {
             .clone();
         let connection = connection.clone();
         let session = session.clone();
-        self.0.push(Box::pin(async move {
-            // Explicit native resume may answer only when its turn finishes.
-            // Do not impose recovery's short acknowledgement timeout here.
-            let admission = if action == mj_core::goal::GoalControlAction::Resume {
-                owner
-                    .as_ref()
-                    .map(|owner| crate::relay::NativeGoalResume::begin(owner, resume_goal))
-                    .transpose()
-            } else {
-                Ok(None)
-            };
-            let response = match admission {
-                Ok(admission) => {
-                    let result = connection
-                        .send_request(control_request(&session, action, expected.as_ref()))
-                        .block_task()
-                        .await;
-                    if result.is_ok()
-                        && let Some(admission) = admission
-                    {
-                        admission.accepted();
+        let sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sending = sent.clone();
+        self.0.push((
+            sent,
+            Box::pin(async move {
+                // Explicit native resume may answer only when its turn finishes.
+                // Do not impose recovery's short acknowledgement timeout here.
+                let admission = if action == mj_core::goal::GoalControlAction::Resume {
+                    record_resume_sent(owner.as_ref(), &events, resume_goal).await
+                } else {
+                    Ok(())
+                };
+                let response = match admission {
+                    Ok(()) => {
+                        let request = connection.send_request(control_request(
+                            &session,
+                            action,
+                            expected.as_ref(),
+                        ));
+                        sending.store(true, std::sync::atomic::Ordering::Release);
+                        request
+                            .block_task()
+                            .await
+                            .map_err(|error| anyhow::anyhow!("{error}"))
                     }
-                    result.map_err(|error| anyhow::anyhow!("{error}"))
+                    Err(error) => Err(error),
+                };
+                match response {
+                    Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
+                    Err(error) => RuntimeEvent::CommandRejected {
+                        reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                        request_id,
+                        message: format!("/goal {} failed: {error}", action.as_str()),
+                    },
                 }
-                Err(error) => Err(error),
-            };
-            match response {
-                Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
-                Err(error) => RuntimeEvent::CommandRejected {
-                    reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
-                    request_id,
-                    message: format!("/goal {} failed: {error}", action.as_str()),
-                },
-            }
-        }));
+            }),
+        ));
     }
 
     pub(super) async fn next(&mut self) -> RuntimeEvent {
         std::future::poll_fn(|cx| {
             for index in 0..self.0.len() {
-                if let std::task::Poll::Ready(event) = self.0[index].as_mut().poll(cx) {
+                if let std::task::Poll::Ready(event) = self.0[index].1.as_mut().poll(cx) {
                     // Keep requests ordered until their first poll sends them.
                     drop(self.0.remove(index));
                     return std::task::Poll::Ready(event);
+                }
+                // A full event FIFO must not let a later control overtake
+                // the resume whose ordered marker is still being enqueued.
+                if !self.0[index].0.load(std::sync::atomic::Ordering::Acquire) {
+                    return std::task::Poll::Pending;
                 }
             }
             std::task::Poll::Pending
@@ -270,6 +272,7 @@ pub(super) struct Question {
 
 async fn control(
     spec: &LaunchSpec,
+    events: &mpsc::Sender<RuntimeEvent>,
     connection: &ConnectionTo<Agent>,
     session: &SessionId,
     goal: &GoalSnapshot,
@@ -285,12 +288,13 @@ async fn control(
     } else {
         mj_core::goal::GoalControlAction::Pause
     };
-    let admission = resume_admission(spec, resume)?;
+    if resume {
+        record_resume_sent(spec.terminal_owner.as_ref(), events, Some(goal.clone())).await?;
+    }
+    // SDK errors also include lost responses. Neither those nor this timeout
+    // prove rejection; only subsequent owner state or process exit settles it.
     tokio::time::timeout(Duration::from_secs(30), connection.send_request(control_request(session, action, Some(goal))).block_task())
         .await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")??;
-    if let Some(admission) = admission {
-        admission.accepted();
-    }
     Ok(())
 }
 
@@ -334,7 +338,15 @@ pub(super) async fn recover(
         if context.state.snapshot.as_ref().is_some_and(|g| {
             g.same_goal(&decision.goal) && matches!(g.status.as_str(), "active" | "paused")
         }) {
-            control(spec, connection, session, &decision.goal, decision.resume).await?;
+            control(
+                spec,
+                events,
+                connection,
+                session,
+                &decision.goal,
+                decision.resume,
+            )
+            .await?;
         }
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
         return Ok(None);
@@ -357,14 +369,14 @@ pub(super) async fn recover(
         return Ok(None);
     };
     if model_question && goal.active() {
-        control(spec, connection, session, &goal, false).await?;
+        control(spec, events, connection, session, &goal, false).await?;
     }
     let mut explanation = None;
     if !context.asking() && !model_question {
         if !goal.active() || context.state.running() {
             return Ok(None);
         }
-        match control(spec, connection, session, &goal, true).await {
+        match control(spec, events, connection, session, &goal, true).await {
             Ok(()) => return Ok(None),
             Err(error) => {
                 let message = format!("Goal recovery needs attention: {error:#}");
@@ -469,7 +481,8 @@ pub(super) async fn resolve(
     }
     decision_update(spec, events, meta).await?;
     if current {
-        if let Err(error) = control(spec, connection, session, &question.goal, resume).await {
+        if let Err(error) = control(spec, events, connection, session, &question.goal, resume).await
+        {
             return Ok(Some(Err(format!("{error:#}"))));
         }
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
@@ -494,17 +507,18 @@ mod tests {
 
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
-        for (asking, running, answer, expected_resumes, status, decision) in [
-            (false, false, None, 1, "active", false),
-            (false, true, None, 0, "active", false),
-            (true, false, Some(true), 1, "active", false),
-            (true, false, Some(false), 0, "active", false),
-            (false, false, None, 0, "paused", false),
-            (false, false, None, 0, "blocked", false),
-            (false, false, None, 0, "limited", false),
-            (false, false, None, 0, "complete", false),
-            (true, false, None, 0, "complete", false),
-            (false, false, None, 1, "paused", true),
+        for (asking, running, answer, expected_resumes, status, decision, timed_out) in [
+            (false, false, None, 1, "active", false, false),
+            (false, true, None, 0, "active", false, false),
+            (true, false, Some(true), 1, "active", false, false),
+            (true, false, Some(false), 0, "active", false, false),
+            (false, false, None, 0, "paused", false, false),
+            (false, false, None, 0, "blocked", false, false),
+            (false, false, None, 0, "limited", false, false),
+            (false, false, None, 0, "complete", false, false),
+            (true, false, None, 0, "complete", false, false),
+            (false, false, None, 1, "paused", true, false),
+            (false, false, None, 1, "active", false, true),
         ] {
             let root = tempfile::tempdir().unwrap();
             let script = root.path().join("goal.py");
@@ -606,7 +620,8 @@ for line in sys.stdin:
                 // Reopen's automatic resume is not a relay command. Drain the
                 // real ACP setup while its resume request is held by the peer.
                 tokio::time::timeout(Duration::from_secs(10), async {
-                    while !root.path().join("resumes").exists() {
+                    while !root.path().join("resumes").exists()
+                        || !relay.observe().unwrap().adoption_blockers().iter().any(|blocker| blocker.contains("goal resume")) {
                         tokio::select! {
                             event = receive.recv() => { crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap(); }
                             _ = tokio::time::sleep(Duration::from_millis(10)) => {}
@@ -623,6 +638,33 @@ for line in sys.stdin:
                         .iter()
                         .any(|blocker| blocker.contains("goal resume"))
                 );
+                if timed_out {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(31)).await;
+                    tokio::time::resume();
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            let event = receive.recv().await.unwrap();
+                            let question =
+                                matches!(&event, RuntimeEvent::ElicitationRequested { .. });
+                            crate::worker_runtime::record_runtime_event(
+                                &relay,
+                                &mut in_flight,
+                                event,
+                            )
+                            .unwrap();
+                            if question {
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(
+                        cut.try_recv().is_err(),
+                        "an ambiguous timeout must not withdraw the resume reservation"
+                    );
+                }
                 std::fs::write(root.path().join("release-resume"), "").unwrap();
                 tokio::time::timeout(Duration::from_secs(10), async {
                     while !relay.observe().unwrap().turn_in_progress() {

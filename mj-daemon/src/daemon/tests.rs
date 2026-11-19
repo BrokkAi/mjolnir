@@ -16114,7 +16114,7 @@ async fn adoption_refusal_keeps_the_daemon_connection_reusable() {
                 bundle: None,
                 all_instances: false,
             },
-            |_, _| panic!("tracked session must refuse without a cut wait"),
+            |_| panic!("tracked session must refuse without progress"),
         )
         .await
         .unwrap_err();

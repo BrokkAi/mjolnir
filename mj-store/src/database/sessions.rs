@@ -839,17 +839,16 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
-/// Claim the worker, install its optional quiescent cut, and publish Running
+/// Claim the worker and install its optional cut as Disconnected
 /// in one writer transaction. Ordinary attachment later owns all post-cut replay.
 pub async fn enqueue_adopted_session<G: Send + 'static>(
     expected: SessionRecord,
     cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
-    native_session_id: Option<String>,
     updated_at: String,
     guard: G,
 ) -> Result<AcceptedDatabaseWrite<SessionRecord, G>> {
     enqueue_database_write("install adopted session", guard, move |connection| {
-        install_adopted_session_with(connection, expected, cut, native_session_id, updated_at)
+        install_adopted_session_with(connection, expected, cut, updated_at)
     })
     .await
 }
@@ -858,7 +857,6 @@ fn install_adopted_session_with(
     connection: &mut Connection,
     mut expected: SessionRecord,
     cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
-    native_session_id: Option<String>,
     updated_at: String,
 ) -> Result<SessionRecord> {
     mj_core::test_hooks::reach_test_hook("adoption_install_write_accepted")?;
@@ -900,12 +898,7 @@ fn install_adopted_session_with(
         );
         super::materialized::install_live_session_baseline_with(&tx, projection, baseline)?;
     }
-    mark_session_worker_connected_with(
-        &tx,
-        &expected.id,
-        native_session_id.as_deref(),
-        &updated_at,
-    )?;
+    tx.execute("UPDATE sessions SET state='disconnected', native_session_id=NULL, updated_at=?2, last_error=NULL WHERE session_id=?1", params![expected.id, updated_at])?;
     let current = super::state_io::load_session_with(&tx, &expected.id)?
         .context("adopted session disappeared")?;
     tx.commit()?;
@@ -915,6 +908,55 @@ fn install_adopted_session_with(
     {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
+    Ok(current)
+}
+
+/// Publish only the worker that the atomic adoption install claimed. Ordinary
+/// catch-up runs without an install holder and may race a destroy or another attach.
+pub async fn enqueue_adoption_connected<G: Send + 'static>(
+    expected: SessionRecord,
+    native_session_id: Option<String>,
+    updated_at: String,
+    guard: G,
+) -> Result<AcceptedDatabaseWrite<SessionRecord, G>> {
+    enqueue_database_write("publish adopted connection", guard, move |connection| {
+        publish_adoption_connected_with(
+            connection,
+            &expected,
+            native_session_id.as_deref(),
+            &updated_at,
+        )
+    })
+    .await
+}
+
+fn publish_adoption_connected_with(
+    connection: &mut Connection,
+    expected: &SessionRecord,
+    native_session_id: Option<&str>,
+    updated_at: &str,
+) -> Result<SessionRecord> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("adopted session disappeared before attachment publication")?;
+    ensure!(
+        current.target == expected.target
+            && matches!(
+                current.state,
+                SessionState::Disconnected | SessionState::Running
+            ),
+        "adopted worker changed during attachment"
+    );
+    if current.state == SessionState::Disconnected {
+        ensure!(
+            current.native_session_id.is_none(),
+            "adoption attachment ownership changed"
+        );
+        mark_session_worker_connected_with(&tx, &expected.id, native_session_id, updated_at)?;
+    }
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("adopted session disappeared")?;
+    tx.commit()?;
     Ok(current)
 }
 
@@ -1960,6 +2002,44 @@ pub struct SessionResumeOptions {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    // The unguarded catch-up must not resurrect a lifecycle that won before publication.
+    #[test]
+    fn adoption_connection_publication_does_not_resurrect_a_stopped_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("adoption-race.sqlite3");
+        let mut expected = super::super::tests::session("adoption-owner", "project");
+        expected.state = SessionState::Disconnected;
+        expected.native_session_id = None;
+        expected.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: directory.path().join(&expected.id),
+        }));
+        save_session_to(&path, &expected).unwrap();
+        let mut stopped = expected.clone();
+        stopped.state = SessionState::Stopped;
+        stopped.target = None;
+        save_session_to(&path, &stopped).unwrap();
+        let stopped =
+            super::super::state_io::load_session_with(&open(&path).unwrap(), &expected.id)
+                .unwrap()
+                .unwrap();
+        let mut connection = open(&path).unwrap();
+        assert!(
+            publish_adoption_connected_with(
+                &mut connection,
+                &expected,
+                Some("late-native"),
+                "2030-01-01T00:00:00Z"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            super::super::state_io::load_session_with(&connection, &expected.id)
+                .unwrap()
+                .unwrap(),
+            stopped
+        );
+    }
 
     // Hard-won: de056ae: a late adoption failure overwrote a successful worker connection.
     #[test]

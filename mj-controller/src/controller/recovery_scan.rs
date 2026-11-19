@@ -22,12 +22,19 @@ pub use mj_core::state::{RecoveryCandidate, RecoveryScan};
 pub struct AdoptionControl {
     pub cancelled: tokio_util::sync::CancellationToken,
     pub progress: Option<tokio::sync::watch::Sender<Option<Vec<String>>>>,
+    pub installed: Option<tokio::sync::oneshot::Sender<AdoptionPublication>>,
     pub lifecycle_gate: std::sync::Arc<crate::recovery_gate::RecoveryGate>,
+}
+
+pub struct AdoptionPublication {
+    pub admission: AdoptionInstall,
+    pub acknowledged: tokio::sync::oneshot::Sender<()>,
 }
 
 pub struct AdoptionOutcome {
     pub result: Result<()>,
-    /// Retains both owners through publication and the final reply attempt.
+    /// Bounded failure publication may retain its owners through the reply.
+    /// Successful installation transfers them with AdoptionPublication.
     pub admission: Option<AdoptionInstall>,
 }
 
@@ -161,6 +168,7 @@ impl Controller {
             AdoptionControl {
                 cancelled: tokio_util::sync::CancellationToken::new(),
                 progress: None,
+                installed: None,
                 lifecycle_gate: std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default()),
             },
         )
@@ -172,12 +180,12 @@ impl Controller {
         &mut self,
         request: &mj_client::daemon::RecoveryAdoptionRequest,
         executor: &(impl CommandExecutor + Sync),
-        control: AdoptionControl,
+        mut control: AdoptionControl,
     ) -> AdoptionOutcome {
         let session_id = request.session_id.as_str();
         let mut admission = None;
         let mut result = self
-            .adopt_orphan_worker_inner(request, executor, &control, &mut admission)
+            .adopt_orphan_worker_inner(request, executor, &mut control, &mut admission)
             .await;
         if result.is_err()
             && admission.is_none()
@@ -220,7 +228,7 @@ impl Controller {
         &mut self,
         request: &mj_client::daemon::RecoveryAdoptionRequest,
         executor: &(impl CommandExecutor + Sync),
-        control: &AdoptionControl,
+        control: &mut AdoptionControl,
         install_admission: &mut Option<AdoptionInstall>,
     ) -> Result<()> {
         let session_id = request.session_id.as_str();
@@ -465,15 +473,7 @@ impl Controller {
             _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began during the worker probe; cut discarded; rerun recover adopt"),
             status = client.status() => status.context("worker disappeared before adoption install; cut discarded")?,
         };
-        anyhow::ensure!(
-            !operational.checkpoint_only
-                && !matches!(
-                    operational.execution,
-                    mj_core::relay::RelayExecutionState::Closing
-                        | mj_core::relay::RelayExecutionState::Closed
-                ),
-            "worker has no runnable harness (checkpoint-only or closed relay); adoption was not installed; recover its saved checkpoint or destroy the leftover worker"
-        );
+        ensure_adoptable_worker(&operational)?;
         let guard = AdoptionInstall {
             _session: install_owner,
             _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
@@ -482,14 +482,92 @@ impl Controller {
             biased;
             _ = control.cancelled.cancelled() => bail!("adoption cancelled before writer acceptance; cut discarded"),
             _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before writer acceptance; cut discarded; rerun recover adopt"),
-            accepted = crate::database::enqueue_adopted_session(record.clone(), cut, operational.native_session_id, now(), guard) => accepted?,
+            accepted = crate::database::enqueue_adopted_session(record.clone(), cut, now(), guard) => accepted?,
         };
         let (result, guard) = accepted.finish().await?;
-        *install_admission = Some(guard);
+        let current = match result {
+            Ok(current) => current,
+            Err(error) => {
+                *install_admission = Some(guard);
+                return Err(error);
+            }
+        };
+        self.state
+            .sessions
+            .insert(session_id.to_owned(), current.clone());
+        self.finish_adoption_attachment(&spec, client, current, guard, executor, control)
+            .await
+            .context("worker adopted; reattaching failed")?;
+        Ok(())
+    }
+
+    async fn finish_adoption_attachment(
+        &mut self,
+        spec: &CommandSpec,
+        client: crate::worker_client::RelayClient,
+        expected: SessionRecord,
+        guard: AdoptionInstall,
+        executor: &(impl CommandExecutor + Sync),
+        control: &mut AdoptionControl,
+    ) -> Result<()> {
+        let session_id = expected.id.clone();
+        let installed = control.installed.take();
+        if let Some(installed) = installed {
+            let (acknowledged, notice) = tokio::sync::oneshot::channel();
+            if let Err(publication) = installed.send(AdoptionPublication {
+                admission: guard,
+                acknowledged,
+            }) {
+                drop(publication);
+                bail!("worker adopted; reattaching interrupted before installed notice");
+            }
+            notice
+                .await
+                .context("worker adopted; reattaching interrupted before installed notice")?;
+        } else {
+            drop(guard);
+        }
+        client
+            .detach()
+            .await
+            .context("worker adopted; could not close preparation connection")?;
+        let attach = async {
+            tokio::select! {
+                biased;
+                _ = control.cancelled.cancelled() => bail!("attachment interrupted"),
+                _ = crate::upgrade::gate().wait_until_draining() => bail!("attachment interrupted for daemon handoff"),
+                connection = StandaloneSession::connect_command(spec, &session_id) => connection,
+            }
+        };
+        let connection = attach.await.context("worker adopted; reattaching failed")?;
+        ensure_adoptable_worker(connection.operational())?;
+        let native = connection.operational().native_session_id.clone();
+        // Close this ordinary connection before another actor attaches.
+        connection
+            .detach()
+            .await
+            .context("worker adopted; detaching attachment probe failed")?;
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let owner = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("worker adopted; reattaching interrupted before publication"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("worker adopted; reattaching interrupted for daemon handoff"),
+            owner = control.lifecycle_gate.enter_foreground(&session_id, "adoption connected publication", crate::recovery_gate::LifecycleOrigin::Person, &cancelled, executor) => owner?,
+        };
+        let guard = AdoptionInstall {
+            _session: owner,
+            _handoff: crate::upgrade::activity_unless_draining("adoption connected publication")?,
+        };
+        let accepted = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("worker adopted; reattaching interrupted before publication"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("worker adopted; reattaching interrupted for daemon handoff"),
+            accepted = crate::database::enqueue_adoption_connected(expected, native, now(), guard) => accepted?,
+        };
+        let (result, guard) = accepted.finish().await?;
         let current = result?;
         self.state.sessions.insert(session_id.to_owned(), current);
-        // No worker readiness or post-cut catch-up holds daemon admission.
-        // The committed cursor is ordinary recovery's starting point.
+        drop(guard);
         Ok(())
     }
 
@@ -693,6 +771,25 @@ fn require_instance_access(
             candidate.session_id
         ),
     }
+}
+
+fn ensure_adoptable_worker(state: &mj_core::relay::RelayOperationalState) -> Result<()> {
+    if let Some(mj_core::relay::HarnessPreparation::Failed { step, error, .. }) =
+        &state.harness_preparation
+    {
+        bail!("worker has no runnable harness: preparation failed at {step}: {error}");
+    }
+    anyhow::ensure!(
+        !state.checkpoint_only
+            && !matches!(
+                state.execution,
+                mj_core::relay::RelayExecutionState::Closing
+                    | mj_core::relay::RelayExecutionState::Closed
+            ),
+        "worker has no runnable harness (checkpoint-only or closed relay); recover its saved checkpoint or destroy the leftover worker"
+    );
+    // A preparing worker may acquire its native identity after attachment.
+    Ok(())
 }
 
 /// Worker markers can outlive the controller database that created them. Keep

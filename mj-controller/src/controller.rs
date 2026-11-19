@@ -29,7 +29,8 @@ pub use readiness::HarnessPreparationFailure;
 pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
 pub use recovery_scan::{
-    AdoptionControl, AdoptionInstall, AdoptionOutcome, recovery_destroy_command,
+    AdoptionControl, AdoptionInstall, AdoptionOutcome, AdoptionPublication,
+    recovery_destroy_command,
 };
 pub mod resume;
 mod reviewer;

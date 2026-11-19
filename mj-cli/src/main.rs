@@ -2631,13 +2631,23 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             bundle,
             all_instances,
         } => {
+            let installed = std::cell::Cell::new(false);
             tokio::select! {
-                result = daemon.adopt_recovery(mj_client::daemon::RecoveryAdoptionRequest { session_id: session.clone(), target_id: target, profile, bundle, all_instances }, |blockers, destroy_command| {
-                    eprintln!("Waiting for {}.", blockers.join("; "));
-                    if let Some(command) = destroy_command { eprintln!("If the worker never becomes idle, the only way forward is to destroy it: {command}"); }
+                result = daemon.adopt_recovery(mj_client::daemon::RecoveryAdoptionRequest { session_id: session.clone(), target_id: target, profile, bundle, all_instances }, |event| {
+                    match event {
+                        mj_client::daemon::RecoveryAdoptionProgress::Waiting { blockers, destroy_command } => {
+                            eprintln!("Waiting for {}.", blockers.join("; "));
+                            if let Some(command) = destroy_command { eprintln!("If the worker never becomes idle, the only way forward is to destroy it: {command}"); }
+                        }
+                        mj_client::daemon::RecoveryAdoptionProgress::Installed { session_id } => {
+                            installed.set(true);
+                            eprintln!("adopted worker {session_id}; reattaching");
+                        }
+                    }
                 }) => result?,
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
+                    if installed.get() { anyhow::bail!("worker adopted; reattaching interrupted; check this instance's session state"); }
                     anyhow::bail!("adoption outcome unknown: no final reply was received; the install may still complete. Check this instance's session state before retrying recover adopt");
                 }
             }
