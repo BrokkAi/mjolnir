@@ -1153,6 +1153,7 @@ mod tests {
         ));
     }
 
+    // Hard-won: 70e0c821d: a fresh store converted to WAL while another connection migrated it failed with "database is locked".
     #[tokio::test]
     async fn draft_hydration_publishes_shared_capabilities_without_adopting_the_draft() {
         if super::super::tests::isolate_runtime_feed_test(
