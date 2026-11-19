@@ -63,66 +63,39 @@ pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::Slopcop
 }
 
 /// What a session's job owns from the moment it is queued on the session's
-/// actor until it has run or been abandoned: the session's background
-/// admission, its turn among the session's steps and, for a role-scoped
-/// renewal, its install lock. The job holds them, not the task that queued it,
-/// so stopping that task (its target changed, the session went away) cannot
-/// hand the session to a newer job while the older one is running.
+/// actor until it has run or been abandoned: for a role-scoped renewal, its
+/// install lock. The job holds it, not the task that queued it, so stopping
+/// that task (its target changed, the session went away) cannot hand the
+/// session to a newer renewal while the older job is running.
 ///
-/// One state machine decides who may release them. While the job is only
-/// queued, the task awaiting it can abandon it (its future was dropped, or the
-/// gate cancelled its admission), and abandoning releases the slots at once:
-/// a close, restart or move waiting for the admission, and a daemon handoff
-/// behind it, must not wait for an actor busy with something else to reach a
-/// job nobody wants. Once the actor starts the job it runs to the end under
-/// the slots, because it is then using the session's connection. The actor
-/// finds an abandoned job over and drops it unrun.
+/// One state machine decides who may release it. While the job is only
+/// queued, the task awaiting it can abandon it (its future was dropped), and
+/// abandoning releases the lock at once. Once the actor starts the job it runs
+/// to the end under the lock, because it is then using the session's
+/// connection. The actor finds an abandoned job over and drops it unrun.
 #[derive(Clone)]
 pub(super) struct JobHold(Arc<HoldState>);
 
 struct HoldState {
     phase: std::sync::Mutex<HoldPhase>,
-    /// The admission's cancellation flag; `None` without a gate.
-    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     runtime: Option<Arc<dyn CredentialSyncRuntime>>,
 }
 
 enum HoldPhase {
-    Queued(HeldSlots),
-    Running { _slots: HeldSlots },
+    Queued(Option<SessionTurn>),
+    Running { _installing: Option<SessionTurn> },
     Over,
-}
-
-/// Released in declaration order: the admission first, so whoever waits on the
-/// session's turn then finds the admission already free.
-struct HeldSlots {
-    _admission: Option<crate::recovery_gate::RecoveryAttempt>,
-    _turn: Option<SessionTurn>,
-    _installing: Option<SessionTurn>,
 }
 
 impl JobHold {
     pub(super) fn new(
-        admission: Option<crate::recovery_gate::RecoveryAttempt>,
-        turn: Option<SessionTurn>,
         installing: Option<SessionTurn>,
         runtime: Option<Arc<dyn CredentialSyncRuntime>>,
     ) -> Self {
         Self(Arc::new(HoldState {
-            cancellation: admission.as_ref().map(|admission| admission.cancellation()),
-            phase: std::sync::Mutex::new(HoldPhase::Queued(HeldSlots {
-                _admission: admission,
-                _turn: turn,
-                _installing: installing,
-            })),
+            phase: std::sync::Mutex::new(HoldPhase::Queued(installing)),
             runtime,
         }))
-    }
-
-    /// The job runs under the gate's admission, so the gate's lifecycle
-    /// operations can cancel it and its target is checked as current.
-    fn gated(&self) -> bool {
-        self.0.cancellation.is_some()
     }
 
     fn phase(&self) -> std::sync::MutexGuard<'_, HoldPhase> {
@@ -133,22 +106,18 @@ impl JobHold {
     }
 
     /// The actor's turn to run the job. `false` when the job was abandoned
-    /// (its slots are already released), or a lifecycle operation cancelled
-    /// the admission while it waited (they are released now).
+    /// (its lock is already released).
     fn start(&self) -> bool {
-        let cancelled = self
-            .0
-            .cancellation
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
-        // Slots are dropped after the lock is released, so a release never
+        // The lock is dropped after the mutex is released, so a release never
         // runs another lock's code under this one.
         let mut released = HoldPhase::Over;
         let started = {
             let mut phase = self.phase();
             match std::mem::replace(&mut *phase, HoldPhase::Over) {
-                HoldPhase::Queued(slots) if !cancelled => {
-                    *phase = HoldPhase::Running { _slots: slots };
+                HoldPhase::Queued(installing) => {
+                    *phase = HoldPhase::Running {
+                        _installing: installing,
+                    };
                     true
                 }
                 other => {
@@ -161,27 +130,13 @@ impl JobHold {
         started
     }
 
-    /// The admission's cancellation flag, for the connection to observe while
-    /// the job's calls are in flight.
-    fn cancellation(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
-        self.0.cancellation.clone()
-    }
-
-    /// A lifecycle operation asked the admitted work to stop.
-    fn cancelled(&self) -> bool {
-        self.0
-            .cancellation
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
-    }
-
-    /// The job is done: release the slots.
+    /// The job is done: release the lock.
     fn finish(&self) {
         let released = std::mem::replace(&mut *self.phase(), HoldPhase::Over);
         drop(released);
     }
 
-    /// The task awaiting the job no longer wants it. Releases the slots if
+    /// The task awaiting the job no longer wants it. Releases the lock if
     /// the actor has not started it; a job already running is not touched.
     fn abandon_if_queued(&self) {
         let released = {
@@ -196,9 +151,8 @@ impl JobHold {
     }
 }
 
-/// Held by the task awaiting a queued job: if that task stops, or the gate
-/// cancels its admission, before the actor has started the job, the job's
-/// slots are released right then.
+/// Held by the task awaiting a queued job: if that task stops before the
+/// actor has started the job, the job's lock is released right then.
 pub(super) struct QueuedJob(JobHold);
 
 impl Drop for QueuedJob {
@@ -207,13 +161,46 @@ impl Drop for QueuedJob {
     }
 }
 
-/// One holder at a time per session. Within a pass, a session's login step and
-/// its AWS install both need the session's credential-sync admission
-/// (`RecoveryGate::try_start`), which turns a second taker away; taking turns
-/// here first means the two never contend for it, so neither is skipped
-/// because the other held it. A step waits only for the same session's other
-/// step, never another session's. The lock is released on every exit path.
-/// A second instance orders a session's role-scoped renewals themselves.
+/// The sessions whose credentials are owed a sync because their actor refused
+/// a job while its connection was leased or reconnecting. The actor is the one
+/// owner of that fact: when its connection is usable again it wakes the
+/// coordinator, which reconciles the session from the host's current login.
+/// The wake carries no job, so a long lease cannot hold a profile's pass open.
+#[derive(Debug)]
+pub struct CredentialWakes(watch::Sender<BTreeSet<String>>);
+
+impl Default for CredentialWakes {
+    fn default() -> Self {
+        Self(watch::channel(BTreeSet::new()).0)
+    }
+}
+
+impl CredentialWakes {
+    pub fn wake(&self, session_id: &str) {
+        self.0
+            .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<BTreeSet<String>> {
+        let mut wakes = self.0.subscribe();
+        wakes.mark_changed();
+        wakes
+    }
+
+    pub fn take(&self) -> BTreeSet<String> {
+        let mut ready = BTreeSet::new();
+        self.0.send_if_modified(|sessions| {
+            ready = std::mem::take(sessions);
+            false
+        });
+        ready
+    }
+}
+
+/// One holder at a time per session, for a kind of step that must not overlap
+/// itself (a session's delivery results, its role-scoped renewals). A step
+/// waits only for the same session's other step, never another session's. The
+/// lock is released on every exit path.
 ///
 /// The map is keyed by session id and only that session's entry is touched by
 /// `enter` and by a release, so a batch of sessions costs one lookup each.
@@ -295,17 +282,11 @@ impl SessionSteps {
 #[derive(Clone, Copy)]
 pub(super) struct SessionAccess<'a> {
     pub(super) relays: &'a SessionRelays,
-    pub(super) gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
     pub(super) runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
-    pub(super) steps: &'a SessionSteps,
 }
 
 enum PassEvent {
     Pulled(String),
-    Attempted {
-        target: Box<CredentialSyncTarget>,
-        retry: bool,
-    },
     Finished(CredentialSyncResult),
 }
 
@@ -320,7 +301,6 @@ impl CredentialSyncCoordinator {
         Self::spawn_inner(
             SessionRelays::Direct,
             None,
-            None,
             unknown_slopcop_login,
             SYNC_INTERVAL,
         )
@@ -330,24 +310,19 @@ impl CredentialSyncCoordinator {
     /// `retry` instead of after the sync interval.
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_with_renewal_retry(retry: Duration) -> Self {
-        Self::spawn_inner(
-            SessionRelays::Direct,
-            None,
-            None,
-            unknown_slopcop_login,
-            retry,
-        )
+        Self::spawn_inner(SessionRelays::Direct, None, unknown_slopcop_login, retry)
     }
 
     pub fn spawn_guarded(
         manager: SessionManagerControl,
-        gate: Arc<crate::recovery_gate::RecoveryGate>,
+        // Credential sync no longer enters the gate. Callers drop this
+        // argument once nobody passes one.
+        _gate: Arc<crate::recovery_gate::RecoveryGate>,
         runtime: Arc<dyn CredentialSyncRuntime>,
         rejected: DeliveryRegistry,
     ) -> Self {
         Self::spawn_with_registry(
             SessionRelays::Actors(manager),
-            Some(gate),
             Some(runtime),
             mj_core::slopcop::host_login,
             SYNC_INTERVAL,
@@ -358,14 +333,12 @@ impl CredentialSyncCoordinator {
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn spawn_inner(
         relays: SessionRelays,
-        gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
     ) -> Self {
         Self::spawn_with_registry(
             relays,
-            gate,
             runtime,
             slopcop_login,
             renewal_retry,
@@ -375,7 +348,6 @@ impl CredentialSyncCoordinator {
 
     pub(super) fn spawn_with_registry(
         relays: SessionRelays,
-        gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
@@ -400,51 +372,36 @@ impl CredentialSyncCoordinator {
             let mut queue = VecDeque::<SyncTrigger>::new();
             let mut renewal_logs = BTreeSet::new();
             let mut scoped = BTreeMap::<String, BTreeSet<String>>::new();
-            let mut retries = BTreeMap::<String, (u32, Option<tokio::time::Instant>)>::new();
             // Role-scoped AWS credentials are renewed by a task per session,
             // never by the profile's pass: a pass that waits on one stalled
             // session must not hold back another session's renewal.
             let renewals_env = RenewalEnv {
                 relays: relays.clone(),
-                gate: gate.clone(),
                 runtime: runtime.clone(),
-                steps: SessionSteps::default(),
                 installs: SessionSteps::default(),
                 results: results_tx.clone(),
                 retry: renewal_retry,
             };
-            let steps = renewals_env.steps.clone();
             let mut renewals = RenewalTasks::default();
             let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
-            let mut lease_returns = gate.as_ref().map(|gate| gate.credential_wakes());
+            // Sessions whose actor refused a job while leased or reconnecting
+            // say so here when they can take one again.
+            let wakes = match &relays {
+                SessionRelays::Actors(manager) => Some(manager.credential_wakes.clone()),
+                #[cfg(any(test, feature = "test-support"))]
+                SessionRelays::Direct => None,
+            };
+            let mut owed = wakes.as_ref().map(|wakes| wakes.subscribe());
             loop {
-                let next_retry = retries.values().filter_map(|(_, due)| *due).min();
                 tokio::select! {
                     () = async {
-                        if let Some(due) = next_retry {
-                            tokio::time::sleep_until(due).await;
-                        } else {
-                            std::future::pending().await
-                        }
-                    } => {
-                        let now = tokio::time::Instant::now();
-                        for target in &*targets_rx.borrow() {
-                            if let Some((_, due)) = retries.get_mut(&target.session_id)
-                                && due.is_some_and(|due| due <= now)
-                            {
-                                *due = None;
-                                queue_session(&mut queue, &mut scoped, target);
-                            }
-                        }
-                    }
-                    () = async {
-                        match lease_returns.as_mut() {
-                            Some(wakes) => { let _ = wakes.changed().await; }
+                        match owed.as_mut() {
+                            Some(owed) => { let _ = owed.changed().await; }
                             None => std::future::pending().await,
                         }
                     } => {
-                        if let Some(gate) = &gate {
-                            let sessions = gate.take_credential_wakes();
+                        if let Some(wakes) = &wakes {
+                            let sessions = wakes.take();
                             for target in targets_rx.borrow().iter()
                                 .filter(|target| sessions.contains(&target.session_id))
                             {
@@ -476,7 +433,6 @@ impl CredentialSyncCoordinator {
                             .collect();
                         for (id, old) in &previous_targets {
                             if next.get(id) == Some(old) { continue; }
-                            retries.remove(id);
                             let conclusion = if next.contains_key(id) {
                                 Some("credential target changed")
                             } else if runtime.as_ref().is_none_or(|runtime| runtime.credential_session_ended(id)) {
@@ -524,19 +480,6 @@ impl CredentialSyncCoordinator {
                                 scoped.remove(&profile_id);
                                 renewal_logs.insert(profile_id.clone());
                                 enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
-                            }
-                            PassEvent::Attempted { target, retry } => {
-                                if previous_targets.get(&target.session_id) != Some(target.as_ref()) {
-                                    continue;
-                                }
-                                if retry {
-                                    let (failures, due) = retries.entry(target.session_id)
-                                        .or_insert((0, None));
-                                    *failures = failures.saturating_add(1);
-                                    *due = Some(tokio::time::Instant::now() + backoff(Duration::from_secs(1), *failures, SYNC_INTERVAL));
-                                } else {
-                                    retries.remove(&target.session_id);
-                                }
                             }
                             PassEvent::Finished(result)
                                 if result.trigger.is_some()
@@ -629,10 +572,8 @@ impl CredentialSyncCoordinator {
                     let aws_report = triggered_by
                         .as_deref()
                         .and_then(|session_id| renewals.wake(session_id));
-                    let gate = gate.clone();
                     let relays = relays.clone();
                     let runtime = runtime.clone();
-                    let steps = steps.clone();
                     let log = log.into_owned();
                     tokio::spawn(async move {
                         let (focus_tx, focus_rx) = if triggered_by.is_some() {
@@ -645,9 +586,7 @@ impl CredentialSyncCoordinator {
                             reconcile_profile_observed(
                                 &SessionAccess {
                                     relays: &relays,
-                                    gate: gate.as_ref(),
                                     runtime: runtime.as_ref(),
-                                    steps: &steps,
                                 },
                                 &targets,
                                 triggered_by.as_deref(),
@@ -737,12 +676,9 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    let steps = SessionSteps::default();
     let access = SessionAccess {
         relays: &SessionRelays::Direct,
-        gate: None,
         runtime: None,
-        steps: &steps,
     };
     let login = reconcile_profile_guarded(&access, targets, triggered_by, unknown_slopcop_login);
     let cycles = futures::future::join_all(
@@ -932,12 +868,7 @@ async fn reconcile_profile_observed(
     profile: &Arc<ProfileLogin>,
     mut focus: Option<tokio::sync::oneshot::Sender<Option<CredentialSyncOutcome>>>,
 ) -> Vec<CredentialSyncOutcome> {
-    let SessionAccess {
-        relays,
-        gate,
-        runtime,
-        steps,
-    } = *access;
+    let SessionAccess { relays, runtime } = *access;
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
     };
@@ -1015,14 +946,12 @@ async fn reconcile_profile_observed(
     let login = PassLogin::Shared(profile.clone());
     let pass_context = PassContext {
         relays,
-        gate,
         runtime,
         skills: &skills,
         slopcop_login: &slopcop_login,
         login: &login,
         profile,
         triggered_by,
-        steps,
     };
     // Use the profile's one AWS export. A
     // role-scoped session's AWS credentials are installed by its own
@@ -1347,14 +1276,12 @@ impl ScopeExpectation {
 /// What one reconcile pass shares between its sessions.
 struct PassContext<'a> {
     relays: &'a SessionRelays,
-    gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     login: &'a PassLogin,
     profile: &'a Arc<ProfileLogin>,
     triggered_by: Option<&'a str>,
-    steps: &'a SessionSteps,
 }
 
 /// What reconciling one session in one pass found.
@@ -1381,11 +1308,12 @@ fn joined_failures(failures: &[StepFailure]) -> Option<String> {
     (!unique.is_empty()).then(|| unique.join("; "))
 }
 
-// Lets a test run the gated path without a daemon to say which sessions are
-// current: every session is, on the thread that sets this.
+// Without a daemon to say which sessions are current, a test run has every
+// session current on its thread, unless it sets this to false (then the
+// session records on disk decide).
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(super) static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 /// Whether the session is still the one this target describes. A lifecycle
@@ -1417,64 +1345,6 @@ async fn target_is_current(
     .context("reload credential sync target")?
 }
 
-/// Run `work` for the session under background admission, when the session is
-/// still current. `None` means the work was deferred. `work` receives the hold
-/// (the admission, the session's turn and its install lock) to pass on to
-/// whatever outlives this future.
-async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T>>>>(
-    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
-    target: &CredentialSyncTarget,
-    turn: SessionTurn,
-    installing: Option<SessionTurn>,
-    work: impl FnOnce(JobHold) -> F,
-) -> Result<Option<T>> {
-    match gate {
-        Some(gate) => gate
-            .run_background_owned(
-                &target.session_id,
-                crate::recovery_gate::BackgroundWork::CredentialSync,
-                |admission| async move {
-                    if !target_is_current(runtime, target).await? {
-                        return Err(RelayJobDeferred("credential target snapshot is stale").into());
-                    }
-                    work(JobHold::new(
-                        Some(admission),
-                        Some(turn),
-                        installing,
-                        runtime.cloned(),
-                    ))
-                    .await
-                },
-            )
-            .await
-            .unwrap_or_else(|| {
-                Err(RelayJobDeferred("credential sync admission unavailable").into())
-            }),
-        None => work(JobHold::new(None, Some(turn), installing, runtime.cloned())).await,
-    }
-}
-
-// Callers outside the login pass only need to distinguish a deferral from failure.
-#[cfg(any(test, feature = "test-support"))]
-pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
-    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
-    target: &CredentialSyncTarget,
-    turn: SessionTurn,
-    installing: Option<SessionTurn>,
-    work: impl FnOnce(JobHold) -> F,
-) -> Result<Option<T>> {
-    defer_as_none(admitted_with_reason(gate, runtime, target, turn, installing, work).await)
-}
-
-fn defer_as_none<T>(result: Result<Option<T>>) -> Result<Option<T>> {
-    match result {
-        Err(error) if RelayJobDeferred::marks(&error) => Ok(None),
-        result => result,
-    }
-}
-
 /// One session's reconciliation in one pass. `reported` says an earlier pass
 /// already recorded an outcome for it.
 async fn reconcile_target(
@@ -1486,22 +1356,18 @@ async fn reconcile_target(
 ) -> TargetResult {
     let PassContext {
         relays,
-        gate,
         runtime,
         skills,
         slopcop_login,
         login,
         profile,
         triggered_by,
-        steps,
     } = context;
     // Keep the delivery result ordered with the next attempt on this session;
     // the actor itself releases the AWS/relay turn before handing us its result.
     let _delivery = profile.deliveries.enter(&target.session_id).await;
     let requested = profile.fingerprint(target);
-    // An AWS install also uses this relay/admission turn.
-    let turn = steps.enter(&target.session_id).await;
-    let result = admitted_with_reason(*gate, *runtime, target, turn, None, |hold| async move {
+    let result = async {
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
         let github = if target.sync_github_token {
@@ -1527,21 +1393,12 @@ async fn reconcile_target(
                 slopcop: slopcop_login,
                 harness: login,
             },
-            hold,
+            JobHold::new(None, runtime.cloned()),
         )
         .await
-    })
+    }
     .await;
     let deferred = matches!(&result, Err(error) if RelayJobDeferred::marks(error));
-    let retry = deferred
-        && !matches!(&result, Err(error) if error.downcast_ref::<RelayJobDeferred>().is_some_and(|error| {
-            error.0 == crate::session_manager::RELAY_JOB_LEASED
-                || (runtime.is_some() && error.0 == crate::session_manager::RELAY_JOB_RECONNECTING)
-        }));
-    profile.send(PassEvent::Attempted {
-        target: Box::new(target.clone()),
-        retry,
-    });
     let awaits_worker_observation = runtime.is_some()
         && matches!(&result, Ok(Some(sync)) if sync.reports_held_login
             && (sync.unchanged_login.is_some() || sync.actions.contains(&CredentialSyncAction::Pushed))
@@ -1706,16 +1563,11 @@ pub(super) async fn aws_cycle(
     } = options;
     let session_id = target.session_id.clone();
     // A session that is gone, or replaced, is not given credentials. This is
-    // checked before the mint, which stays outside admission: an AssumeRole
-    // call can take seconds and must not hold the session's slot.
-    // (Without a gate, as in tests of the direct path, nothing says which
-    // sessions are current, here or under admission.)
-    if access.gate.is_some() {
-        match target_is_current(access.runtime, target).await {
-            Ok(true) => {}
-            Ok(false) => return (session_id, Ok(None)),
-            Err(error) => return (session_id, Err(error)),
-        }
+    // checked before the mint: an AssumeRole call can take seconds.
+    match target_is_current(access.runtime, target).await {
+        Ok(true) => {}
+        Ok(false) => return (session_id, Ok(None)),
+        Err(error) => return (session_id, Err(error)),
     }
     let Some(base) = target
         .aws_credentials
@@ -1879,36 +1731,25 @@ pub(super) async fn aws_cycle(
     (session_id, result)
 }
 
-/// One AWS job on the session: it takes its turn with the same session's login
-/// step instead of competing with it for the admission slot, where a refusal
-/// would skip it.
+/// One AWS job on the session.
 async fn aws_job(
     access: &SessionAccess<'_>,
     target: &CredentialSyncTarget,
     installing: Option<SessionTurn>,
     work: SyncWork,
 ) -> Result<Option<SessionSync>> {
-    let turn = access.steps.enter(&target.session_id).await;
-    defer_as_none(
-        admitted_with_reason(
-            access.gate,
-            access.runtime,
-            target,
-            turn,
-            installing,
-            |hold| async move { run_on_session(access.relays, target, work, hold).await },
-        )
-        .await,
-    )
+    let hold = JobHold::new(installing, access.runtime.cloned());
+    match run_on_session(access.relays, target, work, hold).await {
+        Err(error) if RelayJobDeferred::marks(&error) => Ok(None),
+        result => result,
+    }
 }
 
 /// What a session's renewal task needs, shared by all of them.
 #[derive(Clone)]
 pub(super) struct RenewalEnv {
     pub(super) relays: SessionRelays,
-    pub(super) gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
     pub(super) runtime: Option<Arc<dyn CredentialSyncRuntime>>,
-    pub(super) steps: SessionSteps,
     /// Orders one session's renewals, so a replaced task's cycle finishes
     /// before its successor's begins.
     pub(super) installs: SessionSteps,
@@ -1921,9 +1762,7 @@ impl RenewalEnv {
     pub fn access(&self) -> SessionAccess<'_> {
         SessionAccess {
             relays: &self.relays,
-            gate: self.gate.as_ref(),
             runtime: self.runtime.as_ref(),
-            steps: &self.steps,
         }
     }
 }
@@ -3134,11 +2973,7 @@ impl CredentialSyncJob {
 }
 
 impl RelayConnectionJob for CredentialSyncJob {
-    fn deferred_by_lease(&self, lease: &crate::recovery_gate::RelayLeaseAdmission) {
-        lease.defer_credentials();
-    }
-
-    fn deferred_by_reconnect(&self) -> bool {
+    fn wake_when_usable(&self) -> bool {
         true
     }
 
@@ -3152,8 +2987,7 @@ impl RelayConnectionJob for CredentialSyncJob {
             } = *self;
             // The actor decides, when it is this job's turn, whether the job is
             // still wanted: the task that queued it may have stopped while it
-            // waited (its target changed, the session went away), or a
-            // lifecycle operation may have cancelled its admission. Either
+            // waited (its target changed, the session went away), which
             // already released the hold, and the work is dropped unrun.
             if !hold.start() {
                 tracing::debug!(
@@ -3163,43 +2997,29 @@ impl RelayConnectionJob for CredentialSyncJob {
                 // Deferred, not failed: the awaiting side, if it is still
                 // there, tries again in the next cycle.
                 let _ = reply.send(Err(anyhow::Error::new(RelayJobDeferred(
-                    "the credential sync was cancelled before it started",
+                    "the credential sync was abandoned before it started",
                 ))));
                 return;
             }
-            if hold.gated() {
-                match target_is_current(hold.0.runtime.as_ref(), &target).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        hold.finish();
-                        let _ = reply.send(Err(anyhow::Error::new(RelayJobDeferred(
-                            "the session changed before the credential sync ran",
-                        ))));
-                        return;
-                    }
-                    Err(error) => {
-                        hold.finish();
-                        let _ = reply.send(Err(error));
-                        return;
-                    }
+            // A lifecycle may have completed since the target was published.
+            match target_is_current(hold.0.runtime.as_ref(), &target).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    hold.finish();
+                    let _ = reply.send(Err(anyhow::Error::new(RelayJobDeferred(
+                        "the session changed before the credential sync ran",
+                    ))));
+                    return;
+                }
+                Err(error) => {
+                    hold.finish();
+                    let _ = reply.send(Err(error));
+                    return;
                 }
             }
-            // A lifecycle operation that cancels the admission cancels the
-            // job's calls too: one in flight is abandoned (with its
-            // connection, as a timeout would), and the next cycle reconciles
-            // from what the worker reports.
-            client.set_cancellation(hold.cancellation());
             let result = run_work(client, &target, work).await;
-            client.set_cancellation(None);
-            let result = if hold.cancelled() {
-                Err(anyhow::Error::new(RelayJobDeferred(
-                    "the credential sync was cancelled by a lifecycle operation",
-                )))
-            } else {
-                result
-            };
             // Released before the answer, so whoever awaits it can take the
-            // session's slot at once.
+            // session's install lock at once.
             hold.finish();
             if reply.send(result).is_err() {
                 tracing::debug!(

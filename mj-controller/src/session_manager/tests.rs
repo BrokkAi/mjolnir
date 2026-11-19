@@ -80,6 +80,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
     let control = SessionManagerControl {
         session_gate: Arc::default(),
+        credential_wakes: Arc::default(),
         harness_failure: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,

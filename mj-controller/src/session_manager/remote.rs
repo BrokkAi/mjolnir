@@ -258,6 +258,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     };
     let (updates_tx, updates_rx) = coalesced_update_channel();
     let session_gate = updates_tx.session_gate.clone();
+    let credential_wakes = updates_tx.credential_wakes.clone();
     let (published_tx, mut published_rx) = mpsc::unbounded_channel();
     let (requests_tx, requests_rx) = mpsc::channel(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -376,6 +377,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
         targets: targets_tx,
         control: SessionManagerControl {
             session_gate,
+            credential_wakes,
             harness_failure: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,
             commands: commands_tx,

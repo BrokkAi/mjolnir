@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub struct SessionManagerControl {
     pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
+    pub credential_wakes: Arc<crate::worker_client::CredentialWakes>,
     pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub session_cpu: watch::Receiver<SessionCpuTable>,

@@ -15,7 +15,7 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
 ## Progress
 
 - [x] (2026-11-19 04:10Z) Diagnosis from live logs; design from the Advisor session; read-only code map of the gate, actor, coordinator, classification and tests.
-- [ ] Milestone 1: credential sync leaves the RecoveryGate; the actor owns the "login owed" wake; gate-only deferral and backoff code deleted; hard-won integration test passes.
+- [x] (2026-11-19) Milestone 1: credential sync leaves the RecoveryGate; the actor owns the "login owed" wake; gate-only deferral and backoff code deleted; hard-won integration test passes.
 - [ ] Milestone 2: a daemon that finds a login renewed by another process syncs at once.
 - [ ] Milestone 3: the refused-or-stale decision reads the host login under the native login lock.
 - [ ] Milestone 4: notices reduced to the cases that need the user; code made unreachable by Milestones 1-3 deleted.
@@ -36,6 +36,11 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
 - Observation: pinned Claude Code (2.1.326 with claude-agent-acp 0.108.0) ends a turn at once on a 401 when its login file has no refresh token, and reads a replaced login file on its next request. Session copies never carry a refresh token (#1490). So no delivery scheme can prevent every authentication failure: a request already in flight with the old token fails. The worker's authentication retry is the part that recovers, and it stays.
   Evidence: the Advisor's inspection of the pinned bundle (minified handler for OAuth 401 returns "no retry" for a file login without a refresh token).
 
+
+- Observation: the relay client's per-call cancellation flag (`RelayClient::cancellation`, `set_cancellation`) was set only by the credential sync job. With the gate gone nothing sets it, so Milestone 1 removed it and the cancel case of `project_memory_queueing_has_no_deadline_and_remains_cancellable` (which set it by hand).
+  Evidence: `cargo check` warned that `set_cancellation` was never used after the job stopped calling it.
+
+- Observation: a non-current session in `aws_cycle` is answered (`Ok(None)`), not retried, so a renewal task's deferred-cycle retry has no source left in tests with a direct relay. `a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one` was removed; deferral now comes only from an actor's lease or reconnect, which an actor-based test must drive.
 
 ## Decision Log
 
@@ -79,6 +84,21 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
   Rationale: no end-to-end harness runs a Claude session through an mj instance against a fake API, and nothing can pause a real review or upgrade at a known point. The integration test can hold the real gate states directly and is deterministic.
   Date/Author: 2026-11-19, parent session.
 
+- Decision: `CredentialWakes` is created with the session manager's update channel and reached through `SessionManagerControl::credential_wakes` (public, next to `session_gate`) and `CoalescedUpdateSender`. The coordinator reads it from its `SessionRelays::Actors(manager)`; the daemon's `install_credentials` takes `Option<&CredentialWakes>`.
+  Rationale: the coordinator is spawned after the manager and receives the manager's control, so no new wiring crosses crates.
+  Date/Author: 2026-11-19, implementer (Milestone 1).
+
+- Decision: a refused job that is neither leased nor reconnecting (no relay actor yet, a stale target) is not retried by a timer. The coordinator's own target-change publication queues the session again. The retry map and `backoff` for login passes are deleted as the plan says.
+  Date/Author: 2026-11-19, implementer.
+
+- Decision: `aws_cycle` always checks `target_is_current` before minting (it used `gate.is_some()` as a proxy for "a daemon is present"). The test thread-local `SESSIONS_ARE_CURRENT` now defaults to true; tests that need the on-disk check set it false.
+  Date/Author: 2026-11-19, implementer.
+
+- Decision: `CredentialSyncCoordinator::spawn_guarded` keeps an unused `_gate` argument for now, because its only caller is `mj-daemon/src/daemon/delegation/policy.rs`, which Milestone 2 owns. Remove the argument after Milestone 2 merges.
+  Date/Author: 2026-11-19, implementer.
+
+- Decision: tests removed because they only pinned gate behaviour: `credential_sync_preempted_by_lifecycle_does_not_report_a_login_result` (c8d27f3c; a sync no longer opens its own connection), `the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skipped`, `a_cycle_that_cannot_reach_the_session_is_deferred_and_changes_nothing`, `a_queued_job_releases_its_hold_as_soon_as_admission_is_cancelled`, `a_running_credential_job_stops_when_its_admission_is_cancelled`, `a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one`. Their text is in the implementer's report directory (`removed_tests.txt`). No reconnect-wake phase was added to the lease test: the reconnect branch sets the same `credentials_owed` flag that the lease branch sets and the same loop check clears.
+  Date/Author: 2026-11-19, implementer.
 
 ## Outcomes & Retrospective
 
@@ -162,23 +182,23 @@ Milestones 1, 3 and 4 are built in `~/Projects/mjolnir-wt/login-delivery`, and M
 
 After Milestone 1, in the `login-delivery` worktree:
 
-    cargo test -p mj-store --lib recovery_gate
-    cargo test -p mj-controller --lib worker_client::tests::
-    cargo clippy -p mj-store -p mj-controller --all-targets -- -D warnings
+    cargo test -p brokk-mj-store --lib recovery_gate
+    cargo test -p brokk-mj-controller --lib worker_client::tests::
+    cargo clippy -p brokk-mj-store -p brokk-mj-controller --all-targets -- -D warnings
 
 The new acceptance test and the lease-return test must pass. If `worker_client::tests::` is slow, run the new test, the rewritten tests and the lease and reconnect tests by name instead.
 
 After Milestone 2, in the `login-renewal-notice` worktree:
 
-    cargo test -p mj-daemon --lib delegation::policy
-    cargo clippy -p mj-daemon --all-targets -- -D warnings
+    cargo test -p brokk-mj-daemon --lib delegation::policy
+    cargo clippy -p brokk-mj-daemon --all-targets -- -D warnings
 
 After Milestones 3 and 4, in the `login-delivery` worktree:
 
-    cargo test -p mj-core --lib credentials
-    cargo test -p mj-daemon --lib credential_sync
-    cargo test -p mj-daemon --lib server_runtime::api -- child
-    cargo clippy -p mj-core -p mj-controller -p mj-daemon --all-targets -- -D warnings
+    cargo test -p brokk-mj-core --lib credentials
+    cargo test -p brokk-mj-daemon --lib credential_sync
+    cargo test -p brokk-mj-daemon --lib server_runtime::api -- child
+    cargo clippy -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-daemon --all-targets -- -D warnings
     cargo fmt --all --check
 
 Any test named `Hard-won: #1581` must still pass, since it protects the child hold.
@@ -244,3 +264,5 @@ In `mj-core/src/credentials.rs`, with the profile type the surrounding code alre
     pub fn rejected_login_is_current(profile: &HarnessProfile, rejected_fingerprint: &str, lock_wait: Duration) -> Option<bool>;
 
 `mj-store/src/recovery_gate.rs` loses `BackgroundWork::CredentialSync` and all credential wake members. Nothing outside the files named above may depend on them after Milestone 1.
+
+Note: the Cargo package commands above were corrected to the `brokk-` prefixed package names.

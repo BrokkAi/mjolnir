@@ -1,7 +1,4 @@
 use super::*;
-use crate::session_manager::RelayJobDeferred;
-
-const CANCELLED: &str = "the credential sync was cancelled by a lifecycle operation";
 
 /// How long a request may wait before it counts as slow. A change wait is a
 /// long poll: the worker holds it for up to `RELAY_CHANGE_WAIT_BOUND` (the
@@ -17,7 +14,7 @@ fn slow_operation_warning_after(request: &RelayRequest) -> Duration {
 impl RelayClient {
     pub async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
         // Memory RPCs include filesystem work and worker-side queueing. Neither
-        // has a measured deadline; lifecycle cancellation still interrupts them.
+        // has a measured deadline.
         let timeout = match &request {
             RelayRequest::ProjectMemoryTransfer { .. }
             | RelayRequest::ProjectMemorySnapshot
@@ -122,11 +119,6 @@ impl RelayClient {
         if let Some(reason) = &self.abandoned {
             bail!("{reason}");
         }
-        // Between calls the connection is in step, so a cancelled job stops
-        // here without touching it.
-        if self.cancelled() {
-            return Err(anyhow::Error::new(RelayJobDeferred(CANCELLED)));
-        }
         let mut frame = serde_json::to_vec(envelope)?;
         if frame.len() > MAX_FRAME_BYTES {
             bail!("relay {operation} request frame is too large");
@@ -190,28 +182,7 @@ impl RelayClient {
                 None => Ok(exchange.await),
             }
         };
-        let cancellation = self.cancellation.clone();
-        let exchanged = tokio::select! {
-            biased;
-            () = async {
-                match &cancellation {
-                    Some(flag) => crate::recovery_gate::wait_until_cancelled(flag).await,
-                    None => std::future::pending().await,
-                }
-            } => None,
-            exchanged = exchange => Some(exchanged),
-        };
-        // Dropping an exchange in flight leaves its reply to be read as the
-        // next call's, exactly as a timeout does, so the connection is
-        // abandoned the same way. The worker's state, not this call's answer,
-        // is what the next cycle reconciles from.
-        let Some(exchanged) = exchanged else {
-            tracing::debug!(%session_id, %operation, "relay operation cancelled; abandoning its sequential connection");
-            self.abandoned = Some(format!(
-                "relay connection abandoned after {operation} was cancelled by a lifecycle operation"
-            ));
-            return Err(anyhow::Error::new(RelayJobDeferred(CANCELLED)));
-        };
+        let exchanged = exchange.await;
         tracing::debug!(target: "mj_controller::latency", %session_id, %operation,
             request_id = %envelope.request_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "relay exchange completed");
@@ -234,20 +205,6 @@ impl RelayClient {
                 Err(anyhow!(timed_out))
             }
         }
-    }
-
-    /// Run with a gate admission's cancellation flag, or without one.
-    pub(super) fn set_cancellation(
-        &mut self,
-        cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ) {
-        self.cancellation = cancellation;
-    }
-
-    pub(super) fn cancelled(&self) -> bool {
-        self.cancellation
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
     }
 
     pub(super) fn request_id_for(&self, sequence: u64) -> String {

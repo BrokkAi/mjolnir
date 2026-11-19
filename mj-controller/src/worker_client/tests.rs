@@ -8,12 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a direct (no actor) reconciliation of one session borrows.
 macro_rules! access {
-    ($gate:expr, $steps:expr) => {
+    () => {
         credential_sync::SessionAccess {
             relays: &SessionRelays::Direct,
-            gate: $gate,
             runtime: None,
-            steps: $steps,
         }
     };
 }
@@ -1360,7 +1358,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
                 slopcop: &credential_sync::HostSlopcopLogin::Unknown,
                 harness: &credential_sync::PassLogin::PerSession,
             },
-            credential_sync::JobHold::new(None, None, None, None),
+            credential_sync::JobHold::new(None, None),
         )
         .await
         .unwrap();
@@ -2261,7 +2259,7 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                     slopcop: &credential_sync::HostSlopcopLogin::Unknown,
                     harness: &credential_sync::PassLogin::PerSession,
                 },
-                credential_sync::JobHold::new(None, None, None, None),
+                credential_sync::JobHold::new(None, None),
             )
             .await
         }
@@ -2795,7 +2793,7 @@ async fn mac_sync_pass(
             slopcop: &credential_sync::HostSlopcopLogin::Unknown,
             harness: &pass,
         },
-        credential_sync::JobHold::new(None, None, None, None),
+        credential_sync::JobHold::new(None, None),
     )
     .await
     .unwrap()
@@ -3061,87 +3059,6 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skipped() {
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    // The mint takes long enough that the login step is certainly running,
-    // and holding the slot, when it completes.
-    let cli = slow_counting_aws_cli(scratch.path(), 400);
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    let release_login = scratch.path().join("release-the-login-step");
-    let mut target = aws_sync_session_named(home.path(), &root, &token, &cli, "busy-login", None);
-    // wait_for (none), then the file the login step waits for.
-    target.spec.args.push(String::new());
-    target
-        .spec
-        .args
-        .push(release_login.to_string_lossy().into_owned());
-    // The production path: background admission through a gate.
-    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let steps = credential_sync::SessionSteps::default();
-    let login = tokio::spawn({
-        let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
-        async move {
-            credential_sync::reconcile_profile_guarded(
-                &access!(Some(&gate), &steps),
-                &[target],
-                None,
-                credential_sync::unknown_slopcop_login,
-            )
-            .await
-        }
-    });
-    let install = tokio::spawn({
-        let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
-        async move {
-            credential_sync::aws_cycle(
-                &access!(Some(&gate), &steps),
-                &target,
-                credential_sync::AwsCycleOptions::default(),
-            )
-            .await
-        }
-    });
-    // The login step holds the session's slot; the mint finishes meanwhile.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !root.join("login-holding").exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the login step reached the session");
-    assert!(gate.is_busy("busy-login"));
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    assert!(
-        !root.join("aws").exists(),
-        "installed while the slot was held"
-    );
-
-    // The slot frees; the install happens, once.
-    std::fs::write(&release_login, "").unwrap();
-    login.await.unwrap();
-    let (_, installed) = install.await.unwrap();
-    assert!(root.join("aws").exists(), "the install was skipped");
-    assert!(
-        installed
-            .unwrap()
-            .is_some_and(|sync| sync.actions.contains(&CredentialSyncAction::Pushed))
-    );
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("mints"))
-            .unwrap()
-            .lines()
-            .count(),
-        1
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn aws_errors_are_labelled_by_the_branch_that_failed() {
     let home = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -3190,10 +3107,9 @@ async fn a_session_that_is_no_longer_current_is_not_minted_for() {
     let target = aws_sync_session_named(home.path(), &root, &token, &cli, "gone-session", None);
     // No daemon says it is current, and nothing on disk lists it.
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(false));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
 
     let (_, result) = credential_sync::aws_cycle(
-        &access!(Some(&gate), &Default::default()),
+        &access!(),
         &target,
         credential_sync::AwsCycleOptions::default(),
     )
@@ -3420,7 +3336,6 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
     // The job, if it ran, would withdraw these.
     std::fs::write(root.join("aws"), "host credentials").unwrap();
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
     let steps = credential_sync::SessionSteps::default();
     let queue = || async {
         let work =
@@ -3429,16 +3344,7 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
                 scoped_required: true,
                 expected_scope: None,
             }));
-        let hold = credential_sync::JobHold::new(
-            gate.try_start(
-                &session,
-                crate::recovery_gate::BackgroundWork::CredentialSync,
-            )
-            .ok(),
-            Some(steps.enter(&session).await),
-            None,
-            None,
-        );
+        let hold = credential_sync::JobHold::new(Some(steps.enter(&session).await), None);
         credential_sync::CredentialSyncJob::queue(target.clone(), work, hold)
     };
 
@@ -3446,10 +3352,9 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
     // actor, when it gets to the job, drops it.
     let (job, response, queued) = queue().await;
     drop((response, queued));
-    assert!(!gate.is_busy(&session));
     tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
         .await
-        .expect("the turn was not released with the abandoned job");
+        .expect("the install lock was not released with the abandoned job");
     let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
     Box::new(job).run(&mut client).await;
     assert!(root.join("aws").exists(), "an abandoned job ran");
@@ -3468,97 +3373,18 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
     .await
     .expect("the job reached the worker");
     drop((response, queued));
-    assert!(gate.is_busy(&session), "a running job lost the session");
     assert!(
         tokio::time::timeout(Duration::from_millis(100), steps.enter(&session))
             .await
             .is_err(),
-        "a running job lost its turn"
+        "a running job lost its install lock"
     );
     std::fs::write(&release, "").unwrap();
     running.await.unwrap();
-    assert!(!gate.is_busy(&session));
     assert!(
         !root.join("aws").exists(),
         "the running job did not finish its work"
     );
-}
-
-// A cycle the session actor could not take (the session was busy) checked
-// nothing, so it leaves the trigger's wake for the next cycle, which answers.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one() {
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    let cli = granting_aws_cli(scratch.path());
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "deferred", None);
-    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    // A holder a sync cannot run beside (a worker replacement) has the
-    // session: cycles defer.
-    let held = gate
-        .try_start(
-            "deferred",
-            crate::recovery_gate::BackgroundWork::WorkerReplacement,
-        )
-        .unwrap();
-    let (results, mut results_rx) = mpsc::unbounded_channel();
-    let env = credential_sync::RenewalEnv {
-        relays: SessionRelays::Direct,
-        gate: Some(gate.clone()),
-        runtime: None,
-        steps: Default::default(),
-        installs: Default::default(),
-        results,
-        retry: Duration::from_millis(50),
-    };
-    let (wakes, wake_rx) = mpsc::unbounded_channel();
-    let renewal = tokio::spawn(credential_sync::renew_session_aws(
-        env,
-        target.clone(),
-        wake_rx,
-    ));
-    let (reply, mut answer) = tokio::sync::oneshot::channel();
-    wakes.send(credential_sync::RenewalWake { reply }).unwrap();
-    // A second trigger does not displace the first one's reply.
-    let (second_reply, second_answer) = tokio::sync::oneshot::channel();
-    wakes
-        .send(credential_sync::RenewalWake {
-            reply: second_reply,
-        })
-        .unwrap();
-
-    // Several deferred cycles go by without answering, installing, or saying
-    // anything.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), &mut answer)
-            .await
-            .is_err(),
-        "a deferred cycle answered the trigger"
-    );
-    assert!(!root.join("aws").exists());
-    assert!(results_rx.try_recv().is_err());
-
-    // The session frees: the next cycle, forced by the trigger, answers.
-    drop(held);
-    let outcome = tokio::time::timeout(Duration::from_secs(20), answer)
-        .await
-        .expect("the next cycle answered")
-        .expect("the wake was kept until a cycle could answer it");
-    assert_eq!(outcome.session_id, "deferred");
-    assert_eq!(outcome.outcome, Ok(vec![CredentialSyncAction::Pushed]));
-    let second = tokio::time::timeout(Duration::from_secs(5), second_answer)
-        .await
-        .expect("the second trigger was answered too")
-        .expect("its reply was kept");
-    assert_eq!(second, outcome);
-    assert!(root.join("aws").exists());
-    renewal.abort();
 }
 
 // A renewal stopped (its target changed) before it answered a trigger leaves
@@ -3693,9 +3519,7 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
     let (results, mut results_rx) = mpsc::unbounded_channel();
     let env = credential_sync::RenewalEnv {
         relays: SessionRelays::Direct,
-        gate: None,
         runtime: None,
-        steps: Default::default(),
         installs: Default::default(),
         results,
         retry: Duration::from_millis(100),
@@ -4108,54 +3932,6 @@ async fn an_unreadable_provider_configuration_is_that_cycles_outcome_and_a_repai
     assert!(root.join("aws").exists());
 }
 
-// A cycle that cannot reach the session (here another holder has it) is
-// deferred, and nothing changes: nothing is minted, withdrawn or installed.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_cycle_that_cannot_reach_the_session_is_deferred_and_changes_nothing() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    let cli = granting_aws_cli(scratch.path());
-    let started = scratch.path().join("sts-started");
-    std::fs::write(
-        cli.join("aws"),
-        format!("#!/bin/sh\n/usr/bin/touch {}\nexit 1\n", started.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    std::fs::write(root.join("aws"), br#"{"Version":1,"AccessKeyId":"AKIA"}"#).unwrap();
-    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "busy", None);
-    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let _held = gate
-        .try_start(
-            "busy",
-            crate::recovery_gate::BackgroundWork::WorkerReplacement,
-        )
-        .unwrap();
-
-    let (_, result) = credential_sync::aws_cycle(
-        &access!(Some(&gate), &Default::default()),
-        &target,
-        credential_sync::AwsCycleOptions::default(),
-    )
-    .await;
-
-    assert!(result.unwrap().is_none(), "the cycle was not deferred");
-    assert!(!started.exists(), "something was minted");
-    assert_eq!(
-        std::fs::read(root.join("aws")).unwrap(),
-        br#"{"Version":1,"AccessKeyId":"AKIA"}"#,
-        "the session's credentials changed"
-    );
-}
-
 // A renewal task that ends on its own (it panics) is noticed at the next sync,
 // reported as the session's failure, and replaced; a trigger that wakes it
 // meanwhile is told the renewal's outcome is unknown, not left without an
@@ -4174,9 +3950,7 @@ async fn a_renewal_task_that_panics_is_reported_and_replaced_at_the_next_sync() 
     let (results, mut results_rx) = mpsc::unbounded_channel();
     let env = credential_sync::RenewalEnv {
         relays: SessionRelays::Direct,
-        gate: None,
         runtime: None,
-        steps: Default::default(),
         installs: Default::default(),
         results,
         retry: Duration::from_millis(100),
@@ -4219,171 +3993,6 @@ async fn a_renewal_task_that_panics_is_reported_and_replaced_at_the_next_sync() 
     })
     .await
     .expect("the replacement task renewed the credentials");
-}
-
-// A job queued behind an actor that is busy with something else holds the
-// session's admission and turn only until the gate cancels the admission: a
-// close, restart or move waiting for the session (and a daemon handoff behind
-// it) must not wait for the actor to reach a job nobody wants.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_queued_job_releases_its_hold_as_soon_as_admission_is_cancelled() {
-    use crate::session_manager::RelayConnectionJob;
-
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    let cli = granting_aws_cli(scratch.path());
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    let target = aws_sync_session(home.path(), &root, &token, &cli);
-    let session = target.session_id.clone();
-    std::fs::write(root.join("aws"), "host credentials").unwrap();
-    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let steps = credential_sync::SessionSteps::default();
-
-    // The task that waits for the job: it queues it (here, hands it to the
-    // test, which plays the busy actor) and waits for the answer.
-    let (queue_tx, queue_rx) = tokio::sync::oneshot::channel();
-    let waiting = tokio::spawn({
-        let (gate, steps, target) = (gate.clone(), steps.clone(), target.clone());
-        async move {
-            let turn = steps.enter(&target.session_id).await;
-            let for_admission = target.clone();
-            credential_sync::admitted(
-                Some(&gate),
-                None,
-                &for_admission,
-                turn,
-                None,
-                |hold| async move {
-                    let work = credential_sync::SyncWork::Aws(Box::new(
-                        credential_sync::AwsSync::Unavailable {
-                            error: "no credentials".into(),
-                            scoped_required: true,
-                            expected_scope: None,
-                        },
-                    ));
-                    let (job, response, _queued) =
-                        credential_sync::CredentialSyncJob::queue(target, work, hold);
-                    queue_tx.send(job).ok();
-                    let _ = response.await;
-                    Ok::<Option<()>, anyhow::Error>(None)
-                },
-            )
-            .await
-        }
-    });
-    let job = queue_rx.await.unwrap();
-    assert!(gate.is_busy(&session));
-
-    // A lifecycle operation cancels the admission and waits for it to free.
-    gate.cancel_busy(&session);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gate.is_busy(&session) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the queued job kept the session's admission after it was cancelled");
-    tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
-        .await
-        .expect("the queued job kept the session's turn");
-    waiting.await.unwrap().unwrap();
-
-    // The actor reaches the job at last and drops it unrun.
-    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
-    Box::new(job).run(&mut client).await;
-    assert!(root.join("aws").exists(), "a cancelled job ran");
-}
-
-// A lifecycle operation that cancels the admission of a job the actor is
-// already running must not wait for the worker: the call in flight is
-// abandoned (with its connection, as a timeout would), the hold is released and
-// the job is reported as deferred, not failed.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_running_credential_job_stops_when_its_admission_is_cancelled() {
-    use crate::session_manager::{RelayConnectionJob, RelayJobDeferred};
-
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    let cli = granting_aws_cli(scratch.path());
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    // The worker holds its first AWS answer for longer than this test waits:
-    // only cancellation can end the job.
-    let never = scratch.path().join("never-released");
-    let target = aws_sync_session_named(home.path(), &root, &token, &cli, SESSION_ID, Some(&never));
-    let session = target.session_id.clone();
-    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let steps = credential_sync::SessionSteps::default();
-    let queue = || async {
-        let work =
-            credential_sync::SyncWork::Aws(Box::new(credential_sync::AwsSync::Unavailable {
-                error: "no credentials".into(),
-                scoped_required: true,
-                expected_scope: None,
-            }));
-        let hold = credential_sync::JobHold::new(
-            gate.try_start(
-                &session,
-                crate::recovery_gate::BackgroundWork::CredentialSync,
-            )
-            .ok(),
-            Some(steps.enter(&session).await),
-            None,
-            None,
-        );
-        credential_sync::CredentialSyncJob::queue(target.clone(), work, hold)
-    };
-
-    let (job, response, _queued) = queue().await;
-    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
-    let running = tokio::spawn(async move {
-        Box::new(job).run(&mut client).await;
-        client
-    });
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while !root.join("waiting").exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the job reached the worker");
-    gate.cancel_busy(&session);
-    let answer = tokio::time::timeout(Duration::from_secs(5), response)
-        .await
-        .expect("the running job waited for the worker after it was cancelled")
-        .unwrap();
-    let error = answer.err().expect("a cancelled job reported success");
-    assert!(RelayJobDeferred::marks(&error), "{error:#}");
-    let mut client = running.await.unwrap();
-    assert!(
-        !gate.is_busy(&session),
-        "the cancelled job kept the session"
-    );
-    tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
-        .await
-        .expect("the cancelled job kept the session's turn");
-    // The reply to the abandoned call may still arrive, so the connection is
-    // not used again.
-    let error = client.aws_credentials_state().await.unwrap_err();
-    assert!(format!("{error:#}").contains("abandoned"), "{error:#}");
-
-    // Cancelled while still queued, with the awaiting side still there: the
-    // actor reports it as deferred, not as a dropped sync.
-    let (job, response, _queued) = queue().await;
-    gate.cancel_busy(&session);
-    let mut fresh = RelayClient::connect(&target.spec, &session).await.unwrap();
-    Box::new(job).run(&mut fresh).await;
-    let error = response.await.unwrap().err().unwrap();
-    assert!(RelayJobDeferred::marks(&error), "{error:#}");
 }
 
 // Failed renewals back off, doubling from the retry interval up to the
@@ -4793,98 +4402,6 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
             "{session}"
         );
     }
-}
-
-// Hard-won: c8d27f3c: credential sync connected after lifecycle had parked the worker and reported ECONNREFUSED.
-#[tokio::test]
-async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result() {
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let _reservation = gate.reserve(SESSION_ID);
-    let profile = tempfile::tempdir().unwrap();
-    let target = CredentialSyncTarget {
-        session_id: SESSION_ID.into(),
-        profile_id: "work".into(),
-        harness: mj_core::config::HarnessKind::Codex,
-        profile_home: profile.path().to_path_buf(),
-        aws_credentials: None,
-        skips_login_file_sync: false,
-        sync_github_token: false,
-        github: Default::default(),
-        skills_scope: mj_core::skills::SkillsScope::Localhost,
-        spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
-    };
-    let result = credential_sync::reconcile_profile_guarded(
-        &access!(Some(&gate), &Default::default()),
-        &[target],
-        Some(SESSION_ID),
-        credential_sync::unknown_slopcop_login,
-    )
-    .await;
-    assert!(
-        result.is_empty(),
-        "deferral must not report an unchanged or failed login"
-    );
-}
-
-/// A renewal revokes the old token at once, so the new login must reach a
-/// session even while a recovery copy, which can run for minutes and start
-/// again right after, holds it. A worker replacement still keeps it out.
-// Hard-won: #1564: back-to-back recovery copies held the session's only background slot, so a renewed login never reached it.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_new_login_reaches_a_session_while_its_recovery_copy_runs() {
-    use crate::recovery_gate::BackgroundWork;
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let received = scratch.path().join("received");
-    let target = codex_sync_target(
-        home.path(),
-        SESSION_ID,
-        "2026-09-25T20:00:00.000Z",
-        &received,
-    );
-    let login = codex_login("2026-09-25T22:49:05.000Z");
-    std::fs::write(home.path().join("auth.json"), &login).unwrap();
-    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
-    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let steps = credential_sync::SessionSteps::default();
-    let access = access!(Some(&gate), &steps);
-    let sync = || {
-        credential_sync::reconcile_profile_guarded(
-            &access,
-            std::slice::from_ref(&target),
-            None,
-            credential_sync::unknown_slopcop_login,
-        )
-    };
-
-    let replacement = gate
-        .try_start(SESSION_ID, BackgroundWork::WorkerReplacement)
-        .unwrap();
-    assert!(sync().await.is_empty(), "the sync ran beside a replacement");
-    assert!(!received.exists());
-    drop(replacement);
-
-    let copy = gate
-        .try_start(SESSION_ID, BackgroundWork::RecoveryCopyCapturing)
-        .unwrap();
-    let outcomes = sync().await;
-    assert_eq!(
-        outcomes
-            .iter()
-            .map(|outcome| outcome.outcome.clone())
-            .collect::<Vec<_>>(),
-        [Ok(vec![CredentialSyncAction::Pushed])],
-        "{outcomes:?}"
-    );
-    assert_eq!(std::fs::read(&received).unwrap(), login);
-    assert!(!copy.load(Ordering::Acquire), "the sync cancelled the copy");
-    assert!(
-        gate.is_busy(SESSION_ID),
-        "the sync released the copy's hold"
-    );
-    drop(copy);
-    assert!(!gate.is_busy(SESSION_ID));
 }
 
 #[cfg(unix)]
@@ -5385,7 +4902,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
         ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as Reply,
     };
 
-    for outcome in ["complete", "cancel", "drop", "disconnect", "legacy_drop"] {
+    for outcome in ["complete", "drop", "disconnect", "legacy_drop"] {
         let legacy = outcome == "legacy_drop";
         let (controller, worker) = tokio::io::duplex(4096);
         let (output, input) = tokio::io::split(controller);
@@ -5395,7 +4912,6 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
             output: BufReader::new(Box::new(output)),
             request_timeout: RELAY_RPC_TIMEOUT,
             abandoned: None,
-            cancellation: None,
             next_request: 1,
             connection_nonce: 1,
             protocol_version: RELAY_PROTOCOL_VERSION,
@@ -5413,8 +4929,6 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
         if legacy {
             client.protocol_version = mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL - 1;
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        client.set_cancellation(Some(cancelled.clone()));
         let queue = Arc::new(tokio::sync::Semaphore::new(0));
         let worker_queue = queue.clone();
         let (queued, mut waiting) = mpsc::channel(1);
@@ -5505,7 +5019,6 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
         }
         match outcome {
             "complete" => queue.add_permits(1),
-            "cancel" => cancelled.store(true, Ordering::Release),
             "drop" | "legacy_drop" => dropped.cancel(),
             "disconnect" => {
                 peer.abort();
@@ -5531,13 +5044,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
             assert!(client.abandoned.is_none());
         } else {
             let error = result.unwrap_err();
-            if outcome == "cancel" {
-                assert!(
-                    error
-                        .downcast_ref::<crate::session_manager::RelayJobDeferred>()
-                        .is_some()
-                );
-            } else if outcome == "disconnect" {
+            if outcome == "disconnect" {
                 assert!(error.downcast_ref::<RelayTransportDead>().is_some());
             } else {
                 assert_eq!(error.to_string(), "checkpoint was cancelled");
@@ -5558,7 +5065,8 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
     }
 }
 
-/// The periodic pass must be woken by lease return, without retaining an actor job.
+/// A job the actor refuses while its connection is leased makes the actor wake
+/// the coordinator when the lease returns, without retaining the job.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
@@ -5631,7 +5139,6 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     ));
     let sync = CredentialSyncCoordinator::spawn_with_registry(
         SessionRelays::Actors(channels.control.clone()),
-        Some(gate.clone()),
         None,
         credential_sync::unknown_slopcop_login,
         mj_core::credentials::SYNC_INTERVAL,
@@ -5639,21 +5146,34 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     );
     let sync_handle = sync.handle();
     sync_handle.set_targets(vec![target]);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !gate.credentials_deferred_for_test(SESSION_ID) {
-            tokio::task::yield_now().await;
+    // A job that asks for a wake, queued behind the coordinator's own: the
+    // actor refuses it while capture holds its connection, so the session is
+    // owed a sync whatever the coordinator's job did.
+    struct Probe(Option<tokio::sync::oneshot::Sender<String>>);
+    impl crate::session_manager::RelayConnectionJob for Probe {
+        fn wake_when_usable(&self) -> bool {
+            true
         }
-    })
-    .await
-    .expect("the actor must defer the initial pass while capture holds its connection");
+        fn run<'a>(
+            self: Box<Self>,
+            _client: &'a mut RelayClient,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async { panic!("the lease must keep the job from running") })
+        }
+        fn refuse(mut self: Box<Self>, error: anyhow::Error) {
+            let _ = self.0.take().unwrap().send(format!("{error:#}"));
+        }
+    }
+    let (refused_tx, refused_rx) = tokio::sync::oneshot::channel();
+    handle
+        .run_on_connection(Box::new(Probe(Some(refused_tx))))
+        .await;
+    let reason = tokio::time::timeout(Duration::from_secs(5), refused_rx)
+        .await
+        .expect("the actor must refuse a job while capture holds its connection")
+        .unwrap();
+    assert!(reason.contains("holds the relay connection"), "{reason}");
     assert!(!received.exists());
-    assert_eq!(
-        registry
-            .lock()
-            .unwrap()
-            .delivery_state("codex4", SESSION_ID),
-        Some(mj_core::credentials::LoginDeliveryState::Pending),
-    );
     assert!(!copy.load(Ordering::Acquire));
     let released = tokio::time::Instant::now();
     lease.release();
@@ -5689,6 +5209,151 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     drop(sync_handle);
     drop(sync);
     drop(copy);
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+/// A renewal revokes the old token within seconds, so the new login must reach
+/// a session whatever other background work holds it: a review of its work, a
+/// worker upgrade, or a recovery copy that can run for minutes.
+// Hard-won: #1600: a review or worker-upgrade hold kept a renewed login from reaching the session
+#[cfg(unix)]
+#[tokio::test]
+async fn a_renewed_login_reaches_a_session_whatever_background_work_holds_it() {
+    use crate::recovery_gate::BackgroundWork;
+    const CHILD: &str = "MJ_TEST_RENEWED_LOGIN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_renewed_login_reaches_a_session_whatever_background_work_holds_it",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "renewed-login-holders")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&crate::controller::test_support::checkpoint_test_session(
+        SESSION_ID,
+    ))
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("received");
+    let mut target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00.000Z",
+        &received,
+    );
+    // This fixture needs no newer feeds; its actor still owns the real relay connection.
+    target.spec.args[2] = "16".into();
+    target.spec.env.insert(
+        "MJ_TEST_CREDENTIAL_ACTOR_STATE".into(),
+        serde_json::to_string(
+            &mj_core::relay::RelaySnapshot::new(SESSION_ID.into()).operational_state(),
+        )
+        .unwrap(),
+    );
+    let auth = home.path().join("auth.json");
+    std::fs::write(&auth, codex_login("2026-09-25T21:00:00.000Z")).unwrap();
+    credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![crate::session_manager::RelaySessionTarget {
+            session_id: SESSION_ID.into(),
+            spec: target.spec.clone(),
+            worker_recovery: None,
+            project_memory: None,
+        }])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(SESSION_ID, Duration::from_secs(10))
+        .await
+        .unwrap();
+    // The gate the session's own actor uses, so a holder is a real one.
+    let gate = channels.control.session_gate.clone();
+    let sync = CredentialSyncCoordinator::spawn_with_registry(
+        SessionRelays::Actors(channels.control.clone()),
+        None,
+        credential_sync::unknown_slopcop_login,
+        mj_core::credentials::SYNC_INTERVAL,
+        Default::default(),
+    );
+    let sync_handle = sync.handle();
+    sync_handle.set_targets(vec![target.clone()]);
+    let delivered = |login: Vec<u8>| {
+        let received = received.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while std::fs::read(&received).ok().as_deref() != Some(login.as_slice()) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+    };
+    assert!(delivered(codex_login("2026-09-25T21:00:00.000Z")).await);
+
+    // A review and a worker upgrade refuse each other, so they are separate cases.
+    for (case, minute) in ["review", "worker upgrade", "recovery copy"]
+        .into_iter()
+        .zip(10_u32..)
+    {
+        // The hold, kept until the end of the case, and the flag a lifecycle
+        // operation would set to preempt it.
+        let (holder, preempted): (Box<dyn std::any::Any>, _) = match case {
+            "review" => (
+                Box::new(gate.reserve_when_idle(SESSION_ID).await),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            "worker upgrade" => {
+                let attempt = gate
+                    .try_start(SESSION_ID, BackgroundWork::WorkerReplacement)
+                    .unwrap();
+                let flag = attempt.cancellation();
+                (Box::new(attempt) as _, flag)
+            }
+            // Hard-won: #1564: back-to-back recovery copies held the session's only background slot, so a renewed login never reached it.
+            _ => {
+                let attempt = gate
+                    .try_start(SESSION_ID, BackgroundWork::RecoveryCopyCapturing)
+                    .unwrap();
+                let flag = attempt.cancellation();
+                (Box::new(attempt) as _, flag)
+            }
+        };
+        // Another daemon renews: it writes the new login under the native
+        // lock, and this daemon is told.
+        let renewed = codex_login(&format!("2026-09-25T22:{minute}:00.000Z"));
+        let renewer = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Codex,
+            &auth,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&auth, &renewed).unwrap();
+        drop(renewer);
+        sync_handle.sync_profile_now("codex4", None);
+        assert!(
+            delivered(renewed).await,
+            "the renewed login did not reach the session while a {case} held it"
+        );
+        assert!(
+            !preempted.load(Ordering::Acquire),
+            "the sync cancelled the {case}"
+        );
+        drop(holder);
+    }
+    sync_handle.set_targets(Vec::new());
+    drop(sync_handle);
+    drop(sync);
     channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -5774,7 +5439,6 @@ async fn credential_install_readback_mismatch_concludes_the_delivery() {
     ));
     let mut coordinator = CredentialSyncCoordinator::spawn_with_registry(
         SessionRelays::Direct,
-        None,
         None,
         credential_sync::unknown_slopcop_login,
         SYNC_INTERVAL,
