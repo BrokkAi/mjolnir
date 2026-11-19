@@ -2373,10 +2373,9 @@ pub(super) enum PassLogin {
 /// read. This is the answer to "is the token that failed still current?" for
 /// every consumer that is not itself a sync pass (#1547).
 ///
-/// The login is read under the native login lock, which a renewal holds for
-/// its whole exchange with the provider: a plain read during a renewal returns
-/// the login being replaced, and a token that failed because of the renewal
-/// would then look refused. A lock that cannot be taken in time is `None`.
+/// A plain read, without the native login lock: only a sync pass, which reads
+/// under the lock, creates a refusal. This only re-checks whether the login
+/// has changed since, so during a renewal it can lag but never invent one.
 pub async fn current_claude_access_token(
     profile: &mj_core::config::HarnessProfile,
 ) -> Option<String> {
@@ -2385,27 +2384,13 @@ pub async fn current_claude_access_token(
     {
         return None;
     }
-    claude_access_token_under_lock(
-        profile
-            .kind
-            .login_store(mj_core::config::HarnessHost::current(), &profile.home),
-    )
-    .await
-}
-
-async fn claude_access_token_under_lock(
-    store: mj_core::config::HarnessLoginStore,
-) -> Option<String> {
-    let kind = mj_core::config::HarnessKind::Claude;
-    let access = LoginAccess::bounded(store.clone());
-    let (_, bytes) = mj_core::credentials::read_login_under_native_lock(
-        kind,
-        &store,
-        mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT,
-        move || access.read(kind),
-    )
-    .await?
-    .ok()?;
+    let store = profile
+        .kind
+        .login_store(mj_core::config::HarnessHost::current(), &profile.home);
+    let (_, bytes) = LoginAccess::bounded(store)
+        .read_blocking(profile.kind)
+        .await
+        .ok()?;
     mj_core::credentials::claude_access_token_fingerprint(&bytes)
 }
 

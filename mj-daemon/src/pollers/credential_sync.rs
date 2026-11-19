@@ -106,8 +106,8 @@ pub(crate) async fn current_profile_login(
 ) -> anyhow::Result<Option<LoginFingerprint>> {
     let kind = profile.kind;
     if kind == mj_core::config::HarnessKind::Claude {
-        // Read under the native login lock, so a renewal in progress is not
-        // mistaken for the login that was rejected (also for the Keychain).
+        // A plain read (also for the Keychain): only the sync pass reads under
+        // the native lock and creates a refusal; this re-checks it and may lag.
         return Ok(
             mj_controller::worker_client::current_claude_access_token(profile)
                 .await
