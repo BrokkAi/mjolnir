@@ -182,9 +182,9 @@ def read_current_labels(path, expected_hashes):
     return current, stale
 
 
-def git(repo, *args, input=None):
+def git(repo, *args):
     return subprocess.check_output(["git", "--no-replace-objects", "-C", str(repo), *args],
-                                   input=input, stderr=subprocess.PIPE)
+                                   stderr=subprocess.PIPE)
 
 
 @cache
@@ -710,19 +710,14 @@ def checkout(args, repo, revision, unit):
     batch_repo = unit / "repo"
     batch_repo.mkdir()
     store, work = batch_repo / "store.git", batch_repo / "worktree"
+    git(unit, "init", "--bare", "--template=", str(store))
+    # Fetch only the pinned history into an empty store. A local clone would
+    # copy later objects and could inherit the source's alternates.
     try:
-        git(source, "clone", "--bare", "--local", "--no-hardlinks", str(source), str(store))
+        git(store, "fetch", "--no-tags", "--no-write-fetch-head", str(source), revision)
     except subprocess.CalledProcessError as error:
         raise RuntimeError(error.stderr.decode(errors="replace").strip()) from error
     git(store, "update-ref", "--no-deref", "HEAD", revision)
-    git(store, "remote", "remove", "origin")
-    refs = git(store, "for-each-ref", "--format=%(refname)").splitlines()
-    if refs:
-        git(store, "update-ref", "--stdin",
-            input=b"".join(b"option no-deref\ndelete " + ref + b"\n" for ref in refs))
-    git(store, "reflog", "expire", "--expire=all", "--all")
-    # Later objects may remain in the local object store. Without a ref or
-    # reflog naming them, labellers would need their hashes to reach them.
     git(store, "worktree", "add", "--detach", str(work), revision)
     return work
 
@@ -769,34 +764,41 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         raise ValueError("--work-dir must be absolute")
     args.work_dir.mkdir(parents=True, exist_ok=True)
     unit = Path(mkdtemp(prefix=f"{split}-{role}-", dir=args.work_dir))
-    work = checkout(args, repo, revision, unit)
-    head = git(work, "rev-parse", "HEAD").decode().strip()
-    if head != revision:
-        raise RuntimeError(f"{repo}: checkout HEAD {head} differs from requested revision {revision}")
-    for item in batch:
-        for field in ("base_commit", "intro_commit", "fix_commit"):
-            try:
-                git(work, "merge-base", "--is-ancestor", item[field], head)
-            except subprocess.CalledProcessError as error:
-                raise ValueError(f"{repo}/{item['id']}: {field} {item[field]} is not reachable from {head}") from error
-    inputs = unit / "inputs"
-    inputs.mkdir()
-    for filename, content in documents.items():
-        (inputs / filename).write_bytes(content)
-    save(inputs / "batch.json", {"labeller": role, "output": "labels.jsonl", "items": batch})
-    prompt = unit / "prompt.txt"
-    prompt.write_text(LABEL_PROMPT.format(role=role), encoding="utf-8")
-    quota(args, role)
-    tag = hashlib.sha256(unit.name.encode()).hexdigest()[:8]
-    title = f"RQL census {role} {repo} {tag}"
-    log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
-        ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
-    sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
-                    "--project-directory", work,
-                    "--profile", profile, "--effort", "high",
-                    "--review", "off", "--no-project-memory", "--no-github-events",
-                    "--no-github-credentials", "--subagents", "none", "--title", title,
-                    timeout=900)["session_id"]
+    try:
+        work = checkout(args, repo, revision, unit)
+        head = git(work, "rev-parse", "HEAD").decode().strip()
+        if head != revision:
+            raise RuntimeError(f"{repo}: checkout HEAD {head} differs from requested revision {revision}")
+        for item in batch:
+            for field in ("base_commit", "intro_commit", "fix_commit"):
+                try:
+                    git(work, "merge-base", "--is-ancestor", item[field], head)
+                except subprocess.CalledProcessError as error:
+                    raise ValueError(f"{repo}/{item['id']}: {field} {item[field]} is not reachable from {head}") from error
+        inputs = unit / "inputs"
+        inputs.mkdir()
+        for filename, content in documents.items():
+            (inputs / filename).write_bytes(content)
+        save(inputs / "batch.json", {"labeller": role, "output": "labels.jsonl", "items": batch})
+        prompt = unit / "prompt.txt"
+        prompt.write_text(LABEL_PROMPT.format(role=role), encoding="utf-8")
+        quota(args, role)
+        tag = hashlib.sha256(unit.name.encode()).hexdigest()[:8]
+        title = f"RQL census {role} {repo} {tag}"
+        log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
+            ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
+        sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
+                        "--project-directory", work,
+                        "--profile", profile, "--effort", "high",
+                        "--review", "off", "--no-project-memory", "--no-github-events",
+                        "--no-github-credentials", "--subagents", "none", "--title", title,
+                        timeout=900)["session_id"]
+    except BaseException:
+        # Interruptions (including a quota wait) also leave no pre-launch
+        # session to own the checkout. Keep the rest of the unit for audit.
+        if (unit / "repo").exists():
+            shutil.rmtree(unit / "repo")
+        raise
     # A session with inaccessible output stays available for manual fetch.
     recover_output = False
     try:
