@@ -1203,11 +1203,9 @@ async fn download_verified_async(
         // which also serve the daemon's clients. It only reads, so a
         // cancellation that abandons it is safe.
         let path = destination.to_owned();
-        let actual = crate::runtime::spawn_blocking(move || {
-            crate::worker_launch::worker_executable_digest(&path)
-        })
-        .await
-        .context("hash downloaded artifact task failed")??;
+        let actual = crate::runtime::spawn_blocking(move || crate::hex::file_sha256(&path))
+            .await
+            .context("hash downloaded artifact task failed")??;
         anyhow::ensure!(
             actual == expected,
             "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
@@ -2269,9 +2267,8 @@ mod tests {
         std::fs::write(&fixture, &body).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/kimi/runtime.json")).unwrap();
-        metadata["platforms"][current_node_platform()]["sha256"] = serde_json::Value::String(
-            crate::worker_launch::worker_executable_digest(&fixture).unwrap(),
-        );
+        metadata["platforms"][current_node_platform()]["sha256"] =
+            serde_json::Value::String(crate::hex::file_sha256(&fixture).unwrap());
         let environment =
             BTreeMap::from([("MJ_TEST_KIMI_ARTIFACT_BASE".to_owned(), server.url.clone())]);
         let staging = temp.path().join("staging");
@@ -2308,9 +2305,8 @@ mod tests {
         std::fs::write(&fixture, &compressed).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/grok/runtime.json")).unwrap();
-        metadata["platforms"][current_node_platform()]["sha256"] = serde_json::Value::String(
-            crate::worker_launch::worker_executable_digest(&fixture).unwrap(),
-        );
+        metadata["platforms"][current_node_platform()]["sha256"] =
+            serde_json::Value::String(crate::hex::file_sha256(&fixture).unwrap());
         let environment =
             BTreeMap::from([("MJ_TEST_GROK_ARTIFACT_BASE".to_owned(), server.url.clone())]);
         let staging = temp.path().join("staging");
@@ -2366,9 +2362,7 @@ mod tests {
             serde_json::from_str(include_str!("../assets/antigravity/runtime.json")).unwrap();
         metadata["platforms"][current_node_platform()]["url"] = server.url.clone().into();
         metadata["platforms"][current_node_platform()]["sha256"] =
-            crate::worker_launch::worker_executable_digest(&archive)
-                .unwrap()
-                .into();
+            crate::hex::file_sha256(&archive).unwrap().into();
         let staging = temp.path().join("install");
         std::fs::create_dir(&staging).unwrap();
         run_async(install_antigravity_from_metadata(
@@ -2969,7 +2963,7 @@ mod tests {
                 .unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
-        let digest = crate::worker_launch::worker_executable_digest(&archive).unwrap();
+        let digest = crate::hex::file_sha256(&archive).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/node/runtime.json")).unwrap();
         metadata["platforms"][key]["sha256"] = serde_json::Value::String(digest);
