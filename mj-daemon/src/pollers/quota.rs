@@ -37,40 +37,32 @@ fn quota_requests_from(
 /// Install, in the background, the pinned harnesses the quota checks would
 /// otherwise install inline on their first run (#1595), so that wait is
 /// usually over before a check needs it. It holds no handoff admission and
-/// the next daemon prepares again, so it is safe to stop. On cancellation the
-/// task stops awaiting and returns: dropping the installation kills the
-/// installers' process groups, but an archive extraction on a blocking thread
-/// ignores cancellation, and shutdown must not wait for it. Staging publishes
-/// by atomic rename, so an abandoned extraction publishes nothing and the next
-/// installation sweeps its staging. A failure is logged and not retried; the
-/// next check that needs the harness installs it.
+/// the next daemon prepares again, so it is safe to stop. Cancellation
+/// reaches the installers, which stop their process groups and their archive
+/// extraction (between entries) and release the cache lock and staging only
+/// once their writers have stopped; this task awaits them. A failure is
+/// logged and not retried; the next check that needs the harness installs it.
 #[cfg(unix)]
 pub fn spawn_quota_harness_prewarm(
     profiles: Vec<(String, mj_core::config::HarnessProfile)>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let prepare = async {
-            let requests = match tokio::task::spawn_blocking(move || quota_requests_from(profiles))
-                .await
-            {
-                Ok(requests) => requests,
-                Err(error) => {
-                    tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
-                    return Vec::new();
-                }
-            };
-            // The scope cancels its token when it ends, so it gets a child.
-            mj_core::subprocess::with_preparation_cancellation(
-                cancellation.child_token(),
-                mj_controller::quota::prepare_managed(&requests),
-            )
+        let requests = match tokio::task::spawn_blocking(move || quota_requests_from(profiles))
             .await
+        {
+            Ok(requests) => requests,
+            Err(error) => {
+                tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
+                return;
+            }
         };
-        let failures = tokio::select! {
-            () = cancellation.cancelled() => return,
-            failures = prepare => failures,
-        };
+        // The scope cancels its token when it ends, so it gets a child.
+        let failures = mj_core::subprocess::with_preparation_cancellation(
+            cancellation.child_token(),
+            mj_controller::quota::prepare_managed(&requests),
+        )
+        .await;
         if cancellation.is_cancelled() {
             return;
         }

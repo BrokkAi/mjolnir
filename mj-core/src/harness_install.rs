@@ -1039,8 +1039,14 @@ async fn install_antigravity_from_metadata(
     let executable = bin.join("agy");
     let archive_for_extract = archive.clone();
     let output = executable.clone();
+    let cancellation = crate::subprocess::preparation_cancellation();
     tokio::task::spawn_blocking(move || {
-        extract_archive_file(&archive_for_extract, Path::new("antigravity"), &output)
+        extract_archive_file(
+            &archive_for_extract,
+            Path::new("antigravity"),
+            &output,
+            &cancellation,
+        )
     })
     .await
     .context("Antigravity extraction task failed")??;
@@ -1114,11 +1120,13 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     let entrypoint = staging.join("opencode");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
+    let cancellation = crate::subprocess::preparation_cancellation();
     tokio::task::spawn_blocking(move || {
         extract_archive_file(
             &archive_for_extract,
             Path::new("package/bin/opencode"),
             &entrypoint_for_extract,
+            &cancellation,
         )
     })
     .await
@@ -1129,7 +1137,16 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     Ok(())
 }
 
-fn extract_archive_file(archive: &Path, wanted: &Path, destination: &Path) -> Result<()> {
+/// Extraction runs on a blocking thread that cancellation cannot interrupt, so
+/// the installer awaits it and it checks `cancellation` between entries (and
+/// between chunks of one file): staging and the install lock are released only
+/// after the writer has stopped. One entry or chunk is written to completion.
+fn extract_archive_file(
+    archive: &Path,
+    wanted: &Path,
+    destination: &Path,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let archive_file =
         File::open(archive).with_context(|| format!("open archive {}", archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive_file);
@@ -1139,6 +1156,10 @@ fn extract_archive_file(archive: &Path, wanted: &Path, destination: &Path) -> Re
         .entries()
         .with_context(|| format!("read archive {}", archive_name.display()))?
     {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "preparation cancelled while extracting"
+        );
         let mut entry =
             entry.with_context(|| format!("read archive {}", archive_name.display()))?;
         let path = entry
@@ -1430,8 +1451,9 @@ async fn install_managed_node(
         download_verified_async(&url, &archive, field("sha256")?, environment).await?;
         let staging_root = staging.path().to_path_buf();
         let folder_for_extract = folder.clone();
+        let cancellation = crate::subprocess::preparation_cancellation();
         tokio::task::spawn_blocking(move || {
-            extract_node_archive(&archive, &staging_root, &folder_for_extract)
+            extract_node_archive(&archive, &staging_root, &folder_for_extract, &cancellation)
         })
         .await
         .context("Node.js extraction task failed")??;
@@ -1729,14 +1751,30 @@ fn prepend_path(environment: &mut BTreeMap<String, String>, bin: &Path) -> Resul
     Ok(())
 }
 
-fn extract_node_archive(archive: &Path, destination: &Path, folder: &str) -> Result<()> {
+/// Unpacks entry by entry (what `Archive::unpack` does) so cancellation can
+/// stop it between entries; see [`extract_archive_file`].
+fn extract_node_archive(
+    archive: &Path,
+    destination: &Path,
+    folder: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let archive = File::open(archive)
         .with_context(|| format!("open Node.js archive {}", archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive);
     let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(destination)
-        .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create {}", destination.display()))?;
+    for entry in archive.entries().context("read Node.js archive")? {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "preparation cancelled while extracting"
+        );
+        entry
+            .context("read Node.js archive entry")?
+            .unpack_in(destination)
+            .with_context(|| format!("extract Node.js archive into {}", destination.display()))?;
+    }
     let extracted = destination.join(folder);
     anyhow::ensure!(
         extracted.is_dir(),
@@ -1828,8 +1866,9 @@ async fn install_grok_from_metadata(
     let entrypoint = bin.join("grok");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
+    let cancellation = crate::subprocess::preparation_cancellation();
     tokio::task::spawn_blocking(move || {
-        extract_zstd_file(&archive_for_extract, &entrypoint_for_extract)
+        extract_zstd_file(&archive_for_extract, &entrypoint_for_extract, &cancellation)
     })
     .await
     .context("Grok extraction task failed")??;
@@ -1841,16 +1880,33 @@ async fn install_grok_from_metadata(
     Ok(())
 }
 
-fn extract_zstd_file(archive: &Path, destination: &Path) -> Result<()> {
+/// Copies in chunks so cancellation lands within one chunk; see
+/// [`extract_archive_file`].
+fn extract_zstd_file(
+    archive: &Path,
+    destination: &Path,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let input =
         File::open(archive).with_context(|| format!("open Grok archive {}", archive.display()))?;
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(input))
         .map_err(|error| anyhow!("read Grok archive {}: {error}", archive.display()))?;
     let mut output = File::create(destination)
         .with_context(|| format!("create Grok executable {}", destination.display()))?;
-    std::io::copy(&mut decoder, &mut output)
-        .with_context(|| format!("extract Grok executable to {}", destination.display()))?;
-    Ok(())
+    let mut chunk = vec![0_u8; 1 << 20];
+    loop {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "preparation cancelled while extracting"
+        );
+        let count = std::io::Read::read(&mut decoder, &mut chunk)
+            .with_context(|| format!("read Grok archive {}", archive.display()))?;
+        if count == 0 {
+            return Ok(());
+        }
+        std::io::Write::write_all(&mut output, &chunk[..count])
+            .with_context(|| format!("extract Grok executable to {}", destination.display()))?;
+    }
 }
 
 fn kimi_artifact_base(environment: &BTreeMap<String, String>) -> String {
@@ -2443,7 +2499,13 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap();
         let destination = temp.path().join("opencode");
 
-        extract_archive_file(&archive, Path::new("package/bin/opencode"), &destination).unwrap();
+        extract_archive_file(
+            &archive,
+            Path::new("package/bin/opencode"),
+            &destination,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read(&destination).unwrap(),
@@ -2740,6 +2802,12 @@ mod tests {
     }
 
     fn fake_node_archive(root: &Path) -> (PathBuf, serde_json::Value) {
+        fake_node_archive_with_filler(root, 0)
+    }
+
+    /// The fake Node.js archive plus `filler` one-byte files, so extraction
+    /// takes long enough for a test to cancel it midway.
+    fn fake_node_archive_with_filler(root: &Path, filler: usize) -> (PathBuf, serde_json::Value) {
         let (key, target) = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => ("linux-x86_64", "linux-x64"),
             ("linux", "aarch64") => ("linux-aarch64", "linux-arm64"),
@@ -2783,6 +2851,15 @@ mod tests {
             header.set_cksum();
             builder
                 .append_data(&mut header, format!("{root}/bin/{name}"), std::io::empty())
+                .unwrap();
+        }
+        for index in 0..filler {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{root}/lib/filler/{index}"), &b"x"[..])
                 .unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
@@ -3155,6 +3232,67 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".install-")
         }));
+    }
+
+    // The extraction runs on a blocking thread, so the installer must await it:
+    // staging and the install lock are released only after its writer stopped.
+    #[test]
+    fn cancelling_node_extraction_stops_the_writer_before_staging_is_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, metadata) = fake_node_archive_with_filler(temp.path(), 30_000);
+        let (_server, _tools, mut environment) = fake_node_server(&archive, temp.path());
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            temp.path().join("cache").to_string_lossy().into_owned(),
+        );
+        let root = temp.path().join("node");
+        let folder = format!("node-v{NODE_VERSION}-{}", environment_target());
+        let staged = |root: &Path| {
+            std::fs::read_dir(root)
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".install-")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut cancelled_environment = environment.clone();
+        let error = run_async(async {
+            let token = tokio_util::sync::CancellationToken::new();
+            let install = crate::subprocess::with_preparation_cancellation(
+                token.clone(),
+                install_managed_node(&root, &mut cancelled_environment, &metadata),
+            );
+            tokio::pin!(install);
+            while !staged(&root)
+                .iter()
+                .any(|staging| staging.join(&folder).is_dir())
+            {
+                tokio::select! {
+                    result = &mut install => panic!("install ended before extraction began: {:?}", result.err()),
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+            token.cancel();
+            match install.await {
+                Err(error) => error,
+                Ok(_) => panic!("a cancelled install must fail"),
+            }
+        });
+        assert!(
+            format!("{error:#}").contains("cancelled while extracting"),
+            "cancellation did not land during extraction: {error:#}"
+        );
+        assert!(staged(&root).is_empty(), "staging outlived the install");
+        assert!(!root.join(&folder).exists(), "cancelled install published");
+
+        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        assert!(runtime.path().join("bin/node").is_file());
     }
 
     #[test]
