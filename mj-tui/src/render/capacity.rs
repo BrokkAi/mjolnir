@@ -90,7 +90,10 @@ pub(crate) fn capacity_table_rows(
 }
 
 /// Whether the row lists targets and every one of them is unavailable.
-fn all_listed_targets_unavailable(target_ids: &[String], dashboard: &DashboardState) -> bool {
+pub(crate) fn all_listed_targets_unavailable(
+    target_ids: &[String],
+    dashboard: &DashboardState,
+) -> bool {
     let mut listed = super::sessions::listed_capacity_targets(target_ids, dashboard).peekable();
     listed.peek().is_some() && listed.all(|id| dashboard.target_missing(id).is_some())
 }
