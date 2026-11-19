@@ -252,9 +252,8 @@ pub(crate) fn render_quotas_at(
     now: u64,
     clock: fn(i64, &str) -> String,
 ) {
-    if let Some(error) = dashboard.quota_providers.poll(&dashboard.config) {
-        dashboard.notices.set(error);
-    }
+    // Provider discovery is polled once per frame by the combined renderer,
+    // before pane sizing, so sizing and drawing use the same snapshot.
     let refresh_status = if !dashboard.quota_refreshing.is_empty() {
         format!("refreshing{}", theme::glyphs().ellipsis)
     } else {
