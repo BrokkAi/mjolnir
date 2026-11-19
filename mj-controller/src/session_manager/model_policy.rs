@@ -79,10 +79,7 @@ impl SessionModelPolicy {
         {
             return None;
         }
-        Some(format!(
-            "model {value:?} is hidden by profile {:?}'s models setting",
-            self.profile
-        ))
+        Some(self.offer.refusal(&self.profile, value))
     }
 }
 

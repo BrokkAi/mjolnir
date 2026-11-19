@@ -680,15 +680,25 @@ impl ProfileConfig {
     /// The catalogue as Mjolnir offers it under a profile's [`ModelOffer`]:
     /// the listed models outside excluded scopes, plus the profile's current
     /// model, which stays so a session never runs a model its picker hides.
-    /// An empty list with no excluded scope offers everything.
+    /// An empty list with no excluded scope offers everything. The current
+    /// model is exempt from the list but never from an excluded scope; when
+    /// that scope holds it, the first remaining choice becomes the current
+    /// model, or `None` when nothing remains.
     ///
     /// [`ModelOffer`]: crate::config::ModelOffer
     pub fn restricted_to(mut self, offer: &crate::config::ModelOffer) -> Self {
         if !offer.is_unrestricted() {
             let current = self.model.clone();
             self.models.retain(|choice| {
-                offer.allows(&choice.value) || current.as_ref() == Some(&choice.value)
+                offer.allows(&choice.value)
+                    || (!offer.excludes(&choice.value) && current.as_ref() == Some(&choice.value))
             });
+            if current
+                .as_deref()
+                .is_some_and(|model| offer.excludes(model))
+            {
+                self.model = self.models.first().map(|choice| choice.value.clone());
+            }
         }
         self
     }

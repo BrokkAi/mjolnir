@@ -1530,8 +1530,19 @@ impl ProfileCatalog {
         choices.model = default;
         // The list may have changed during the probes; apply the current one.
         let allowed = self.lock().model_offer(&identity);
+        let advertised = choices.models.len();
         choices = choices.restricted_to(&allowed);
-        choices.model = selected;
+        // A default read keeps the allowed default `restricted_to` chose; a
+        // model-specific read reports the model it selected.
+        if specific {
+            choices.model = selected;
+        }
+        if advertised > 0 && choices.models.is_empty() {
+            bail!(
+                "profile {id:?} offers no model: its `models` and `third_party_models` \
+                 settings leave none of the {advertised} the harness advertises"
+            );
+        }
         Ok(choices)
     }
 
@@ -4371,7 +4382,10 @@ mod tests {
                 .map(|choice| choice.value.clone())
                 .collect::<Vec<_>>()
         };
-        let mut config = test_config(&[("p", HarnessKind::Antigravity)]);
+        let mut config = test_config(&[
+            ("p", HarnessKind::Antigravity),
+            ("claude-first", HarnessKind::Antigravity),
+        ]);
         let key = config.profiles["p"].capabilities_key("p");
         let snapshot_models =
             |catalog: &Arc<ProfileCatalog>| match &catalog.snapshot().profiles[&key].choices {
@@ -4456,6 +4470,29 @@ mod tests {
             snapshot_models(&catalog),
             ["p-model", "m1", "m2", "m3", "gemini-3"]
         );
+
+        // A harness default in the turned-off pool is neither offered nor
+        // reported: the first allowed choice replaces it, on every exit.
+        config
+            .profiles
+            .get_mut("claude-first")
+            .unwrap()
+            .third_party_models = false;
+        catalog.sync_now(&config).await;
+        let key = config.profiles["claude-first"].capabilities_key("claude-first");
+        let mj_core::profile_capabilities::CapabilityState::Ready(snapshot) =
+            &catalog.snapshot().profiles[&key].choices
+        else {
+            panic!("not ready");
+        };
+        assert_eq!(values(snapshot), ["m1", "m2", "m3", "gemini-3"]);
+        assert_eq!(snapshot.model.as_deref(), Some("m1"));
+        let read = catalog
+            .capabilities(&["claude-first".into()])
+            .await
+            .unwrap();
+        assert_eq!(read[0].model.as_deref(), Some("m1"));
+        assert_eq!(values(&read[0]), ["m1", "m2", "m3", "gemini-3"]);
     }
     // Hard-won: 9d1f70d2b: refreshing Muse retired an admission waiter.
     #[tokio::test]

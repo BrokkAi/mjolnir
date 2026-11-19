@@ -78,10 +78,27 @@ impl ModelOffer {
     /// Whether `model` is offered, before the current-model exemption.
     pub fn allows(&self, model: &str) -> bool {
         (self.models.is_empty() || self.models.iter().any(|listed| listed == model))
-            && !self
-                .excluded_scopes
-                .iter()
-                .any(|scope| model_matches_scope(model, scope))
+            && !self.excludes(model)
+    }
+
+    /// Whether `model` is in a scope the profile turned off. No exemption
+    /// applies: the profile never offers or starts such a model.
+    pub fn excludes(&self, model: &str) -> bool {
+        self.excluded_scopes
+            .iter()
+            .any(|scope| model_matches_scope(model, scope))
+    }
+
+    /// Why a profile named `profile` refuses `model`, naming the setting.
+    pub fn refusal(&self, profile: &str, model: &str) -> String {
+        if self.excludes(model) {
+            format!(
+                "model {model:?} uses profile {profile:?}'s third-party quota pool, which \
+                 `third_party_models = false` turns off"
+            )
+        } else {
+            format!("model {model:?} is hidden by profile {profile:?}'s models setting")
+        }
     }
 }
 
