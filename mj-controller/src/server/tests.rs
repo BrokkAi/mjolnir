@@ -974,47 +974,35 @@ fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
 }
 
 // Hard-won: bbe5c1a01: retained questions intercepted live forms on the compatibility endpoint.
-// Hard-won: eb00602a0: matching legacy form ReadThrough selectors were rejected.
 #[tokio::test]
-async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
-        pending_elicitation_snapshot(snapshot);
-        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::NeedsInput;
-    });
-    let cookie = login_cookie(&app).await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get(
-                "/api/sessions/session-1/notification-message?holder=session-1&requests=elicitation-1",
-            )
-                .header(COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: serde_json::Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(
-        body["text"],
-        "Which CI architecture should the workflow use?"
-    );
-
-    // A card that captured another holder or request gets a conflict, never text.
-    for stale in [
-        "holder=other-session&requests=elicitation-1",
-        "holder=session-1&requests=elicitation-0",
-        "holder=session-1&requests=elicitation-1&question=agent:9",
-        "holder=session-1",
+async fn notification_message_reads_only_the_current_form_identity() {
+    for (holder, request_id) in [
+        ("session-1", "elicitation-1"),
+        ("session-2", "child-approval"),
+        ("session-1", "review-verdict.reviewer.findings"),
     ] {
+        let (app, ..) = app_with_snapshot(|snapshot| {
+            snapshot.sessions[0].notification_card =
+                Some(mj_client::runtime_feed::NotificationCard {
+                    since_ms: 0,
+                    badge: mj_core::attention::NotificationKind::NeedsInput,
+                    entries: vec![],
+                    dismissal: None,
+                    holder: Some(holder.into()),
+                    form: Some(mj_client::runtime_feed::CardForm {
+                        raised_at_ms: 42,
+                        request_id: request_id.into(),
+                        message: "Approve this action?".into(),
+                    }),
+                });
+        });
+        let cookie = login_cookie(&app).await;
+        let query = format!("holder={holder}&request_id={request_id}&raised_at_ms=42");
         let response = app
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{stale}"
+                    "/api/sessions/session-1/notification-message?{query}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -1022,106 +1010,24 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+        assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(body["code"], "notification_changed");
-    }
-
-    let missing = app
-        .oneshot(
-            Request::get(
-                "/api/sessions/unknown-session/notification-message?holder=unknown-session",
-            )
-            .header(COOKIE, cookie)
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    // A retained stack question never intercepts a live form, including native
-    // forms whose requests are not in pending_elicitations.
-    for (holder, request, unread_reply) in [
-        ("session-1", "elicitation-1", false),
-        ("session-2", "child-approval", false),
-        ("session-1", "native.session.1.approval", false),
-        ("session-1", "elicitation-1", true),
-    ] {
-        let (app, ..) = app_with_snapshot(|snapshot| {
-            pending_elicitation_snapshot(snapshot);
-            let session = &mut snapshot.sessions[0];
-            session.notification_card = Some(mj_client::runtime_feed::NotificationCard {
-                since_ms: 0,
-                badge: mj_core::attention::NotificationKind::NeedsInput,
-                entries: vec![mj_core::attention::NotificationStackEntry {
-                    completed_at_ms: 0,
-                    completed_ordinal: 3,
-                    kind: if unread_reply {
-                        mj_core::attention::NotificationKind::Important
-                    } else {
-                        mj_core::attention::NotificationKind::NeedsInput
-                    },
-                    message: mj_core::attention::EntryMessage::Found("agent:retained".into()),
-                }],
-                dismissal: Some(if unread_reply {
-                    mj_core::attention::NotificationDismissal::ReadThrough(3)
-                } else {
-                    mj_core::attention::NotificationDismissal::Stack { revision: 3 }
-                }),
-                holder: Some(holder.into()),
-                form: Some(mj_client::runtime_feed::CardForm {
-                    raised_at_ms: 0,
-                    request_id: request.into(),
-                    message: "Approve this action?".into(),
-                }),
-            });
-        });
-        let cookie = login_cookie(&app).await;
-        let mut matching = vec![
-            String::new(),
-            format!("?holder={holder}&requests={request}"),
-        ];
-        if unread_reply {
-            matching.push(format!("?holder={holder}&requests={request}&through=3"));
-        }
-        for query in matching {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::get(format!(
-                        "/api/sessions/session-1/notification-message{query}"
-                    ))
-                    .header(COOKIE, &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                StatusCode::OK,
-                "{holder} {request} {query}"
-            );
-            let body: serde_json::Value =
-                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                    .unwrap();
-            assert_eq!(
-                body,
-                serde_json::json!({"session_id": holder, "text": "Approve this action?"})
-            );
-        }
-        for query in [
-            format!("?holder={holder}&requests=stale"),
-            format!("?holder=wrong&requests={request}"),
-            format!("?holder={holder}&requests={request}&through=4"),
+        assert_eq!(
+            body,
+            serde_json::json!({"session_id": holder, "text": "Approve this action?"})
+        );
+        for stale in [
+            format!("holder=wrong&request_id={request_id}&raised_at_ms=42"),
+            format!("holder={holder}&request_id=stale&raised_at_ms=42"),
+            format!("holder={holder}&request_id={request_id}&raised_at_ms=41"),
         ] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::get(format!(
-                        "/api/sessions/session-1/notification-message{query}"
+                        "/api/sessions/session-1/notification-message?{stale}"
                     ))
                     .header(COOKIE, &cookie)
                     .body(Body::empty())
@@ -1129,8 +1035,20 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+        let missing = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/unknown-session/notification-message?{query}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 }
 
@@ -5709,67 +5627,7 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
     );
 }
 
-// A worker without open requests (relay protocol before 64) has no question
-// target, so its question is the last thing the agent wrote.
-#[test]
-fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message() {
-    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
-    let facts = |supports_open_request| NotificationMessageFacts {
-        pending_request: None,
-        review_activity: None,
-        question_message: None,
-        supports_open_request,
-    };
-    let read = |facts| {
-        super::handlers::notification_message_text(
-            NotificationKind::NeedsInput,
-            &facts,
-            |_| unreachable!("no question target"),
-            || Ok(Some("the agent's last words".to_owned())),
-        )
-        .unwrap()
-    };
-    assert_eq!(
-        read(facts(false)).as_deref(),
-        Some("the agent's last words")
-    );
-    assert_eq!(read(facts(true)), None);
-}
-
-// An `!` card names its message by ReadThrough ordinal: a different or missing
-// boundary is a conflict, never the latest reply.
-#[tokio::test]
-async fn notification_message_for_an_important_card_requires_its_read_through_boundary() {
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
-        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::Important;
-        snapshot.sessions[0].notification_dismissal =
-            Some(mj_core::attention::NotificationDismissal::ReadThrough(3));
-    });
-    let cookie = login_cookie(&app).await;
-    for stale in [
-        "holder=session-1&through=4",
-        "holder=session-1",
-        "holder=session-1&through=3&requests=x",
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{stale}"
-                ))
-                .header(COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
-    }
-}
-
 // Hard-won: 8dd7f6384: a turn without text used a preceding turn's reply.
-// Hard-won: 4c2c5b4f8: selector-free notification text exposed a newer held question.
-// Hard-won: b30132512: matching legacy selectors were rejected for published cards.
 #[tokio::test]
 async fn notification_message_reads_only_entries_on_the_current_card() {
     use mj_client::runtime_feed::NotificationCard;
@@ -5875,6 +5733,12 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 },
+                NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal: 11,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::Locating,
+                },
             ],
             dismissal: None,
             holder: None,
@@ -5886,6 +5750,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         ("message_id=agent%3A1", Some(Some("exact"))),
         ("through=5", Some(Some("bounded"))),
         ("through=9", Some(None)),
+        ("through=11", Some(None)),
         ("message_id=agent%3A7", None),
         ("through=2", None),
         ("through=8", None),
@@ -5916,17 +5781,19 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         }
     }
 
-    // Hard-won: b30132512: an older viewer retried a valid legacy identity forever.
-    for (query, status) in [
-        ("holder=session-1&through=9", StatusCode::OK),
-        ("holder=session-1&through=5", StatusCode::CONFLICT),
-        ("holder=wrong&through=9", StatusCode::CONFLICT),
+    for invalid in [
+        "",
+        "holder=session-1&requests=elicitation-1",
+        "holder=session-1&question=agent:1",
+        "holder=session-1&through=9",
+        "holder=session-1&request_id=elicitation-1",
+        "message_id=agent:1&through=5",
     ] {
         let response = app
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{query}"
+                    "/api/sessions/session-1/notification-message?{invalid}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -5934,13 +5801,11 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), status, "{query}");
-        if status == StatusCode::OK {
-            let body: serde_json::Value =
-                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                    .unwrap();
-            assert_eq!(body["text"], serde_json::Value::Null);
-        }
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "explicit current item selectors are required: {invalid}"
+        );
     }
 
     let response = app
@@ -5959,83 +5824,4 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         body["sessions"][0]["notification_card"]["entries"][0]["message"]["found"],
         "agent:1"
     );
-    // A is shown while the newer worker request B (agent:7) remains held.
-    // Even the selector-free compatibility route must read the card's newest ?.
-    for message in [
-        EntryMessage::Found("agent:4".into()),
-        EntryMessage::None,
-        EntryMessage::Locating,
-    ] {
-        let expected_text = if message == EntryMessage::Locating {
-            None
-        } else {
-            Some("bounded")
-        };
-        let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
-            let session = &mut snapshot.sessions[0];
-            session.attention = mj_core::attention::SessionAttention::NeedsInput;
-            session.question_message = Some("agent:7".into());
-            session.supports_open_request = true;
-            session.notification_card = Some(NotificationCard {
-                since_ms: 0,
-                badge: NotificationKind::NeedsInput,
-                entries: vec![
-                    NotificationStackEntry {
-                        completed_at_ms: 0,
-                        completed_ordinal: 2,
-                        kind: NotificationKind::NeedsInput,
-                        message: EntryMessage::Found("agent:1".into()),
-                    },
-                    NotificationStackEntry {
-                        completed_at_ms: 0,
-                        completed_ordinal: 5,
-                        kind: NotificationKind::NeedsInput,
-                        message: message.clone(),
-                    },
-                    NotificationStackEntry {
-                        completed_at_ms: 0,
-                        completed_ordinal: 8,
-                        kind: NotificationKind::Important,
-                        message: EntryMessage::Found("agent:7".into()),
-                    },
-                ],
-                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 10 }),
-                holder: None,
-                form: None,
-            });
-        });
-        let cookie = login_cookie(&app).await;
-        let response = app
-            .clone()
-            .oneshot(
-                Request::get("/api/sessions/session-1/notification-message")
-                    .header(COOKIE, &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert_eq!(body["text"], serde_json::json!(expected_text));
-        let question = match &message {
-            EntryMessage::Found(id) => id.as_str(),
-            _ => "",
-        };
-        let response = app.clone().oneshot(Request::get(format!("/api/sessions/session-1/notification-message?holder=session-1&question={question}")).header(COOKIE, &cookie).body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "matching legacy question selector"
-        );
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert_eq!(body["text"], serde_json::json!(expected_text));
-        let response = app.oneshot(Request::get("/api/sessions/session-1/notification-message?holder=session-1&question=agent%3A7")
-            .header(COOKIE, &cookie).body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-    }
 }

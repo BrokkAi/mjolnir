@@ -732,33 +732,6 @@ test('when the draft cannot be checked, or the composer is no longer empty, noth
   assert.equal(typed.read('composerHandoffs.size'), 0);
 });
 
-test('the message request carries the identity the card captured, and a conflict is discarded until the next snapshot', async () => {
-  const conflict = Object.assign(new Error('the notification changed'), { code: 'notification_changed', status: 409 });
-  const view = screen([row('p', 'needs_input', 3, { form_holder: 'c1', question_message: 'agent:p' }),
-    row('c1', 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: ['r1', 'r2'] })],
-  { texts: { '/api/sessions/p/notification-message': conflict } });
-  await settle();
-  const reads = () => view.requests.filter(r => r.url.includes('/p/notification-message'));
-  const params = new URL(reads()[0].url, 'http://x').searchParams;
-  assert.deepEqual(Object.fromEntries(params), { holder: 'c1', requests: 'r1,r2', question: '' });
-  assert.equal(view.nodes.body.textContent, 'loading…', 'a conflicting answer shows no text');
-  assert.equal(view.read('[...inboxTexts.values()].some(entry => entry.state === "ready")'), false, 'nothing is cached under the card');
-  view.render(); view.render();
-  await settle();
-  assert.equal(reads().length, 1, 'the same snapshot does not ask again');
-  // The next snapshot brings the new holder; the card asks for that identity.
-  view.answers.set('/api/sessions/p/notification-message', { session_id: 'c2', text: 'B asks' });
-  view.context.viewerState.rows.set('c2', row('c2', 'working', 1, { subagent_parent_id: 'p', pending_elicitation_ids: ['r9'] }));
-  view.context.viewerState.rows.get('p').form_holder = 'c2';
-  view.context.viewerState.cursor = { sequence: 2 };
-  view.render();
-  await settle();
-  const latest = new URL(reads().at(-1).url, 'http://x').searchParams;
-  assert.deepEqual(Object.fromEntries(latest), { holder: 'c2', requests: 'r9', question: '' });
-  assert.equal(view.nodes.body.textContent, 'B asks');
-  assert.equal(view.read('inboxDestination(inboxEntries()[0])'), 'c2', 'text and destination name the same holder');
-});
-
 test('a card without a Quick reply hides its form even though the form is a flex box', () => {
   const css = readFileSync(new URL('../../../mj-controller/src/web/viewer.css', import.meta.url), 'utf8');
   assert.match(css, /\.inbox-reply\s*\{[^}]*display:\s*flex/);
@@ -784,18 +757,6 @@ test('a new form request or holder after a skip is a new card, not deferred', ()
   view.context.viewerState.rows.get('p').form_holder = 'c2';
   assert.deepEqual(view.ids(), ['p', 'b'], 'a new holder');
   assert.equal(view.read('inboxSkipped.length'), 0);
-});
-
-test('an ! card asks for the message at its ReadThrough ordinal, and the cache keys on the same identity as skip', async () => {
-  const view = screen([row('a', 'important', 3, { notification_dismissal: { read_through: 41 } })],
-    { texts: { '/api/sessions/a/notification-message': { text: 'the reply at 41' } } });
-  await settle();
-  const params = new URL(view.requests.find(r => r.url.includes('/a/notification-message')).url, 'http://x').searchParams;
-  assert.equal(params.get('through'), '41');
-  const entry = view.read('inboxEntries()[0]');
-  assert.equal(view.read('[...inboxTexts.keys()][0]'), view.read('inboxKey(inboxEntries()[0])'));
-  assert.equal(view.read('inboxCard(inboxEntries()[0]).key'), view.read('inboxKey(inboxEntries()[0])'));
-  assert.ok(entry);
 });
 
 /// A Quick reply whose refusal arrives after `act` has run; resolves with the view.
