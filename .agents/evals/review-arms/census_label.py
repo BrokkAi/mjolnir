@@ -144,8 +144,10 @@ def exclude_families(items, check_clones):
 
 
 def labeller_item(row, split):
-    return {**{key: row.get(key) for key in INPUTS}, "census": split,
-            "fix_test": row.get("fix_test") or row.get("regression_test") or row.get("marker")}
+    fix_test = row.get("fix_test") or row.get("regression_test") or row.get("marker")
+    if row["repo"] == "bifrost-dev" and split == "development":
+        fix_test = row.get("regression_test_pin") or fix_test
+    return {**{key: row.get(key) for key in INPUTS}, "census": split, "fix_test": fix_test}
 
 
 def input_documents():
@@ -180,9 +182,9 @@ def read_current_labels(path, expected_hashes):
     return current, stale
 
 
-def git(repo, *args):
+def git(repo, *args, input=None):
     return subprocess.check_output(["git", "--no-replace-objects", "-C", str(repo), *args],
-                                   stderr=subprocess.PIPE)
+                                   input=input, stderr=subprocess.PIPE)
 
 
 @cache
@@ -701,15 +703,25 @@ def checkout(args, repo, revision, unit):
     if git(source, "rev-parse", "--is-shallow-repository").strip() != b"false":
         raise ValueError(f"{source}: full Git history is required")
 
-    # Give each launch its own checkout, config and refs. Copy objects so
-    # this also works across the home and scratch filesystems.
-    work = unit / "repo"
+    # Keep the object store and linked checkout private to this batch. A
+    # linked worktree makes mj attach directly instead of creating a branch.
+    batch_repo = unit / "repo"
+    batch_repo.mkdir()
+    store, work = batch_repo / "store.git", batch_repo / "worktree"
     try:
-        git(source, "clone", "--local", "--no-hardlinks", "--no-checkout", str(source), str(work))
+        git(source, "clone", "--bare", "--local", "--no-hardlinks", str(source), str(store))
     except subprocess.CalledProcessError as error:
         raise RuntimeError(error.stderr.decode(errors="replace").strip()) from error
-    git(work, "checkout", "-B", "rql-census-input", revision)
-    git(work, "remote", "remove", "origin")
+    git(store, "update-ref", "--no-deref", "HEAD", revision)
+    git(store, "remote", "remove", "origin")
+    refs = git(store, "for-each-ref", "--format=%(refname)").splitlines()
+    if refs:
+        git(store, "update-ref", "--stdin",
+            input=b"".join(b"option no-deref\ndelete " + ref + b"\n" for ref in refs))
+    git(store, "reflog", "expire", "--expire=all", "--all")
+    # Later objects may remain in the local object store. Without a ref or
+    # reflog naming them, labellers would need their hashes to reach them.
+    git(store, "worktree", "add", "--detach", str(work), revision)
     return work
 
 
@@ -761,7 +773,10 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         raise RuntimeError(f"{repo}: checkout HEAD {head} differs from requested revision {revision}")
     for item in batch:
         for field in ("base_commit", "intro_commit", "fix_commit"):
-            git(work, "cat-file", "-e", item[field] + "^{commit}")
+            try:
+                git(work, "merge-base", "--is-ancestor", item[field], head)
+            except subprocess.CalledProcessError as error:
+                raise ValueError(f"{repo}/{item['id']}: {field} {item[field]} is not reachable from {head}") from error
     inputs = unit / "inputs"
     inputs.mkdir()
     for filename, content in documents.items():
@@ -775,7 +790,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
         ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
     sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
-                    "--project-directory", work, "--branch", "rql-census-input",
+                    "--project-directory", work,
                     "--profile", profile, "--effort", "high",
                     "--review", "off", "--no-project-memory", "--no-github-events",
                     "--no-github-credentials", "--subagents", "none", "--title", title,
@@ -863,7 +878,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
                 raise
     # Only the completed, suspended batch reaches here. Keep the evidence
     # beside the checkout, and release the full clone.
-    shutil.rmtree(work)
+    shutil.rmtree(unit / "repo")
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
