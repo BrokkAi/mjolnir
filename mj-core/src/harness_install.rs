@@ -1549,27 +1549,23 @@ fn node_distribution_url(environment: &BTreeMap<String, String>, file: &str) -> 
             (!value.is_empty()).then_some((name, value.as_str()))
         });
     let (setting, base) = configured.unwrap_or(("the default mirror", DEFAULT_NODE_DIST_URL));
-    // Errors name the setting and at most the mirror's host and path: a
-    // rejected URL can hold credentials, and these errors reach the daemon log.
+    // Errors name the setting and the rule, never any part of the URL: a
+    // rejected value can hold credentials anywhere (a missing "https://" turns
+    // "user:secret@host" into a scheme and path), and these errors reach the
+    // daemon log.
     let parsed = url::Url::parse(base).map_err(|error| {
         anyhow!("{setting} is not a valid Node.js download mirror URL: {error}")
     })?;
-    let shown = format!(
-        "{}://{}{}",
-        parsed.scheme(),
-        parsed.host_str().unwrap_or(""),
-        parsed.path()
-    );
     anyhow::ensure!(
         artifact_url_is_allowed(&parsed),
-        "{setting} must name an HTTPS Node.js download mirror: {shown}"
+        "{setting} must name an HTTPS Node.js download mirror"
     );
     anyhow::ensure!(
         parsed.username().is_empty()
             && parsed.password().is_none()
             && parsed.query().is_none()
             && parsed.fragment().is_none(),
-        "{setting} must be a plain HTTPS base URL without credentials, a query, or a fragment: {shown}"
+        "{setting} must be a plain HTTPS base URL without credentials, a query, or a fragment"
     );
     Ok(format!(
         "{}/v{NODE_VERSION}/{file}",
@@ -2710,6 +2706,7 @@ mod tests {
             "https://mirror.example/node?token=secret",
             "http://user:secret@mirror.example/node",
             "not a url secret",
+            "user:secret@mirror.example/node",
         ] {
             let environment = BTreeMap::from([("NODEJS_ORG_MIRROR".into(), mirror.into())]);
             let error = node_distribution_url(&environment, &file)
