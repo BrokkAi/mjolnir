@@ -935,17 +935,32 @@ fn snapshot_registered_submodules(
         checkout,
         &["ls-files", "--unmerged", "--", ".gitmodules"],
     )?;
-    let source = if unmerged.is_empty() {
-        if !checkout.join(".gitmodules").exists() {
-            return Ok(Default::default());
-        }
-        ["--file", ".gitmodules"]
-    } else {
-        // Inventory must reach the operation policy even with conflict markers.
+    let source = if !unmerged.is_empty() {
+        // Conflict markers cannot be parsed; the operation policy needs the
+        // committed registration before managed abort/raw committed-only cuts.
         if submodule_git(runner, checkout, &["ls-tree", "HEAD", "--", ".gitmodules"])?.is_empty() {
             return Ok(Default::default());
         }
         ["--blob", "HEAD:.gitmodules"]
+    } else if checkout.join(".gitmodules").exists() {
+        ["--file", ".gitmodules"]
+    } else {
+        // Match Git's registration fallback when working-tree deletion leaves
+        // the index or HEAD version available, including staged deletions.
+        let indexed = submodule_git(
+            runner,
+            checkout,
+            &["ls-files", "--stage", "-z", "--", ".gitmodules"],
+        )?;
+        if !indexed.is_empty() {
+            ["--blob", ":.gitmodules"]
+        } else if !submodule_git(runner, checkout, &["ls-tree", "HEAD", "--", ".gitmodules"])?
+            .is_empty()
+        {
+            ["--blob", "HEAD:.gitmodules"]
+        } else {
+            return Ok(Default::default());
+        }
     };
     let output = runner.run(
         checkout,
