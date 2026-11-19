@@ -40,7 +40,15 @@ The RQL reference is `rql-documented-steps.md`, next to this file. It lists ever
      - `other`: describe it.
    - `rql.class`: exactly one of:
      - `documented`: a query built only from forms in the reference returns a row whose fields state this fact: for example a `field-write-value` row giving the value written, a `call-input` row giving the argument passed, or a `callers` row when the fact is who calls a symbol. A row that only points at code a reader must open to learn the fact doesn't state it. Write the query in `rql.query` in RQL form: a start form (a structural pattern or a source such as `occurrences`) followed by the steps in order. Use only forms the reference documents, and make each step's input match the rows the form inside it produces. Count a step as documented even when the reference doesn't establish its Rust support; whether today's Bifrost answers is measured separately.
-     - `missing`: no documented query returns a row that states the fact, but one new step would. Give `rql.missing_step` as `{name, input, output, semantics}`, where semantics says what the step starts from, which constructs it crosses (calls, assignments, fields, returns, control flow), and to what depth, and what its rows state. Also write, in `rql.query`, the query you'd use with that step added.
+     - `missing`: no documented query returns a row that states the fact, but one new step would. Give `rql.missing_step` as `{name, kind, input, output, semantics}`, where semantics says what the step starts from, which constructs it crosses (calls, assignments, fields, returns, control flow), and to what depth, and what its rows state. `kind` is the nearest of these, chosen by what the step's rows state:
+       - `value_flow`: where a value comes from or goes, across assignments, arguments, returns and fields.
+       - `field_writes`: every write to a field, with the value written.
+       - `call_arguments`: the value passed for a parameter at each call site.
+       - `guarded_path`: whether, or under which conditions or in which order, execution reaches a site across calls.
+       - `state_lifecycle`: how shared, cached or persisted state is created, changed, saved and reloaded across calls.
+       - `keyed_matching`: how entries are keyed, looked up or matched, in collections, maps or protocol messages.
+       - `contract`: what a callee guarantees or requires (its errors, panics or invariants), as its callers rely on it.
+       - `other`: none of these; say why in `semantics`. Also write, in `rql.query`, the query you'd use with that step added.
      - `not_expressible`: no single query step could state it. Set `rql.reason` to `intent` (a product rule, requirement or convention), `external` (how a third-party library, OS, protocol or service behaves) or `other` (describe it).
    - `rql.locator_query`: a query built only from documented forms whose rows point at the code site where a reader could read this fact, for example `callees` of a touched function, or `enclosing-decl` of a call. Give it for every fact with `in_diff: false` when one exists, whatever the class, and null otherwise. It records what documented RQL can point a reader at, even when it can't state the fact.
 

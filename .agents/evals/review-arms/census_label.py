@@ -21,6 +21,9 @@ from label_facts import HERE, batches, indexed, save
 CENSUS = HERE / "brief/rql-census"
 LABELS = CENSUS / "labels"
 RUST = Path("/mnt/optane/tmp/rust10")
+# Missing-step kinds from label-SPEC.md; the menu ranks these.
+MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
+                 "keyed_matching", "contract", "other")
 ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
 INPUTS = ("id", "repo", "intro_commit", "base_commit", "fix_commit", "defect", "trigger", "location")
 
@@ -484,9 +487,11 @@ def validate_fact(fact, split, where, errors, query_checks, allowed):
             errors.extend(f"{where}: {problem}" for problem in problems)
             if not problems:
                 query_checks.append({"fact": where, "status": status})
-    elif fields(step, "name input output semantics", f"{where} missing_step", errors):
+    elif fields(step, "name kind input output semantics", f"{where} missing_step", errors):
         if any(not string(step[key]) for key in ("name", "input", "output", "semantics")):
             errors.append(f"{where}: missing_step fields must be nonempty strings")
+        elif step["kind"] not in MISSING_KINDS:
+            errors.append(f"{where}: missing_step kind must be one of {', '.join(MISSING_KINDS)}")
         else:
             name = step["name"].strip()
             spellings = (name, name.replace("_", "-"), name.replace("-", "_"))
