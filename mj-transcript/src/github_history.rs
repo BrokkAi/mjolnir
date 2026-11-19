@@ -453,7 +453,9 @@ pub struct HistoryScanner {
     live: Vec<Candidate>,
     sets: IdSets,
     /// Identifiers of windows that can still receive hits.
-    building: Vec<(u32, Vec<u32>)>,
+    /// Windows still taking hits, sorted by start. Every window closes at its
+    /// start plus the same reach, so the oldest always closes first.
+    building: std::collections::VecDeque<(u32, Vec<u32>)>,
     /// Windows still collecting text: start and text.
     open: Vec<(u32, String)>,
     /// Positions of the stamps seen, pruned to those a future window can still need.
@@ -509,7 +511,7 @@ impl HistoryScanner {
             pending: Vec::new(),
             live: Vec::new(),
             sets: IdSets::default(),
-            building: Vec::new(),
+            building: std::collections::VecDeque::new(),
             open: Vec::new(),
             stamps: Default::default(),
             stamp_open: None,
@@ -559,14 +561,14 @@ impl HistoryScanner {
         let key = start as u32;
         match self.find(key) {
             Ok(at) => {
-                let at_building = match self.building.iter().position(|b| b.0 == key) {
-                    Some(n) => n,
-                    None => {
+                let at_building = match self.building.binary_search_by_key(&key, |b| b.0) {
+                    Ok(n) => n,
+                    Err(n) => {
                         // Cannot happen before a window closes; keep it correct anyway.
                         let set = self.sets.sets[self.live[at].ids as usize].clone();
                         self.live[at].ids = BUILDING;
-                        self.building.push((key, set));
-                        self.building.len() - 1
+                        self.building.insert(n, (key, set));
+                        n
                     }
                 };
                 let set = &mut self.building[at_building].1;
@@ -605,7 +607,9 @@ impl HistoryScanner {
                 if self.stamp_open.is_some_and(|(p, _)| p <= start) {
                     self.awaiting_stamp.push(key);
                 }
-                self.building.push((key, vec![id as u32]));
+                // A longer identifier's hit can start before a shorter one's.
+                let n = self.building.partition_point(|b| b.0 < key);
+                self.building.insert(n, (key, vec![id as u32]));
                 self.live.insert(
                     at,
                     Candidate {
@@ -634,15 +638,13 @@ impl HistoryScanner {
     fn close_windows(&mut self, all: bool) {
         let reach = self.ring_cap - 400 + 376;
         let seen = self.seen;
-        let mut i = 0;
-        while i < self.building.len() {
-            if all || self.building[i].0 as usize + reach <= seen {
-                let (start, set) = self.building.swap_remove(i);
-                if let Ok(at) = self.find(start) {
-                    self.live[at].ids = self.sets.intern(set);
-                }
-            } else {
-                i += 1;
+        while let Some(&(start, _)) = self.building.front() {
+            if !all && start as usize + reach > seen {
+                break;
+            }
+            let (start, set) = self.building.pop_front().expect("front exists");
+            if let Ok(at) = self.find(start) {
+                self.live[at].ids = self.sets.intern(set);
             }
         }
     }
