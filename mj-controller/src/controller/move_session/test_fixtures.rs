@@ -41,7 +41,10 @@ pub fn isolated_test_child(test_name: &str, marker: &str) -> bool {
     IsolatedTest::new(test_name)
         .env(marker, "1")
         .isolated_store(directory.path())
-        .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+        .env(
+            "MJ_WORKER_BINARY",
+            mj_core::worker_build::test_worker_executable(),
+        )
         .run();
     false
 }

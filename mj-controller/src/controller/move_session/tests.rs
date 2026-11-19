@@ -920,7 +920,10 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
                 .env("MJ_MOVE_QUEUE_REPLAY_CHILD", "1")
                 .env(MOVE_QUEUE_GOAL, goal)
                 .isolated_store(directory.path())
-                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+                .env(
+                    "MJ_WORKER_BINARY",
+                    mj_core::worker_build::test_worker_executable(),
+                )
                 .run();
         }
         return;
