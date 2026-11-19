@@ -169,10 +169,10 @@ impl CredentialSyncNotices {
     pub fn notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        _harness: Option<mj_core::config::HarnessKind>,
+        harness: Option<mj_core::config::HarnessKind>,
         state: &State,
     ) -> Option<String> {
-        self.leveled_notice(result, state, None)
+        self.leveled_notice(result, state, harness, None)
             .map(|notice| notice.text)
     }
 
@@ -183,6 +183,7 @@ impl CredentialSyncNotices {
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
         state: &State,
+        harness: Option<mj_core::config::HarnessKind>,
         login_verdict: Option<&LoginFailureVerdict>,
     ) -> Option<CredentialNotice> {
         let warning = |text: String| CredentialNotice {
@@ -207,7 +208,13 @@ impl CredentialSyncNotices {
                 // unknown while no new login reached the session. A stale
                 // login that was or will be replaced by the renewed one needs
                 // nothing from them, and neither does an unknown cause once a
-                // new login was pushed: the worker retries the turn by itself.
+                // new login was pushed to a worker that retries the turn by
+                // itself. Only a Claude worker that recorded the failed
+                // turn's login does (`authentication_retry_intent` in
+                // mj-worker); any other session needs the person to retry.
+                let worker_retries = harness == Some(mj_core::config::HarnessKind::Claude)
+                    && trigger.login_fingerprint.is_some()
+                    && result.pushed_to(session_id);
                 let conclusion = match login_verdict {
                     Some(LoginFailureVerdict::Refused) => format!(
                         "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`."
@@ -231,9 +238,7 @@ impl CredentialSyncNotices {
                         );
                         return None;
                     }
-                    Some(LoginFailureVerdict::Unrefused { reason })
-                        if result.pushed_to(session_id) =>
-                    {
+                    Some(LoginFailureVerdict::Unrefused { reason }) if worker_retries => {
                         tracing::info!(
                             profile_id = %profile,
                             session_id = %session_id,

@@ -2310,7 +2310,7 @@ fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
         registry.accept(&result.profile_id, result.trigger.as_ref().unwrap());
         let verdict = registry.conclude(result, Some(&profile));
         CredentialSyncNotices::default()
-            .leveled_notice(result, &State::default(), verdict.as_ref())
+            .leveled_notice(result, &State::default(), Some(harness), verdict.as_ref())
             .map(|notice| notice.text)
     };
     let claude = notice(&result, HarnessKind::Claude).unwrap();
@@ -2345,6 +2345,18 @@ fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
     let mut delivered = unidentified.clone();
     delivered.outcomes[0].outcome = Ok(vec![mj_core::credentials::CredentialSyncAction::Pushed]);
     assert_eq!(notice(&delivered, HarnessKind::Claude), None);
+
+    // A worker that cannot retry by itself still needs the person: Codex has
+    // no authentication retry, and a Claude turn that recorded no login
+    // fingerprint gives the worker nothing to compare the new login with.
+    let codex_delivered = notice(&delivered, HarnessKind::Codex).unwrap();
+    assert!(
+        codex_delivered.contains("was not established"),
+        "{codex_delivered}"
+    );
+    let mut unfingerprinted = delivered.clone();
+    unfingerprinted.trigger.as_mut().unwrap().login_fingerprint = None;
+    assert!(notice(&unfingerprinted, HarnessKind::Claude).is_some());
 
     // A failed check cannot establish that signing in again will help.
     let failed = CredentialSyncResult {
@@ -2409,7 +2421,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         partial: false,
     };
     let leveled = CredentialSyncNotices::default()
-        .leveled_notice(&result, &State::default(), None)
+        .leveled_notice(&result, &State::default(), None, None)
         .unwrap();
     assert!(!leveled.routine, "a failed sync stays a warning");
     let notice = leveled.text;
@@ -3186,6 +3198,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             .leveled_notice(
                 result,
                 &state,
+                Some(mj_core::config::HarnessKind::Claude),
                 Some(&mj_core::credentials::LoginFailureVerdict::Refused),
             )
             .unwrap()
