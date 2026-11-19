@@ -786,9 +786,17 @@ fn validate_action_against(
                 })?;
             if !option.choices.iter().any(|choice| choice.value == *value) {
                 return Err(ApiError::bad_request(if key == "model" {
+                    // Antigravity also hides its third-party pool's models.
+                    let antigravity =
+                        session.harness_kind == mj_core::config::HarnessKind::Antigravity.id();
                     format!(
-                        "this agent does not offer that model; check profile {:?}'s models setting",
-                        session.profile_id
+                        "this agent does not offer that model; check profile {:?}'s {}",
+                        session.profile_id,
+                        if antigravity {
+                            "models and third_party_models settings"
+                        } else {
+                            "models setting"
+                        }
                     )
                 } else {
                     "this agent does not offer that value for that setting".to_owned()

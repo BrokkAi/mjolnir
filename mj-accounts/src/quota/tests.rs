@@ -20,6 +20,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
     )
     .unwrap();
     HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),

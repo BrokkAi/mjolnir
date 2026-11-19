@@ -145,6 +145,7 @@ mod tests {
 
     fn profile(kind: HarnessKind, home: &std::path::Path) -> HarnessProfile {
         HarnessProfile {
+            third_party_models: true,
             enabled: true,
             kind,
             home: home.to_path_buf(),
