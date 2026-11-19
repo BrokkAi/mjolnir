@@ -2527,7 +2527,7 @@ fn validate_archive_relative_path(path: &Path) -> Result<()> {
 /// archive path rules, it refuses a `.git` component in any case, as Git does
 /// for every path it tracks: a hook written into the Git directory would run
 /// on the restored clone's next Git command.
-fn validate_worktree_relative_path(path: &Path) -> Result<()> {
+pub(crate) fn validate_worktree_relative_path(path: &Path) -> Result<()> {
     validate_archive_relative_path(path)?;
     ensure!(
         !path

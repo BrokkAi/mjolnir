@@ -442,6 +442,49 @@ impl GitCommandRunner for CaptureGit<'_> {
         ];
         arguments.extend(command.arguments);
         command.arguments = arguments;
+        // SystemGit's noninteractive SSH default must not hide the source's
+        // identity/proxy command. Resolve it through the same runner so target
+        // and worktree configuration, including includes, retain precedence.
+        if std::env::var_os("GIT_SSH_COMMAND").is_none()
+            && !command
+                .env
+                .iter()
+                .any(|(name, _)| name == "GIT_SSH_COMMAND")
+        {
+            let configured = self.inner.run(
+                repository,
+                &GitCommand {
+                    arguments: [
+                        "-c",
+                        "gc.auto=0",
+                        "-c",
+                        "maintenance.auto=false",
+                        "config",
+                        "--get",
+                        "core.sshCommand",
+                    ]
+                    .map(OsString::from)
+                    .to_vec(),
+                    env: command.env.clone(),
+                    ..Default::default()
+                },
+            )?;
+            ensure!(
+                configured.status == 0 || configured.status == 1,
+                "{}",
+                git_failure("read source SSH command", &configured)
+            );
+            if configured.status == 0 {
+                let value = configured
+                    .stdout
+                    .strip_suffix(b"\n")
+                    .unwrap_or(&configured.stdout);
+                command.env.push((
+                    "GIT_SSH_COMMAND".into(),
+                    mj_core::path_input::from_git_bytes(value)?.into_os_string(),
+                ));
+            }
+        }
         // Inspection must not refresh or lock a user's real index.
         command.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
         self.inner.run(repository, &command)
@@ -557,8 +600,9 @@ fn read_all_refs(
         let name = fields.next().context("missing Git ref name")?;
         let oid = fields.next().context("missing Git ref object")?;
         let symbolic = fields.next().context("missing Git symbolic ref field")?;
-        if symbolic.is_empty()
-            && (local_snapshot_ref(name) || name.starts_with("refs/remotes/origin/"))
+        // Keep local symbolic aliases as ordinary refs at their resolved OID.
+        if local_snapshot_ref(name)
+            || (symbolic.is_empty() && name.starts_with("refs/remotes/origin/"))
         {
             refs.insert(name.to_owned(), oid.to_owned());
         }
@@ -1048,6 +1092,13 @@ fn saved_head(
                     });
                 }
             }
+            Some(GitOperationKind::Am) => {
+                let commit = git_text(runner, checkout, ["rev-parse", "ORIG_HEAD"])?;
+                return Ok(match read_head(runner, checkout)? {
+                    SnapshotHead::Branch { name, .. } => SnapshotHead::Branch { name, commit },
+                    SnapshotHead::Detached(_) => SnapshotHead::Detached(commit),
+                });
+            }
             Some(GitOperationKind::Bisect) => {
                 let start = fs::read_to_string(git_path(runner, checkout, "BISECT_START")?)?;
                 let start = start.trim();
@@ -1486,7 +1537,7 @@ pub(crate) fn resolve_submodule_url(
         return absolute_config_url(checkout, url);
     }
     let base = config_values(runner, checkout, "remote.origin.url")?;
-    match base.first().map(String::as_str).or(origin_override) {
+    match origin_override.or_else(|| base.first().map(String::as_str)) {
         Some(base) => relative_submodule_url(base, url, checkout),
         None => resolve_remote_path(checkout, url),
     }
@@ -3397,6 +3448,16 @@ fn workspace_inventory_scoped(
             worktrees: Vec::new(),
         })
     }
+    // Restore shares the primary checkout's anchored origin with its linked
+    // worktrees, even when their source config contains a relative URL.
+    let primary_origin = config_values(runner, checkout, "remote.origin.url")?;
+    let restore_origin = primary_origin
+        .first()
+        .map(String::as_str)
+        .or(origin_override)
+        .map(|origin| absolute_config_url(checkout, origin))
+        .transpose()?;
+    let origin_override = restore_origin.as_deref();
     let nested = discover_linked_worktrees(runner, checkout)?;
     let paths: Vec<_> = nested.iter().map(|tree| tree.relative.clone()).collect();
     let raw = matches!(ownership, CheckoutOwnership::Raw { .. });
@@ -3590,6 +3651,7 @@ fn restore_submodules(
         .map(|entry| &entry.path)
         .chain(gitlinks.into_iter().flatten().map(|entry| &entry.path))
     {
+        crate::archive::validate_worktree_relative_path(path)?;
         ensure!(
             !path.as_os_str().is_empty()
                 && path
@@ -4203,6 +4265,28 @@ pub fn restore_workspace_snapshot(
     destination: &Path,
     base: &RestoreBase,
 ) -> Result<()> {
+    // Validate every persisted working-tree path before creating or changing
+    // any repository, including paths below Git administration directories.
+    for path in snapshot
+        .initialized_submodules
+        .iter()
+        .map(|module| &module.path)
+        .chain(snapshot.index_gitlinks.iter().map(|link| &link.path))
+        .chain(snapshot.worktrees.iter().map(|tree| &tree.relative_path))
+        .chain(snapshot.worktrees.iter().flat_map(|tree| {
+            tree.initialized_submodules
+                .iter()
+                .map(|module| &module.path)
+        }))
+        .chain(
+            snapshot
+                .worktrees
+                .iter()
+                .flat_map(|tree| tree.index_gitlinks.iter().map(|link| &link.path)),
+        )
+    {
+        crate::archive::validate_worktree_relative_path(path)?;
+    }
     let destination = std::path::absolute(destination)?;
     let destination = destination.as_path();
     let allow_origin_fetch = match base {
@@ -10932,5 +11016,195 @@ mod tests {
         )
         .unwrap();
         git(&recovered.join("sub"), &["cat-file", "-e", &ancestor]);
+    }
+    // Hard-won: b445ceae5: the runner's SSH default hid repository identity/proxy configuration.
+    #[cfg(unix)]
+    #[test]
+    fn integration_review_capture_honors_source_ssh_command() {
+        let root = Repo::new();
+        let ssh = root.temp.path().join("ssh.sh");
+        fs::write(
+            &ssh,
+            format!("exec git-upload-pack '{}'\n", root.origin.display()),
+        )
+        .unwrap();
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "core.sshCommand",
+                &format!("sh '{}'", ssh.display()),
+            ],
+        );
+        git(
+            &root.checkout,
+            &["remote", "set-url", "origin", "ssh://snapshot.invalid/repo"],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert!(!snapshot.remote_refs_stale);
+        assert!(snapshot.pack.is_none());
+    }
+
+    // Hard-won: b445ceae5: a partially applied am saved the live HEAD instead of its abort position.
+    #[test]
+    fn integration_review_raw_am_restores_pre_series_head() {
+        for detached in [false, true] {
+            let root = Repo::new();
+            let base = git(&root.checkout, &["rev-parse", "HEAD"]);
+            git(&root.checkout, &["checkout", "-b", "patches"]);
+            fs::write(root.checkout.join("added"), "first patch\n").unwrap();
+            git(&root.checkout, &["add", "added"]);
+            git(&root.checkout, &["commit", "-m", "first patch"]);
+            root.commit("second patch conflicts\n");
+            let patches = git(
+                &root.checkout,
+                &["format-patch", "--stdout", &format!("{base}..HEAD")],
+            );
+            git(&root.checkout, &["checkout", "main"]);
+            root.commit("recipient conflict\n");
+            if detached {
+                git(&root.checkout, &["checkout", "--detach"]);
+            }
+            let before = read_head(&FileGit, &root.checkout).unwrap();
+            let output = run_git(&FileGit, &root.checkout, ["am"], patches.as_bytes()).unwrap();
+            assert_ne!(output.status, 0);
+            assert_ne!(git(&root.checkout, &["rev-parse", "HEAD"]), before.commit());
+            let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+            assert_eq!(snapshot.head, before);
+            assert_eq!(
+                operation(&FileGit, &root.checkout).unwrap(),
+                Some(GitOperationKind::Am)
+            );
+            let restored = root.restore(&snapshot, None);
+            assert_eq!(read_head(&FileGit, &restored).unwrap(), before);
+            assert!(!restored.join("added").exists());
+        }
+    }
+
+    // Hard-won: b445ceae5: linked-checkout inventory used a different relative origin than restore.
+    #[test]
+    fn integration_review_nested_relative_origin_uses_primary_endpoint() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let authoritative = root.temp.path().join("lib.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.origin.to_str().unwrap(),
+                authoritative.to_str().unwrap(),
+            ],
+        );
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.sub.url",
+                "../lib.git",
+            ],
+        );
+        git(&root.checkout, &["commit", "-am", "relative module"]);
+        git(
+            &root.checkout,
+            &["remote", "set-url", "origin", "../origin.git"],
+        );
+        let nested = root.checkout.join("lanes/agent");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        );
+        module.commit("only the wrong nested endpoint has this pin\n");
+        let pin = git(&module.checkout, &["rev-parse", "HEAD"]);
+        let wrong = root.checkout.join("lanes/lib.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.checkout.to_str().unwrap(),
+                wrong.to_str().unwrap(),
+            ],
+        );
+        git(
+            &nested,
+            &["update-index", "--cacheinfo", &format!("160000,{pin},sub")],
+        );
+        let inventory =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        assert!(
+            inventory.worktrees[0]
+                .1
+                .dirty_submodules
+                .iter()
+                .any(|module| module.value == Path::new("sub"))
+        );
+    }
+
+    // Hard-won: b445ceae5: persisted paths could initialize a repository inside Git administration.
+    #[test]
+    fn integration_review_restore_rejects_git_directory_paths_before_writes() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let nested = root.checkout.join("lanes/agent");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        for path in [".git/modules/injected", "safe/.GiT/injected"] {
+            for kind in 0..3 {
+                let mut invalid = snapshot.clone();
+                match kind {
+                    0 => invalid.initialized_submodules[0].path = path.into(),
+                    1 => invalid.index_gitlinks[0].path = path.into(),
+                    _ => invalid.worktrees[0].relative_path = path.into(),
+                }
+                let destination = root.temp.path().join("unsafe-destination");
+                let error = restore_workspace_snapshot(
+                    &FileGit,
+                    &invalid,
+                    &destination,
+                    &clone_base(&invalid, None),
+                )
+                .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("inside a Git directory"),
+                    "{error:#}"
+                );
+                assert!(!destination.exists());
+            }
+        }
+    }
+
+    // Hard-won: b445ceae5: skipping symrefs also dropped their names from a complete snapshot.
+    #[test]
+    fn integration_review_symbolic_local_alias_keeps_name_and_commit() {
+        let root = Repo::new();
+        git(
+            &root.checkout,
+            &["symbolic-ref", "refs/heads/alias", "refs/heads/main"],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert_eq!(snapshot.refs["refs/heads/alias"], snapshot.head.commit());
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "refs/heads/alias"]),
+            snapshot.head.commit()
+        );
+        let output = run_git(
+            &FileGit,
+            &restored,
+            ["symbolic-ref", "-q", "refs/heads/alias"],
+            &[],
+        )
+        .unwrap();
+        assert_ne!(output.status, 0);
     }
 }
