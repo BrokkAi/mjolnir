@@ -3,12 +3,11 @@ use mj_core::relay::{HarnessPreparation, RelayOperationalState};
 use std::time::Duration;
 use tokio::time::Instant;
 
-pub(super) const HARNESS_READINESS_TIMEOUT: Duration =
-    mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
+pub const HARNESS_READINESS_TIMEOUT: Duration = mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 #[derive(Debug, Clone)]
 pub struct HarnessStartupFailure {
-    pub(crate) cause: String,
+    pub cause: String,
     pub observed_updated_at: String,
 }
 impl HarnessStartupFailure {
@@ -35,13 +34,13 @@ enum HarnessStartupWait {
     Applied,
 }
 #[derive(Default)]
-pub(super) struct HarnessStartupWatch {
+pub struct HarnessStartupWatch {
     waiting: Option<HarnessStartupWait>,
 }
 impl HarnessStartupWatch {
     /// Explicit failures are the worker's terminal decision. The daemon clock
     /// is used only when the negotiated worker version has no such decision.
-    pub(super) fn observe_worker(
+    pub fn observe_worker(
         &mut self,
         now: Instant,
         protocol: u32,
@@ -71,12 +70,12 @@ impl HarnessStartupWatch {
         ))
     }
 
-    pub(super) fn lost_contact(&mut self) {
+    pub fn lost_contact(&mut self) {
         self.waiting = None;
     }
 
     /// Called only after the guarded write was accepted inside the actor loop.
-    pub(super) fn applied(&mut self) {
+    pub fn applied(&mut self) {
         self.waiting = Some(HarnessStartupWait::Applied);
     }
 

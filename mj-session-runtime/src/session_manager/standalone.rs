@@ -1,15 +1,15 @@
 use super::*;
 
 pub struct StandaloneSession {
-    pub(super) client: RelayClient,
-    pub(super) materialized: MaterializedSession,
-    pub(super) window: mj_core::state::ProjectionWindow,
-    pub(super) operational: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
-    pub(super) latest_credential_sync_signal: Option<CredentialSyncSignal>,
-    pub(super) project_memory: Option<ProjectMemorySyncTarget>,
-    pub(super) subagent_requests:
+    pub client: RelayClient,
+    pub materialized: MaterializedSession,
+    pub window: mj_core::state::ProjectionWindow,
+    pub operational: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
+    pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
+    pub project_memory: Option<ProjectMemorySyncTarget>,
+    pub subagent_requests:
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
-    pub(super) subagent_completions:
+    pub subagent_completions:
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
     subagent_queue: Option<super::subagent_queue::SubagentQueueObserver>,
     subagent_queue_error: Option<String>,
@@ -19,9 +19,7 @@ pub struct StandaloneSession {
 }
 
 impl StandaloneSession {
-    pub(super) async fn cpu_usage(
-        &mut self,
-    ) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
+    pub async fn cpu_usage(&mut self) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
         self.client.cpu_usage().await
     }
 
@@ -90,7 +88,7 @@ impl StandaloneSession {
         self.client.reserve_idle(command_id).await
     }
 
-    pub(super) async fn detach(self) -> Result<()> {
+    pub async fn detach(self) -> Result<()> {
         self.client.detach().await
     }
 
@@ -110,7 +108,7 @@ impl StandaloneSession {
     /// to the slow sweep, so no worker state can hold the fast cadence forever.
     /// Whether this session's worker reports changes as they happen, so a
     /// quiet session need not be polled.
-    pub(super) fn waits_for_changes(&self) -> bool {
+    pub fn waits_for_changes(&self) -> bool {
         self.subagent_queue
             .as_ref()
             .is_some_and(|queue| queue.waits_for_changes())
@@ -118,7 +116,7 @@ impl StandaloneSession {
 
     /// Resolves when the worker reported a relay change, the delegation queue
     /// changed, or its change waits failed and the session must be polled.
-    pub(super) async fn relay_changed(&mut self) {
+    pub async fn relay_changed(&mut self) {
         match self.subagent_queue.as_mut() {
             Some(queue) => queue.relay_changed().await,
             None => std::future::pending().await,
@@ -127,7 +125,7 @@ impl StandaloneSession {
 
     /// Only the actor starts replication, after control sync succeeds. Lifecycle
     /// connections never acquire their own background dialer.
-    pub(super) async fn start_observing(&mut self, target: &RelaySessionTarget) {
+    pub async fn start_observing(&mut self, target: &RelaySessionTarget) {
         // The worker serves control while preparing, but cannot serve its
         // delegation queue yet. Its published preparation state owns readiness.
         if self.operational.execution == mj_core::relay::RelayExecutionState::Closed
@@ -148,13 +146,13 @@ impl StandaloneSession {
 
     /// Join cancellation before granting the lifecycle lease: its owner may
     /// stop or replace the worker as soon as it receives the connection.
-    pub(super) async fn stop_observing(&mut self) {
+    pub async fn stop_observing(&mut self) {
         if let Some(queue) = self.subagent_queue.take() {
             queue.stop().await;
         }
     }
 
-    pub(super) fn follows_closely(&self) -> bool {
+    pub fn follows_closely(&self) -> bool {
         const FRESH_CLASSIFICATION_MS: i64 = 60_000;
         let now = mj_core::clock::epoch_millis();
         !self.history_active.is_empty()
@@ -170,7 +168,7 @@ impl StandaloneSession {
                 })
     }
 
-    pub(super) async fn sync_in_place(&mut self) -> Result<bool> {
+    pub async fn sync_in_place(&mut self) -> Result<bool> {
         if self.protocol_version() >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL {
             let presence = tokio::task::spawn_blocking(crate::database::load_operator_presence)
                 .await
@@ -293,7 +291,7 @@ impl StandaloneSession {
     /// response, then acknowledge that frontier once. Every projection page is
     /// independently durable; delaying the relay's GC watermark avoids one
     /// snapshot fsync per transport-sized page without risking redelivery.
-    pub(super) async fn catch_up_fixed_frontier(&mut self) -> Result<()> {
+    pub async fn catch_up_fixed_frontier(&mut self) -> Result<()> {
         let after = RelayCursor {
             ordinal: self.materialized.applied_event_ordinal,
             digest: self.materialized.applied_event_digest.clone(),
@@ -348,7 +346,7 @@ impl StandaloneSession {
         Ok(())
     }
 
-    pub(super) async fn repair_projection(&mut self) -> Result<()> {
+    pub async fn repair_projection(&mut self) -> Result<()> {
         let session_id = self.materialized.session_id.clone();
         let record =
             tokio::task::spawn_blocking(move || crate::database::load_session_record(&session_id))
@@ -498,7 +496,7 @@ impl StandaloneSession {
     /// page can contain thousands of events, but SQLite has one global writer;
     /// regularly releasing it lets other session actors keep their views
     /// current. The relay GC watermark advances only after the complete page.
-    pub(super) async fn apply_event_page(&mut self, page: RelayEventPage) -> Result<RelayCursor> {
+    pub async fn apply_event_page(&mut self, page: RelayEventPage) -> Result<RelayCursor> {
         let now = std::time::SystemTime::now();
         let now_ms = now
             .duration_since(std::time::UNIX_EPOCH)
@@ -897,7 +895,7 @@ impl StandaloneSession {
     }
 }
 
-pub(super) fn relay_desynchronized(error: &anyhow::Error) -> bool {
+pub fn relay_desynchronized(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<RelayRejected>()
@@ -905,7 +903,7 @@ pub(super) fn relay_desynchronized(error: &anyhow::Error) -> bool {
     })
 }
 
-pub(super) fn projection_integrity_failure(error: &anyhow::Error) -> bool {
+pub fn projection_integrity_failure(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<ProjectionIntegrityError>().is_some())

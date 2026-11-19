@@ -1,8 +1,8 @@
 use super::*;
 
 #[derive(Debug)]
-pub(super) struct ProjectionAdvancedError {
-    pub(super) event_ordinal: u64,
+pub struct ProjectionAdvancedError {
+    pub event_ordinal: u64,
 }
 
 impl std::fmt::Display for ProjectionAdvancedError {
@@ -19,7 +19,7 @@ impl std::error::Error for ProjectionAdvancedError {}
 
 /// Delay before the next reconnect attempt after `failures` consecutive
 /// failures. Doubles from `RECONNECT_INTERVAL` up to the ceiling.
-pub(super) fn reconnect_delay(failures: u32) -> Duration {
+pub fn reconnect_delay(failures: u32) -> Duration {
     let doubling = failures.saturating_sub(1).min(u32::BITS - 1);
     RECONNECT_INTERVAL
         .saturating_mul(1_u32 << doubling)
@@ -27,7 +27,7 @@ pub(super) fn reconnect_delay(failures: u32) -> Duration {
 }
 
 #[derive(Default)]
-pub(super) struct StartingSessions(BTreeMap<String, StartingSessionPhase>);
+pub struct StartingSessions(BTreeMap<String, StartingSessionPhase>);
 
 enum StartingSessionPhase {
     Guarded,
@@ -35,13 +35,13 @@ enum StartingSessionPhase {
 }
 
 impl StartingSessions {
-    pub(super) fn reconcile_attached(&mut self, protocol: impl Fn(&str) -> Option<u32>) {
+    pub fn reconcile_attached(&mut self, protocol: impl Fn(&str) -> Option<u32>) {
         self.0.retain(|id, phase| {
             matches!(phase, StartingSessionPhase::Guarded) || protocol(id).is_none()
         });
     }
 
-    pub(super) fn reconcile_committed(&mut self, state: &mj_core::state::State) {
+    pub fn reconcile_committed(&mut self, state: &mj_core::state::State) {
         self.0.retain(|id, phase| {
             matches!(phase, StartingSessionPhase::Guarded)
                 || state
@@ -51,7 +51,7 @@ impl StartingSessions {
         });
     }
 
-    pub(super) fn event(
+    pub fn event(
         &mut self,
         event: StartingEvent,
         view: Option<ManagedSessionView>,

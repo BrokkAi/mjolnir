@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SessionModelPolicy {
+pub struct SessionModelPolicy {
     pub profile: String,
     pub models: Vec<String>,
 }
@@ -19,7 +19,7 @@ impl SessionModelPolicy {
         .models
     }
 
-    pub(super) fn filter(&self, state: &mut RelayOperationalState) {
+    pub fn filter(&self, state: &mut RelayOperationalState) {
         use agent_client_protocol::v1::schema::{SessionConfigKind, SessionConfigSelectOptions};
         if self.models.is_empty() {
             return;

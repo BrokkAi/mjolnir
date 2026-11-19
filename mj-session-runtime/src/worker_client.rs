@@ -28,7 +28,7 @@ use mj_core::relay::{
 
 pub use mj_client::session::RelayAttachment;
 
-pub(crate) type SubagentQueueSnapshot = (
+pub type SubagentQueueSnapshot = (
     mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
     mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
 );

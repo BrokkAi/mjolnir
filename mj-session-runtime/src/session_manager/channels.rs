@@ -19,7 +19,7 @@ impl SessionManagerUpdate {
     }
 }
 
-pub(crate) type SessionCpuTable =
+pub type SessionCpuTable =
     mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>;
 
 pub struct SessionManagerChannels {
@@ -46,7 +46,7 @@ pub struct RemoteSessionManagerChannels {
 
 #[derive(Clone)]
 pub struct RemoteSessionPublisher {
-    pub(super) updates: mpsc::UnboundedSender<RemoteManagerUpdate>,
+    pub updates: mpsc::UnboundedSender<RemoteManagerUpdate>,
 }
 
 impl RemoteSessionPublisher {
@@ -64,7 +64,7 @@ impl RemoteSessionPublisher {
 }
 
 pub struct RemoteSessionRequests {
-    pub(super) requests: mpsc::Receiver<RemoteSessionRequest>,
+    pub requests: mpsc::Receiver<RemoteSessionRequest>,
 }
 
 impl RemoteSessionRequests {
@@ -137,7 +137,7 @@ pub struct SessionRequestOrder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum SessionRequestStream {
+pub enum SessionRequestStream {
     Primary(String),
     Reviewer(String, Option<String>),
 }
@@ -307,8 +307,8 @@ async fn supervise_requests(mut requests: mpsc::Receiver<OrderedRequest>) {
 /// their Tokio runtime goes away. Drop remains an aborting fallback for tests
 /// and early-return paths that cannot await.
 pub struct SessionManagerShutdown {
-    pub(super) signal: Option<oneshot::Sender<()>>,
-    pub(super) task: Option<tokio::task::JoinHandle<()>>,
+    pub signal: Option<oneshot::Sender<()>>,
+    pub task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SessionManagerShutdown {
@@ -336,22 +336,22 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub struct CoalescedUpdateSender {
-    pub(crate) session_gate: Arc<crate::recovery_gate::RecoveryGate>,
-    pub(super) recovery_planner: Arc<dyn RecoveryPlanner>,
-    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
+    pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
+    pub recovery_planner: Arc<dyn RecoveryPlanner>,
+    pub harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
     pub pending_observations:
         Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
-    pub(super) last_raw_options:
+    pub last_raw_options:
         Arc<Mutex<Option<Arc<Vec<agent_client_protocol::v1::schema::SessionConfigOption>>>>>,
-    pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
-    pub(super) cpu: watch::Sender<SessionCpuTable>,
+    pub model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
+    pub cpu: watch::Sender<SessionCpuTable>,
     producers: Arc<Mutex<BTreeMap<String, Arc<()>>>>,
     producer: Option<Arc<UpdateProducer>>,
-    pub(super) delegation: Option<DelegationSender>,
-    pub(super) observer: Option<Arc<DelegationPublisher>>,
-    pub(super) mailbox: Arc<Mutex<UpdateMailbox>>,
-    pub(super) wake: mpsc::Sender<()>,
+    pub delegation: Option<DelegationSender>,
+    pub observer: Option<Arc<DelegationPublisher>>,
+    pub mailbox: Arc<Mutex<UpdateMailbox>>,
+    pub wake: mpsc::Sender<()>,
 }
 
 struct UpdateProducer {
@@ -381,21 +381,21 @@ impl Drop for UpdateProducer {
 /// Bounded latest-state feed for the dashboard. At most one snapshot per
 /// session is retained, and sessions are served in first-pending order.
 pub struct SessionManagerUpdates {
-    pub(super) mailbox: Arc<Mutex<UpdateMailbox>>,
-    pub(super) wake: mpsc::Receiver<()>,
+    pub mailbox: Arc<Mutex<UpdateMailbox>>,
+    pub wake: mpsc::Receiver<()>,
     // Keep the update owned until the consumer asks for another one. Its
     // completion edge can schedule a review or continuation in the meantime.
     delivered_work: Option<crate::upgrade::Work>,
 }
 
-pub(super) struct PendingUpdate {
+pub struct PendingUpdate {
     update: SessionManagerUpdate,
     work: Option<crate::upgrade::Work>,
 }
 
 #[derive(Default)]
-pub(super) struct UpdateMailbox {
-    pub(super) pending: BTreeMap<String, PendingUpdate>,
+pub struct UpdateMailbox {
+    pub pending: BTreeMap<String, PendingUpdate>,
     ready: VecDeque<String>,
 }
 
@@ -431,7 +431,7 @@ impl UpdateMailbox {
 }
 
 impl CoalescedUpdateSender {
-    pub(super) fn for_actor(&self, session_id: &str) -> Self {
+    pub fn for_actor(&self, session_id: &str) -> Self {
         assert!(
             self.producer.is_none(),
             "only the manager registers producers"
@@ -460,7 +460,7 @@ impl CoalescedUpdateSender {
         sender
     }
 
-    pub(super) fn publish_cpu(
+    pub fn publish_cpu(
         &self,
         session_id: &str,
         value: Option<mj_client::runtime_feed::SessionCpuView>,
@@ -531,7 +531,7 @@ impl CoalescedUpdateSender {
 }
 
 impl SessionManagerUpdates {
-    pub(super) fn pop_pending(&mut self) -> Option<SessionManagerUpdate> {
+    pub fn pop_pending(&mut self) -> Option<SessionManagerUpdate> {
         self.delivered_work = None;
         let pending = self
             .mailbox

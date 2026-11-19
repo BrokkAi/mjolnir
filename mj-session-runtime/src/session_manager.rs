@@ -89,7 +89,7 @@ mod client_backend;
 use client_backend::*;
 mod actor_types;
 use actor_types::*;
-pub(crate) use actor_types::{RELAY_JOB_LEASED, RELAY_JOB_RECONNECTING};
+pub use actor_types::{RELAY_JOB_LEASED, RELAY_JOB_RECONNECTING};
 pub use actor_types::{RelayConnectionJob, RelayJobDeferred};
 mod remote;
 pub use remote::*;
@@ -110,9 +110,19 @@ pub use standalone::*;
 #[doc(hidden)]
 pub mod stand_in;
 #[cfg(test)]
-pub(crate) mod tests;
+pub mod tests;
 
 mod model_policy;
+
+/// Internals that the tests of the crates above drive directly.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_internals {
+    pub use super::actor::{publish_view, run_session_actor, sync_actor_connection};
+    pub use super::actor_types::ActorCommand;
+    pub use super::model_policy::SessionModelPolicy;
+    pub use super::readiness::HARNESS_READINESS_TIMEOUT;
+}
 pub mod move_ownership;
 use model_policy::SessionModelPolicy;
 

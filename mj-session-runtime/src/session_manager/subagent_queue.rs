@@ -9,7 +9,7 @@ struct Observation {
     error: Option<String>,
 }
 
-pub(super) struct SubagentQueueObserver {
+pub struct SubagentQueueObserver {
     view: watch::Receiver<Observation>,
     task: tokio::task::JoinHandle<()>,
     active: watch::Sender<bool>,

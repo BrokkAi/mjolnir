@@ -22,8 +22,8 @@ impl std::fmt::Display for GithubTokenSource {
 }
 
 pub struct GithubCredential {
-    pub(crate) token: String,
-    pub(crate) source: GithubTokenSource,
+    pub token: String,
+    pub source: GithubTokenSource,
 }
 
 impl std::fmt::Debug for GithubCredential {

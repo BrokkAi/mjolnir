@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-pub(super) struct ClientSessionHandle(pub(super) ManagedSessionHandle);
+pub struct ClientSessionHandle(pub ManagedSessionHandle);
 
 impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
     fn transcript_history(
@@ -146,7 +146,7 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
 }
 
 #[derive(Clone)]
-pub(super) struct ClientSessionControl(pub(super) SessionManagerControl);
+pub struct ClientSessionControl(pub SessionManagerControl);
 
 impl mj_client::session::SessionControlBackend for ClientSessionControl {
     fn parent_message_route(

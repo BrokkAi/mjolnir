@@ -97,7 +97,7 @@ impl RelayClient {
 
     /// Wraps a reviewer action, refusing it on a worker too old to know what a
     /// reviewer is rather than sending a method it would reject as unknown.
-    pub(super) fn reviewer_request(
+    pub fn reviewer_request(
         &self,
         role: Option<&str>,
         request: ReviewerRequest,

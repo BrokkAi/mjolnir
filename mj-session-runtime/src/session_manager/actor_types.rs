@@ -1,13 +1,13 @@
 use super::*;
 
-pub(super) enum ManagerCommand {
+pub enum ManagerCommand {
     Session {
         session_id: String,
         reply: oneshot::Sender<Option<ManagedSessionHandle>>,
     },
 }
 
-pub(super) enum StartingEvent {
+pub enum StartingEvent {
     Restore {
         session_id: String,
         reply: oneshot::Sender<Result<()>>,
@@ -31,7 +31,7 @@ pub(super) enum StartingEvent {
 }
 
 #[allow(clippy::large_enum_variant)] // Submit owns its relay command; the other requests are small.
-pub(super) enum ActorCommand {
+pub enum ActorCommand {
     Submit {
         queued_at: Instant,
         command_id: String,
@@ -91,8 +91,8 @@ pub trait RelayConnectionJob: Send + Sync + 'static {
     fn refuse(self: Box<Self>, error: anyhow::Error);
 }
 
-pub(crate) const RELAY_JOB_LEASED: &str = "a lifecycle operation holds the relay connection";
-pub(crate) const RELAY_JOB_RECONNECTING: &str = "the relay connection is reconnecting";
+pub const RELAY_JOB_LEASED: &str = "a lifecycle operation holds the relay connection";
+pub const RELAY_JOB_RECONNECTING: &str = "the relay connection is reconnecting";
 
 /// The actor had no connection to lend: a lifecycle operation holds it, or
 /// the actor is reconnecting. The job belongs to the next cycle.
@@ -203,46 +203,46 @@ impl ActorCommand {
     }
 }
 
-pub(super) struct ReturnedConnection {
-    pub(super) lease_id: u64,
+pub struct ReturnedConnection {
+    pub lease_id: u64,
     /// Boxed: the unbounded channel allocates whole 32-slot blocks of this
     /// message per actor, and a session connection is a large struct.
-    pub(super) connection: Option<Box<StandaloneSession>>,
+    pub connection: Option<Box<StandaloneSession>>,
 }
 
 /// A submission that arrived while a lifecycle operation held the connection.
 /// The actor replays these in arrival order once the lease comes back.
-pub(super) struct DeferredSubmit {
-    pub(super) queued_at: Instant,
-    pub(super) command_id: String,
-    pub(super) command: RelayCommand,
-    pub(super) reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
+pub struct DeferredSubmit {
+    pub queued_at: Instant,
+    pub command_id: String,
+    pub command: RelayCommand,
+    pub reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
 }
 
 #[derive(Default)]
-pub(super) struct ActorLifecycle {
-    pub(super) active_lease: Option<(u64, crate::recovery_gate::RelayLeaseAdmission)>,
-    pub(super) retirement_requested: bool,
+pub struct ActorLifecycle {
+    pub active_lease: Option<(u64, crate::recovery_gate::RelayLeaseAdmission)>,
+    pub retirement_requested: bool,
 }
 
 impl ActorLifecycle {
-    pub(super) fn set_retirement_requested(&mut self, requested: bool) {
+    pub fn set_retirement_requested(&mut self, requested: bool) {
         self.retirement_requested = requested;
     }
 
-    pub(super) fn is_leased(&self) -> bool {
+    pub fn is_leased(&self) -> bool {
         self.active_lease.is_some()
     }
 
-    pub(super) fn should_stop(&self) -> bool {
+    pub fn should_stop(&self) -> bool {
         self.retirement_requested && !self.is_leased()
     }
 
-    pub(super) fn accepts_new_work(&self) -> bool {
+    pub fn accepts_new_work(&self) -> bool {
         !self.retirement_requested
     }
 
-    pub(super) fn activate_lease(
+    pub fn activate_lease(
         &mut self,
         lease_id: u64,
         admission: crate::recovery_gate::RelayLeaseAdmission,
@@ -251,7 +251,7 @@ impl ActorLifecycle {
         self.active_lease = Some((lease_id, admission));
     }
 
-    pub(super) fn return_lease(&mut self, lease_id: u64) -> bool {
+    pub fn return_lease(&mut self, lease_id: u64) -> bool {
         if self.active_lease.as_ref().map(|(id, _)| *id) != Some(lease_id) {
             return false;
         }
@@ -260,24 +260,24 @@ impl ActorLifecycle {
     }
 }
 
-pub(super) struct ActorRegistration {
-    pub(super) target: RelaySessionTarget,
-    pub(super) commands: mpsc::Sender<ActorCommand>,
-    pub(super) releases: mpsc::UnboundedSender<ReturnedConnection>,
-    pub(super) retirement: watch::Sender<bool>,
-    pub(super) view: watch::Receiver<ManagedSessionView>,
-    pub(super) abort: tokio::task::AbortHandle,
+pub struct ActorRegistration {
+    pub target: RelaySessionTarget,
+    pub commands: mpsc::Sender<ActorCommand>,
+    pub releases: mpsc::UnboundedSender<ReturnedConnection>,
+    pub retirement: watch::Sender<bool>,
+    pub view: watch::Receiver<ManagedSessionView>,
+    pub abort: tokio::task::AbortHandle,
 }
 
-pub(super) struct RemoteActorRegistration {
-    pub(super) commands: mpsc::Sender<ActorCommand>,
-    pub(super) releases: mpsc::UnboundedSender<ReturnedConnection>,
-    pub(super) view: watch::Receiver<ManagedSessionView>,
-    pub(super) view_tx: watch::Sender<ManagedSessionView>,
-    pub(super) abort: tokio::task::AbortHandle,
+pub struct RemoteActorRegistration {
+    pub commands: mpsc::Sender<ActorCommand>,
+    pub releases: mpsc::UnboundedSender<ReturnedConnection>,
+    pub view: watch::Receiver<ManagedSessionView>,
+    pub view_tx: watch::Sender<ManagedSessionView>,
+    pub abort: tokio::task::AbortHandle,
 }
 
-pub(super) enum RemoteManagerUpdate {
+pub enum RemoteManagerUpdate {
     Publish {
         session_id: String,
         view: ManagedSessionView,
@@ -285,7 +285,7 @@ pub(super) enum RemoteManagerUpdate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReconcileAction {
+pub enum ReconcileAction {
     Idle,
     Spawn,
     Keep,
@@ -293,7 +293,7 @@ pub(super) enum ReconcileAction {
 }
 
 #[derive(Debug)]
-pub(super) struct SubmitFailure {
+pub struct SubmitFailure {
     pub failure: mj_client::session::SubmitFailure,
     pub code: Option<mj_core::relay::RelayErrorCode>,
 }

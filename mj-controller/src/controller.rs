@@ -43,6 +43,8 @@ pub use subagents::recover_registered_subagent_startup;
 pub mod test_support;
 pub mod update;
 pub(crate) use mj_worker_staging::worker_binary;
+#[cfg(test)]
+mod session_runtime_tests;
 mod worker_launch;
 pub use worker_launch::DurableRecoveryPlanner;
 mod worker_project_memory;

@@ -28,7 +28,7 @@ impl RelayClient {
         self.call_with_deadline(request, timeout).await
     }
 
-    pub(super) async fn call_with_timeout(
+    pub async fn call_with_timeout(
         &mut self,
         request: RelayRequest,
         timeout: Duration,
@@ -83,7 +83,7 @@ impl RelayClient {
         result
     }
 
-    pub(super) async fn call_hello(
+    pub async fn call_hello(
         &mut self,
         request: RelayRequest,
         timeout: Duration,
@@ -112,7 +112,7 @@ impl RelayClient {
     /// true cause, so callers reconnect deliberately instead of chasing a
     /// mismatched response ID. This matters most where a short bookkeeping
     /// deadline and a long compaction deadline share one connection.
-    pub(super) async fn exchange(
+    pub async fn exchange(
         &mut self,
         envelope: &RelayRequestEnvelope,
         operation: &str,
@@ -237,24 +237,21 @@ impl RelayClient {
     }
 
     /// Run with a gate admission's cancellation flag, or without one.
-    pub(super) fn set_cancellation(
-        &mut self,
-        cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ) {
+    pub fn set_cancellation(&mut self, cancellation: Option<Arc<std::sync::atomic::AtomicBool>>) {
         self.cancellation = cancellation;
     }
 
-    pub(super) fn cancelled(&self) -> bool {
+    pub fn cancelled(&self) -> bool {
         self.cancellation
             .as_ref()
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
     }
 
-    pub(super) fn request_id_for(&self, sequence: u64) -> String {
+    pub fn request_id_for(&self, sequence: u64) -> String {
         format!("relay-{:016x}-{sequence}", self.connection_nonce)
     }
 
-    pub(super) fn request_id(&mut self) -> String {
+    pub fn request_id(&mut self) -> String {
         let id = self.request_id_for(self.next_request);
         self.next_request = self.next_request.wrapping_add(1);
         id

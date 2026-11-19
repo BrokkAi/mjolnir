@@ -7,7 +7,7 @@ const DEFERRED_SUBMIT_CAPACITY: usize = 32;
 /// `Closing` and `Destroying` are still in flight and their owners need the
 /// actor. The rest have ended: nothing will ever answer on this session's
 /// control socket again.
-pub(crate) fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
+pub fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
     use mj_core::state::SessionState;
     matches!(
         state,
@@ -96,7 +96,7 @@ async fn capture_harness_failure(
     .context("capture harness failure lifecycle revision")?
 }
 
-pub(super) async fn run_session_actor(
+pub async fn run_session_actor(
     target: RelaySessionTarget,
     mut commands: mpsc::Receiver<ActorCommand>,
     mut releases: mpsc::UnboundedReceiver<ReturnedConnection>,
@@ -1345,7 +1345,7 @@ pub(super) async fn run_session_actor(
 
 /// Submit one relay command and publish the resulting snapshot. Live and
 /// deferred submissions share this path so both report identical results.
-pub(super) async fn deliver_submit(
+pub async fn deliver_submit(
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
     submission: DeferredSubmit,
@@ -1480,7 +1480,7 @@ pub(super) async fn deliver_submit(
 /// and error code stay in the log written above (I1-12).
 /// The submission failed before it was handed to the worker.
 #[derive(Debug)]
-pub(super) struct NotSent;
+pub struct NotSent;
 
 impl std::fmt::Display for NotSent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1503,7 +1503,7 @@ impl std::fmt::Display for MailboxAdmissionDeferred {
 
 impl std::error::Error for MailboxAdmissionDeferred {}
 
-pub(super) fn submit_failure(error: &anyhow::Error) -> SubmitFailure {
+pub fn submit_failure(error: &anyhow::Error) -> SubmitFailure {
     let failure = client_submit_failure(error);
     SubmitFailure {
         failure,
@@ -1551,13 +1551,13 @@ fn is_not_now_rejection(error: &anyhow::Error) -> bool {
         })
 }
 
-pub(super) fn is_final_rejection(error: &anyhow::Error) -> bool {
+pub fn is_final_rejection(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RelayRejected>()
         .is_some_and(|rejected| !rejected.is_retryable())
 }
 
-pub(super) async fn submit_actor_command(
+pub async fn submit_actor_command(
     gate: &Arc<crate::recovery_gate::RecoveryGate>,
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
@@ -1655,7 +1655,7 @@ pub(super) async fn submit_actor_command(
 }
 
 /// Perform one repository capture operation on an independent relay connection.
-pub(super) async fn run_reviewer_operation(
+pub async fn run_reviewer_operation(
     target: RelaySessionTarget,
     role: Option<String>,
     action: ReviewerAction,
@@ -1698,7 +1698,7 @@ pub(super) async fn run_reviewer_operation(
     }
 }
 
-pub(super) async fn drive_reviewer(
+pub async fn drive_reviewer(
     client: &mut RelayClient,
     role: Option<String>,
     action: ReviewerAction,
@@ -1776,7 +1776,7 @@ fn sync_delay(connection: Option<&StandaloneSession>) -> Duration {
     }
 }
 
-pub(super) async fn sync_actor_connection(
+pub async fn sync_actor_connection(
     gate: &Arc<crate::recovery_gate::RecoveryGate>,
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
@@ -1973,7 +1973,7 @@ async fn observe_worker_readiness(
 /// sync tick would otherwise walk the whole conversation to prove nothing
 /// changed. The remaining scalars are compared directly because they are small
 /// and bound the projection's non-transcript state.
-pub(super) fn view_is_unchanged(current: &ManagedSessionView, next: &ManagedSessionView) -> bool {
+pub fn view_is_unchanged(current: &ManagedSessionView, next: &ManagedSessionView) -> bool {
     if current.connected != next.connected || current.error != next.error {
         return false;
     }
@@ -2006,7 +2006,7 @@ pub(super) fn view_is_unchanged(current: &ManagedSessionView, next: &ManagedSess
     }
 }
 
-pub(super) fn publish_view(
+pub fn publish_view(
     session_id: &str,
     mut view: ManagedSessionView,
     watch: &watch::Sender<ManagedSessionView>,
@@ -2066,7 +2066,7 @@ pub(super) fn publish_view(
 /// and the transcript deserialization behind it are synchronous and grow with
 /// the conversation, so a long session must not stall a worker thread that
 /// other actors share.
-pub(super) async fn load_projection(
+pub async fn load_projection(
     session_id: &str,
 ) -> Result<(MaterializedSession, mj_core::state::ProjectionWindow)> {
     let session_id = session_id.to_owned();

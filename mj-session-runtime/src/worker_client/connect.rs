@@ -12,7 +12,7 @@ impl RelayClient {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(super) async fn connect_with_timeout(
+    pub async fn connect_with_timeout(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
@@ -31,7 +31,7 @@ impl RelayClient {
     /// recovery would destroy a healthy session. A worker that was started
     /// moments ago has usually not bound its socket yet; that is routine too,
     /// as long as the socket appears within [`WORKER_SOCKET_RETRY_DELAYS`].
-    pub(super) async fn connect_with_timeouts(
+    pub async fn connect_with_timeouts(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
@@ -112,7 +112,7 @@ impl RelayClient {
     /// When the proxy runs over a shared SSH connection, a session is leased
     /// first (opening a master if needed) and kept for the life of the
     /// proxy.
-    pub(super) async fn connect_attempt(
+    pub async fn connect_attempt(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
@@ -168,7 +168,7 @@ impl RelayClient {
         .await
     }
 
-    pub(super) async fn spawn_and_handshake(
+    pub async fn spawn_and_handshake(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
@@ -327,7 +327,7 @@ impl RelayClient {
     /// cannot: a grandchild that inherited stderr keeps the pipe open for as
     /// long as it lives. Either way the lines already read are returned, since
     /// the drain publishes them as it goes.
-    pub(super) async fn proxy_stderr_tail(
+    pub async fn proxy_stderr_tail(
         draining: Option<tokio::task::JoinHandle<()>>,
         tail: &ProxyStderrTail,
     ) -> Vec<String> {
@@ -348,7 +348,7 @@ impl RelayClient {
     /// Attach the proxy's own stderr tail to a failed connect. The proxy
     /// explains failures the controller cannot see any other way, such as a
     /// worker socket path longer than `sun_path`.
-    pub(super) fn attach_proxy_stderr(error: anyhow::Error, lines: Vec<String>) -> anyhow::Error {
+    pub fn attach_proxy_stderr(error: anyhow::Error, lines: Vec<String>) -> anyhow::Error {
         if lines.is_empty() {
             return error;
         }
@@ -369,7 +369,7 @@ impl RelayClient {
     }
 
     /// Exchange `Hello` and record what the relay negotiated.
-    pub(super) async fn complete_handshake(
+    pub async fn complete_handshake(
         &mut self,
         expected_session_id: &str,
         handshake_timeout: Duration,

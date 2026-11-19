@@ -2,7 +2,7 @@ use super::*;
 
 /// Keep per-request diagnostics at debug. The session actor owns reachability
 /// transitions; logging here would warn again for every connection and retry.
-pub(super) fn log_relay_client_failure(
+pub fn log_relay_client_failure(
     client: &RelayClient,
     operation: &str,
     request_id: &str,
@@ -75,7 +75,7 @@ impl Drop for RelayClient {
 
 /// Let EOF traverse a proxy launcher, then stop and reap it without relying on
 /// an async runtime that may already be shutting down.
-pub(super) fn reap_dropped_relay_proxy(mut child: proxy::ProxyChild, session_id: String) {
+pub fn reap_dropped_relay_proxy(mut child: proxy::ProxyChild, session_id: String) {
     let deadline = Instant::now() + RELAY_PROXY_DETACH_GRACE;
     loop {
         match child.try_wait() {
@@ -125,7 +125,7 @@ pub(super) fn reap_dropped_relay_proxy(mut child: proxy::ProxyChild, session_id:
     }
 }
 
-pub(super) fn credential_snapshot(payload: RelayResponsePayload) -> Result<CredentialSnapshot> {
+pub fn credential_snapshot(payload: RelayResponsePayload) -> Result<CredentialSnapshot> {
     match payload {
         RelayResponsePayload::CredentialState {
             present,
@@ -140,7 +140,7 @@ pub(super) fn credential_snapshot(payload: RelayResponsePayload) -> Result<Crede
     }
 }
 
-pub(super) fn skills_sync_state(
+pub fn skills_sync_state(
     payload: RelayResponsePayload,
 ) -> Result<mj_core::skills::SkillsSyncState> {
     match payload {
@@ -155,7 +155,7 @@ pub(super) fn skills_sync_state(
     }
 }
 
-pub(super) fn github_token_snapshot(
+pub fn github_token_snapshot(
     payload: RelayResponsePayload,
 ) -> Result<mj_core::credentials::GithubTokenSnapshot> {
     match payload {
@@ -170,14 +170,14 @@ pub(super) fn github_token_snapshot(
     }
 }
 
-pub(super) async fn read_bounded_frame(
+pub async fn read_bounded_frame(
     reader: &mut (impl AsyncBufRead + Unpin),
     kind: ExchangeKind,
 ) -> Result<Option<String>> {
     read_bounded_frame_with_limit(reader, MAX_FRAME_BYTES, kind).await
 }
 
-pub(super) async fn read_bounded_frame_with_limit(
+pub async fn read_bounded_frame_with_limit(
     reader: &mut (impl AsyncBufRead + Unpin),
     maximum_bytes: usize,
     kind: ExchangeKind,
@@ -208,7 +208,7 @@ pub(super) async fn read_bounded_frame_with_limit(
         .map(Some)
 }
 
-pub(super) fn clip_catch_up_page(
+pub fn clip_catch_up_page(
     page: RelayEventPage,
     previous: &RelayCursor,
     frontier: &RelayCursor,
@@ -269,7 +269,7 @@ pub(super) fn clip_catch_up_page(
     })
 }
 
-pub(super) fn decode_relay_response(
+pub fn decode_relay_response(
     line: &str,
     request_id: &str,
     protocol: u32,
@@ -294,10 +294,7 @@ pub(super) fn decode_relay_response(
     }
 }
 
-pub(super) fn decode_relay_hello_response(
-    line: &str,
-    request_id: &str,
-) -> Result<RelayResponsePayload> {
+pub fn decode_relay_hello_response(line: &str, request_id: &str) -> Result<RelayResponsePayload> {
     let response: RelayResponseEnvelope =
         serde_json::from_str(line).context("decode relay hello response")?;
     if response.request_id != request_id {

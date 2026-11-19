@@ -22,7 +22,7 @@ const PROJECT_MEMORY_MERGE_SYSTEM_PROMPT: &str = "You merge project-memory files
 type ConflictResolutionFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 
 /// A seam for deterministic tests and for the controller's utility model.
-pub(crate) trait ConflictResolver: Send + Sync {
+pub trait ConflictResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
         conflict: &'a ConflictedFile,
@@ -32,13 +32,13 @@ pub(crate) trait ConflictResolver: Send + Sync {
 
 /// Lazily discovers one utility candidate and reuses that discovery for every
 /// conflicted file in this sync. Each file itself gets one model request.
-pub(crate) struct UtilityModelConflictResolver {
+pub struct UtilityModelConflictResolver {
     config: Config,
     candidates: OnceCell<Option<Vec<crate::utility_llm::UtilityCandidate>>>,
 }
 
 impl UtilityModelConflictResolver {
-    pub(crate) fn new(config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
             candidates: OnceCell::new(),
@@ -99,13 +99,13 @@ impl ConflictResolver for UtilityModelConflictResolver {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConflictResolutionMethod {
+pub enum ConflictResolutionMethod {
     UtilityModel,
     ReplicaWins,
 }
 
 impl ConflictResolutionMethod {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::UtilityModel => "utility model",
             Self::ReplicaWins => "replica wins",
@@ -114,20 +114,20 @@ impl ConflictResolutionMethod {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConflictResolutionRecord {
-    pub(crate) conflict: ConflictedFile,
-    pub(crate) method: ConflictResolutionMethod,
+pub struct ConflictResolutionRecord {
+    pub conflict: ConflictedFile,
+    pub method: ConflictResolutionMethod,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CanonicalSync {
-    pub(crate) tree: ProjectMemorySnapshot,
-    pub(crate) resolutions: Vec<ConflictResolutionRecord>,
-    pub(crate) attempts: usize,
+pub struct CanonicalSync {
+    pub tree: ProjectMemorySnapshot,
+    pub resolutions: Vec<ConflictResolutionRecord>,
+    pub attempts: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CanonicalSyncOutcome {
+pub enum CanonicalSyncOutcome {
     Swapped(CanonicalSync),
     AttemptsExhausted { attempts: usize },
 }
@@ -150,7 +150,7 @@ impl Drop for CancelOnDrop {
 /// Read, merge, resolve, and compare-and-swap the canonical tree. Filesystem
 /// calls run on Tokio's blocking pool; the model runs after the read and before
 /// the swap, with no canonical-memory lock held.
-pub(crate) async fn merge_and_swap_canonical<R: ConflictResolver>(
+pub async fn merge_and_swap_canonical<R: ConflictResolver>(
     canonical_root: &Path,
     baseline: &ProjectMemorySnapshot,
     replica: &ProjectMemorySnapshot,
@@ -327,7 +327,7 @@ where
 
 /// Worker-side installation operations are a seam for the protocol fallback
 /// and compare-and-replace race behavior.
-pub(crate) trait ProjectMemoryWorker {
+pub trait ProjectMemoryWorker {
     fn supports_replace(&self) -> bool;
 
     fn replace_tree<'a>(
@@ -364,13 +364,13 @@ impl ProjectMemoryWorker for crate::worker_client::RelayClient {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkerInstallOutcome {
+pub enum WorkerInstallOutcome {
     Replaced,
     ReplicaChanged,
     Additive,
 }
 
-pub(crate) async fn install_worker_tree<W: ProjectMemoryWorker>(
+pub async fn install_worker_tree<W: ProjectMemoryWorker>(
     worker: &mut W,
     expected_replica: TreeVersion,
     tree: ProjectMemorySnapshot,
@@ -388,7 +388,7 @@ pub(crate) async fn install_worker_tree<W: ProjectMemoryWorker>(
 
 /// Install when either input tree differs. Replacing a tree equal to the
 /// replica still advances the worker baseline for the next three-way merge.
-pub(crate) async fn install_merged_tree<W: ProjectMemoryWorker>(
+pub async fn install_merged_tree<W: ProjectMemoryWorker>(
     worker: &mut W,
     baseline: &ProjectMemorySnapshot,
     replica: &ProjectMemorySnapshot,

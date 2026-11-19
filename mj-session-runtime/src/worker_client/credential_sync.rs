@@ -10,7 +10,7 @@ type DeliveryRegistry = Arc<std::sync::Mutex<RejectedLogins>>;
 
 /// How a reconciliation reaches each session's worker.
 #[derive(Clone)]
-pub(super) enum SessionRelays {
+pub enum SessionRelays {
     /// The session actor's own connection. A sync never opens a connection
     /// of its own to a live worker.
     Actors(SessionManagerControl),
@@ -22,11 +22,11 @@ pub(super) enum SessionRelays {
 /// Reads the host's slopcop login. The daemon reads its own environment and
 /// slopcop's configuration; tests pass their own reader, so a test never reads
 /// the developer's login.
-pub(super) type SlopcopLoginSource = fn() -> Result<Option<mj_core::slopcop::SlopcopLogin>>;
+pub type SlopcopLoginSource = fn() -> Result<Option<mj_core::slopcop::SlopcopLogin>>;
 
 /// What one reconciliation knows about the host's slopcop login.
 #[derive(Debug, Clone)]
-pub(super) enum HostSlopcopLogin {
+pub enum HostSlopcopLogin {
     /// It could not be read. Session copies stay as they are, because an
     /// unreadable login is not a signed-out one.
     Unknown,
@@ -58,7 +58,7 @@ pub trait CredentialSyncRuntime: Send + Sync {
 
 /// A test reader: the host's login is never known, so no session copy changes.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
+pub fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
     bail!("tests do not read the host's slopcop login")
 }
 
@@ -78,7 +78,7 @@ pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::Slopcop
 /// the slots, because it is then using the session's connection. The actor
 /// finds an abandoned job over and drops it unrun.
 #[derive(Clone)]
-pub(super) struct JobHold(Arc<HoldState>);
+pub struct JobHold(Arc<HoldState>);
 
 struct HoldState {
     phase: std::sync::Mutex<HoldPhase>,
@@ -102,7 +102,7 @@ struct HeldSlots {
 }
 
 impl JobHold {
-    pub(super) fn new(
+    pub fn new(
         admission: Option<crate::recovery_gate::RecoveryAttempt>,
         turn: Option<SessionTurn>,
         installing: Option<SessionTurn>,
@@ -199,7 +199,7 @@ impl JobHold {
 /// Held by the task awaiting a queued job: if that task stops, or the gate
 /// cancels its admission, before the actor has started the job, the job's
 /// slots are released right then.
-pub(super) struct QueuedJob(JobHold);
+pub struct QueuedJob(JobHold);
 
 impl Drop for QueuedJob {
     fn drop(&mut self) {
@@ -218,13 +218,13 @@ impl Drop for QueuedJob {
 /// The map is keyed by session id and only that session's entry is touched by
 /// `enter` and by a release, so a batch of sessions costs one lookup each.
 #[derive(Clone, Default)]
-pub(super) struct SessionSteps(Arc<std::sync::Mutex<SessionLocks>>);
+pub struct SessionSteps(Arc<std::sync::Mutex<SessionLocks>>);
 
 type SessionLocks = BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
 
 /// A session's turn. Dropping it releases the session's lock and, when nobody
 /// else holds or waits for that lock, forgets the session's entry.
-pub(super) struct SessionTurn {
+pub struct SessionTurn {
     // Both dropped first, which is what lets the entry's count reach zero.
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     lock: Option<Arc<tokio::sync::Mutex<()>>>,
@@ -253,7 +253,7 @@ impl Drop for SessionTurn {
 impl SessionSteps {
     /// How many sessions the lock map has an entry for.
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn tracked(&self) -> usize {
+    pub fn tracked(&self) -> usize {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -293,11 +293,11 @@ impl SessionSteps {
 /// What a reconciliation needs to reach sessions and to know which AWS profile
 /// each was staged with.
 #[derive(Clone, Copy)]
-pub(super) struct SessionAccess<'a> {
-    pub(super) relays: &'a SessionRelays,
-    pub(super) gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
-    pub(super) runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
-    pub(super) steps: &'a SessionSteps,
+pub struct SessionAccess<'a> {
+    pub relays: &'a SessionRelays,
+    pub gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
+    pub runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
+    pub steps: &'a SessionSteps,
 }
 
 enum PassEvent {
@@ -310,8 +310,8 @@ enum PassEvent {
 }
 
 pub struct CredentialSyncCoordinator {
-    pub(super) handle: CredentialSyncHandle,
-    pub(super) results: mpsc::UnboundedReceiver<CredentialSyncResult>,
+    pub handle: CredentialSyncHandle,
+    pub results: mpsc::UnboundedReceiver<CredentialSyncResult>,
 }
 
 impl CredentialSyncCoordinator {
@@ -356,7 +356,7 @@ impl CredentialSyncCoordinator {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn spawn_inner(
+    pub fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<dyn CredentialSyncRuntime>>,
@@ -373,7 +373,7 @@ impl CredentialSyncCoordinator {
         )
     }
 
-    pub(super) fn spawn_with_registry(
+    pub fn spawn_with_registry(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<dyn CredentialSyncRuntime>>,
@@ -733,7 +733,7 @@ impl CredentialSyncCoordinator {
 /// What the coordinator does over time, once: the profile's pass, and one AWS
 /// cycle for each role-scoped session.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(super) async fn reconcile_profile(
+pub async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
@@ -824,7 +824,7 @@ fn queue_session(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(super) async fn reconcile_profile_guarded(
+pub async fn reconcile_profile_guarded(
     access: &SessionAccess<'_>,
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
@@ -1111,7 +1111,7 @@ async fn reconcile_profile_observed(
 /// Fold one more step's result into a session's outcome. A session whose
 /// whole sync failed keeps that failure (as `SyncStep::Session`, which reports
 /// without a step), so the other step's actions are recorded beside it.
-pub(super) fn merge_step_outcome(
+pub fn merge_step_outcome(
     outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
     session_id: &str,
     actions: Vec<CredentialSyncAction>,
@@ -1236,7 +1236,7 @@ fn clear_failure(outcomes: &mut BTreeMap<String, CredentialSyncOutcome>, session
 
 /// What a sync pass does about one session's AWS credentials.
 #[derive(Clone)]
-pub(super) enum AwsSync {
+pub enum AwsSync {
     /// The session's AWS credentials are not managed by the controller.
     Unmanaged,
     /// The session should hold exactly these.
@@ -1284,7 +1284,7 @@ impl AwsSync {
 
 /// The controller's GitHub token for a session, or why it could not be read.
 #[derive(Clone)]
-pub(super) enum GithubSync {
+pub enum GithubSync {
     Known(Option<String>),
     /// The lookup failed. The session's copy stays as it is, because an
     /// unreadable token is not an absent one.
@@ -1294,15 +1294,15 @@ pub(super) enum GithubSync {
 /// What reconciling one session did: the actions its steps took, and the
 /// failure of each step that failed. Every step runs whether or not another
 /// failed.
-pub(super) struct SessionSync {
-    pub(super) unchanged_login: Option<CredentialSnapshot>,
+pub struct SessionSync {
+    pub unchanged_login: Option<CredentialSnapshot>,
     /// Access-token hash of the profile's login as this sync read it.
-    pub(super) current_access_token: Option<String>,
-    pub(super) actions: Vec<CredentialSyncAction>,
-    pub(super) failures: Vec<StepFailure>,
+    pub current_access_token: Option<String>,
+    pub actions: Vec<CredentialSyncAction>,
+    pub failures: Vec<StepFailure>,
     /// The AWS profile the session's worker was staged with, when the work
     /// asked for it (`SyncWork::StagedProfile`).
-    pub(super) staged_profile: Option<String>,
+    pub staged_profile: Option<String>,
     /// The login install response arrives before the daemon can publish the
     /// worker's operational observation. New workers acknowledge delivery
     /// through that observation so a child cannot be held on a stale view.
@@ -1311,16 +1311,16 @@ pub(super) struct SessionSync {
 
 /// The role, role session and session policy credentials were issued for.
 #[derive(Clone)]
-pub(super) struct ScopeExpectation {
-    pub(super) role_arn: String,
-    pub(super) role_session_name: String,
+pub struct ScopeExpectation {
+    pub role_arn: String,
+    pub role_session_name: String,
     /// Fingerprint of the effective session policy (inline and managed): a
     /// narrower policy than the one the credentials were issued under makes
     /// them broader than configured, so they do not match.
-    pub(super) session_policy_fingerprint: String,
+    pub session_policy_fingerprint: String,
     /// The `SourceIdentity` the credentials must have been issued with: the
     /// role session name when `source_identity` is on, nothing when it is off.
-    pub(super) source_identity: Option<String>,
+    pub source_identity: Option<String>,
 }
 
 impl ScopeExpectation {
@@ -1385,7 +1385,7 @@ fn joined_failures(failures: &[StepFailure]) -> Option<String> {
 // current: every session is, on the thread that sets this.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(super) static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether the session is still the one this target describes. A lifecycle
@@ -1448,7 +1448,7 @@ async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T
 
 // Callers outside the login pass only need to distinguish a deferral from failure.
 #[cfg(all(unix, any(test, feature = "test-support")))]
-pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
+pub async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
@@ -1675,17 +1675,17 @@ fn login_disposition(
 /// install on the session's own connection, or withdraw what must not stay.
 /// What distinguishes one AWS cycle from another.
 #[derive(Default)]
-pub(super) struct AwsCycleOptions<'a> {
+pub struct AwsCycleOptions<'a> {
     /// The renewal's install lock, held by the install job.
-    pub(super) installing: Option<SessionTurn>,
+    pub installing: Option<SessionTurn>,
     /// Drop the cached credentials first: the session's were perhaps refused.
-    pub(super) force_new: bool,
+    pub force_new: bool,
     /// Where to report, before the cycle ends, that credentials were withdrawn
     /// while the replacement is pending.
-    pub(super) interim: Option<&'a mpsc::UnboundedSender<CredentialSyncResult>>,
+    pub interim: Option<&'a mpsc::UnboundedSender<CredentialSyncResult>>,
 }
 
-pub(super) async fn aws_cycle(
+pub async fn aws_cycle(
     access: &SessionAccess<'_>,
     target: &CredentialSyncTarget,
     options: AwsCycleOptions<'_>,
@@ -1895,17 +1895,17 @@ async fn aws_job(
 
 /// What a session's renewal task needs, shared by all of them.
 #[derive(Clone)]
-pub(super) struct RenewalEnv {
-    pub(super) relays: SessionRelays,
-    pub(super) gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-    pub(super) runtime: Option<Arc<dyn CredentialSyncRuntime>>,
-    pub(super) steps: SessionSteps,
+pub struct RenewalEnv {
+    pub relays: SessionRelays,
+    pub gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+    pub runtime: Option<Arc<dyn CredentialSyncRuntime>>,
+    pub steps: SessionSteps,
     /// Orders one session's renewals, so a replaced task's cycle finishes
     /// before its successor's begins.
-    pub(super) installs: SessionSteps,
-    pub(super) results: mpsc::UnboundedSender<CredentialSyncResult>,
+    pub installs: SessionSteps,
+    pub results: mpsc::UnboundedSender<CredentialSyncResult>,
     /// How long after a cycle that did not complete cleanly the next is tried.
-    pub(super) retry: Duration,
+    pub retry: Duration,
 }
 
 impl RenewalEnv {
@@ -1921,8 +1921,8 @@ impl RenewalEnv {
 
 /// A request to renew a session's credentials now, with new ones, and to
 /// answer with the cycle's outcome.
-pub(super) struct RenewalWake {
-    pub(super) reply: tokio::sync::oneshot::Sender<CredentialSyncOutcome>,
+pub struct RenewalWake {
+    pub reply: tokio::sync::oneshot::Sender<CredentialSyncOutcome>,
 }
 
 struct RenewalTask {
@@ -1936,13 +1936,13 @@ struct RenewalTask {
 /// own schedule, at half their lifetime, by a task that is not part of any
 /// profile pass: a stalled session holds its own renewal and nothing else.
 #[derive(Default)]
-pub(super) struct RenewalTasks(BTreeMap<String, RenewalTask>);
+pub struct RenewalTasks(BTreeMap<String, RenewalTask>);
 
 impl RenewalTasks {
     /// A task standing in for the session's renewal, as one that had been
     /// started for `target`.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(super) fn with_task(
+    pub fn with_task(
         target: &CredentialSyncTarget,
         handle: tokio::task::JoinHandle<()>,
         wakes: mpsc::UnboundedSender<RenewalWake>,
@@ -2049,7 +2049,7 @@ impl RenewalTasks {
 
     /// Ask the session's renewal task to renew now with new credentials. The
     /// answer is its cycle's outcome; `None` when the session has no task.
-    pub(super) fn wake(
+    pub fn wake(
         &self,
         session_id: &str,
     ) -> Option<tokio::sync::oneshot::Receiver<CredentialSyncOutcome>> {
@@ -2078,7 +2078,7 @@ impl Drop for RenewalTasks {
 /// cycle of a replaced task still queued or running, and ends on any path by
 /// releasing it. A wake renews now, with new credentials, and answers with the
 /// cycle's outcome.
-pub(super) async fn renew_session_aws(
+pub async fn renew_session_aws(
     env: RenewalEnv,
     target: CredentialSyncTarget,
     mut wakes: mpsc::UnboundedReceiver<RenewalWake>,
@@ -2221,7 +2221,7 @@ async fn scheduling_source(
 /// Once the credentials have expired (`remaining` is `None`) the backoff
 /// stands: an authentication failure, which wakes the renewal, is how a session
 /// that has recovered renews promptly.
-pub(super) fn retry_delay(
+pub fn retry_delay(
     base: Duration,
     failures: u32,
     limit: Duration,
@@ -2291,7 +2291,7 @@ fn start_scoped_mint(
 /// plus Mjolnir's managed skills, exactly as launch staging writes them into
 /// the session's staged home, collected for the archive format the session's
 /// worker reads.
-pub(super) fn canonical_session_skills(
+pub fn canonical_session_skills(
     target: &CredentialSyncTarget,
     format: mj_core::skills::SkillsArchiveFormat,
 ) -> Result<mj_core::skills::SkillsArchive> {
@@ -2312,7 +2312,7 @@ pub(super) fn canonical_session_skills(
 
 /// A profile's canonical skills tree in each archive format a worker may read.
 /// Which one a session needs is known only from its worker's hello.
-pub(super) struct CanonicalSkills {
+pub struct CanonicalSkills {
     plain: [std::result::Result<mj_core::skills::SkillsArchive, String>; 2],
     gzip: [std::result::Result<mj_core::skills::SkillsArchive, String>; 2],
 }
@@ -2370,13 +2370,13 @@ impl CanonicalSkills {
 }
 
 /// The profile's login as the controller holds it.
-pub(super) struct CanonicalLogin {
+pub struct CanonicalLogin {
     profile_home: std::path::PathBuf,
     harness: mj_core::config::HarnessKind,
     /// How the controller reads and writes it.
-    pub(super) access: LoginAccess,
-    pub(super) credential: CredentialSnapshot,
-    pub(super) bytes: Vec<u8>,
+    pub access: LoginAccess,
+    pub credential: CredentialSnapshot,
+    pub bytes: Vec<u8>,
 }
 
 /// A login as read from where its store keeps it.
@@ -2387,7 +2387,7 @@ type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
 /// ([`mj_core::config::HarnessKind::login_store`]) and the bounded `security`
 /// tool a macOS login needs.
 #[derive(Clone)]
-pub(super) struct LoginAccess {
+pub struct LoginAccess {
     store: mj_core::config::HarnessLoginStore,
     security: Arc<dyn crate::targets::CommandExecutor + Send + Sync>,
     /// The credential file whose directory carries the locks a Keychain write
@@ -2396,7 +2396,7 @@ pub(super) struct LoginAccess {
 }
 
 impl LoginAccess {
-    pub(super) fn new(
+    pub fn new(
         store: mj_core::config::HarnessLoginStore,
         security: Arc<dyn crate::targets::CommandExecutor + Send + Sync>,
     ) -> Self {
@@ -2408,7 +2408,7 @@ impl LoginAccess {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(super) fn with_lock_marker(mut self, marker: std::path::PathBuf) -> Self {
+    pub fn with_lock_marker(mut self, marker: std::path::PathBuf) -> Self {
         self.lock_marker = Some(marker);
         self
     }
@@ -2494,15 +2494,15 @@ impl LoginAccess {
 }
 
 /// The host's logins a pass reads once for all of a profile's sessions.
-pub(super) struct HostLogins<'a> {
-    pub(super) slopcop: &'a HostSlopcopLogin,
-    pub(super) harness: &'a PassLogin,
+pub struct HostLogins<'a> {
+    pub slopcop: &'a HostSlopcopLogin,
+    pub harness: &'a PassLogin,
 }
 
 /// Where a pass finds the profile's login. Decided once per pass, from
 /// [`mj_core::config::HarnessKind::login_store`], so every session of the
 /// profile agrees on it.
-pub(super) enum PassLogin {
+pub enum PassLogin {
     Shared(Arc<ProfileLogin>),
     PerSession,
     /// The macOS Keychain, read once for the whole pass: every session of the
@@ -2543,7 +2543,7 @@ pub async fn current_claude_access_token(
 /// Serializes reads and adoption of the single profile login. Session relay
 /// calls never hold this lock: an unreachable worker cannot hold up a new
 /// canonical decision or delivery to a different worker.
-pub(super) struct ProfileLogin {
+pub struct ProfileLogin {
     decide: tokio::sync::Mutex<()>,
     current: watch::Sender<Option<Result<Arc<CanonicalLogin>, String>>>,
     deliveries: SessionSteps,
@@ -2706,13 +2706,13 @@ fn read_canonical_login(
 /// What one session is reconciled against, read on the controller before its
 /// worker is asked anything. Nothing here fails the session as a whole: each
 /// part that could not be read is the failure of the one step that needs it.
-pub(super) struct SessionCanonical {
+pub struct SessionCanonical {
     profile: Option<Arc<ProfileLogin>>,
-    pub(super) login: Result<Arc<CanonicalLogin>, String>,
-    pub(super) skills: Arc<CanonicalSkills>,
-    pub(super) github: GithubSync,
-    pub(super) aws: AwsSync,
-    pub(super) slopcop_login: HostSlopcopLogin,
+    pub login: Result<Arc<CanonicalLogin>, String>,
+    pub skills: Arc<CanonicalSkills>,
+    pub github: GithubSync,
+    pub aws: AwsSync,
+    pub slopcop_login: HostSlopcopLogin,
 }
 
 impl SessionCanonical {
@@ -2742,7 +2742,7 @@ impl SessionCanonical {
 }
 
 /// What a session's worker connection is asked to do.
-pub(super) enum SyncWork {
+pub enum SyncWork {
     /// Every sync step of the profile's pass.
     Full(Box<SessionCanonical>),
     /// Only the session's AWS credentials.
@@ -2755,7 +2755,7 @@ pub(super) enum SyncWork {
 /// Reconcile one session. Returns every action taken, where an empty list
 /// means the copies already agree, or `None` when the session could not be
 /// reached this cycle because its actor had no connection to lend.
-pub(super) async fn reconcile_session(
+pub async fn reconcile_session(
     relays: &SessionRelays,
     target: &CredentialSyncTarget,
     skills: &Arc<CanonicalSkills>,
@@ -2772,7 +2772,7 @@ pub(super) async fn reconcile_session(
 }
 
 /// Run `work` on the session's worker connection.
-pub(super) async fn run_on_session(
+pub async fn run_on_session(
     relays: &SessionRelays,
     target: &CredentialSyncTarget,
     work: SyncWork,
@@ -2869,7 +2869,7 @@ async fn run_work(
 /// recorded on its own: the AWS credentials, the harness login, the skills,
 /// the GitHub token and the slopcop login do not depend on one another, so a
 /// failing STS call or GitHub lookup must not hold back the rest.
-pub(super) async fn reconcile_on(
+pub async fn reconcile_on(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
@@ -3090,17 +3090,17 @@ async fn reconcile_aws(
 
 /// One session's reconciliation, run by its actor on the actor's connection.
 /// It owns its `hold` until it has run or been dropped.
-pub(super) struct CredentialSyncJob {
-    pub(super) target: CredentialSyncTarget,
-    pub(super) work: SyncWork,
-    pub(super) reply: tokio::sync::oneshot::Sender<Result<SessionSync>>,
-    pub(super) hold: JobHold,
+pub struct CredentialSyncJob {
+    pub target: CredentialSyncTarget,
+    pub work: SyncWork,
+    pub reply: tokio::sync::oneshot::Sender<Result<SessionSync>>,
+    pub hold: JobHold,
 }
 
 impl CredentialSyncJob {
     /// The job, the receiver of its answer, and the guard that abandons the
     /// job if the awaiting task stops first.
-    pub(super) fn queue(
+    pub fn queue(
         target: CredentialSyncTarget,
         work: SyncWork,
         hold: JobHold,
@@ -3211,7 +3211,7 @@ impl RelayConnectionJob for CredentialSyncJob {
     }
 }
 
-pub(super) async fn reconcile_credentials(
+pub async fn reconcile_credentials(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     access: &LoginAccess,
@@ -3469,7 +3469,7 @@ const NO_STORED_LOGINS: &[u8] = b"[]";
 /// session already holds them. The database is the profile's only copy, so a
 /// session's copy is never pulled, and a session staged while the profile had
 /// no logins holds no export, which is the same as an empty one.
-pub(crate) fn stored_logins_push<'a>(
+pub fn stored_logins_push<'a>(
     canonical: &CredentialSnapshot,
     bytes: &'a [u8],
     session: &CredentialSnapshot,
@@ -3487,7 +3487,7 @@ pub(crate) fn stored_logins_push<'a>(
     (!current).then_some(wanted)
 }
 
-pub(super) async fn reconcile_github_token(
+pub async fn reconcile_github_token(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     canonical: Option<&str>,
@@ -3543,7 +3543,7 @@ fn syncs_slopcop_login(target: &CredentialSyncTarget) -> bool {
 /// Sync is the copy's only writer, and it writes only isolated sessions; a
 /// localhost session's home is staged without one and reads the host's
 /// own login.
-pub(super) async fn reconcile_slopcop_login(
+pub async fn reconcile_slopcop_login(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     host: &HostSlopcopLogin,
@@ -3595,7 +3595,7 @@ pub(super) async fn reconcile_slopcop_login(
 /// sent in that format. Returns true when a push happened. Workers old enough
 /// to predate skills sync answer the unknown method with `InvalidRequest`;
 /// those sessions are skipped quietly until their target is re-provisioned.
-pub(super) async fn reconcile_skills(
+pub async fn reconcile_skills(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     canonical: &mj_core::skills::SkillsArchive,
@@ -3630,7 +3630,7 @@ pub(super) async fn reconcile_skills(
     Ok(true)
 }
 
-pub(super) fn sync_method_unsupported(error: &anyhow::Error) -> bool {
+pub fn sync_method_unsupported(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RelayRejected>()
         .is_some_and(|rejected| rejected.0.code == RelayErrorCode::InvalidRequest)

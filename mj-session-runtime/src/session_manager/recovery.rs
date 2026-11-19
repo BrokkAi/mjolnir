@@ -6,11 +6,11 @@ use super::*;
 /// Every failure that proves it is marked with [`RelayTransportDead`] where it
 /// is produced, and this decision downcasts for that marker. Message text is
 /// never read: a reworded diagnostic must not be able to disable auto-restart.
-pub(crate) fn worker_connect_needs_restart(error: &anyhow::Error) -> bool {
+pub fn worker_connect_needs_restart(error: &anyhow::Error) -> bool {
     RelayTransportDead::marks(error)
 }
 
-pub(super) fn worker_connect_allows_live_restart(error: &anyhow::Error) -> bool {
+pub fn worker_connect_allows_live_restart(error: &anyhow::Error) -> bool {
     RelayTransportDead::marks_failed_handshake(error)
 }
 
@@ -72,7 +72,7 @@ fn storage_forbids_restart(
         .map(|(host, problem)| WorkerRecoveryOutcome::StorageFull { host, problem })
 }
 
-pub(super) fn refresh_worker_binary_if_stale(
+pub fn refresh_worker_binary_if_stale(
     executor: &impl CommandExecutor,
     refresh: Option<&WorkerBinaryRefresh>,
 ) -> Result<()> {
@@ -99,9 +99,9 @@ pub(super) fn refresh_worker_binary_if_stale(
     }
 }
 
-pub(crate) use mj_targets::command_checks::installed_digest_matches;
+pub use mj_targets::command_checks::installed_digest_matches;
 
-pub(super) fn refresh_worker_launch_if_stale(
+pub fn refresh_worker_launch_if_stale(
     executor: &impl CommandExecutor,
     plan: Option<&WorkerLaunchRefreshPlan>,
 ) -> Result<()> {
@@ -118,7 +118,7 @@ pub(super) fn refresh_worker_launch_if_stale(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(super) async fn recover_worker(
+pub async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
 ) -> Result<WorkerRecoveryOutcome> {
@@ -132,7 +132,7 @@ pub(super) async fn recover_worker(
     .await
 }
 
-pub(super) async fn recover_worker_for_session(
+pub async fn recover_worker_for_session(
     gate: Arc<crate::recovery_gate::RecoveryGate>,
     planner: Arc<dyn RecoveryPlanner>,
     plan: WorkerRecoveryPlan,
@@ -203,7 +203,7 @@ impl RecoveryPlanner for NoRecoveryPlanner {
     }
 }
 
-pub(crate) fn recover_worker_admitted(
+pub fn recover_worker_admitted(
     mut plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,

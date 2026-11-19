@@ -3,18 +3,18 @@ use super::*;
 #[derive(Clone)]
 pub struct SessionManagerControl {
     pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
-    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
-    pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
+    pub harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
+    pub model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub session_cpu: watch::Receiver<SessionCpuTable>,
-    pub(super) commands: mpsc::Sender<ManagerCommand>,
-    pub(super) launches: mpsc::UnboundedSender<StartingEvent>,
+    pub commands: mpsc::Sender<ManagerCommand>,
+    pub launches: mpsc::UnboundedSender<StartingEvent>,
 }
 
 /// Owns a pre-commit launch registration. Publication hands it to the durable
 /// state feed; every earlier exit releases it through the manager's channel.
 pub struct StartingSessionRegistration {
-    pub(super) session_id: Option<String>,
-    pub(super) launches: mpsc::UnboundedSender<StartingEvent>,
+    pub session_id: Option<String>,
+    pub launches: mpsc::UnboundedSender<StartingEvent>,
 }
 
 impl StartingSessionRegistration {
@@ -58,10 +58,10 @@ impl Drop for StartingSessionRegistration {
 
 #[derive(Clone, Debug)]
 pub struct ManagedSessionHandle {
-    pub(super) session_id: String,
-    pub(super) commands: mpsc::Sender<ActorCommand>,
-    pub(super) releases: mpsc::UnboundedSender<ReturnedConnection>,
-    pub(super) view: watch::Receiver<ManagedSessionView>,
+    pub session_id: String,
+    pub commands: mpsc::Sender<ActorCommand>,
+    pub releases: mpsc::UnboundedSender<ReturnedConnection>,
+    pub view: watch::Receiver<ManagedSessionView>,
 }
 
 impl SessionManagerControl {
@@ -83,10 +83,10 @@ impl SessionManagerControl {
 /// The actor queues them and forwards them in arrival order once the lease is
 /// released or dropped.
 pub struct ManagedSessionLease {
-    pub(super) session_id: String,
-    pub(super) lease_id: Option<u64>,
-    pub(super) connection: Option<StandaloneSession>,
-    pub(super) releases: mpsc::UnboundedSender<ReturnedConnection>,
+    pub session_id: String,
+    pub lease_id: Option<u64>,
+    pub connection: Option<StandaloneSession>,
+    pub releases: mpsc::UnboundedSender<ReturnedConnection>,
 }
 
 impl ManagedSessionLease {
@@ -232,7 +232,7 @@ impl ManagedSessionHandle {
         }
     }
 
-    pub(super) async fn enqueue_submit_inner(
+    pub async fn enqueue_submit_inner(
         &self,
         command_id: String,
         command: RelayCommand,
@@ -424,7 +424,7 @@ impl RelayConnectionJob for InstallGithubTokenJob {
 }
 
 #[derive(Debug)]
-pub(super) struct SessionNotIdle;
+pub struct SessionNotIdle;
 
 impl std::fmt::Display for SessionNotIdle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -435,7 +435,7 @@ impl std::fmt::Display for SessionNotIdle {
 impl std::error::Error for SessionNotIdle {}
 
 pub struct PendingRelaySubmit {
-    pub(super) response: oneshot::Receiver<std::result::Result<u64, SubmitFailure>>,
+    pub response: oneshot::Receiver<std::result::Result<u64, SubmitFailure>>,
 }
 
 impl PendingRelaySubmit {
@@ -463,7 +463,7 @@ impl PendingRelaySubmit {
 }
 
 pub struct PendingRelaySync {
-    pub(super) response: oneshot::Receiver<Result<()>>,
+    pub response: oneshot::Receiver<Result<()>>,
 }
 
 impl PendingRelaySync {

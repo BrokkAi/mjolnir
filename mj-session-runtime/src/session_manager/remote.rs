@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn reconcile_action(
+pub fn reconcile_action(
     actor: Option<&RelaySessionTarget>,
     desired: Option<&RelaySessionTarget>,
 ) -> ReconcileAction {
@@ -12,7 +12,7 @@ pub(super) fn reconcile_action(
     }
 }
 
-pub(super) fn target_map(targets: &[RelaySessionTarget]) -> BTreeMap<String, RelaySessionTarget> {
+pub fn target_map(targets: &[RelaySessionTarget]) -> BTreeMap<String, RelaySessionTarget> {
     targets
         .iter()
         .cloned()
@@ -20,7 +20,7 @@ pub(super) fn target_map(targets: &[RelaySessionTarget]) -> BTreeMap<String, Rel
         .collect()
 }
 
-pub(super) fn remove_actor_task(
+pub fn remove_actor_task(
     actors: &mut BTreeMap<String, ActorRegistration>,
     task_id: tokio::task::Id,
 ) -> Option<String> {
@@ -31,7 +31,7 @@ pub(super) fn remove_actor_task(
     Some(session_id)
 }
 
-pub(super) fn reconcile_actors(
+pub fn reconcile_actors(
     targets: &BTreeMap<String, RelaySessionTarget>,
     actors: &mut BTreeMap<String, ActorRegistration>,
     tasks: &mut tokio::task::JoinSet<String>,
@@ -105,7 +105,7 @@ pub(super) fn reconcile_actors(
     }
 }
 
-pub(super) async fn run_remote_session_actor(
+pub async fn run_remote_session_actor(
     session_id: String,
     mut commands: mpsc::Receiver<ActorCommand>,
     requests: mpsc::Sender<RemoteSessionRequest>,
@@ -211,7 +211,7 @@ pub(super) async fn run_remote_session_actor(
     }
 }
 
-pub(super) fn spawn_remote_actor(
+pub fn spawn_remote_actor(
     session_id: String,
     view: ManagedSessionView,
     requests: &mpsc::Sender<RemoteSessionRequest>,

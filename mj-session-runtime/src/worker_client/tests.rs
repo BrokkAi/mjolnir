@@ -1,4 +1,4 @@
-pub(crate) use super::test_fixtures::*;
+pub use super::test_fixtures::*;
 use super::*;
 #[cfg(unix)]
 use crate::test_log::CapturedLog;

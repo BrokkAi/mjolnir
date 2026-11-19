@@ -52,9 +52,9 @@ struct TokenCacheKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InstallationScope {
-    pub(super) installation_id: u64,
-    pub(super) repositories: Vec<String>,
+pub struct InstallationScope {
+    pub installation_id: u64,
+    pub repositories: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -166,11 +166,11 @@ impl GithubAppTokenProvider {
         .await
     }
 
-    pub(crate) async fn installation_for_repo(&self, owner: &str, repository: &str) -> Result<u64> {
+    pub async fn installation_for_repo(&self, owner: &str, repository: &str) -> Result<u64> {
         self.installation_for_owner(owner, Some(repository)).await
     }
 
-    pub(super) async fn token_for_owner_repo_pairs(
+    pub async fn token_for_owner_repo_pairs(
         &self,
         bundle_id: &str,
         repositories: &[(String, String)],
@@ -330,7 +330,7 @@ impl GithubAppTokenProvider {
         Ok(installation.id)
     }
 
-    pub(crate) async fn token_for_installation(
+    pub async fn token_for_installation(
         &self,
         installation_id: u64,
         repositories: &[String],

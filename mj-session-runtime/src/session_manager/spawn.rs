@@ -173,7 +173,7 @@ pub fn spawn_session_manager_observed(
     })
 }
 
-pub(super) async fn shutdown_session_actors(
+pub async fn shutdown_session_actors(
     actors: &mut BTreeMap<String, ActorRegistration>,
     tasks: &mut tokio::task::JoinSet<String>,
 ) {

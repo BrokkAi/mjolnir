@@ -52,8 +52,8 @@ impl RelayRejected {
 /// so rewording a diagnostic can never silently disable recovery.
 #[derive(Debug)]
 pub struct RelayTransportDead {
-    pub(super) message: String,
-    pub(super) handshake_failed: bool,
+    pub message: String,
+    pub handshake_failed: bool,
 }
 
 impl std::fmt::Display for RelayTransportDead {
@@ -74,11 +74,11 @@ impl RelayTransportDead {
 
     /// Mark an I/O failure on the relay's pipes. The marker reports exactly
     /// what the I/O error reported, so it adds a type without adding text.
-    pub(super) fn from_io(error: std::io::Error, kind: ExchangeKind) -> Self {
+    pub fn from_io(error: std::io::Error, kind: ExchangeKind) -> Self {
         Self::during_exchange(error.to_string(), kind)
     }
 
-    pub(super) fn during_exchange(message: impl Into<String>, kind: ExchangeKind) -> Self {
+    pub fn during_exchange(message: impl Into<String>, kind: ExchangeKind) -> Self {
         Self {
             message: message.into(),
             handshake_failed: kind == ExchangeKind::Handshake,
@@ -108,21 +108,21 @@ impl RelayTransportDead {
 /// timeout does not: the proxy launcher or worker can still be alive and slow,
 /// so timeout classification is handled separately in [`RelayClient::exchange`].
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ExchangeKind {
+pub enum ExchangeKind {
     Handshake,
     Call,
 }
 
 /// Why one relay proxy launch failed, and whether it may be tried again.
-pub(super) struct ConnectFailure {
-    pub(super) error: anyhow::Error,
+pub struct ConnectFailure {
+    pub error: anyhow::Error,
     /// Why the launch may be tried again, when it may.
-    pub(super) retry: Option<ConnectRetry>,
+    pub retry: Option<ConnectRetry>,
 }
 
 /// A failed relay proxy launch that said nothing about the worker's health,
 /// so the connect tries again. Either way the worker was never reached.
-pub(super) enum ConnectRetry {
+pub enum ConnectRetry {
     /// The SSH server turned the proxy away, and this is what `ssh` printed.
     /// `walks_on` is whether the refusal is a step of the command's walk to
     /// another master (see `SshSessionLease::note_refusal`).
@@ -138,7 +138,7 @@ pub(super) enum ConnectRetry {
 }
 
 impl ConnectFailure {
-    pub(super) fn plain(error: anyhow::Error) -> Self {
+    pub fn plain(error: anyhow::Error) -> Self {
         Self { error, retry: None }
     }
 }
