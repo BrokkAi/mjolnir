@@ -2262,7 +2262,7 @@ fn github_tokens_sync_to_every_session_target() {
 }
 
 #[test]
-fn only_a_refused_login_or_a_failed_reconciliation_reaches_the_person() {
+fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
     use mj_core::config::{HarnessKind, HarnessProfile};
     use mj_core::credentials::{
         CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, RejectedLogins,
@@ -2314,6 +2314,21 @@ fn only_a_refused_login_or_a_failed_reconciliation_reaches_the_person() {
     let mut stale = result.clone();
     stale.outcomes[0].current_access_token = Some("renewed-token".into());
     assert_eq!(notice(&stale, HarnessKind::Claude), None);
+
+    // The host login could not be read under the native lock, so the failed
+    // login stays unidentified and no new login reached the session: the
+    // worker has nothing to retry with, so the person hears of it.
+    let mut unidentified = result.clone();
+    unidentified.outcomes[0].current_access_token = None;
+    let unknown = notice(&unidentified, HarnessKind::Claude).unwrap();
+    assert!(unknown.contains("was not established"), "{unknown}");
+    assert!(!unknown.contains("mj login"), "{unknown}");
+
+    // The same unknown cause after a new login was pushed resolves itself:
+    // the worker retries the turn with the new login.
+    let mut delivered = unidentified.clone();
+    delivered.outcomes[0].outcome = Ok(vec![mj_core::credentials::CredentialSyncAction::Pushed]);
+    assert_eq!(notice(&delivered, HarnessKind::Claude), None);
 
     // A failed check cannot establish that signing in again will help.
     let failed = CredentialSyncResult {

@@ -202,10 +202,12 @@ impl CredentialSyncNotices {
             });
             if trigger.reason == CredentialSyncReason::AuthenticationFailure {
                 let profile = &result.profile_id;
-                // The person hears only what they must act on: a refused
-                // login, or a reconciliation that failed. A stale login that
-                // was or will be replaced by the renewed one needs nothing
-                // from them, and the worker retries the turn by itself.
+                // The person hears what nothing else will resolve: a refused
+                // login, a reconciliation that failed, or a cause that stays
+                // unknown while no new login reached the session. A stale
+                // login that was or will be replaced by the renewed one needs
+                // nothing from them, and neither does an unknown cause once a
+                // new login was pushed: the worker retries the turn by itself.
                 let conclusion = match login_verdict {
                     Some(LoginFailureVerdict::Refused) => format!(
                         "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`."
@@ -229,7 +231,9 @@ impl CredentialSyncNotices {
                         );
                         return None;
                     }
-                    Some(LoginFailureVerdict::Unrefused { reason }) => {
+                    Some(LoginFailureVerdict::Unrefused { reason })
+                        if result.pushed_to(session_id) =>
+                    {
                         tracing::info!(
                             profile_id = %profile,
                             session_id = %session_id,
@@ -237,6 +241,9 @@ impl CredentialSyncNotices {
                         );
                         return None;
                     }
+                    Some(LoginFailureVerdict::Unrefused { reason }) => format!(
+                        "a refusal of the profile's current login was not established: {reason}."
+                    ),
                     _ => return None,
                 };
                 return Some(warning(format!(
