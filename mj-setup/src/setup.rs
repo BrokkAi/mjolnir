@@ -28,7 +28,8 @@ pub use machines::{
 };
 mod startup;
 pub use startup::{
-    SetupReport, actionable_errors, add_detected_profiles, run_setup, run_setup_command,
+    SetupReport, actionable_errors, add_detected_profiles, automatic_setup_due, run_setup,
+    run_setup_command,
 };
 
 // Session tools and harnesses are installed after cloning the project.

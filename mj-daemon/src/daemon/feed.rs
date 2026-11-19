@@ -517,10 +517,9 @@ mod tests {
             .run();
             return;
         }
-        assert_eq!(
-            mj_client::daemon::PROTOCOL_VERSION,
-            mj_client::daemon::ALERT_EVENTS_PROTOCOL
-        );
+        const {
+            assert!(mj_client::daemon::PROTOCOL_VERSION >= mj_client::daemon::ALERT_EVENTS_PROTOCOL)
+        };
         let log = mj_controller::test_log::CapturedLog::default();
         tracing::subscriber::set_global_default(log.clone())
             .expect("isolated observer log subscriber");

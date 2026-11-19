@@ -876,6 +876,10 @@ pub enum DaemonAction {
     /// The configuration the daemon serves. Clients read it here instead of
     /// opening `config.toml`, which belongs to the daemon.
     Configuration,
+    /// Whether first-run setup has work to do: a new installation, or one
+    /// whose setup did not finish. A dashboard asks before it shows the
+    /// first-run welcome, which takes the keyboard.
+    FirstRunSetupDue,
     /// Discover and persist the first-run configuration in the daemon's own
     /// environment. A client in another placement asks its daemon instead of
     /// writing the client's `config.toml`.
@@ -1422,6 +1426,7 @@ pub enum DaemonReply {
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
     Configuration(Box<Config>),
+    FirstRunSetupDue(bool),
     FirstRunSetup(Option<FirstRunSetupReport>),
     DoctorErrors(Vec<String>),
     RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
@@ -2266,6 +2271,13 @@ impl DaemonClient {
         match self.request(DaemonAction::Configuration).await? {
             DaemonReply::Configuration(config) => Ok(*config),
             reply => bail!("unexpected daemon configuration reply {reply:?}"),
+        }
+    }
+
+    pub async fn first_run_setup_due(&mut self) -> Result<bool> {
+        match self.request(DaemonAction::FirstRunSetupDue).await? {
+            DaemonReply::FirstRunSetupDue(due) => Ok(due),
+            reply => bail!("unexpected first-run setup reply {reply:?}"),
         }
     }
 
@@ -3798,7 +3810,9 @@ pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
 /// The first protocol with daemon-owned notify-once alert events.
 pub const ALERT_EVENTS_PROTOCOL: u32 = 108;
 // Version 107: explicit SessionWiki sync generations and progress watches.
-pub const PROTOCOL_VERSION: u32 = ALERT_EVENTS_PROTOCOL;
+// Version 109: the daemon answers whether first-run setup is due, so a
+// dashboard shows the first-run welcome only for an installation that needs it.
+pub const PROTOCOL_VERSION: u32 = 109;
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;

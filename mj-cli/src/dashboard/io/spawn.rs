@@ -439,18 +439,25 @@ pub(crate) fn spawn_first_run_setup(
         "first-run setup",
         updates,
         move |_cancelled| {
-            report(
-                "first-run setup",
-                &progress,
-                DashboardIoUpdate::FirstRunStarted,
-            );
             // The daemon owns its configuration and its environment. In
             // container placement this discovery runs inside the container,
             // not against the client's host home.
             mj_core::runtime::block_on(async {
                 let mut daemon = crate::daemon::connect_or_start().await?;
-                // An existing installation picks up agents installed since its
-                // last launch through the startup availability check.
+                // The welcome takes the keyboard, so it opens only once the
+                // daemon has said this installation needs setup. An existing
+                // installation picks up agents installed since its last
+                // launch through the startup availability check.
+                if !daemon.first_run_setup_due().await? {
+                    return Ok(None);
+                }
+                report(
+                    "first-run setup",
+                    &progress,
+                    DashboardIoUpdate::FirstRunStarted,
+                );
+                // Setup decides again under its lock: another dashboard may
+                // have finished it since the daemon answered.
                 let Some(summary) = daemon.run_first_run_setup().await? else {
                     return Ok(None);
                 };

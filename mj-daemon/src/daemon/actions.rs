@@ -76,6 +76,19 @@ pub(super) async fn handle_action(
         DaemonAction::Configuration => Ok(DaemonReply::Configuration(Box::new(
             state.with_config(Clone::clone),
         ))),
+        DaemonAction::FirstRunSetupDue => {
+            // Not `blocking`: this only reads the setup marker and the
+            // configuration, so it takes no upgrade admission.
+            let due = mj_core::runtime::spawn_blocking(|| {
+                mj_setup::setup::automatic_setup_due(
+                    &mj_core::config::config_path(),
+                    &mj_core::config::data_dir(),
+                )
+            })
+            .await
+            .context("daemon first-run check task panicked")??;
+            Ok(DaemonReply::FirstRunSetupDue(due))
+        }
         DaemonAction::RunFirstRunSetup => {
             let report = blocking(|| {
                 let executor = mj_controller::targets::ProcessExecutor;
@@ -1366,6 +1379,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::ImportSession { .. }
             // Read-only and repeatable; the client reports an interrupted run.
             | DaemonAction::RunDoctor
+            | DaemonAction::FirstRunSetupDue
     ) {
         Ok(None)
     } else {
