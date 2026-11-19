@@ -27,7 +27,13 @@ MJOLNIR_REVISION = "fb0a4c0ac5cfe0396e1bce2740b6a1148c47fdb9"
 # Missing-step kinds from label-SPEC.md; the menu ranks these.
 MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
                  "keyed_matching", "contract", "other")
+# Default profile, model and quota scope per labeller. --profile overrides the profile, for
+# example to run replication on a Claude profile the coordinator allots (claude7's week ran out).
 ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
+
+
+def role_profile(args, role):
+    return getattr(args, "profile", None) or ROLES[role][0]
 INPUTS = ("id", "repo", "intro_commit", "base_commit", "fix_commit", "defect", "trigger", "location")
 
 LABELLER_EFFORT = "high"
@@ -674,7 +680,8 @@ def collect(output, expected, role, repo, allowed):
 
 
 def quota(args, role):
-    profile, _, scope = ROLES[role]
+    _, _, scope = ROLES[role]
+    profile = role_profile(args, role)
     previous = None
     while hold := driver.quota_hold(scope, floor=f"{profile}=25", weekly=True, strict=True):
         if hold != previous:
@@ -773,7 +780,8 @@ def fetch_output(sid, path):
 
 
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
-    profile, model, _ = ROLES[role]
+    _, model, _ = ROLES[role]
+    profile = role_profile(args, role)
     ids = [item["id"] for item in batch]
     if not args.work_dir.is_absolute():
         raise ValueError("--work-dir must be absolute")
@@ -913,6 +921,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=("test", "development"))
     parser.add_argument("--labeller", choices=ROLES, required=False)
+    parser.add_argument("--profile", help="run this labeller on another profile of the same model family")
     parser.add_argument("--repo", help="run only this repo, e.g. 1jehuang/jcode")
     parser.add_argument("--limit", type=int, help="take only the first N selected items, before applying resume")
     parser.add_argument("--batch-size", type=int, default=5)
