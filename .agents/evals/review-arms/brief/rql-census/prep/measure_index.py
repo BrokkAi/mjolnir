@@ -517,8 +517,10 @@ def main():
         "nproc": os.cpu_count(),
         # What Bifrost actually gets: CPU affinity and the driver's cgroup CPU quota.
         "cpu_affinity": len(os.sched_getaffinity(0)),
-        "cpu_max": read_cpu_max(),
-        "bifrost_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("BIFROST_")},
+        "scope_cpu_max": read_scope_cpu_max(),
+        # Thread-pool settings Bifrost inherits (BIFROST_*, RAYON_NUM_THREADS and similar).
+        "thread_env": {k: v for k, v in sorted(os.environ.items())
+                       if k.startswith("BIFROST_") or k.startswith("RAYON_") or k.endswith("_THREADS")},
     }
     def is_done(repo, r):
         """The single decision "this repo has a usable measurement under current conditions",
@@ -610,14 +612,22 @@ def main():
     if incomplete:
         sys.exit(f"{len(incomplete)} of {len(repos)} pinned repos lack a usable measurement: {incomplete[:5]}")
 
-def read_cpu_max():
-    """The driver cgroup's CPU quota ("max" when unlimited); "no cpu controller" when the
-    controller isn't enabled there. Servers' scopes inherit any ancestor quota."""
-    try:
-        cg = open("/proc/self/cgroup").read().split("::", 1)[1].strip()
-        return open(f"/sys/fs/cgroup{cg}/cpu.max").read().strip()
-    except FileNotFoundError:
-        return "no cpu controller"
+def read_scope_cpu_max():
+    """CPU quotas on the path a server scope inherits: transient --user scopes go under the
+    user manager's app.slice, so record cpu.max from app.slice up to the root (absent where the
+    cpu controller isn't enabled). A quota change on that path changes the reuse key."""
+    uid = os.getuid()
+    path = pathlib.Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice")
+    quotas = {}
+    while path != pathlib.Path("/sys/fs/cgroup").parent:
+        try:
+            quotas[str(path)] = (path / "cpu.max").read_text().strip()
+        except FileNotFoundError:
+            pass
+        if path == pathlib.Path("/sys/fs/cgroup"):
+            break
+        path = path.parent
+    return quotas
 
 
 def latest_records(results):
