@@ -7786,7 +7786,10 @@ async fn forced_refresh_uses_the_new_default_for_the_allowlist() {
         assert_eq!(calls.first(), Some(&None));
         assert_eq!(choices.model, selected.or(Some("new-default".into())));
         choices.model = default;
-        let choices = choices.restricted_to(&["allowed".into()]);
+        let choices = choices.restricted_to(&mj_core::config::ModelOffer {
+            models: vec!["allowed".into()],
+            ..Default::default()
+        });
         assert_eq!(
             choices
                 .models

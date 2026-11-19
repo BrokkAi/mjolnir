@@ -3215,6 +3215,7 @@ const ZAI_CATALOG: &str = r#"{"models":[
 fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
     std::fs::write(home.join("config.toml"), ZAI_CONFIG).unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -3521,6 +3522,7 @@ const DEEPSEEK_LIST: &str = r#"{"object":"list","data":[
 fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
     std::fs::write(home.join("config.toml"), DEEPSEEK_CONFIG).unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -4266,6 +4268,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
     )
     .unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),

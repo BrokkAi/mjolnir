@@ -1386,7 +1386,10 @@ impl DashboardState {
         if quota.harness == HarnessKind::Antigravity {
             let pool_cell = |weekly: bool| {
                 PickerCell::text(
-                    AntigravityQuotaPool::ALL
+                    self.config
+                        .enabled_profile(id)
+                        .map(|profile| profile.antigravity_pools())
+                        .unwrap_or_default()
                         .into_iter()
                         .map(|pool| {
                             let report = quota.for_antigravity_pool(pool);
@@ -1475,7 +1478,7 @@ impl DashboardState {
             .enabled_profiles()
             .flat_map(|(id, profile)| {
                 let pools = if profile.kind == HarnessKind::Antigravity {
-                    AntigravityQuotaPool::ALL.map(Some).to_vec()
+                    profile.antigravity_pools().into_iter().map(Some).collect()
                 } else {
                     vec![None]
                 };
