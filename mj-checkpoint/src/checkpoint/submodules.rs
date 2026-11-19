@@ -152,6 +152,30 @@ fn inspect_checkout(
         if !replacements.is_empty() {
             snapshot.notices.push(format!("{}: Git replacement refs and replacement content do not travel with the snapshot; the raw checkout is kept", checkout.display()));
         }
+        let grafts = crate::snapshot::git_path(runner, checkout, "info/grafts")?;
+        let contents = match std::fs::read(&grafts) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error).context("read Git grafts"),
+        };
+        let active = contents.split(|byte| *byte == b'\n').any(|line| {
+            line.iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| byte != b'#')
+        });
+        ensure!(
+            !managed || !active,
+            "managed checkout {} has Git grafts at {} that snapshots do not preserve; back up its full original history in an independent repository, remove the graft file, and retry, or suspend with --without-checkpoint",
+            checkout.display(),
+            grafts.display()
+        );
+        if active {
+            snapshot.notices.push(format!(
+                "{}: Git grafts do not travel with the snapshot; the raw checkout is kept",
+                grafts.display()
+            ));
+        }
         crate::snapshot::validate_origin_rewrite_anchoring(runner, checkout, None)?;
     }
     let mut gitlinks = gitlinks(runner, checkout)?;

@@ -3941,7 +3941,10 @@ fn teardown_path_dependency(absolute: &Path, roots: &[PathBuf]) -> Result<Option
 /// routes too: canonical provider names alone hide symlinks through teardown.
 enum LocalOriginProviders {
     Unavailable(String),
-    Ready(Vec<PathBuf>),
+    Ready {
+        providers: Vec<PathBuf>,
+        shallow: Option<PathBuf>,
+    },
 }
 
 fn local_origin_object_providers(
@@ -3989,6 +3992,14 @@ fn local_origin_object_providers(
         );
         Ok(output.stdout)
     };
+    let shallow = if query(&["rev-parse", "--is-shallow-repository"])? == b"true\n" {
+        Some(crate::archive::git::absolute_git_path(
+            context,
+            &query(&["rev-parse", "--git-path", "shallow"])?,
+        )?)
+    } else {
+        None
+    };
     let common = crate::archive::git::absolute_git_path(
         context,
         &query(&["rev-parse", "--git-common-dir"])?,
@@ -4029,7 +4040,10 @@ fn local_origin_object_providers(
             ));
         }
     }
-    Ok(LocalOriginProviders::Ready(providers.into_iter().collect()))
+    Ok(LocalOriginProviders::Ready {
+        providers: providers.into_iter().collect(),
+        shallow,
+    })
 }
 
 fn inventory_origin_dependencies(
@@ -4128,7 +4142,15 @@ fn inventory_origin_dependencies(
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
                 let providers = match local_origin_object_providers(runner, checkout, &absolute).with_context(|| format!("cannot inspect local origin object storage at {}; repair its objects/info/alternates, or make it independent with `git -C {} repack -a -d` and remove its alternates file, then retry", absolute.display(), mj_core::targets::posix_quote(&absolute.to_string_lossy())))? {
-                    LocalOriginProviders::Ready(providers) => providers,
+                    LocalOriginProviders::Ready { providers, shallow } => {
+                        // A local shallow server advertises tips without promising
+                        // their parents. Never exclude using our fuller source graph.
+                        // Hosted origins retain the agreed complete-origin assumption.
+                        if let Some(boundary) = shallow {
+                            anyhow::bail!("managed snapshot origin {} is shallow at {}; restore its full history with `git --git-dir {} fetch --unshallow <full-history-remote>`, then retry, or use `mj suspend --without-checkpoint`", absolute.display(), boundary.display(), mj_core::targets::posix_quote(&boundary.parent().context("shallow boundary has no Git directory")?.to_string_lossy()));
+                        }
+                        providers
+                    },
                     LocalOriginProviders::Unavailable(error) => {
                         // Only an absent/unresolvable repository uses the
                         // existing offline policy. Errors after resolution
@@ -4652,6 +4674,34 @@ fn validate_restored_module_admin(
         directory.display(),
         private.display(),
         common.display()
+    );
+    // Snapshot modules preserve their recorded clean tracked files. A normal
+    // same-commit checkout preserves destination edits instead of restoring them.
+    // Ignore gitlinks: their intentionally staged positions are restored below.
+    let status = runner.run(
+        directory,
+        &GitCommand {
+            arguments: [
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--ignore-submodules=all",
+            ]
+            .map(Into::into)
+            .to_vec(),
+            env: vec![("GIT_OPTIONAL_LOCKS".into(), "0".into())],
+            stdin: Vec::new(),
+        },
+    )?;
+    ensure!(
+        status.status == 0,
+        "{}",
+        git_failure("inspect provisioned submodule tracked state", &status)
+    );
+    ensure!(
+        status.stdout.is_empty(),
+        "provisioned submodule {} has tracked edits that conflict with the saved clean state; stash or commit these edits in that submodule, then retry; destination untracked files are kept",
+        directory.display()
     );
     Ok(private)
 }
@@ -17407,5 +17457,224 @@ mod tests {
             git(&restored.join("sub"), &["rev-parse", "HEAD"]),
             snapshot.initialized_submodules[0].commit
         );
+    }
+    // Hard-won: 85706ae8f: a shallow local server advertised a tip whose full ancestry lived only in the source.
+    #[test]
+    fn review_fourteenth_local_shallow_origins_refuse_before_managed_abort() {
+        for operation in [false, true] {
+            let root = Repo::new();
+            root.commit("history below the shallow origin tip\n");
+            git(&root.checkout, &["push", "origin", "main"]);
+            let uri = url::Url::from_directory_path(&root.origin)
+                .unwrap()
+                .to_string();
+            let shallow = root.temp.path().join("shallow.git");
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    "--depth",
+                    "1",
+                    &uri,
+                    shallow.to_str().unwrap(),
+                ],
+            );
+            git(
+                &root.checkout,
+                &["remote", "set-url", "origin", shallow.to_str().unwrap()],
+            );
+            assert_eq!(
+                git(&root.checkout, &["rev-parse", "--is-shallow-repository"]),
+                "false"
+            );
+            if operation {
+                root.conflict();
+                root.start_conflict("merge");
+            }
+            let index = fs::read(root.checkout.join(".git/index")).unwrap();
+            let file = fs::read(root.checkout.join("file")).unwrap();
+            let error = capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Managed,
+                &root.temp.path().join("refused.pack"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::Any,
+                },
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("origin")
+                    && format!("{error:#}").contains("is shallow at")
+                    && format!("{error:#}").contains("fetch --unshallow"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(root.checkout.join(".git/index")).unwrap(), index);
+            assert_eq!(fs::read(root.checkout.join("file")).unwrap(), file);
+            assert_eq!(root.checkout.join(".git/MERGE_HEAD").exists(), operation);
+        }
+        let root = Repo::new();
+        let module = Repo::new();
+        module.commit("module ancestry\n");
+        git(&module.checkout, &["push", "origin", "main"]);
+        let directory = add_submodule(&root, &module);
+        let shallow = module.temp.path().join("shallow.git");
+        let uri = url::Url::from_directory_path(&module.origin)
+            .unwrap()
+            .to_string();
+        git(
+            module.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                "--depth",
+                "1",
+                &uri,
+                shallow.to_str().unwrap(),
+            ],
+        );
+        git(
+            &directory,
+            &["remote", "set-url", "origin", shallow.to_str().unwrap()],
+        );
+        let error =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(shallow.to_str().unwrap())
+                && format!("{error:#}").contains("is shallow at"),
+            "{error:#}"
+        );
+    }
+
+    // Hard-won: 85706ae8f: legacy grafts hid parents from packing while original commit objects still named them.
+    #[test]
+    fn review_fourteenth_grafts_refuse_before_a_managed_abort() {
+        let root = Repo::new();
+        root.conflict();
+        root.start_conflict("merge");
+        let head = git(&root.checkout, &["rev-parse", "HEAD"]);
+        let graft = git_path(&FileGit, &root.checkout, "info/grafts").unwrap();
+        fs::write(&graft, format!("{head}\n")).unwrap();
+        assert_eq!(
+            git(&root.checkout, &["rev-list", "--parents", "-1", "HEAD"]),
+            head
+        );
+        let index = fs::read(root.checkout.join(".git/index")).unwrap();
+        let file = fs::read(root.checkout.join("file")).unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Git grafts at")
+                && format!("{error:#}").contains(graft.to_str().unwrap()),
+            "{error:#}"
+        );
+        assert!(root.checkout.join(".git/MERGE_HEAD").exists());
+        assert_eq!(fs::read(root.checkout.join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(root.checkout.join("file")).unwrap(), file);
+        let raw = workspace_inventory(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Raw { launch: None },
+        )
+        .unwrap();
+        assert!(
+            raw.notices
+                .iter()
+                .any(|notice| notice.contains("Git grafts")
+                    && notice.contains("raw checkout is kept"))
+        );
+        fs::write(&graft, b"# no active graft\n\n").unwrap();
+        root.capture(&CheckoutOwnership::Managed);
+        assert!(!root.checkout.join(".git/MERGE_HEAD").exists());
+        let module = Repo::new();
+        let directory = add_submodule(&root, &module);
+        let graft = git_path(&FileGit, &directory, "info/grafts").unwrap();
+        fs::write(
+            &graft,
+            format!("{}\n", git(&directory, &["rev-parse", "HEAD"])),
+        )
+        .unwrap();
+        let error =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(graft.to_str().unwrap()),
+            "{error:#}"
+        );
+    }
+
+    // Hard-won: 85706ae8f: same-commit checkout preserved provisioned module index and worktree edits.
+    #[test]
+    fn review_fourteenth_provisioned_module_tracked_edits_refuse_without_writes() {
+        for mode in ["unstaged", "staged", "cancelled-in-worktree"] {
+            let root = Repo::new();
+            let module = Repo::new();
+            add_submodule(&root, &module);
+            let snapshot = root.capture(&CheckoutOwnership::Managed);
+            let destination = root.restore(&snapshot, None);
+            let directory = destination.join("sub");
+            let original = fs::read(directory.join("file")).unwrap();
+            fs::write(directory.join("file"), "destination edits\n").unwrap();
+            if mode != "unstaged" {
+                git(&directory, &["add", "file"]);
+            }
+            if mode == "cancelled-in-worktree" {
+                fs::write(directory.join("file"), &original).unwrap();
+            }
+            fs::write(directory.join("notes"), "destination-owned notes\n").unwrap();
+            let module_index = git_path(&FileGit, &directory, "index").unwrap();
+            let index = fs::read(&module_index).unwrap();
+            let file = fs::read(directory.join("file")).unwrap();
+            let config = fs::read(destination.join(".git/config")).unwrap();
+            let parent_index = fs::read(destination.join(".git/index")).unwrap();
+            let error = restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("has tracked edits")
+                    && format!("{error:#}").contains(directory.to_str().unwrap()),
+                "{mode}: {error:#}"
+            );
+            assert_eq!(fs::read(&module_index).unwrap(), index);
+            assert_eq!(fs::read(directory.join("file")).unwrap(), file);
+            assert_eq!(fs::read(destination.join(".git/config")).unwrap(), config);
+            assert_eq!(
+                fs::read(destination.join(".git/index")).unwrap(),
+                parent_index
+            );
+            git(&directory, &["reset", "--hard", "HEAD"]);
+            restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(fs::read(directory.join("file")).unwrap(), original);
+            assert_eq!(
+                fs::read_to_string(directory.join("notes")).unwrap(),
+                "destination-owned notes\n"
+            );
+        }
     }
 }
