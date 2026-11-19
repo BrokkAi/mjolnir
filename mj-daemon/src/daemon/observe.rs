@@ -91,15 +91,9 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                 save_delivery(&paths, &delivery, None).await?;
                 return Ok(());
             }
-            // Do not remove queued envelopes until their ids are durable.
-            let flush = if !export
-                .as_ref()
-                .is_err_and(|error| error.downcast_ref::<UndurableObserveIds>().is_some())
-            {
-                flush_spool(&paths, &config, &client, &cancellation).await
-            } else {
-                Ok(0)
-            };
+            // Each batch repairs its own id log before upload. An enqueue
+            // failure must not prevent already-durable entries freeing space.
+            let flush = flush_spool(&paths, &config, &client, &cancellation).await;
             match &flush {
                 Ok(delivered) => {
                     if *delivered > 0 {
@@ -201,7 +195,7 @@ async fn publish_changed_sessions(
         let mut delivery = delivery
             .lock()
             .map_err(|_| anyhow!("Observe state lock poisoned"))?;
-        let spool = ObserveSpool::open(&paths.spool)?;
+        let spool = ObserveSpool::open_for_delivery(&paths, &cancellation)?;
         let mut ids = runtime_state
             .sessions
             .keys()
@@ -263,16 +257,7 @@ async fn publish_changed_sessions(
                 }
             }
         }
-        let undurable = failures
-            .iter()
-            .any(|error| error.downcast_ref::<UndurableObserveIds>().is_some());
-        delivery.save(&paths.state).map_err(|error| {
-            if undurable {
-                error.context(UndurableObserveIds)
-            } else {
-                error
-            }
-        })?;
+        delivery.save(&paths.state)?;
         if emitted > 0 {
             tracing::debug!(emitted, "enqueued Mjolnir events for Brokk Observe");
         }
@@ -288,11 +273,7 @@ async fn publish_changed_sessions(
                     .collect::<Vec<_>>()
                     .join("; ")
             );
-            Err(if undurable {
-                error.context(UndurableObserveIds)
-            } else {
-                error
-            })
+            Err(error)
         }
     })
     .await
@@ -371,15 +352,13 @@ fn publish_one(
         known.remote = known.remote.take().or(found.remote);
         known.branch = found.position.branch.clone().or(known.branch.take());
         let start_already_sent = known.head.is_none()
-            && cursor.is_some_and(|cursor| {
-                cursor.reported_git.is_none()
-                    && emitted.contains(&mj_core::observe::event_id(
-                        &record.id,
-                        0,
-                        "SessionStart",
-                        0,
-                    ))
-            });
+            && cursor.is_none_or(|cursor| cursor.reported_git.is_none())
+            && emitted.contains(&mj_core::observe::event_id(
+                &record.id,
+                0,
+                "SessionStart",
+                0,
+            ));
         if known.head.is_none() {
             known.head = found.launch.clone();
         }
@@ -576,18 +555,18 @@ fn enqueue_envelopes(
             continue;
         }
         if let Err(error) = spool.enqueue(&envelope) {
-            ids.append(session_id, &appended)
-                .context(UndurableObserveIds)?;
-            // Failure can follow the final link: the current envelope may
-            // already be queued even though enqueue did not acknowledge it.
-            return Err(error.context(UndurableObserveIds));
+            if !appended.is_empty() {
+                ids.append(session_id, &appended)?;
+            }
+            // Batch delivery recovers any current id left behind by a failure
+            // after publication, independently of whether projection can retry.
+            return Err(error);
         }
         emitted.insert(envelope.meta.event_id.clone());
         appended.push(envelope.meta.event_id.clone());
         count += 1;
     }
-    ids.append(session_id, &appended)
-        .context(UndurableObserveIds)?;
+    ids.append(session_id, &appended)?;
     let cursor = delivery.sessions.entry(session_id.to_owned()).or_default();
     cursor.record_updated_at = batch.revision.to_owned();
     cursor.materialized_event_ordinal = batch.materialized_event_ordinal;
@@ -601,17 +580,6 @@ fn enqueue_envelopes(
     }
     Ok(count)
 }
-
-/// A spool entry must remain local if its deduplication record could not be
-/// made durable. Ordinary projection failures do not block healthy sessions.
-#[derive(Debug)]
-struct UndurableObserveIds;
-impl std::fmt::Display for UndurableObserveIds {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Observe emitted ids are not durable; retained spool")
-    }
-}
-impl std::error::Error for UndurableObserveIds {}
 
 struct ObserveBatch<'a> {
     revision: &'a str,
@@ -813,10 +781,10 @@ async fn flush_spool(
     client: &reqwest::Client,
     cancellation: &CancellationToken,
 ) -> Result<usize> {
-    let spool_path = paths.spool.clone();
+    let delivery_paths = paths.clone();
     let preparing_cancellation = cancellation.clone();
     let (spool, pending) = tokio::task::spawn_blocking(move || {
-        let spool = ObserveSpool::open(spool_path)?;
+        let spool = ObserveSpool::open_for_delivery(&delivery_paths, &preparing_cancellation)?;
         let pending = spool.pending_cancellable(&preparing_cancellation)?;
         Ok::<_, anyhow::Error>((spool, Arc::new(pending)))
     })
@@ -855,28 +823,24 @@ async fn flush_spool(
         .filter(|bytes| *bytes > 0)
         .context("Brokk Observe ping did not provide max_body_bytes")?;
 
-    // Ping first: an unavailable server should not make every retry resync
-    // the backlog. Reconcile ids before the first batch can leave the spool.
-    let preparing_spool = spool.clone();
-    let preparing_paths = Arc::clone(&pending);
-    let preparing_cancellation = cancellation.clone();
-    tokio::task::spawn_blocking(move || {
-        preparing_spool.prepare_delivery(&preparing_paths, &preparing_cancellation)
-    })
-    .await
-    .context("Observe queued-id recovery task panicked")??;
-    if cancellation.is_cancelled() {
-        return Ok(0);
-    }
     let started = Instant::now();
     let mut delivered = 0_usize;
     let mut index = 0_usize;
     while index < pending.len() {
         let batch_paths = Arc::clone(&pending);
-        let (body, end) =
-            tokio::task::spawn_blocking(move || batch_from(&batch_paths, index, limit))
-                .await
-                .context("Observe batch read task panicked")??;
+        let preparing_spool = spool.clone();
+        let preparing_cancellation = cancellation.clone();
+        let (body, end) = tokio::task::spawn_blocking(move || {
+            let (body, end) = batch_from(&batch_paths, index, limit)?;
+            // Recover only this server-sized batch, using bytes already read.
+            preparing_spool.prepare_delivery(&body, &preparing_cancellation)?;
+            Ok::<_, anyhow::Error>((body, end))
+        })
+        .await
+        .context("Observe batch preparation task panicked")??;
+        if cancellation.is_cancelled() {
+            return Ok(0);
+        }
         let exchange = async {
             let response = client
                 .post(format!("{}/api/v1/ingest/batch", config.url))
@@ -1091,16 +1055,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let later = spool.root().join("zz-later.json");
+        std::fs::write(&later, b"not a valid envelope").unwrap();
         let pending = spool.pending().unwrap();
+        let (body, end) =
+            batch_from(&pending, 0, unprojectable.to_ndjson().unwrap().len()).unwrap();
+        assert_eq!(end, 1);
+        // Hard-won: d91380c89: preparation must not read the rest of the backlog.
         spool
-            .prepare_delivery(&pending, &CancellationToken::new())
+            .prepare_delivery(&body, &CancellationToken::new())
             .unwrap();
-        assert_eq!(pending.len(), 1);
         assert_eq!(
             spool.emitted_ids().load("unprojectable-session").unwrap(),
             BTreeSet::from([unprojectable.meta.event_id.clone()])
         );
         spool.remove(&pending[0]).unwrap();
+        spool.remove(&later).unwrap();
         assert_eq!(replay_stop(&spool, &mut delivery, unprojectable), 0);
     }
 
@@ -1145,12 +1115,7 @@ mod tests {
             BTreeSet::new(),
         );
         std::fs::set_permissions(spool.root(), permissions).unwrap();
-        assert!(
-            result
-                .unwrap_err()
-                .downcast_ref::<UndurableObserveIds>()
-                .is_some()
-        );
+        assert!(result.is_err());
         assert!(!delivery.sessions.contains_key(session_id));
         assert!(spool.emitted_ids().load(session_id).unwrap().is_empty());
         let queued = spool.pending().unwrap();
@@ -1220,7 +1185,18 @@ mod tests {
             1
         );
         let mut reloaded = ObserveDeliveryState::load(&path, 40).unwrap();
-        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let paths = ObservePaths {
+            root: root.path().to_owned(),
+            state: path.clone(),
+            spool: root.path().join("spool"),
+        };
+        #[cfg(unix)]
+        let relocated_spool = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(relocated_spool.path(), &paths.spool).unwrap();
+        // Hard-won: d91380c89: a relocated spool must use the migrated id log.
+        let spool = ObserveSpool::open_for_delivery(&paths, &CancellationToken::new()).unwrap();
+
         assert_eq!(replay_stop(&spool, &mut reloaded, envelope), 0);
         assert!(spool.pending().unwrap().is_empty());
     }
@@ -1397,7 +1373,13 @@ mod tests {
                 .unwrap();
         let state = mj_core::state::State::default();
         let mut publish = |record: &SessionRecord| {
-            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
+            let count =
+                publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap();
+            if record.checkpoint.is_none() {
+                // Hard-won: d91380c89: partial export can persist SessionStart without a cursor.
+                delivery.sessions.remove(&record.id);
+            }
+            count
         };
         // Every head in the spool, in delivery order, with the event carrying it.
         let heads = || {
@@ -1544,6 +1526,20 @@ mod tests {
             "an unchanged projection must not be rebuilt"
         );
         delivery.save(&paths.state).unwrap();
+
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(spool.root()).unwrap().permissions();
+            std::fs::set_permissions(spool.root(), std::fs::Permissions::from_mode(0o500)).unwrap();
+            let enqueue = spool.enqueue(&projected_stop(
+                "cannot-enqueue",
+                "no free writable storage",
+            ));
+            std::fs::set_permissions(spool.root(), permissions).unwrap();
+            // Hard-won: d91380c89: failed enqueue must still let durable entries drain.
+            assert!(enqueue.is_err());
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

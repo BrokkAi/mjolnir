@@ -538,6 +538,8 @@ pub fn usage_envelopes(
 pub struct ObserveSpool {
     root: PathBuf,
     queued: std::sync::Arc<std::sync::Mutex<Option<BTreeMap<String, PathBuf>>>>,
+    ids: ObserveEmittedIds,
+    cancellation: CancellationToken,
 }
 
 impl ObserveSpool {
@@ -545,12 +547,27 @@ impl ObserveSpool {
         let requested = root.into();
         fs::create_dir_all(&requested)
             .with_context(|| format!("create Observe spool {}", requested.display()))?;
+        let ids = ObserveEmittedIds::new(&requested.with_file_name("delivery.json"));
         let root = fs::canonicalize(&requested)
             .with_context(|| format!("resolve Observe spool {}", requested.display()))?;
         Ok(Self {
             root,
             queued: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ids,
+            cancellation: CancellationToken::new(),
         })
+    }
+
+    /// The logical Observe state path owns id logs, independently of where a
+    /// symlink places the spool. Rebuildable indexing follows daemon cancellation.
+    pub fn open_for_delivery(
+        paths: &ObservePaths,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        let mut spool = Self::open(&paths.spool)?;
+        spool.ids = ObserveEmittedIds::new(&paths.state);
+        spool.cancellation = cancellation.clone();
+        Ok(spool)
     }
 
     fn filename_digest(path: &Path) -> Result<&str> {
@@ -560,8 +577,8 @@ impl ObserveSpool {
             .context("invalid Observe spool filename")
     }
 
-    pub fn emitted_ids(&self) -> ObserveEmittedIds {
-        ObserveEmittedIds::new(&self.root.with_file_name("delivery.json"))
+    pub fn emitted_ids(&self) -> &ObserveEmittedIds {
+        &self.ids
     }
 
     pub fn root(&self) -> &Path {
@@ -580,12 +597,24 @@ impl ObserveSpool {
             .lock()
             .map_err(|_| anyhow::anyhow!("Observe spool lock poisoned"))?;
         if queued.is_none() {
-            *queued = Some(
-                self.pending()?
-                    .into_iter()
-                    .map(|path| Ok((Self::filename_digest(&path)?.to_owned(), path)))
-                    .collect::<Result<BTreeMap<_, _>>>()?,
+            let mut index = BTreeMap::new();
+            for entry in fs::read_dir(&self.root)? {
+                ensure!(
+                    !self.cancellation.is_cancelled(),
+                    "Observe spool indexing cancelled"
+                );
+                let path = entry?.path();
+                if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    index
+                        .entry(Self::filename_digest(&path)?.to_owned())
+                        .or_insert(path);
+                }
+            }
+            ensure!(
+                !self.cancellation.is_cancelled(),
+                "Observe spool indexing cancelled"
             );
+            *queued = Some(index);
         }
         let queued = queued
             .as_mut()
@@ -656,21 +685,16 @@ impl ObserveSpool {
 
     /// Recover the spool-to-id-log gap even when projection of a session fails.
     /// Delivery may remove a queued entry only after its id is durable.
-    pub fn prepare_delivery(
-        &self,
-        pending: &[PathBuf],
-        cancellation: &CancellationToken,
-    ) -> Result<()> {
+    pub fn prepare_delivery(&self, batch: &[u8], cancellation: &CancellationToken) -> Result<()> {
         // A crash may have interrupted the original link's directory sync.
         // Make the queued files durable before their ids can outlive them.
         mj_core::config::sync_directory(&self.root)?;
         let mut sessions: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for path in pending {
+        for envelope in serde_json::Deserializer::from_slice(batch).into_iter::<ObserveEnvelope>() {
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            let envelope: ObserveEnvelope = serde_json::from_slice(&fs::read(path)?)
-                .with_context(|| format!("read queued Observe envelope {}", path.display()))?;
+            let envelope = envelope.context("decode queued Observe envelope")?;
             let session_id = envelope.event["session_id"]
                 .as_str()
                 .context("queued Observe envelope lost session id")?;
@@ -911,6 +935,7 @@ impl ObserveDeliveryState {
 
 /// Exact deduplication lives on disk and is loaded only for a changed session.
 /// Hashing the complete id keeps arbitrary imported ids inside this directory.
+#[derive(Debug, Clone)]
 pub struct ObserveEmittedIds {
     root: PathBuf,
 }
@@ -952,6 +977,17 @@ impl ObserveEmittedIds {
     }
 
     pub fn append(&self, session_id: &str, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            // A known batch may drain a full disk. Open only an existing file,
+            // without creating entries or changing its length. Windows requires
+            // write access on the handle used by FlushFileBuffers.
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(self.path(session_id))?
+                .sync_all()?;
+            return self.sync_directories();
+        }
         fs::create_dir_all(&self.root)?;
         let path = self.path(session_id);
         let mut file = OpenOptions::new()
@@ -980,6 +1016,10 @@ impl ObserveEmittedIds {
             writeln!(file, "{id}")?;
         }
         file.sync_all()?;
+        self.sync_directories()
+    }
+
+    fn sync_directories(&self) -> Result<()> {
         mj_core::config::sync_directory(&self.root)?;
         mj_core::config::sync_directory(
             self.root
