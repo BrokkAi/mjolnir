@@ -9421,6 +9421,7 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
 
 /// Replay pinned-adapter lifecycle replies (Claude source-derived) against real driver requests.
 // Hard-won: 621276a78: the unsupported-adapter branch had no phase that reached it.
+// Hard-won: 5fc951f2e: shared Claude profiles were told to use unregistered tools.
 #[tokio::test]
 async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -9470,6 +9471,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
             .collect();
         for phase in [
             "new",
+            "unregistered-profile",
             "load",
             "resume",
             "clear",
@@ -9479,6 +9481,9 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
             "unsupported-brief-writer",
             "unsupported-reviewer",
         ] {
+            if phase == "unregistered-profile" && harness != HarnessKind::Claude {
+                continue;
+            }
             #[cfg(not(unix))]
             if phase == "fifo-load" {
                 continue;
@@ -9516,6 +9521,12 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 _ => None,
             };
             spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::MessageOnly));
+            spec.subagent_mcp_socket
+                .as_mut()
+                .unwrap()
+                .profile_registration =
+                harness == HarnessKind::Claude && phase != "unregistered-profile";
+            spec.subagent_mcp_socket.as_mut().unwrap().review_tools = true;
             spec.project_memory = Some(ProjectMemoryLaunchConfig {
                 history_socket: None,
                 project_key: "test".into(),
@@ -9545,6 +9556,13 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
             let expected = instructions::compose(&spec, true, &expected_events)
                 .await
                 .unwrap();
+            if phase == "unregistered-profile" {
+                assert!(!expected.contains("send_message"));
+                assert!(!expected.contains("request_review"));
+            } else if harness == HarnessKind::Claude {
+                assert!(expected.contains("send_message"));
+                assert!(expected.contains("request_review"));
+            }
             if phase == "clear" {
                 spec.clear_context_request = Some(ContextReset {
                     request_id: "clear".into(),
@@ -9636,6 +9654,8 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                                 request["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
                                 expected
                             );
+                            assert!(request["params"]["systemPrompt"].is_null());
+                        } else if expected.is_empty() {
                             assert!(request["params"]["systemPrompt"].is_null());
                         } else {
                             assert_eq!(

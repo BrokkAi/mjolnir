@@ -267,3 +267,22 @@ Saved a local source checkpoint before compilation. Checks ran outside the sandb
 - `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-review9-clippy.log`).
 
 Formatting/diff checks are clean. No still-failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings from this round were overridden; the final candidate is submitted for re-review.
+
+
+## Tenth review: Claude registration outcome and external memory data
+
+configure_claude_subagent_mcp returns whether it installed the role servers. Worker preparation carries that actual outcome through the existing profile_registration field instead of unconditionally reporting true. The composer uses it for Claude agent/review guidance and handback availability. Shared legacy MessageOnly profiles still open without mutating the user's profile; registered private profiles keep their guidance. No launch, relay or journal serialization field was added.
+
+The formatter now applies escape_prompt_data to the memory directory, repository identifiers, repository paths and unavailable-index reason as well as index contents. The delimiter-injection regression feeds tag and ampersand text through every data position, for both available and unavailable indexes, and verifies the only real block delimiters belong to the composer.
+
+The shared-profile integration regression verifies a skipped registration reports false and preserves the profile bytes. The recorded ACP lifecycle fixture now distinguishes registered and unregistered Claude profiles and checks both send_message and request_review guidance. Its first run incorrectly expected an empty append object when no standing text remained; delivery correctly omits that parameter. The fixture now checks omission.
+
+Source was checkpointed before each long build. Checks ran outside the sandbox on the dev profile with inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared; existing isolated test directories remain in place:
+
+- `cargo test -p brokk-mj-core memory_block_delimiters_cannot_be_injected_by_paths_or_read_errors`: 1 passed (`memory-instructions-review10-escaping-test.log`).
+- `cargo test -p brokk-mj-worker-runtime the_claude_registration_never_edits_a_profile_that_may_be_the_persons_own`: 1 passed (`memory-instructions-review10-registration-test.log`).
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: golden, native-file and shutdown regressions passed; lifecycle fixture failed with the empty-append expectation described above (`memory-instructions-review10-worker-tests.log`).
+- `cargo test -p brokk-mj-worker-runtime session_instructions_system_prompt_contract_replays_pinned_adapters`: 1 passed after correcting the fixture (`memory-instructions-review10-lifecycle-final-test.log`).
+- `cargo clippy -p brokk-mj-core -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-review10-clippy.log`).
+
+Formatting/diff checks are clean. No still-failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings were overridden; the final candidate is submitted for re-review.

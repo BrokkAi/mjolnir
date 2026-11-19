@@ -66,7 +66,10 @@ pub(super) async fn compose(
             index.as_deref().map_err(String::as_str),
         ));
     }
-    if mcp_available && let Some(socket) = &spec.subagent_mcp_socket {
+    let agent_socket = spec.subagent_mcp_socket.as_ref().filter(|socket| {
+        mcp_available && (spec.harness != HarnessKind::Claude || socket.profile_registration)
+    });
+    if let Some(socket) = agent_socket {
         let review_role = match spec.instruction_role {
             Some(InstructionRole::Reviewer) => {
                 Some(mj_core::worker_launch::ReviewChildRole::Reviewer)
@@ -94,11 +97,8 @@ pub(super) async fn compose(
     }
     match spec.instruction_role {
         Some(InstructionRole::Worker) => {
-            let has_handback = mcp_available
-                && spec
-                    .subagent_mcp_socket
-                    .as_ref()
-                    .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child);
+            let has_handback = agent_socket
+                .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child);
             sections.push("When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.".into());
             if !has_handback {
                 sections.push(format!(
@@ -108,11 +108,8 @@ pub(super) async fn compose(
             }
         }
         Some(InstructionRole::Oracle) => {
-            let instructions = if mcp_available
-                && spec
-                    .subagent_mcp_socket
-                    .as_ref()
-                    .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child)
+            let instructions = if agent_socket
+                .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child)
             {
                 ORACLE_INSTRUCTIONS.to_owned()
             } else {

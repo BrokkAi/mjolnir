@@ -1972,7 +1972,7 @@ async fn prepare_and_start_harness(
                     if step_cancel.is_cancelled() {
                         bail!("preparation cancelled before configuring the Claude profile");
                     }
-                    super::subagents::configure_claude_subagent_mcp(
+                    let registered = super::subagents::configure_claude_subagent_mcp(
                         &root,
                         &session_id,
                         &home,
@@ -1989,7 +1989,7 @@ async fn prepare_and_start_harness(
                         &home,
                         user_home.as_deref(),
                     )?;
-                    Ok((true, mailbox_hook_available))
+                    Ok((registered, mailbox_hook_available))
                 })
                 .await?;
             claude_mailbox_hook_available = mailbox_hook_available;

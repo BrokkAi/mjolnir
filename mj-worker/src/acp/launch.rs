@@ -113,7 +113,8 @@ pub struct SubagentMcpSocket {
     pub subtle_subagents: bool,
     /// Whether this launch offers the `mj-review` server beside `mj-agents`.
     pub review_tools: bool,
-    /// False for legacy shared Codex homes, which must retain ACP delivery.
+    /// Actual profile registration outcome. Legacy shared Codex homes use ACP;
+    /// shared Claude homes skip these tools entirely.
     pub profile_registration: bool,
 }
 

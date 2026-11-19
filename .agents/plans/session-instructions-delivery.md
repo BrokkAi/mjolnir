@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Tenth review: carry Claude profile registration outcome through the existing launch field; compose agent guidance only for installed profile tools. Escape root paths, repository identifiers and unavailable-index reasons as prompt data. Source checkpoint saved before builds. Escaping regression (1), shared-profile regression (1), instruction suite (three passed initially, lifecycle passed after fixture correction) and core/worker all-target clippy pass. No overrides; request re-review.
+
 - [x] (2026-11-19) Ninth review: compose MCP guidance from the same negotiated availability used by the post-open warning. Muse without HTTP MCP grant omits agent/history guidance; configured memory data remains, and roles use their existing no-handback wording. Extended the Muse ACP fixture to capture append text with history and agent servers offered. Checkpoint saved before long builds; grant/withheld regression (1), failed-host diagnostic (1), instruction suite (4) and worker all-target clippy pass. No overrides; request re-review.
 
 - [x] (2026-11-19) Eighth review: parent ruled that legacy symlinked native homes visibly degrade without writes or migration (automated reviewer/brief exceptions still fail); OpenCode's config pin is staged-only; system append remains approved and shared memory is escaped as agent-written data. Added legacy-link security regression and hostile closing-tag role golden input; legacy regression (1), instruction tests (4), host/staged-home checks (1 each), project-memory tests (12) and core/worker/staging clippy pass. Source and updated goldens were checkpointed before long builds; amend the WIP into the final commit and request re-review.
@@ -47,6 +49,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Surprises & Discoveries
+
+- Tenth review found Claude preparation always reported successful profile registration even when the shared-home MessageOnly branch intentionally installed no server. The registration owner now returns the actual outcome through the existing field; composition uses it rather than inferring availability from the configured role. Paths and index-read errors are external data just like index contents and now share the same escaping.
 
 - Ninth review found that a configured MCP socket did not imply the Muse host had granted its tools. Composition now consumes the same initialized availability decision as the existing warning, including the no-handback role wording. The ACP grant fixture verifies actual appended text as well as offered server names.
 
