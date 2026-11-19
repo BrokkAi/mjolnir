@@ -749,13 +749,18 @@ def run_turn(sid, prompt, phase, title):
             result = subprocess.run([str(driver.MJX), "wait", "--session", sid, "--turn", str(response["turn_id"]),
                                      "--return-on-input", "--timeout", "1200", "--json"],
                                     capture_output=True, timeout=1230)
-            waited = json.loads(result.stdout)
-        except (subprocess.TimeoutExpired, ValueError) as error:
-            # The turn was accepted, so an unknown outcome (a stuck wait, a daemon restart) is not
-            # a failure of the turn: keep reading the same turn, backing off between attempts.
-            print(f"{title}: mj wait gave no outcome ({str(error)[:200]}); waiting again", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            # The wait process itself hung: the outcome is unknown, not a failure of the accepted
+            # turn, so read the same turn again after a pause.
+            print(f"{title}: mj wait gave no answer; waiting again", file=sys.stderr)
             time.sleep(60)
             continue
+        try:
+            waited = json.loads(result.stdout)
+        except ValueError:
+            # No structured answer: a definitive CLI error (destroyed session, refused request).
+            # Surface it instead of retrying.
+            raise RuntimeError(f"{title}: mj wait failed: {result.stderr.decode(errors='replace')[-1500:]}") from None
         if waited.get("outcome") == "timeout":
             continue
         if result.returncode:
