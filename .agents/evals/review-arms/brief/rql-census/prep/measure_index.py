@@ -281,6 +281,9 @@ def phase(binary, root, cache, log):
     except Exception as e:
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
     rec["exit"] = server.stop()
+    if CANCEL.is_set():
+        # Torn down; now stop the batch before any checkout or another index launch.
+        raise Cancelled("cancelled; this phase's server was torn down")
     if rec.get("ready") and rec["exit"] != 0:
         # A crash or kill after the ready reply can leave the cache half-persisted: the pair
         # isn't a valid cold/warm measurement.
@@ -340,8 +343,15 @@ def reap_leftover_scopes():
         while True:
             state = run_bounded(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"],
                                    capture_output=True, text=True).stdout.strip()
-            cg = run_bounded(["systemctl", "--user", "show", unit, "-p", "ControlGroup", "--value"],
-                                capture_output=True, text=True).stdout.strip()
+            shown = run_bounded(["systemctl", "--user", "show", unit, "-p", "ControlGroup", "--value"],
+                                capture_output=True, text=True)
+            if shown.returncode:  # a failed lookup proves nothing: treat the tree as possibly alive
+                if time.monotonic() > deadline:
+                    sys.exit(f"leftover {unit}: ControlGroup lookup failed ({shown.stderr.strip()[-200:]}); "
+                             "refusing to clean up any worktree")
+                time.sleep(1)
+                continue
+            cg = shown.stdout.strip()  # empty for a stopped unit, which has no cgroup
             try:
                 procs = open(f"/sys/fs/cgroup{cg}/cgroup.procs").read().strip() if cg else ""
             except FileNotFoundError:
@@ -443,11 +453,14 @@ def main():
             rec["error"] = repr(e)[:1000]
             rec["traceback"] = traceback.format_exc()[-2000:]
             rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
+            rec["cancelled"] = isinstance(e, Cancelled)
         with open(results, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
+        if rec.get("cancelled"):
+            sys.exit(f"{repo}: cancelled; its server was torn down and the batch stopped")
         if rec.get("teardown_unconfirmed"):
             # A server tree may still be alive: stop the batch here, leaving its worktree and
             # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
