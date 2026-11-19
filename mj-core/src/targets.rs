@@ -1473,6 +1473,9 @@ fn stream_command_with_stdin(
     let group =
         (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
     let exit_watch = crate::subprocess::ExitWatch::new(&child);
+    // Each timed wait says whether the child may have exited, so nothing
+    // polls the pidfd twice; the first pass checks once.
+    let mut maybe_exited = true;
     let stdin = child
         .stdin
         .take()
@@ -1588,7 +1591,7 @@ fn stream_command_with_stdin(
             if stdout_reader.is_finished() {
                 end_reply();
             }
-            match if status.is_some() || !exit_watch.exited() {
+            match if status.is_some() || !maybe_exited {
                 Ok(status)
             } else {
                 child.try_wait()
@@ -1626,11 +1629,12 @@ fn stream_command_with_stdin(
                 }
             }
             // A reaped child's pidfd stays readable; sleep while draining.
-            if status.is_some() {
+            maybe_exited = if status.is_some() {
                 std::thread::sleep(Duration::from_millis(25));
+                true
             } else {
-                exit_watch.wait(Duration::from_millis(25));
-            }
+                exit_watch.wait(Duration::from_millis(25))
+            };
         };
         let input_result = input_writer
             .join()
@@ -2234,6 +2238,9 @@ impl CancellableProcessExecutor {
         let group = (!command.detaches && !command.preserve_children_on_cancel)
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let exit_watch = crate::subprocess::ExitWatch::new(&child);
+        // Each timed wait says whether the child may have exited, so nothing
+        // polls the pidfd twice; the first pass checks once.
+        let mut maybe_exited = true;
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
         let mut stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
@@ -2257,7 +2264,7 @@ impl CancellableProcessExecutor {
                 }
                 bail!("{}", self.cancellation_message(&command.purpose));
             }
-            if status.is_none() && exit_watch.exited() {
+            if status.is_none() && maybe_exited {
                 status = child
                     .try_wait()
                     .with_context(|| format!("wait for {}", command.purpose))?;
@@ -2273,11 +2280,12 @@ impl CancellableProcessExecutor {
                 }
             }
             // A reaped child's pidfd stays readable; sleep while draining.
-            if status.is_some() {
+            maybe_exited = if status.is_some() {
                 std::thread::sleep(Duration::from_millis(25));
+                true
             } else {
-                exit_watch.wait(Duration::from_millis(25));
-            }
+                exit_watch.wait(Duration::from_millis(25))
+            };
         };
         let deadline = Instant::now();
         let stdout = stdout_reader.finish("stdout", deadline)?;

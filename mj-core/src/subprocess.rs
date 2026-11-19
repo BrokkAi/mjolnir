@@ -103,11 +103,6 @@ impl ExitWatch {
         }
     }
 
-    /// Whether the child may have exited; false only when it certainly has not.
-    pub fn exited(&self) -> bool {
-        self.wait(std::time::Duration::ZERO)
-    }
-
     /// Sleep up to `timeout`, returning early once the child exits. Returns
     /// whether the child may have exited.
     pub fn wait(&self, timeout: std::time::Duration) -> bool {
@@ -126,7 +121,9 @@ impl ExitWatch {
             // caller reaps instead of waiting on a descriptor it cannot use.
             return ready != 0;
         }
-        std::thread::sleep(timeout);
+        if !timeout.is_zero() {
+            std::thread::sleep(timeout);
+        }
         true
     }
 }
@@ -1389,12 +1386,26 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn exit_watch_wakes_when_the_child_exits_and_not_before() {
+        // The child stays alive until its stdin closes, so the first check
+        // cannot race its exit.
         let mut child = Command::new("sh")
-            .args(["-c", "sleep 0.3"])
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
             .spawn()
             .unwrap();
         let watch = ExitWatch::new(&child);
-        assert!(!watch.exited(), "a running child must not look exited");
+        if watch.pidfd.is_none() {
+            // Kernel or seccomp without pidfd_open: the documented fallback
+            // reports a possible exit on every check, so nothing to observe.
+            drop(child.stdin.take());
+            child.wait().unwrap();
+            return;
+        }
+        assert!(
+            !watch.wait(std::time::Duration::ZERO),
+            "a running child must not look exited"
+        );
+        drop(child.stdin.take());
         let started = std::time::Instant::now();
         assert!(watch.wait(std::time::Duration::from_secs(10)));
         assert!(
