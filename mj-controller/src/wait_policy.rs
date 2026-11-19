@@ -179,10 +179,13 @@ impl WaitObservation {
     /// Whether the worker is sending the request of the turn that left
     /// `outcome` again. A server retry carries the turn it retries in its
     /// command id, so this holds while the retry is armed, queued or running,
-    /// and the retry's own ending is what answers for the turn.
+    /// and the retry's own ending is what answers for the turn. A restart
+    /// continuation likewise carries out the interrupted request.
     fn resubmits(&self, outcome: &MaterializedTurnOutcome) -> bool {
+        let restart = mj_core::continuation::restart_continuation_id(&outcome.command_id);
         let retries = |command_id: &str| {
             mj_core::relay::retried_turn(command_id) == Some(outcome.completed_ordinal)
+                || command_id == restart
         };
         self.capacity_retry
             .as_ref()

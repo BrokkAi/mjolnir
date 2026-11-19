@@ -2148,6 +2148,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
                 message: "worker restarted".into(),
             },
         );
+        assert_eq!(session.queued_prompts[0].accepted_ordinal, Some(1));
         let interrupted_at = session.applied_event_ordinal;
         apply_observation(&mut session, RelayObservation::SessionRestarted);
         assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
@@ -2160,6 +2161,10 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
                 command_id: recovery_id.clone(),
                 started_at_ms: 30,
             },
+        );
+        assert_eq!(
+            session.active_turn.as_ref().unwrap().accepted_ordinal,
+            Some(1)
         );
         let item = session
             .transcript

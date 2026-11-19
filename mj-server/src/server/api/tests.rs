@@ -4710,88 +4710,122 @@ async fn a_turn_the_harness_starts_itself_holds_only_the_session_wait() {
 /// armed, queued or running; the retry's own ending answers for it. A retry
 /// the worker armed for some other turn does not hold turn 10.
 // Hard-won: #1304: a wait on a turn answered while the worker's retry of that turn was still running.
+// Hard-won: 70b45ac58: waits treated a worker's restart continuation as a final interrupted turn.
 #[test]
 fn a_wait_on_a_turn_follows_the_workers_retry_of_it() {
     use mj_core::activity::ActivityState;
-    let refused = completed(10, "end_turn");
-    let retry_id = format!("server-retry-{}", refused.completed_ordinal);
-    let on_turn_10 = WaitRequest {
-        turn_id: Some(10),
-        ..WaitRequest::default()
-    };
-    let armed_for = |command_id: &str| {
-        let mut operational = worker_state(ActivityState::Retry);
-        operational.capacity_retry = Some(CapacityRetry {
-            attempt: 1,
-            retry_at_ms: 60_000,
-            command_id: command_id.into(),
-            submitted: false,
-        });
-        live_observation(projection_with(refused.clone()), operational)
-    };
-    assert_eq!(resolve_wait(&armed_for(&retry_id), &on_turn_10), None);
+    for restarting in [false, true] {
+        let mut refused = completed(10, "end_turn");
+        if restarting {
+            refused.outcome = TurnOutcomeKind::Interrupted {
+                reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                message: "worker restarted".into(),
+            };
+        }
+        let retry_id = if restarting {
+            mj_core::continuation::restart_continuation_id(&refused.command_id)
+        } else {
+            format!("server-retry-{}", refused.completed_ordinal)
+        };
+        let retry_accepted = if restarting { 10 } else { 15 };
+        let on_turn_10 = WaitRequest {
+            turn_id: Some(10),
+            ..WaitRequest::default()
+        };
+        let armed_for = |command_id: &str| {
+            let mut operational = worker_state(ActivityState::Retry);
+            operational.capacity_retry = Some(CapacityRetry {
+                attempt: 1,
+                retry_at_ms: 60_000,
+                command_id: command_id.into(),
+                submitted: false,
+            });
+            live_observation(projection_with(refused.clone()), operational)
+        };
+        if !restarting {
+            assert_eq!(resolve_wait(&armed_for(&retry_id), &on_turn_10), None);
+        }
 
-    let retry_turn = MaterializedTurn {
-        command_id: retry_id.clone(),
-        accepted_ordinal: Some(15),
-        turn_start_position: 16,
-        started_at_ms: 2_000,
-        steered_into: None,
-    };
-    let mut queued = projection_with(refused.clone());
-    queued.queued_prompts = vec![mj_core::state::MaterializedQueuedPrompt {
-        command_id: retry_id.clone(),
-        kind: Default::default(),
-        content: Vec::new(),
-        queued_at_ms: 2_000,
-        accepted_ordinal: Some(15),
-    }];
-    assert_eq!(
-        resolve_wait(
-            &live_observation(queued, worker_state(ActivityState::Idle { since_ms: None })),
-            &on_turn_10
-        ),
-        None,
-        "the retry is queued"
-    );
-    let mut running = projection_with(refused.clone());
-    running.execution = MaterializedExecutionState::Running {
-        started_at_ms: 2_000,
-    };
-    running.active_turn = Some(retry_turn);
-    let turn = ActivityState::Turn {
-        started_at_ms: Some(2_000),
-        last_activity_at_ms: Some(2_500),
-    };
-    assert_eq!(
-        resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
-        None,
-        "the retry is running"
-    );
+        let retry_turn = MaterializedTurn {
+            command_id: retry_id.clone(),
+            accepted_ordinal: Some(retry_accepted),
+            turn_start_position: 16,
+            started_at_ms: 2_000,
+            steered_into: None,
+        };
+        let mut queued = projection_with(refused.clone());
+        queued.queued_prompts = vec![mj_core::state::MaterializedQueuedPrompt {
+            command_id: retry_id.clone(),
+            kind: Default::default(),
+            content: Vec::new(),
+            queued_at_ms: 2_000,
+            accepted_ordinal: Some(retry_accepted),
+        }];
+        assert_eq!(
+            resolve_wait(
+                &live_observation(queued, worker_state(ActivityState::Idle { since_ms: None })),
+                &on_turn_10
+            ),
+            None,
+            "the retry is queued"
+        );
+        let mut running = projection_with(refused.clone());
+        running.execution = MaterializedExecutionState::Running {
+            started_at_ms: 2_000,
+        };
+        running.active_turn = Some(retry_turn);
+        let turn = ActivityState::Turn {
+            started_at_ms: Some(2_000),
+            last_activity_at_ms: Some(2_500),
+        };
+        assert_eq!(
+            resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
+            None,
+            "the retry is running"
+        );
 
-    let retried = MaterializedTurnOutcome {
-        command_id: retry_id,
-        accepted_ordinal: Some(15),
-        turn_start_position: Some(16),
-        completed_ordinal: 20,
-        ..refused.clone()
-    };
-    let decision = resolve_wait(
-        &live_observation(
+        let retried = MaterializedTurnOutcome {
+            command_id: retry_id,
+            accepted_ordinal: Some(retry_accepted),
+            turn_start_position: Some(16),
+            completed_ordinal: 20,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+            ..refused.clone()
+        };
+        let settled = live_observation(
             projection_with(retried),
             worker_state(ActivityState::Idle { since_ms: None }),
-        ),
-        &on_turn_10,
-    )
-    .expect("the retry ended");
-    assert_eq!(decision.outcome, WaitOutcome::Finished);
-    assert_eq!(decision.turn_id, Some(15));
+        );
+        if restarting {
+            assert!(
+                resolve_wait(
+                    &settled,
+                    &WaitRequest {
+                        turn_id: Some(11),
+                        ..WaitRequest::default()
+                    }
+                )
+                .is_none(),
+                "recovery of A must not answer a later queued B"
+            );
+        }
+        let decision = resolve_wait(&settled, &on_turn_10).expect("the retry ended");
+        assert_eq!(decision.outcome, WaitOutcome::Finished);
+        assert_eq!(decision.turn_id, Some(retry_accepted));
 
-    assert_eq!(
-        resolve_wait(&armed_for("server-retry-30"), &on_turn_10).map(|decision| decision.outcome),
-        Some(WaitOutcome::Finished),
-        "a retry of another turn does not resend turn 10"
-    );
+        assert_eq!(
+            resolve_wait(&armed_for("server-retry-30"), &on_turn_10)
+                .map(|decision| decision.outcome),
+            Some(if restarting {
+                WaitOutcome::Error
+            } else {
+                WaitOutcome::Finished
+            }),
+            "a retry of another turn does not resend turn 10"
+        );
+    }
 }
 
 /// The turn's own assessment record is the owner of Jev's verdict on it. A

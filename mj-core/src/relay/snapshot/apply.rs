@@ -1565,6 +1565,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 {
                     bail!("invalid interrupted prompt recovery {recovery_id}");
                 }
+                let accepted_ordinal = snapshot.handled_commands[command_id].accepted_ordinal;
                 // Release every stored copy of the old execution payload before
                 // installing its replacement. No journal prefix or snapshot can
                 // contain two accepted copies, even at the snapshot byte limit.
@@ -1578,7 +1579,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     HandledRelayCommand {
                         command: Some(command.clone()),
                         terminal_identity: None,
-                        accepted_ordinal: event.ordinal,
+                        accepted_ordinal,
                         terminal_ordinal: None,
                         outcome: None,
                         failure: None,
@@ -1605,8 +1606,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .insert(recovery_id.to_owned(), context);
                 }
                 // This is the same accepted turn, not a fresh mailbox claim.
+                // Keep its acceptance and the actual latest input unchanged:
+                // input already queued after this turn still supersedes it.
                 // A stale retry intent must not also resume it.
-                snapshot.latest_prompt_accepted_ordinal = Some(event.ordinal);
                 snapshot.capacity_retry = None;
                 snapshot.retry_assessment = None;
                 snapshot.continuation.quota_recovery = None;

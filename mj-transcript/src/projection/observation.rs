@@ -550,6 +550,16 @@ pub(super) fn project_observation(
                 .cloned();
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
+            let accepted_ordinal = current
+                .active_turn
+                .as_ref()
+                .filter(|turn| turn.belongs_to(command_id))
+                .and_then(|turn| turn.accepted_ordinal)
+                .or_else(|| {
+                    queued_entry
+                        .as_ref()
+                        .and_then(|entry| entry.accepted_ordinal)
+                });
             if let RelayObservation::CommandInterrupted {
                 continuation_id: Some(recovery_id),
                 ..
@@ -581,7 +591,7 @@ pub(super) fn project_observation(
                         kind: QueuedCommandKind::Prompt,
                         content,
                         queued_at_ms: event.recorded_at_ms,
-                        accepted_ordinal: Some(event.ordinal),
+                        accepted_ordinal: accepted_ordinal.or(Some(event.ordinal)),
                     },
                 );
             }
@@ -612,11 +622,7 @@ pub(super) fn project_observation(
                     diagnostic: None,
                     usage: None,
                     command_id: command_id.clone(),
-                    accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
-                        queued_entry
-                            .as_ref()
-                            .and_then(|entry| entry.accepted_ordinal)
-                    }),
+                    accepted_ordinal,
                     turn_start_position: active.map(|turn| turn.turn_start_position),
                     completed_ordinal: event.ordinal,
                     completed_at_ms: event.recorded_at_ms,
