@@ -914,7 +914,7 @@ The Git commands at the heart of capture and restore, shown for one managed chec
 
 No new external dependencies. Git 2.30 or newer (Debian 11's version) is the minimum on targets. Every command in this plan must work there: no `rev-list --disk-usage` (2.31), and no reliance on `rev-list --missing=print` reporting missing starting tips (2.45). The existing harness images ship newer Git.
 
-In `mj-checkpoint/src/snapshot.rs`, define:
+In `mj-checkpoint/src/snapshot.rs`, define the following. Note that the 2026-11-19 restructure (Decision Log) supersedes parts of this sketch. The snapshot no longer carries rewrite rules, push URLs, push evidence, worktree-scoped remotes or module URL rules, only origin's URL and the upstreams that name origin. Restore takes the path of a clone the provisioner made, positions are literal, and the pack's prerequisites are recorded. The module's own interface documentation is the current contract:
 
     pub struct WorkspaceSnapshot {
         pub origin_urls: Vec<String>,              // configured remote.origin.url entries, redacted; relative local paths with no matching rule made absolute; empty only for a raw checkout without origin
