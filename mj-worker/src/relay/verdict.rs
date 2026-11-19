@@ -678,7 +678,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/v7/turn-verdict", listener.local_addr().unwrap());
             let response = serde_json::json!({"answers":sample["answers"]}).to_string();
-            let server = tokio::spawn(async move {
+            let server = mj_core::runtime::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut reader = tokio::io::BufReader::new(socket);
                 let mut line = String::new();

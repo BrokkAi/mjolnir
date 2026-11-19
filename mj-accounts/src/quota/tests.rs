@@ -20,6 +20,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
     )
     .unwrap();
     HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -566,7 +567,7 @@ for line in sys.stdin:
     .env(CHILD_HOME, directory.path())
     .env(CHILD_ENV, serde_json::to_string(&environment).unwrap())
     .isolated_store(&directory.path().join("child-instance"));
-    let mut child = tokio::task::spawn_blocking(move || child.output());
+    let mut child = mj_core::runtime::spawn_blocking(move || child.output());
     let (mut control, _) = tokio::select! {
         result = tokio::time::timeout(Duration::from_secs(20), listener.accept()) => {
             result.expect("first process entered its refresh").unwrap()
@@ -773,7 +774,8 @@ done
     );
 }
 
-#[cfg(unix)]
+// macOS filesystems reject the non-UTF-8 directory name this fixture needs.
+#[cfg(all(unix, not(target_os = "macos")))]
 // Hard-won: 7f4649508: an ambient CLI's non-UTF-8 directory was replaced before process startup.
 #[tokio::test]
 async fn inherited_native_path_reports_a_non_utf8_quota_harness() {
@@ -828,7 +830,7 @@ IFS= read -r line
     .env(CHILD_HOME, directory.path())
     .env("PATH", std::env::join_paths([bin]).unwrap())
     .isolated_store(&directory.path().join("child-instance"));
-    let output = tokio::task::spawn_blocking(move || child.output())
+    let output = mj_core::runtime::spawn_blocking(move || child.output())
         .await
         .unwrap();
     assert!(
@@ -1109,7 +1111,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         .with_state(rejected.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let server = mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
@@ -1152,6 +1154,183 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     manager.shutdown().await;
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
+}
+
+/// While no five-hour window is open, Meta's key endpoint answers without any
+/// usage, weekly included. The weekly figure is carried across that from the
+/// probes the daemon saved, but only while they leave no gap a window could
+/// open and close in unseen.
+///
+/// Runs alone in a child process: the database writer is process-wide.
+#[test]
+fn an_idle_muse_profile_keeps_its_weekly_figure_only_across_continuous_probes() {
+    const TEST: &str = "an_idle_muse_profile_keeps_its_weekly_figure_only_across_continuous_probes";
+    const CHILD: &str = "MJ_MUSE_IDLE_QUOTA_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            TEST,
+        ))
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(idle_muse_quota_carries_the_week_across_continuous_probes());
+}
+
+async fn idle_muse_quota_carries_the_week_across_continuous_probes() {
+    let _writer = crate::database::install_isolated_test_writer();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("auth.json"),
+        br#"{"providers":{"meta":{"access_token":"profile-token"}}}"#,
+    )
+    .unwrap();
+    let mints = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Meta's answer while idle, as recorded live on 2026-11-19 with the
+    // account details replaced: no `subs_usage` key at all.
+    let app = Router::new()
+        .route(
+            "/muse-code/key",
+            post(
+                |State(mints): State<Arc<std::sync::atomic::AtomicUsize>>| async move {
+                    mints.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "action_url": null,
+                        "api_key": "must-not-be-persisted",
+                        "base_url": "https://api.meta.ai/v1",
+                        "can_subscribe": false,
+                        "has_payment_method": false,
+                        "is_subs_active": true,
+                        "is_subs_upgrade_available": false,
+                        "payment_method": null,
+                        "require_payment": false,
+                        "show_subs_upsell": true,
+                        "subs_tier_id": "1",
+                        "subs_tier_name": "Muse Code Everyday Usage",
+                        "user_avatar_url": null,
+                        "user_email": "user@example.com",
+                        "user_full_name": "Example User"
+                    }))
+                },
+            ),
+        )
+        .with_state(mints.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // Profiles sharing one home share Meta's one answer, and each keeps its
+    // own probe history.
+    let request = |profile_id: &str| QuotaRefreshRequest {
+        profile_id: profile_id.into(),
+        harness: HarnessKind::Muse,
+        auth_scheme: AuthScheme::NativeLogin,
+        source_home: home.path().to_path_buf(),
+        environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
+        cwd: home.path().to_path_buf(),
+        codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
+    };
+    let now = mj_core::clock::epoch_seconds();
+    let window = |label: &str, remaining: u8, reset: Option<i64>| QuotaWindow {
+        label: label.into(),
+        remaining_percent: Some(remaining),
+        duration_seconds: Some(if label == "Week" { 604_800 } else { 18_000 }),
+        model_scope: None,
+        used: None,
+        limit: None,
+        resets: reset.and_then(format_reset_local_seconds),
+        resets_at_epoch_seconds: reset,
+    };
+    let saved = |profile_id: &str, ago: u64, windows: Vec<QuotaWindow>, extra: Option<&str>| {
+        let report = ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            profile_id: profile_id.into(),
+            harness: HarnessKind::Muse,
+            windows,
+            extra: extra.map(str::to_owned),
+            error: None,
+            refreshed_at_epoch_seconds: now - ago,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        let identity = request(profile_id).cache_identity();
+        async move {
+            mj_core::runtime::spawn_blocking(move || {
+                crate::database::save_quota_report(&identity, &report)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    };
+    let probe = |profile_id: &str| {
+        let request = request(profile_id);
+        async move {
+            refresh_profile_with_cache_root(request, None, None)
+                .await
+                .0
+                .report
+        }
+    };
+    let week_reset = now as i64 + 3 * 86_400;
+    let week = window("Week", 78, Some(week_reset));
+
+    // An hour after a reading with a window open: the week holds, and the
+    // five-hour window is idle, so it is left out.
+    saved(
+        "muse",
+        3_600,
+        vec![week.clone(), window("5H", 94, Some(now as i64 - 600))],
+        None,
+    )
+    .await;
+    let report = probe("muse").await;
+    assert_eq!(report.error, None);
+    assert_eq!(report.windows, std::slice::from_ref(&week));
+    assert_eq!(report.extra, None);
+    assert!(report.compact().starts_with("Week 78% left"));
+    // The idle probe is itself saved, so the next one carries from it.
+    assert_eq!(probe("muse").await.windows, std::slice::from_ref(&week));
+
+    // Probes served during a rate limit observed nothing, and the last one
+    // that did is too old: a window could have come and gone since.
+    saved("muse-held", 6 * 3_600, vec![week.clone()], None).await;
+    saved("muse-held", 3_600, vec![week.clone()], Some("rate limited")).await;
+    let report = probe("muse-held").await;
+    assert_eq!(report.error, None);
+    assert!(report.windows.is_empty());
+    assert_eq!(report.windowless_label(), Some(IDLE_LABEL));
+    assert_eq!(report.compact(), "idle");
+
+    // Just past the five-hour window less the gate's cache age.
+    saved("muse-gap", 4 * 3_600 + 55 * 60, vec![week.clone()], None).await;
+    assert_eq!(probe("muse-gap").await.windowless_label(), Some(IDLE_LABEL));
+
+    // The week reset while nothing ran: it is full, next reset unknown.
+    saved(
+        "muse-reset",
+        1_800,
+        vec![window("Week", 60, Some(now as i64 - 600))],
+        None,
+    )
+    .await;
+    assert_eq!(
+        probe("muse-reset").await.windows,
+        [window("Week", 100, None)]
+    );
+
+    // Every profile was answered from Meta's one idle reply.
+    assert_eq!(mints.load(std::sync::atomic::Ordering::SeqCst), 1);
+    server.abort();
 }
 
 /// Launch finding R12-2 (also R11): the Profiles pane showed the claude
@@ -1215,7 +1394,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         .with_state(status.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let server = mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
@@ -1516,7 +1695,7 @@ async fn kimi_quota_refreshes_after_unauthorized_and_retries() {
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
@@ -1615,7 +1794,7 @@ async fn kimi_quota_accepts_an_api_key_without_oauth_credentials() {
     let app = Router::new().route("/coding/v1/usages", get(test_kimi_api_key_usage));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 

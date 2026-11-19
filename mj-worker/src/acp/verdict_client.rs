@@ -404,7 +404,7 @@ impl VerdictClient {
     }
     pub(crate) async fn resolve(source: Option<&VerdictSource>) -> Option<Self> {
         let source = source.cloned();
-        match tokio::task::spawn_blocking(move || Self::resolve_blocking(source)).await {
+        match mj_core::runtime::spawn_blocking(move || Self::resolve_blocking(source)).await {
             Ok(client) => client,
             Err(error) => {
                 tracing::warn!(target: "mj_jev", %error, "turn classifier initialization task failed");
@@ -714,7 +714,7 @@ mod tests {
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = BufReader::new(socket);
             let mut request_line = String::new();
@@ -758,7 +758,7 @@ mod tests {
             for refusal in [false, true] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let endpoint = format!("http://{}/", listener.local_addr().unwrap());
-                let server = tokio::spawn(async move {
+                let server = mj_core::runtime::spawn(async move {
                     let mut sizes = Vec::new();
                     loop {
                         let (socket, _) = listener.accept().await.unwrap();
@@ -860,7 +860,7 @@ mod tests {
     async fn handback_size_refusal_never_shrinks_away_instructions() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let mut requests = 0;
             loop {
                 let Ok(Ok((socket, _))) =

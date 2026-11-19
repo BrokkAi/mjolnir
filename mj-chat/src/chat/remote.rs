@@ -390,7 +390,7 @@ impl ChatRemoteSupervisor {
         let (results_tx, results_rx) = tokio::sync::mpsc::unbounded_channel();
         let attached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let worker_attached = attached.clone();
-        let worker = tokio::spawn(run_chat_remote_worker(
+        let worker = mj_core::runtime::spawn(run_chat_remote_worker(
             session,
             session_manager,
             operations_rx,
@@ -440,8 +440,8 @@ impl ChatRemoteSupervisor {
         updates: tokio::sync::mpsc::UnboundedSender<super::composer::ComposerIoUpdate>,
     ) -> Option<super::composer::RemoteResultForwarder> {
         let mut results = self.results.take()?;
-        Some(super::composer::RemoteResultForwarder(Some(tokio::spawn(
-            async move {
+        Some(super::composer::RemoteResultForwarder(Some(
+            mj_core::runtime::spawn(async move {
                 while let Some(result) = results.receiver.recv().await {
                     if let Err(error) =
                         updates.send(super::composer::ComposerIoUpdate::Remote(result))
@@ -454,8 +454,8 @@ impl ChatRemoteSupervisor {
                         break;
                     }
                 }
-            },
-        ))))
+            }),
+        )))
     }
 
     pub(super) async fn take_finished(
@@ -1782,7 +1782,7 @@ mod tests {
         let mut legacy_upload_started = Some(legacy_upload_started);
         let (receipt_upload_started, receipt_started) = tokio::sync::oneshot::channel();
         let mut receipt_upload_started = Some(receipt_upload_started);
-        let uploads = tokio::spawn(async move {
+        let uploads = mj_core::runtime::spawn(async move {
             for attempt in 0..6 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut body = Vec::new();

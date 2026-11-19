@@ -1271,3 +1271,57 @@ fn delivery_registration_consumes_a_matching_held_login_in_either_order() {
         );
     }
 }
+
+fn claude_login_with_token(token: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": token,
+            "refreshToken": "refresh",
+            "expiresAt": 4_000_000_000_000_i64,
+        }
+    }))
+    .unwrap()
+}
+
+// Hard-won: #1600: a failure during a renewal was judged against the login being replaced and called refused
+// Hard-won: #1600: a failure during a renewal was judged against the login being replaced and called refused
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_login_is_judged_against_the_login_the_renewer_writes() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let store = crate::config::HarnessLoginStore::File {
+        marker: harness_authentication_marker(HarnessKind::Claude, home.path()),
+    };
+    let crate::config::HarnessLoginStore::File { marker } = &store else {
+        unreachable!()
+    };
+    std::fs::write(marker, claude_login_with_token("old")).unwrap();
+    let rejected = claude_access_token_fingerprint(&claude_login_with_token("old")).unwrap();
+    // The decision: is the rejected token still the file's current one?
+    let decide = |wait: Duration| {
+        let (store, marker, rejected) = (store.clone(), marker.clone(), rejected.clone());
+        async move {
+            read_login_under_native_lock(HarnessKind::Claude, &store.clone(), wait, move || {
+                match LoginFingerprint::read_file(HarnessKind::Claude, &marker) {
+                    Ok(Some(LoginFingerprint::AccessToken(current))) => Some(current == rejected),
+                    _ => None,
+                }
+            })
+            .await
+            .flatten()
+        }
+    };
+
+    // Another daemon is renewing: it holds the native lock until the new
+    // login is written.
+    let renewer = CredentialWriteGuard::acquire(HarnessKind::Claude, marker)
+        .await
+        .unwrap();
+    // While the lock is held, the answer is unknown, not "refused".
+    assert_eq!(decide(Duration::from_millis(200)).await, None);
+    let decision = crate::runtime::spawn(decide(Duration::from_secs(10)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(marker, claude_login_with_token("new")).unwrap();
+    drop(renewer);
+
+    assert_eq!(decision.await.unwrap(), Some(false));
+}

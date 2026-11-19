@@ -59,7 +59,6 @@ impl ClaudeProbe {
             harness: HarnessKind::Claude,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -67,7 +66,7 @@ impl ClaudeProbe {
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
         };
-        let driver = tokio::spawn(async move {
+        let driver = mj_core::runtime::spawn(async move {
             drive(
                 ByteStreams::new(client_write.compat_write(), client_read.compat()),
                 spec,

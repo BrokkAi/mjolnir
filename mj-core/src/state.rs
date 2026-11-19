@@ -795,7 +795,7 @@ impl ManagedSessionSnapshot {
 #[derive(Debug, Clone)]
 pub struct RecoveryObservation {
     pub session: SessionRecord,
-    pub config: Config,
+    pub config: crate::snapshot_map::SharedSnapshot<Config>,
     pub latest_completed_turn_ordinal: Option<u64>,
     /// Why a routine checkpoint has to wait, or `None` when one may start now:
     /// [`crate::activity::routine_checkpoint_wait`] on the worker's

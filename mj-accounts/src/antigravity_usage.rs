@@ -8,7 +8,13 @@ use mj_client::quota::{AntigravityQuotaPool, QuotaWindow};
 use mj_core::config::{HarnessKind, harness_authentication_marker};
 use serde_json::Value;
 
-pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result<Vec<QuotaWindow>> {
+/// The environment the quota CLI is resolved and run under: the daemon's, then
+/// the profile's, with the Antigravity home settings applied. The prewarm
+/// resolves the managed runtime from this same environment.
+pub(crate) fn runtime_environment(
+    home: &Path,
+    environment: &HashMap<String, String>,
+) -> BTreeMap<String, String> {
     // Resolve the runtime from the daemon's environment before HOME is replaced
     // for the disposable login. Profile overrides retain their usual precedence.
     let mut inherited = std::env::vars_os()
@@ -17,22 +23,36 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
     inherited.extend(environment.clone());
     let mut environment = inherited;
     HarnessKind::Antigravity.configure_home_environment(home, &mut environment);
+    environment
+}
+
+/// The pinned `agy` a quota check runs. Unlike the other quota harnesses it
+/// has no host-CLI step: the host is always served the managed installation.
+#[cfg(unix)]
+pub(crate) async fn managed_runtime(
+    environment: &BTreeMap<String, String>,
+) -> Result<mj_core::harness_install::Located> {
+    let policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
+    let (command, args) =
+        mj_core::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+    mj_core::harness_install::locate(
+        mj_core::placement::local_harness_runtime(),
+        HarnessKind::Antigravity,
+        policy,
+        Path::new(&command),
+        &args,
+        environment,
+    )
+    .await
+    .context("prepare Antigravity quota CLI")
+}
+
+pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result<Vec<QuotaWindow>> {
+    // Only the managed runtime, which is Unix's, adds to the environment.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut environment = runtime_environment(home, environment);
     #[cfg(unix)]
-    let located = {
-        let policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
-        let (command, args) =
-            mj_core::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
-        mj_core::harness_install::locate(
-            mj_core::placement::local_harness_runtime(),
-            HarnessKind::Antigravity,
-            policy,
-            Path::new(&command),
-            &args,
-            &environment,
-        )
-        .await
-        .context("prepare Antigravity quota CLI")?
-    };
+    let located = managed_runtime(&environment).await?;
     // Retain Located until capture completes: its lease protects the running CLI.
     #[cfg(unix)]
     let program = {
@@ -47,7 +67,7 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
         .await?
         .context("Antigravity requires agy installed on this target")?;
     let source = harness_authentication_marker(HarnessKind::Antigravity, home);
-    let staged = tokio::task::spawn_blocking(move || -> Result<tempfile::TempDir> {
+    let staged = mj_core::runtime::spawn_blocking(move || -> Result<tempfile::TempDir> {
         let staged = tempfile::tempdir().context("stage Antigravity quota login")?;
         let (_, bytes) =
             mj_core::credentials::read_credential_file(HarnessKind::Antigravity, &source)?;
@@ -213,7 +233,8 @@ mod tests {
         let mut partial = windows
             .iter()
             .filter(|window| {
-                AntigravityQuotaPool::of_window(window) == Some(AntigravityQuotaPool::Claude)
+                mj_client::quota::antigravity_pool_of_window(window)
+                    == Some(AntigravityQuotaPool::Claude)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -226,7 +247,8 @@ mod tests {
             .iter()
             .find(|window| {
                 window.label == "Week"
-                    && AntigravityQuotaPool::of_window(window) == Some(AntigravityQuotaPool::Claude)
+                    && mj_client::quota::antigravity_pool_of_window(window)
+                        == Some(AntigravityQuotaPool::Claude)
             })
             .unwrap();
         assert_eq!(
@@ -268,7 +290,7 @@ mod tests {
         for pool in AntigravityQuotaPool::ALL {
             let scoped = windows
                 .iter()
-                .filter(|window| AntigravityQuotaPool::of_window(window) == Some(pool))
+                .filter(|window| mj_client::quota::antigravity_pool_of_window(window) == Some(pool))
                 .collect::<Vec<_>>();
             assert!(
                 scoped.iter().any(|window| window.is_weekly_or_longer()),

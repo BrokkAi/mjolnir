@@ -35,16 +35,16 @@ if not TAIL:
         l=l[:mt.start()]+cfg+(vis if vis else 'pub(crate) ')+f'use {lib}::'+m+';\n'+l[mt.end():]
     wr(src+'/src/lib.rs',l)
     wr(new+'/src/lib.rs',spec['doc']+'''
-    // `test-support` compiles the test-only items for the tests of the crates
-    // above, which use only some of them. The dead-code lints still run on normal
-    // and test builds.
-    #![cfg_attr(
-        all(feature = "test-support", not(test)),
-        allow(dead_code, unused_imports)
-    )]
+// `test-support` compiles the test-only items for the tests of the crates
+// above, which use only some of them. The dead-code lints still run on normal
+// and test builds.
+#![cfg_attr(
+    all(feature = "test-support", not(test)),
+    allow(dead_code, unused_imports)
+)]
 
-    // The moved modules name these by their old paths.
-    '''+spec['reexports']+'\n'+''.join(decl))
+// The moved modules name these by their old paths.
+'''+spec['reexports']+'\n'+''.join(decl))
     wr(new+'/Cargo.toml',spec['manifest'])
 
 if not TAIL: sys.exit(0)

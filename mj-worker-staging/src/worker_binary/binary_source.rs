@@ -534,7 +534,7 @@ pub fn publish_cached_worker(
     cache_root: &Path,
     digest: &str,
 ) -> Result<PathBuf> {
-    verify_worker_build(temporary.path())?;
+    mj_core::worker_build::verify_unpublished_worker_build(temporary.path())?;
     let directory = cache_root.join(digest);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create pinned worker cache {}", directory.display()))?;
@@ -685,8 +685,8 @@ pub fn worker_binary_prerequisite_for_current(
 }
 
 /// The lookup with the build-stamp check passed in. Startup pinning passes a
-/// check that skips files it already verified; every other caller reads the
-/// file.
+/// check that skips files it already verified; other callers use the
+/// process-local executable memo.
 pub fn worker_binary_prerequisite_with_verifier(
     arch: &str,
     requirement: WorkerBinaryRequirement,

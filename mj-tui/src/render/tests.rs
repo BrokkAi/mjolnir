@@ -1002,6 +1002,13 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
     }
 }
 
+// Hard-won: quota review: a reading stamped with the current second rendered
+// "refreshed 0s ago" or "1s ago" depending on whether a second passed before
+// the frame; two hours back renders "2h ago" however long the test takes.
+fn settled_refresh_time() -> u64 {
+    now_seconds() - 2 * 3_600
+}
+
 /// A profile quota with `remaining` percent of its weekly window left.
 fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
     ProfileQuota {
@@ -1022,7 +1029,7 @@ fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
         }],
         extra: None,
         error: None,
-        refreshed_at_epoch_seconds: now_seconds(),
+        refreshed_at_epoch_seconds: settled_refresh_time(),
         rate_limited_until_epoch_seconds: None,
         next_check_at_epoch_seconds: None,
     }
@@ -1057,7 +1064,7 @@ fn api_quota(profile_id: &str) -> ProfileQuota {
         windows: Vec::new(),
         extra: Some(API_LABEL.into()),
         error: None,
-        refreshed_at_epoch_seconds: now_seconds(),
+        refreshed_at_epoch_seconds: settled_refresh_time(),
         rate_limited_until_epoch_seconds: None,
         next_check_at_epoch_seconds: None,
     }

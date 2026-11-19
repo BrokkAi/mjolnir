@@ -48,7 +48,7 @@ pub(super) fn chat_daemon_requests(
     let (persistence_tx, mut persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<mj_chat::chat::ChatDaemonRequest>();
     let refusals = updates;
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         while let Some(request) = persistence_rx.recv().await {
             // A review action's refusal is a sentence for the person who
             // pressed the key, so it comes back to the chat rather than
@@ -402,7 +402,7 @@ impl DashboardContext {
                         .wait_for_session(&session_id, attachment::ATTACH_TIMEOUT)
                         .await
                         .map_err(|error| format!("{error:#}"))?;
-                    tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(
+                    tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn_blocking(
                         move || {
                             mj_chat::chat::ActiveChat::prepare_with_persistence(
                                 managed.client(),

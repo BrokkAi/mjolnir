@@ -6,7 +6,6 @@
 //! carry no process, network, or worker-runtime behaviour, so both sides of
 //! the relay can depend on them without depending on each other.
 
-use crate::hex::lower_hex;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -282,10 +281,13 @@ pub struct WorkerLaunchConfig {
         skip_serializing_if = "crate::config::ClaudePermissionMode::is_auto"
     )]
     pub claude_permission_mode: crate::config::ClaudePermissionMode,
-    /// Optional synchronous Brokk Observe guardrails. Present only when the
-    /// selected harness can ask Mjolnir before every policy-eligible tool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observe_policy: Option<crate::observe::ObserveEnforcementConfig>,
+    /// Accepted from older daemon launch files, which carried Brokk Observe
+    /// guardrail settings here; no longer used or written. This struct
+    /// rejects unknown fields, so dropping the name would make a new worker
+    /// refuse those launches. The contents (including a bearer token) are
+    /// discarded while parsing, so they never reach `Debug` output.
+    #[serde(default, skip_serializing)]
+    pub observe_policy: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -592,26 +594,10 @@ impl WorkerLaunchConfig {
 ///
 /// One definition, because both sides of the upgrade decision compare it: the
 /// worker reports the digest of the file serving it, and the controller
-/// computes the digest of the file it would install. Streamed, because a
-/// worker binary is tens of megabytes.
+/// computes the digest of the file it would install. The digest and build
+/// stamp share a streaming read and are memoized by executable identity on Unix.
 pub fn worker_executable_digest(path: &Path) -> Result<String> {
-    use sha2::Digest;
-    use std::io::Read as _;
-
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("open worker executable {}", path.display()))?;
-    let mut digest = sha2::Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("hash worker executable {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(lower_hex(digest.finalize()))
+    crate::worker_build::executable_digest(path)
 }
 
 /// Content address of the executable running this process, or `None` when it
@@ -677,15 +663,17 @@ pub struct ProfileConfig {
 }
 
 impl ProfileConfig {
-    /// The catalogue as Mjolnir offers it under a profile's `models`
-    /// allow-list: the listed models plus the profile's current model, which
-    /// stays so a session never runs a model its picker hides. An empty list
-    /// offers everything.
-    pub fn restricted_to(mut self, allowed: &[String]) -> Self {
-        if !allowed.is_empty() {
+    /// The catalogue as Mjolnir offers it under a profile's [`ModelOffer`]:
+    /// the listed models outside excluded scopes, plus the profile's current
+    /// model, which stays so a session never runs a model its picker hides.
+    /// An empty list with no excluded scope offers everything.
+    ///
+    /// [`ModelOffer`]: crate::config::ModelOffer
+    pub fn restricted_to(mut self, offer: &crate::config::ModelOffer) -> Self {
+        if !offer.is_unrestricted() {
             let current = self.model.clone();
             self.models.retain(|choice| {
-                allowed.contains(&choice.value) || current.as_ref() == Some(&choice.value)
+                offer.allows(&choice.value) || current.as_ref() == Some(&choice.value)
             });
         }
         self
@@ -1034,6 +1022,24 @@ mod tests {
         assert_eq!(
             launch.subagent_mcp_role(),
             Some(crate::subagent::SubagentMcpRole::MessageOnly)
+        );
+    }
+
+    #[test]
+    fn a_launch_from_a_daemon_with_observe_guardrails_still_loads_and_drops_them() {
+        // Older daemons wrote Brokk Observe settings under `observe_policy`.
+        // The struct rejects unknown fields, so the name must stay accepted.
+        let mut value = launch_json();
+        value["observe_policy"] = serde_json::json!({
+            "url": "http://observe.invalid", "token": "secret", "timeout_ms": 3000, "fail_closed": true
+        });
+        let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
+        assert!(launch.observe_policy.is_some());
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("observe_policy")
+                .is_none()
         );
     }
 

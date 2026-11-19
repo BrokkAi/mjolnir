@@ -434,6 +434,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: true,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 create_managed_worktree: None,
                 at: None,
@@ -449,6 +450,14 @@ fn stale_worker_fails_before_any_container_is_created() {
             },
         )
         .unwrap();
+    assert!(
+        controller
+            .state
+            .sessions
+            .get(&session)
+            .unwrap()
+            .notifications_ignored
+    );
     let executor = RecordingExecutor::failing("no target command should run");
     let error =
         futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
@@ -480,7 +489,10 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_ssh_docker_preflight_retains_durable_error_record";
         IsolatedTest::new(test_name(module_path!(), test))
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path())
@@ -510,6 +522,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -606,6 +619,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -797,7 +811,10 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(test_name(module_path!(), name))
             .env(MARKER, "1")
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .isolated_store(directory.path())
             .run();
         return;
@@ -923,7 +940,10 @@ fn failed_node_preflight_retains_error_before_provisioning() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_node_preflight_retains_error_before_provisioning";
         IsolatedTest::new(test_name(module_path!(), test))
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path())
@@ -966,6 +986,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -1212,6 +1233,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -2049,7 +2071,9 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
     let queued = std::sync::Arc::new(StageRecorder::default());
     let waiter = {
         let (gate, queued) = (gate.clone(), queued.clone());
-        tokio::spawn(async move { admit_container_start(&gate, &*queued).await.is_some() })
+        mj_core::runtime::spawn(
+            async move { admit_container_start(&gate, &*queued).await.is_some() },
+        )
     };
     while queued.events.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;

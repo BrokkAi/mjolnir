@@ -43,8 +43,8 @@ pub(crate) fn spawn_io<T>(
 where
     T: Send + 'static,
 {
-    tokio::spawn(async move {
-        let result = blocking_result(operation, tokio::task::spawn_blocking(work).await);
+    mj_core::runtime::spawn(async move {
+        let result = blocking_result(operation, mj_core::runtime::spawn_blocking(work).await);
         report(operation, &updates, to_update(result));
     })
 }
@@ -63,8 +63,8 @@ where
 {
     let label = label.into();
     let guard = tracker.begin(label.clone());
-    tokio::spawn(async move {
-        let result = blocking_result(&label, tokio::task::spawn_blocking(work).await);
+    mj_core::runtime::spawn(async move {
+        let result = blocking_result(&label, mj_core::runtime::spawn_blocking(work).await);
         report(&label, &updates, to_update(result));
         drop(guard);
     })
@@ -83,8 +83,8 @@ pub(crate) fn spawn_async_job<T: Send + 'static>(
 ) -> JoinHandle<()> {
     let label = label.into();
     let guard = tracker.map(|tracker| tracker.begin(label.clone()));
-    tokio::spawn(async move {
-        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(work));
+    mj_core::runtime::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work));
         let result = match tokio::time::timeout(timeout, task).await {
             Ok(Ok(result)) => result.map_err(|error| format!("{error:#}")),
             Ok(Err(error)) => Err(format!("{label} task failed: {error}")),
@@ -345,9 +345,9 @@ pub(crate) fn spawn_workspace_close(
 ) -> JoinHandle<()> {
     // The daemon owns stopping. Detaching the UI must not wait for checkpoints,
     // and ordinary save acknowledgement deadlines are too short for them.
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let closing_workspace_id = workspace_id.clone();
-        let work = tokio::spawn(async move {
+        let work = mj_core::runtime::spawn(async move {
             let mut daemon = daemon::connect_or_start().await?;
             daemon.close_workspace(workspace_id).await
         });
@@ -419,8 +419,8 @@ where
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable(label.clone(), cancelled.clone());
     let worker_cancelled = cancelled.clone();
-    let worker = tokio::spawn(async move {
-        let joined = tokio::task::spawn_blocking(move || work(worker_cancelled)).await;
+    let worker = mj_core::runtime::spawn(async move {
+        let joined = mj_core::runtime::spawn_blocking(move || work(worker_cancelled)).await;
         let result = blocking_result(&label, joined);
         report(&label, &updates, to_update(result));
         drop(guard);
@@ -439,18 +439,25 @@ pub(crate) fn spawn_first_run_setup(
         "first-run setup",
         updates,
         move |_cancelled| {
-            report(
-                "first-run setup",
-                &progress,
-                DashboardIoUpdate::FirstRunStarted,
-            );
             // The daemon owns its configuration and its environment. In
             // container placement this discovery runs inside the container,
             // not against the client's host home.
             mj_core::runtime::block_on(async {
                 let mut daemon = crate::daemon::connect_or_start().await?;
-                // An existing installation picks up agents installed since its
-                // last launch through the startup availability check.
+                // The welcome takes the keyboard, so it opens only once the
+                // daemon has said this installation needs setup. An existing
+                // installation picks up agents installed since its last
+                // launch through the startup availability check.
+                if !daemon.first_run_setup_due().await? {
+                    return Ok(None);
+                }
+                report(
+                    "first-run setup",
+                    &progress,
+                    DashboardIoUpdate::FirstRunStarted,
+                );
+                // Setup decides again under its lock: another dashboard may
+                // have finished it since the daemon answered.
                 let Some(summary) = daemon.run_first_run_setup().await? else {
                     return Ok(None);
                 };
@@ -708,20 +715,21 @@ pub(crate) fn spawn_lifecycle_operation(
             kind.label().to_ascii_lowercase()
         ),
     )))));
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let worker_cancelled = cancelled.clone();
         // Failed or panicking submission must report its uncertainty before
         // quit is released; successful submission releases at the receipt.
         let worker_submission = LifecycleSubmission(Arc::clone(&submission.0));
-        let result =
-            match tokio::task::spawn_blocking(move || work(worker_cancelled, worker_submission))
-                .await
-            {
-                Ok(result) => result.map_err(crate::pollers::DashboardLifecycleFailure::from),
-                Err(error) => Err(crate::pollers::DashboardLifecycleFailure::Failed(format!(
-                    "session lifecycle operation task failed: {error}"
-                ))),
-            };
+        let result = match mj_core::runtime::spawn_blocking(move || {
+            work(worker_cancelled, worker_submission)
+        })
+        .await
+        {
+            Ok(result) => result.map_err(crate::pollers::DashboardLifecycleFailure::from),
+            Err(error) => Err(crate::pollers::DashboardLifecycleFailure::Failed(format!(
+                "session lifecycle operation task failed: {error}"
+            ))),
+        };
         report(
             "session lifecycle operation",
             &updates,
@@ -743,10 +751,10 @@ pub(crate) fn spawn_materialized_session_projection(
     permits: Arc<tokio::sync::Semaphore>,
 ) {
     let session_id = projection.materialized.session_id.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = match permits.acquire_owned().await {
             Ok(permit) => {
-                let result = tokio::task::spawn_blocking(move || {
+                let result = mj_core::runtime::spawn_blocking(move || {
                     PreparedMaterializedSessionDetail::from_assessed_materialized(
                         projection.materialized,
                         projection.assessment.as_deref(),
@@ -802,7 +810,7 @@ pub(crate) fn spawn_notification_message_read(
 ) -> JoinHandle<()> {
     let session_id = request.session_id.clone();
     let source = request.source.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let _permit = permits
             .acquire_owned()
             .await
@@ -854,7 +862,7 @@ pub(crate) fn spawn_stored_session_summary(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
     let reported_session_id = session_id.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let _permit = permits
             .acquire_owned()
             .await
@@ -871,7 +879,7 @@ pub(crate) fn spawn_stored_session_summary(
                     .with_context(|| format!("session {session_id} has no stored projection"))?;
                 // Only CPU preparation needs a blocking thread. Acquiring one
                 // while awaiting the connection can starve its metadata read.
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     PreparedMaterializedSessionSummary::from_materialized(
                         summary,
                         viewed_through_event_ordinal,
@@ -1337,7 +1345,7 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     targets: BTreeMap<String, PathBuf>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let sizes = match machine_request(
             mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
                 paths: targets.clone(),
@@ -1382,7 +1390,7 @@ pub(crate) fn spawn_dashboard_create_session(
 ) {
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let retry_launch = action.clone();
         let DashboardAction::CreateSession {
             remember_container_size,
@@ -1456,6 +1464,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         no_project_memory: carried.no_project_memory,
                         no_github_events: carried.no_github_events,
                         no_github_credentials: carried.no_github_credentials,
+                        notifications_ignored: false,
                         at: None,
                         branch: None,
                         base: None,
@@ -1626,7 +1635,7 @@ async fn supervised_wiki_task<T: Send + 'static>(
 ) -> std::result::Result<T, String> {
     blocking_result(
         operation,
-        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(work)).await,
+        tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work)).await,
     )
 }
 
@@ -1639,7 +1648,7 @@ pub(crate) fn spawn_wiki_search(
 ) -> tokio_util::sync::DropGuard {
     let cancel = tokio_util::sync::CancellationToken::new();
     let guard = cancel.clone().drop_guard();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let search = async {
             tokio::time::sleep(delay).await;
             let live_query = query.clone();
@@ -1691,7 +1700,7 @@ pub(crate) fn spawn_wiki_sync(
 ) -> tokio_util::sync::DropGuard {
     let cancel = tokio_util::sync::CancellationToken::new();
     let guard = cancel.clone().drop_guard();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let follow = async {
             let answers = updates.clone();
             let result = supervised_wiki_task("syncing the session index", async move {
@@ -1765,7 +1774,7 @@ pub(crate) fn spawn_sessions_text_search(
 ) -> tokio_util::sync::DropGuard {
     let cancel = tokio_util::sync::CancellationToken::new();
     let guard = cancel.clone().drop_guard();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let search = async {
             tokio::time::sleep(WIKI_SEARCH_DEBOUNCE).await;
             let result = supervised_wiki_task("searching session conversations", async move {
@@ -1796,7 +1805,7 @@ const WIKI_SEARCH_LIMIT: usize = 50;
 const WIKI_BRIEF_CHARS: usize = 4_000;
 
 pub(crate) fn spawn_wiki_brief(wiki_id: String, updates: UnboundedSender<DashboardIoUpdate>) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = async {
             daemon::connect_or_start()
                 .await?
@@ -1825,7 +1834,7 @@ pub(crate) fn spawn_wiki_hits(
     query: String,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = async {
             daemon::connect_or_start()
                 .await?
@@ -1862,7 +1871,7 @@ pub(crate) fn spawn_dashboard_restore_session(
 ) {
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("restoring archived session", cancelled.clone());
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let registered = mj_core::runtime::block_on(async {
             daemon::connect_or_start()
                 .await?
@@ -1960,11 +1969,12 @@ mod wiki_search_tests {
         let stopped = tokio_util::sync::CancellationToken::new();
         let worker_stopped = stopped.clone();
         let (ready, started) = tokio::sync::oneshot::channel();
-        let supervisor = tokio::spawn(supervised_wiki_task("pending read", async move {
-            let _guard = worker_stopped.drop_guard();
-            ready.send(()).unwrap();
-            std::future::pending::<Result<()>>().await
-        }));
+        let supervisor =
+            mj_core::runtime::spawn(supervised_wiki_task("pending read", async move {
+                let _guard = worker_stopped.drop_guard();
+                ready.send(()).unwrap();
+                std::future::pending::<Result<()>>().await
+            }));
         started.await.unwrap();
         supervisor.abort();
         assert!(supervisor.await.unwrap_err().is_cancelled());
@@ -2011,7 +2021,7 @@ mod wiki_search_tests {
                 instance_id: "swsync".into(),
                 placement: DaemonPlacement::Host,
             };
-            let server = tokio::spawn(async move {
+            let server = mj_core::runtime::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 for step in 0..2 {
                     let request: RequestEnvelope = read_frame(&mut socket).await.unwrap();
@@ -2097,7 +2107,7 @@ mod create_wait_tests {
     ) -> (DaemonMetadata, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let metadata = metadata(listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             for answer in script {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();

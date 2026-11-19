@@ -24,6 +24,88 @@ pub enum HarnessKind {
     Antigravity,
 }
 
+/// The independent subscription pools returned by Antigravity's `/usage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntigravityQuotaPool {
+    Gemini,
+    Claude,
+}
+
+impl AntigravityQuotaPool {
+    pub const ALL: [Self; 2] = [Self::Gemini, Self::Claude];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Gemini => "Ge",
+            Self::Claude => "Cl",
+        }
+    }
+    pub const fn bucket_prefix(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini-",
+            Self::Claude => "3p-",
+        }
+    }
+    pub const fn model_scope(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Claude => "claude,gpt",
+        }
+    }
+}
+
+/// True when `model` contains one of the comma-separated scope fragments.
+pub fn model_matches_scope(model: &str, scope: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    scope.split(',').any(|fragment| {
+        let fragment = fragment.trim();
+        !fragment.is_empty() && model.contains(&fragment.to_ascii_lowercase())
+    })
+}
+
+/// The models Mjolnir offers from a profile: its `models` allow-list (empty
+/// offers everything) minus models in scopes the profile turned off. Built by
+/// [`HarnessProfile::model_offer`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelOffer {
+    pub models: Vec<String>,
+    pub excluded_scopes: Vec<String>,
+}
+
+impl ModelOffer {
+    /// Whether this offer leaves every advertised model in place.
+    pub fn is_unrestricted(&self) -> bool {
+        self.models.is_empty() && self.excluded_scopes.is_empty()
+    }
+
+    /// Whether `model` is offered, before the current-model exemption.
+    pub fn allows(&self, model: &str) -> bool {
+        (self.models.is_empty() || self.models.iter().any(|listed| listed == model))
+            && !self.excludes(model)
+    }
+
+    /// Whether `model` is in a scope the profile turned off. Only the
+    /// current-model exemption in [`crate::worker_launch::ProfileConfig::restricted_to`]
+    /// still offers such a model: a session already on it, or a harness whose
+    /// own default is in the scope, keeps it until someone switches.
+    pub fn excludes(&self, model: &str) -> bool {
+        self.excluded_scopes
+            .iter()
+            .any(|scope| model_matches_scope(model, scope))
+    }
+
+    /// Why a profile named `profile` refuses `model`, naming the setting.
+    pub fn refusal(&self, profile: &str, model: &str) -> String {
+        if self.excludes(model) {
+            format!(
+                "model {model:?} uses profile {profile:?}'s third-party quota pool, which \
+                 `third_party_models = false` turns off"
+            )
+        } else {
+            format!("model {model:?} is hidden by profile {profile:?}'s models setting")
+        }
+    }
+}
+
 /// The operating system of the machine a harness's own CLI runs on, as far as
 /// where that harness keeps its login is concerned. See
 /// [`HarnessKind::keeps_login_in_home`].
@@ -1260,11 +1342,6 @@ impl HarnessKind {
         )
     }
 
-    /// Claude and Codex publish background inventory through the pinned AIR bridge.
-    pub const fn has_reliable_background_inventory(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
-    }
-
     /// Whether the harness has sub-agents of its own, which the Native
     /// delegation choice keeps. dsh-acp has none, so Native would do nothing
     /// for DSH and is not offered there.
@@ -1580,6 +1657,12 @@ pub struct HarnessProfile {
     /// own allow-lists. The profile's current model is always offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// Whether an Antigravity profile uses its third-party quota pool (the
+    /// `3p-` buckets in `agy /usage`), which serves Claude and GPT models.
+    /// False offers only Gemini models and hides that pool's quota. Only
+    /// valid on an Antigravity profile.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub third_party_models: bool,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -1711,6 +1794,7 @@ impl HarnessProfile {
     pub fn new(kind: HarnessKind, home: impl Into<PathBuf>) -> Self {
         Self {
             enabled: true,
+            third_party_models: true,
             kind,
             home: home.into(),
             environment: Default::default(),
@@ -2059,10 +2143,37 @@ impl HarnessProfile {
         if self.claude_permission_mode.is_some() && self.kind != HarnessKind::Claude {
             bail!("profile {id:?}: `claude_permission_mode` applies only to a Claude profile");
         }
+        if !self.third_party_models && self.kind != HarnessKind::Antigravity {
+            bail!("profile {id:?}: `third_party_models` applies only to an Antigravity profile");
+        }
         if let Some(aws) = &self.aws {
             aws.validate(id)?;
         }
         Ok(())
+    }
+
+    /// The Antigravity quota pools this profile uses; empty for other harnesses.
+    pub fn antigravity_pools(&self) -> Vec<AntigravityQuotaPool> {
+        if self.kind != HarnessKind::Antigravity {
+            return Vec::new();
+        }
+        AntigravityQuotaPool::ALL
+            .into_iter()
+            .filter(|pool| self.third_party_models || *pool != AntigravityQuotaPool::Claude)
+            .collect()
+    }
+
+    /// The single interpretation of `models` and `third_party_models` that
+    /// catalogues, pickers and model refusals share.
+    pub fn model_offer(&self) -> ModelOffer {
+        ModelOffer {
+            models: self.models.clone(),
+            excluded_scopes: if self.kind == HarnessKind::Antigravity && !self.third_party_models {
+                vec![AntigravityQuotaPool::Claude.model_scope().to_owned()]
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     /// Supply the provider keys this profile's harness reads from its

@@ -19,7 +19,7 @@ use mj_core::credentials::{
 };
 
 pub use mj_client::quota::{
-    API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
+    API_LABEL, IDLE_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
 };
 
 /// Clone a daemon report for a user-facing quota surface, retaining only
@@ -57,6 +57,18 @@ pub struct QuotaRefreshRequest {
     pub opencode_usage_priced: bool,
 }
 
+/// Whether a quota check for this harness can call the managed installer at
+/// all (a host harness or the pinned Antigravity), decided from the kind alone, before reading any profile file. Whether
+/// one profile does ([`QuotaRefreshRequest::runs_host_harness`]) also depends
+/// on its login and provider.
+#[cfg(unix)]
+pub fn kind_may_need_managed_quota_harness(kind: HarnessKind) -> bool {
+    matches!(
+        kind,
+        HarnessKind::Codex | HarnessKind::Grok | HarnessKind::Claude | HarnessKind::Antigravity
+    )
+}
+
 pub use mj_core::config::{CodexQuotaSource, ProviderCredential};
 
 impl QuotaRefreshRequest {
@@ -87,6 +99,30 @@ impl QuotaRefreshRequest {
         }
         hash.update([u8::from(self.opencode_usage_priced)]);
         mj_core::hex::lower_hex(hash.finalize())
+    }
+
+    /// Whether this profile's check runs a host harness program, through
+    /// `quota_harness::locate`, rather than answering from configuration or
+    /// an HTTP endpoint.
+    /// Whether this profile's check or login renewal would call
+    /// `quota_harness::locate`: the question the daemon's prewarm asks, so it
+    /// installs nothing a check would not. It reads the Claude login file, so
+    /// call it on a blocking thread. Claude's decision is
+    /// [`claude_usage::runs_cli`]; Codex and Grok resolve their program
+    /// before reading any login, so the kind and Codex's ChatGPT source decide.
+    #[cfg(unix)]
+    pub fn runs_host_harness(&self) -> bool {
+        kind_may_need_managed_quota_harness(self.harness)
+            && match self.harness {
+                HarnessKind::Claude => {
+                    self.auth_scheme != AuthScheme::AwsCredentialChain
+                        && claude_usage::runs_cli(&self.source_home)
+                }
+                HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
+                // Grok and Antigravity resolve their program before reading
+                // any login.
+                _ => true,
+            }
     }
 
     /// Build the request for one configured profile. The harness home
@@ -161,6 +197,8 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
+#[cfg(unix)]
+pub use crate::quota_harness::prepare_managed;
 pub use mj_core::retry_after::retry_after_header;
 
 /// The hold for a 429: what the provider asked for, kept between one minute
@@ -946,34 +984,50 @@ async fn refresh_profile_with_cache_root(
                 })
                 .map_err(|error| anyhow::anyhow!(error.to_string()))
         }
-        HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
-            .await
-            .map(|report| ProfileQuota {
-                paid_credits: None,
-                monthly_price_usd: None,
-                banked_resets: None,
-                profile_id: profile_id.clone(),
-                harness,
-                windows: report
-                    .windows
-                    .into_iter()
-                    .map(|window| QuotaWindow {
-                        label: window.label,
-                        remaining_percent: Some(window.remaining_percent),
-                        duration_seconds: window.duration_seconds,
-                        model_scope: None,
-                        used: None,
-                        limit: None,
-                        resets: window.resets_at.and_then(format_reset_local_seconds),
-                        resets_at_epoch_seconds: window.resets_at,
-                    })
-                    .collect(),
-                extra: report.note,
-                error: None,
-                refreshed_at_epoch_seconds,
-                rate_limited_until_epoch_seconds: None,
-                next_check_at_epoch_seconds: None,
-            }),
+        HarnessKind::Muse => match crate::muse_usage::query(&source_home, &environment).await {
+            Ok(report) => {
+                let windows = match report.usage {
+                    crate::muse_usage::MuseUsage::Open(windows) => windows
+                        .into_iter()
+                        .map(|window| QuotaWindow {
+                            label: window.label,
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: window.resets_at.and_then(format_reset_local_seconds),
+                            resets_at_epoch_seconds: window.resets_at,
+                        })
+                        .collect(),
+                    crate::muse_usage::MuseUsage::Idle => {
+                        let history = recent_quota_history(
+                            &cache_identity,
+                            &profile_id,
+                            crate::muse_usage::idle_history_since(refreshed_at_epoch_seconds),
+                        )
+                        .await;
+                        crate::muse_usage::idle_windows(&history, refreshed_at_epoch_seconds)
+                    }
+                };
+                Ok(ProfileQuota {
+                    paid_credits: None,
+                    monthly_price_usd: None,
+                    banked_resets: None,
+                    profile_id: profile_id.clone(),
+                    extra: report
+                        .note
+                        .or_else(|| windows.is_empty().then(|| IDLE_LABEL.to_owned())),
+                    harness,
+                    windows,
+                    error: None,
+                    refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
+                    next_check_at_epoch_seconds: None,
+                })
+            }
+            Err(error) => Err(error),
+        },
         // OpenCode reads no allowance from any provider: rate-limit headers
         // reach it only on failed requests. A profile signed in through an
         // environment-supplied provider key (OpenRouter and the like) is
@@ -1027,7 +1081,7 @@ async fn refresh_profile_with_cache_root(
     if crate::database::database_writer_installed() {
         let observed = report.clone();
         let identity = cache_identity.clone();
-        match tokio::task::spawn_blocking(move || {
+        match mj_core::runtime::spawn_blocking(move || {
             crate::database::save_quota_report(&identity, &observed)
         })
         .await
@@ -1066,6 +1120,32 @@ async fn refresh_profile_with_cache_root(
         },
         codex_client,
     )
+}
+
+/// This profile's probes saved since `since`, newest first. Only the process
+/// that saves probes reads them back: elsewhere there is no history, and a
+/// failed read is logged and treated as none, which shows less rather than
+/// something stale.
+async fn recent_quota_history(identity: &str, profile_id: &str, since: u64) -> Vec<ProfileQuota> {
+    if !crate::database::database_writer_installed() {
+        return Vec::new();
+    }
+    let (identity, profile) = (identity.to_owned(), profile_id.to_owned());
+    match mj_core::runtime::spawn_blocking(move || {
+        crate::database::load_quota_history_since(&identity, &profile, since)
+    })
+    .await
+    {
+        Ok(Ok(history)) => history,
+        Ok(Err(error)) => {
+            tracing::warn!(profile_id, error = %format!("{error:#}"), "could not read the stored quota probes");
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(profile_id, %error, "stored quota probe read task failed");
+            Vec::new()
+        }
+    }
 }
 
 /// Shortest gap to expiry Hel will leave a Codex login sitting at. A token with

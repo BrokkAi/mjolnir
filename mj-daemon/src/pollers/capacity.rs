@@ -54,7 +54,7 @@ where
         tokio::sync::watch::channel(Vec::<DeploymentCapacityTarget>::new());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
     let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut targets = Vec::new();
         let collect = Arc::new(collect);
         let mut samples = CapacitySamples::new(requested.clone());
@@ -316,7 +316,7 @@ async fn collect_local_storage(
     target: &DeploymentCapacityTarget,
 ) -> Vec<mj_core::targets::storage::HostStorageSample> {
     let paths = target.local_storage_paths.clone();
-    let measured = tokio::task::spawn_blocking(move || {
+    let measured = mj_core::runtime::spawn_blocking(move || {
         mj_controller::targets::measure_local_storage(
             &paths,
             &mj_controller::targets::BoundedProcessExecutor::new(RESOURCE_POLL_TIMEOUT),
@@ -347,7 +347,7 @@ pub(crate) async fn collect_local_capacity_with(
 ) -> Result<DeploymentCapacityUsage> {
     // A blocking sample cannot be cancelled. Keep its slot occupied
     // until it exits, even when the deadline has elapsed.
-    let mut sample = tokio::task::spawn_blocking(move || {
+    let mut sample = mj_core::runtime::spawn_blocking(move || {
         let result = collect();
         // Shutdown can drop the awaiting future before this thread exits.
         if let Err(error) = &result {
@@ -430,7 +430,7 @@ async fn run_resource_command(
         );
         let _cancel_preparation = executor.cancel_on_drop();
         let mut walked = std::mem::take(walk);
-        let (prepared, walked) = tokio::task::spawn_blocking(move || {
+        let (prepared, walked) = mj_core::runtime::spawn_blocking(move || {
             let prepared = requested
                 .open_ssh_session(&executor, &mut walked)
                 .map(mj_controller::targets::SessionCommand::into_parts);

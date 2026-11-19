@@ -108,7 +108,7 @@ impl RuntimeState {
             },
         ).await?;
         let runtime = self.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if let Err(error) = Self::wait_lifecycle_result(operation.clone()).await {
                 tracing::warn!(
                     error = format!("{error:#}"),

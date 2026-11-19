@@ -98,8 +98,8 @@ pub fn apply_worker_record_update(controller: &mut Controller, update: &WorkerPo
         return;
     };
     let session_id = update.session_id.clone();
-    tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn(async move {
+        let result = mj_core::runtime::spawn_blocking(move || {
             mj_controller::database::set_session_acp_title(&session_id, title.as_deref())
         })
         .await;

@@ -1271,9 +1271,18 @@ function inboxSessionFailed(entry) {
 /// Quick reply sends to this session and Go to Session opens it. A parent
 /// promoted by a child's pending request opens the form holder. A launch
 /// failure opens the session it was for, when there is one.
-function inboxDestination(entry) {
+// Stack entries address their session; only the live form addresses its holder.
+function notificationItemDestination(stack, sessionId, index) {
+  return stack.form && index >= stack.entries.length ? stack.holder ?? sessionId : sessionId;
+}
+
+function inboxDestination(entry, selectedIndex = null) {
   if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
-  if (entry.notification_card) return entry.notification_card.holder ?? entry.id;
+  if (entry.notification_card) {
+    const stack = entry.notification_card;
+    const index = selectedIndex ?? stack.entries.length + Number(Boolean(stack.form)) - 1;
+    return notificationItemDestination(stack, entry.id, index);
+  }
   if (inboxSessionFailed(entry)) return entry.id;
   const holder = childFormHolder(entry);
   return holder && sessionById(holder) ? holder : entry.id;
@@ -1283,7 +1292,7 @@ function inboxDestination(entry) {
 function inboxKey(entry) {
   if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
   const stack = entry.notification_card;
-  if (stack) return JSON.stringify([entry.id, stack.holder, stack.badge, stack.dismissal,
+  if (stack) return JSON.stringify([entry.id, notificationItemDestination(stack, entry.id, stack.entries.length), stack.badge, stack.dismissal,
     stack.entries, stack.form?.request_id]);
   const identity = inboxTextIdentity(entry);
   return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
@@ -1572,7 +1581,11 @@ const inboxFailureNotices = new Map();
 function inboxHasReplyCard(destination) {
   return inboxEntries().some(entry => {
     const card = inboxCard(entry);
-    return card.canReply && card.destination === destination;
+    const stack = entry.notification_card;
+    const destinations = stack
+      ? [ ...(stack.entries.length ? [entry.id] : []), ...(stack.form ? [notificationItemDestination(stack, entry.id, stack.entries.length)] : []) ]
+      : [card.destination];
+    return card.canReply && destinations.includes(destination);
   });
 }
 
@@ -1840,6 +1853,7 @@ function renderInbox() {
   const retained = inboxSelection?.sessionId === entry.id ? itemIds.indexOf(inboxSelection.itemId) : -1;
   const count = itemIds.length;
   const index = retained >= 0 ? retained : count - 1;
+  card.destination = inboxDestination(entry, index);
   if (!count) inboxSelection = null;
   else if (retained < 0) inboxSelection = { sessionId: entry.id, itemId: itemIds[index] };
   nodes.pager.hidden = !count;

@@ -164,6 +164,9 @@ pub fn append_staged_instructions(
                 permissions.set_mode(permissions.mode() | 0o200);
             }
             #[cfg(not(unix))]
+            // Windows files carry only a read-only attribute; clearing it is
+            // the owner-write grant above, not world-writable Unix modes.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             if permissions != metadata.permissions() {
                 std::fs::set_permissions(&path, permissions).with_context(|| {
@@ -1569,7 +1572,7 @@ fn profile_archive_entries(
             );
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
-            let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
+            let digest = mj_core::hex::file_sha256(&absolute)?;
             Some(if header.mode()? & 0o100 != 0 {
                 format!("{digest}.x")
             } else {

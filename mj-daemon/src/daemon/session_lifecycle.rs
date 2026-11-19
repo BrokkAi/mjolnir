@@ -219,7 +219,7 @@ mod tests {
         prepared.send_replace(Some(Ok(())));
         assert_eq!(acceptance.await.unwrap(), receipt);
         assert!(state.owner().lifecycle[&receipt.session_id].is_running());
-        let observer = tokio::spawn({
+        let observer = mj_core::runtime::spawn({
             let state = state.clone();
             let receipt = receipt.clone();
             async move { state.wait_session_lifecycle(receipt).await }
@@ -287,7 +287,7 @@ mod tests {
             .unwrap();
         let metadata = test_metadata(listener.local_addr().unwrap());
         let server_metadata = metadata.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             super::super::serve::serve_client(
                 stream,

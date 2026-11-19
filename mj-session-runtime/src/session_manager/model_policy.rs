@@ -1,0 +1,118 @@
+use super::*;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionModelPolicy {
+    pub profile: String,
+    pub offer: mj_core::config::ModelOffer,
+}
+
+// Live sessions exempt their current model; catalog probes exempt the default.
+impl SessionModelPolicy {
+    fn offered(&self, state: &RelayOperationalState) -> Vec<mj_core::acp::SessionConfigChoice> {
+        mj_core::worker_launch::ProfileConfig {
+            model: mj_core::acp::surface::config_current_value(&state.config_options, "model"),
+            models: mj_core::acp::session_config_choices(&state.config_options, "model"),
+            efforts: Vec::new(),
+            observed_at: 0,
+        }
+        .restricted_to(&self.offer)
+        .models
+    }
+
+    pub fn filter(&self, state: &mut RelayOperationalState) {
+        use agent_client_protocol::v1::schema::{SessionConfigKind, SessionConfigSelectOptions};
+        if self.offer.is_unrestricted() {
+            return;
+        }
+        let offered = self.offered(state);
+        let Some(id) = mj_core::acp::find_session_config_option(&state.config_options, "model")
+            .map(|option| option.id.clone())
+        else {
+            return;
+        };
+        let Some(option) = std::sync::Arc::make_mut(&mut state.config_options)
+            .iter_mut()
+            .find(|option| option.id == id)
+        else {
+            return;
+        };
+        let SessionConfigKind::Select(select) = &mut option.kind else {
+            return;
+        };
+        let keep = |value: &str| offered.iter().any(|choice| choice.value == value);
+        match &mut select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => {
+                options.retain(|option| keep(&option.value.to_string()))
+            }
+            SessionConfigSelectOptions::Grouped(groups) => {
+                for group in groups.iter_mut() {
+                    group
+                        .options
+                        .retain(|option| keep(&option.value.to_string()));
+                }
+                groups.retain(|group| !group.options.is_empty());
+            }
+            _ => {}
+        }
+    }
+
+    pub fn refusal(
+        &self,
+        command: &RelayCommand,
+        state: Option<&RelayOperationalState>,
+    ) -> Option<String> {
+        let RelayCommand::SetConfig { key, value } = command else {
+            return None;
+        };
+        let is_model = key == "model"
+            || state.is_some_and(|state| {
+                mj_core::acp::find_session_config_option(&state.config_options, "model")
+                    .is_some_and(|option| option.id.to_string() == *key)
+            });
+        if !is_model
+            || self.offer.allows(value)
+            || state.is_some_and(|state| {
+                self.offered(state)
+                    .iter()
+                    .any(|choice| choice.value == *value)
+            })
+        {
+            return None;
+        }
+        Some(self.offer.refusal(&self.profile, value))
+    }
+}
+
+impl SessionManagerControl {
+    pub fn update_model_policies(
+        &self,
+        config: &mj_core::config::Config,
+        state: &mj_core::state::State,
+    ) {
+        let policies = state
+            .sessions
+            .iter()
+            .map(|(id, session)| {
+                (
+                    id.clone(),
+                    SessionModelPolicy {
+                        profile: session.last_profile.clone(),
+                        offer: config
+                            .profiles
+                            .get(&session.last_profile)
+                            .map(|profile| profile.model_offer())
+                            .unwrap_or_default(),
+                    },
+                )
+            })
+            .collect();
+        self.model_policies.send_if_modified(|current| {
+            if *current == policies {
+                false
+            } else {
+                *current = policies;
+                true
+            }
+        });
+    }
+}

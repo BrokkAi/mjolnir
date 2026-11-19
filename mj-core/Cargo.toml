@@ -23,6 +23,9 @@ include = [
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
     "assets/skills/**/*.md",
+    # Review instructions embedded with `include_str!` by session setup.
+    "assets/instructions/review_rubric.md",
+    "assets/instructions/brief_writer.md",
     # Delegation guidance embedded with `include_str!` by `subagent`.
     "assets/subagent-delegation.md",
     # OpenCode provider environment embedded with `include_str!` by the

@@ -38,12 +38,107 @@ pub async fn with_preparation_cancellation<F: std::future::Future>(
     CANCELLATION.scope(token, future).await
 }
 
+/// A preparation stopped because its cancellation token fired. It is a type,
+/// not a message, so callers that treat a failed probe or command as grounds
+/// to repair or remove something can tell "the probe said the thing is broken"
+/// from "the probe was cut short" and must propagate the latter.
+#[derive(Debug)]
+pub struct PreparationCancelled;
+
+impl std::fmt::Display for PreparationCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("preparation cancelled")
+    }
+}
+
+impl std::error::Error for PreparationCancelled {}
+
+/// Whether `error`, at any depth of its context chain, is a cancelled
+/// preparation.
+pub fn is_preparation_cancelled(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<PreparationCancelled>())
+}
+
 pub(crate) fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
     CANCELLATION.try_with(Clone::clone).ok()
 }
 
 pub fn preparation_cancellation() -> tokio_util::sync::CancellationToken {
     scoped_preparation_cancellation().unwrap_or_default()
+}
+
+/// Waits for a spawned child's exit without polling `waitpid`.
+///
+/// `wait4` on a multithreaded process scans the children of every thread, so
+/// a daemon with hundreds of threads paid for that on each 25 ms poll of every
+/// running command. On Linux a pidfd becomes readable once the child exits:
+/// the loop sleeps in `poll` on it and reaps only after it fires. Without a
+/// pidfd (other systems, or a kernel older than 5.3) every check reports a
+/// possible exit, so callers reap on each tick as before.
+pub struct ExitWatch {
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
+}
+
+impl ExitWatch {
+    /// Must be called before the child is reaped, so the pid cannot be reused.
+    pub fn new(child: &std::process::Child) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd;
+            // SAFETY: pidfd_open takes a pid and flags and returns a new
+            // descriptor or -1; the child is ours and not yet reaped.
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+            Self {
+                // SAFETY: a non-negative result is a descriptor we now own.
+                pidfd: (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = child;
+            Self {}
+        }
+    }
+
+    /// Sleep up to `timeout`, returning early once the child exits. Returns
+    /// whether the child may have exited.
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = &self.pidfd {
+            use std::os::fd::AsRawFd;
+            let mut poll = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let millis = remaining.as_millis().min(i32::MAX as u128) as libc::c_int;
+                // SAFETY: one valid pollfd for the duration of the call.
+                let ready = unsafe { libc::poll(&mut poll, 1, millis) };
+                if ready >= 0 {
+                    return ready != 0;
+                }
+                if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                    // A handled signal: keep waiting for the rest of the time.
+                    continue;
+                }
+                // A poll refused outright (for example by a syscall filter)
+                // keeps the plain pace and reports a possible exit, so the
+                // caller reaps instead of spinning on a descriptor it cannot use.
+                std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+                return true;
+            }
+        }
+        if !timeout.is_zero() {
+            std::thread::sleep(timeout);
+        }
+        true
+    }
 }
 
 /// Own a child-created process group through all of its I/O and cleanup.
@@ -157,8 +252,8 @@ impl SupervisedChild {
         let captured = stderr.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let (finished, done) = tokio::sync::watch::channel(None);
-        tokio::spawn(async move {
-            let reader = tokio::spawn(async move {
+        crate::runtime::spawn(async move {
+            let reader = crate::runtime::spawn(async move {
                 let mut bytes = [0; 8192];
                 loop {
                     let count = pipe.read(&mut bytes).await?;
@@ -364,7 +459,9 @@ pub async fn run_bounded_observed(
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     let cancellation = preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(PreparationCancelled.into());
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -425,7 +522,7 @@ pub async fn run_bounded_observed(
     });
     let result = tokio::select! {
         result = work => result,
-        _ = cancellation.cancelled() => Ok(Err(anyhow!("preparation cancelled"))),
+        _ = cancellation.cancelled() => Ok(Err(anyhow::Error::from(PreparationCancelled))),
     };
     let result = result.map(|status| {
         status.map(|status| Output {
@@ -1154,7 +1251,9 @@ pub async fn run_capturing_stdout_cancellable(
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     let cancellation = preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(PreparationCancelled.into());
+    }
     command
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
@@ -1175,7 +1274,7 @@ pub async fn run_capturing_stdout_cancellable(
             let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
             Ok::<_, anyhow::Error>(status)
         } => result,
-        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+        _ = cancellation.cancelled() => Err(anyhow::Error::from(PreparationCancelled)),
     };
     drop(group);
     #[cfg(windows)]
@@ -1296,6 +1395,38 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exit_watch_wakes_when_the_child_exits_and_not_before() {
+        // The child stays alive until its stdin closes, so the first check
+        // cannot race its exit.
+        let mut child = Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let watch = ExitWatch::new(&child);
+        if watch.pidfd.is_none() {
+            // Kernel or seccomp without pidfd_open: the documented fallback
+            // reports a possible exit on every check, so nothing to observe.
+            drop(child.stdin.take());
+            child.wait().unwrap();
+            return;
+        }
+        assert!(
+            !watch.wait(std::time::Duration::ZERO),
+            "a running child must not look exited"
+        );
+        drop(child.stdin.take());
+        let started = std::time::Instant::now();
+        assert!(watch.wait(std::time::Duration::from_secs(10)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the wait must end at the exit, not at its timeout"
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn capture_drains_both_pipes_beyond_pipe_capacity() {
@@ -1335,7 +1466,7 @@ mod tests {
         let log_path = temp.path().join("log");
         let output = std::fs::File::create(&log_path).unwrap();
         let child_pid_file = pid_file.clone();
-        let command = tokio::spawn(async move {
+        let command = crate::runtime::spawn(async move {
             let mut command = tokio::process::Command::new("sh");
             command.args(["-c", "head -c 131072 /dev/zero; echo diagnostics >&2; echo $$ > \"$1\"; sleep 60 & wait", "logged-fixture"])
                 .arg(child_pid_file);
