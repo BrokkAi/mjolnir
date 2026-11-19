@@ -91,14 +91,19 @@ impl DashboardState {
                 continue;
             }
             let event = alert.event;
-            let published = self.notification_cards.as_ref().is_some_and(|cards| {
-                cards.iter().any(|(session, card)| {
-                    (0..card.entries.len() + usize::from(card.form.is_some())).any(|item| {
-                        card.item_destination(session, item) == event.destination
-                            && card.item_identity(session, item).as_deref() == Some(&event.identity)
+            // The daemon made the event from a published item, so with no delay it
+            // rings as is. A delayed event rings only if its item survived the
+            // delay; the card map may lag the event batch, which a delay absorbs.
+            let published = delay.is_zero()
+                || self.notification_cards.as_ref().is_some_and(|cards| {
+                    cards.iter().any(|(session, card)| {
+                        (0..card.entries.len() + usize::from(card.form.is_some())).any(|item| {
+                            card.item_destination(session, item) == event.destination
+                                && card.item_identity(session, item).as_deref()
+                                    == Some(&event.identity)
+                        })
                     })
-                })
-            });
+                });
             if !published || self.current_session_id() == Some(event.destination.as_str()) {
                 continue;
             }
