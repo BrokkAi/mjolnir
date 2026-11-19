@@ -1811,15 +1811,18 @@ fi
         format!(
             r#"
 import os, socket, subprocess
-# Which process started this helper, for the report of a helper that is not
-# killed: only the login's own helper is the login's to stop.
+# Say who started this helper. The login's own Node probe is the login's to
+# stop; the daemon probes Node too wherever it asks the Claude CLI for usage
+# (macOS), and those are the daemon's.
 parent = subprocess.run(['ps', '-o', 'pid=,ppid=,pgid=,command=', '-p', str(os.getppid())],
                         capture_output=True, text=True).stdout.strip()
-open({trace:?}, 'a').write('helper pid=%d pgid=%d parent: %s\n' % (os.getpid(), os.getpgid(0), parent))
+owner = 'login' if ' login ' in parent + ' ' else 'other'
+open({trace:?}, 'a').write('helper pid=%d pgid=%d owner=%s parent: %s\n' % (os.getpid(), os.getpgid(0), owner, parent))
 s = socket.create_connection(('127.0.0.1', {port}))
-s.sendall((str(os.getpid()) + '\n').encode())
+s.sendall(('%d %s\n' % (os.getpid(), owner)).encode())
 s.recv(1)
-open({output:?}, 'w').write('helper survived cancellation')
+if owner == 'login':
+    open({output:?}, 'w').write('helper survived cancellation')
 "#,
             port = preparation_address.port(),
             output = after_cancel.to_str().unwrap(),
@@ -1894,12 +1897,26 @@ open({output:?}, 'w').write('helper survived cancellation')
                     .await
                     .unwrap();
                 eprintln!("login ending={ending}: waiting for helper readiness");
-                let (helper, _) = preparation.accept().await.unwrap();
+                // Hard-won: #1607: on macOS the daemon's own Node probes connected first and
+                // were taken for the login's helper, which nothing then killed.
+                // Their connections stay open here; the daemon stops them.
+                let mut other_probes = Vec::new();
+                let (mut helper, pid) = loop {
+                    let (stream, _) = preparation.accept().await.unwrap();
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let (pid, owner) = line
+                        .trim()
+                        .split_once(' ')
+                        .expect("a helper reports its pid and its owner");
+                    if owner == "login" {
+                        break (stream, pid.parse::<i32>().unwrap());
+                    }
+                    eprintln!("login ending={ending}: helper {pid} belongs to the daemon");
+                    other_probes.push(stream);
+                };
                 eprintln!("login ending={ending}: helper connected");
-                let mut helper = tokio::io::BufReader::new(helper);
-                let mut pid = String::new();
-                helper.read_line(&mut pid).await.unwrap();
-                let pid: i32 = pid.trim().parse().unwrap();
                 assert_eq!(
                     unsafe { libc::getpgid(pid) },
                     pid,
