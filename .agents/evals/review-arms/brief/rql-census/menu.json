@@ -1,0 +1,336 @@
+{
+ "menu": [
+  "contract",
+  "value_flow",
+  "state_lifecycle"
+ ],
+ "stability": {
+  "without carthage-software/mago": [
+   "contract",
+   "value_flow",
+   "state_lifecycle"
+  ],
+  "without nushell/nushell": [
+   "contract",
+   "value_flow",
+   "guarded_path"
+  ],
+  "without rust-lang/rust-analyzer": [
+   "contract",
+   "state_lifecycle",
+   "value_flow"
+  ],
+  "without uutils/coreutils": [
+   "contract",
+   "value_flow",
+   "state_lifecycle"
+  ],
+  "without web-infra-dev/rspack": [
+   "contract",
+   "state_lifecycle",
+   "value_flow"
+  ],
+  "without all test repos": [
+   "value_flow",
+   "guarded_path",
+   "state_lifecycle"
+  ]
+ },
+ "stable": false,
+ "ranking": [
+  {
+   "kind": "contract",
+   "mean_share": 0.2696141215106732,
+   "total_decided": 12,
+   "per_repo": {
+    "bifrost-dev": [
+     2,
+     29
+    ],
+    "carthage-software/mago": [
+     1,
+     1
+    ],
+    "mjolnir": [
+     4,
+     25
+    ],
+    "nushell/nushell": [
+     3,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     1,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     1,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "value_flow",
+   "mean_share": 0.1068472906403941,
+   "total_decided": 11,
+   "per_repo": {
+    "bifrost-dev": [
+     4,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     4,
+     25
+    ],
+    "nushell/nushell": [
+     0,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     1,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     2,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "state_lifecycle",
+   "mean_share": 0.08525451559934318,
+   "total_decided": 10,
+   "per_repo": {
+    "bifrost-dev": [
+     3,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     4,
+     25
+    ],
+    "nushell/nushell": [
+     3,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     0,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     0,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "guarded_path",
+   "mean_share": 0.0703448275862069,
+   "total_decided": 9,
+   "per_repo": {
+    "bifrost-dev": [
+     5,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     3,
+     25
+    ],
+    "nushell/nushell": [
+     0,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     0,
+     5
+    ],
+    "uutils/coreutils": [
+     1,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     0,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "keyed_matching",
+   "mean_share": 0.04485221674876848,
+   "total_decided": 6,
+   "per_repo": {
+    "bifrost-dev": [
+     2,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     3,
+     25
+    ],
+    "nushell/nushell": [
+     0,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     0,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     1,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "call_arguments",
+   "mean_share": 0.0,
+   "total_decided": 0,
+   "per_repo": {
+    "bifrost-dev": [
+     0,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     0,
+     25
+    ],
+    "nushell/nushell": [
+     0,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     0,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     0,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "field_writes",
+   "mean_share": 0.0,
+   "total_decided": 0,
+   "per_repo": {
+    "bifrost-dev": [
+     0,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     0,
+     25
+    ],
+    "nushell/nushell": [
+     0,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     0,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     0,
+     8
+    ]
+   }
+  },
+  {
+   "kind": "other",
+   "mean_share": 0.0,
+   "total_decided": 0,
+   "per_repo": {
+    "bifrost-dev": [
+     0,
+     29
+    ],
+    "carthage-software/mago": [
+     0,
+     1
+    ],
+    "mjolnir": [
+     0,
+     25
+    ],
+    "nushell/nushell": [
+     0,
+     9
+    ],
+    "rust-lang/rust-analyzer": [
+     0,
+     5
+    ],
+    "uutils/coreutils": [
+     0,
+     5
+    ],
+    "web-infra-dev/rspack": [
+     0,
+     8
+    ]
+   }
+  }
+ ],
+ "relation_bugs": {
+  "mjolnir": 25,
+  "bifrost-dev": 29,
+  "carthage-software/mago": 1,
+  "nushell/nushell": 9,
+  "rust-lang/rust-analyzer": 5,
+  "uutils/coreutils": 5,
+  "web-infra-dev/rspack": 8
+ },
+ "not_confirmed_excluded": {
+  "mjolnir": 2,
+  "rust-lang/rust-analyzer": 1
+ },
+ "stale_rows_ignored": 4
+}
