@@ -588,6 +588,19 @@ fn a_streamed_spec_is_the_same_json_as_the_whole_spec() {
             },
         })
         .collect();
+    // serde_json writes an unescaped run in one call; it must cross chunks intact.
+    spec.canonical_session
+        .transcript
+        .push(mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "item-unescaped".into(),
+            position: 40,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: mj_core::archive::CanonicalTranscriptBody::System {
+                text: "a".repeat(1024 * 1024 + 7),
+            },
+        });
     let expected = serde_json::to_vec(&spec).unwrap();
     assert!(expected.len() > 4 * 1024 * 1024);
     let executor = ExportExecutor::new(0, "");

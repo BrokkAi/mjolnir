@@ -320,11 +320,14 @@ impl ChunkWriter {
 
 impl std::io::Write for ChunkWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.chunk.extend_from_slice(data);
+        // serde_json writes a long unescaped string in one call; accept only
+        // what fits so no chunk grows past the bound (`write_all` loops).
+        let taken = data.len().min(SPEC_STREAM_CHUNK_BYTES - self.chunk.len());
+        self.chunk.extend_from_slice(&data[..taken]);
         if self.chunk.len() >= SPEC_STREAM_CHUNK_BYTES {
             self.send_chunk()?;
         }
-        Ok(data.len())
+        Ok(taken)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
