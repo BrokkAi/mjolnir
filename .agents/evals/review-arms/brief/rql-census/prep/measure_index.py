@@ -94,6 +94,9 @@ class Server:
         self.sampling = True
         threading.Thread(target=self._sample, daemon=True).start()
 
+    def note_peak(self, kib):
+        self.sample["peak_tree_kib"] = max(kib, self.sample.get("peak_tree_kib") or 0)
+
     def _cgroup_dir(self):
         """The server's own scope cgroup, or None until systemd-run has moved the process into it
         (an earlier read would see the driver's cgroup and its unrelated counters)."""
@@ -104,13 +107,14 @@ class Server:
         return "/sys/fs/cgroup" + path if path.endswith(f"/{self.unit}.scope") else None
 
     def _sample(self):
-        while self.sampling and self.proc.poll() is None:
-            d = self._cgroup_dir()
+        # Keep sampling while the scope's cgroup exists: descendants can outlive the parent.
+        while self.sampling and (self.proc.poll() is None or (self.cgroup and os.path.isdir(self.cgroup))):
+            d = self._cgroup_dir() or (self.cgroup if self.cgroup and os.path.isdir(self.cgroup) else None)
             if d:
                 self.cgroup = d
             if d:  # each file on its own, so one unreadable file can't hide the others
                 try:
-                    self.sample["peak_tree_kib"] = int(open(f"{d}/memory.peak").read()) // 1024
+                    self.note_peak(int(open(f"{d}/memory.peak").read()) // 1024)
                 except (OSError, ValueError):
                     pass
                 try:
@@ -199,6 +203,11 @@ class Server:
             raise TeardownUnconfirmed(f"{self.unit}.scope: teardown failed before confirmation: {e!r}") from e
 
     def _stop(self):
+        if self.cgroup:  # one more peak reading while the scope certainly still exists
+            try:
+                self.note_peak(int(open(f"{self.cgroup}/memory.peak").read()) // 1024)
+            except (OSError, ValueError):
+                pass
         try:
             self.proc.stdin.close()
         except OSError:
@@ -280,6 +289,10 @@ def phase(binary, root, cache, log):
             rec["cpu_to_ready_usec"] = None
         if rec["cpu_to_ready_usec"] is None:
             raise RuntimeError("cpu.stat unreadable at readiness: the ranking's CPU is missing")
+        try:  # the whole-tree peak is required too, read directly rather than from the sampler
+            server.note_peak(int(open(f"{d}/memory.peak").read()) // 1024)
+        except (OSError, ValueError):
+            raise RuntimeError("memory.peak unreadable at readiness: the whole-tree peak is missing")
         rec.update(wall=time.monotonic() - t0, polls=polls,
                    ready=True, readiness={k: payload.get(k) for k in
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
@@ -308,15 +321,26 @@ def phase(binary, root, cache, log):
 def git(*args, cwd=None):
     """Run git, but stop it if the batch is cancelled: a long clone or fetch mustn't delay
     cancellation, and nothing launches after it (phase() checks CANCEL first)."""
-    proc = subprocess.Popen(["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Its own process group, so cancelling stops transport and index-pack children too.
+    proc = subprocess.Popen(["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
     while True:
         try:
             out, err = proc.communicate(timeout=1)
             break
         except subprocess.TimeoutExpired:
             if CANCEL.is_set():
-                proc.terminate()
-                proc.communicate()
+                import signal
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(proc.pid, sig)
+                    except ProcessLookupError:
+                        break
+                    try:
+                        proc.communicate(timeout=STOP_SECONDS)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
                 raise Cancelled(f"cancelled during git {args[0]}")
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
