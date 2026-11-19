@@ -8831,3 +8831,56 @@ async fn cancelled_writer_enqueue_cannot_commit_after_queue_space_returns() {
     assert!(!ran.load(Ordering::SeqCst));
     owner.shutdown().unwrap();
 }
+
+// Hard-won: 282a657: a slower repair replaced transcript already committed and acknowledged by another attachment.
+#[test]
+fn projection_repair_yields_to_a_concurrent_committed_frontier() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let observed = materialized_session("session-1");
+    save_materialized_session_to(&database, &observed).unwrap();
+    let replacement = MaterializedSession::empty("session-1");
+    // Both repairs observed the same broken cursor. The first repairs and
+    // catches up before the second reaches the serialized replacement write.
+    assert!(
+        materialized::repair_materialized_session_if_current_to(
+            &database,
+            &replacement,
+            observed.applied_event_ordinal,
+            &observed.applied_event_digest
+        )
+        .unwrap()
+    );
+    let mut winner = observed.clone();
+    winner.applied_event_ordinal += 1;
+    winner.applied_event_digest = event_digest(winner.applied_event_ordinal);
+    winner.session_title = Some("concurrent recovered transcript".into());
+    save_materialized_session_to(&database, &winner).unwrap();
+    assert!(
+        !materialized::repair_materialized_session_if_current_to(
+            &database,
+            &replacement,
+            observed.applied_event_ordinal,
+            &observed.applied_event_digest
+        )
+        .unwrap()
+    );
+    let saved = load_materialized_session_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(saved).unwrap(),
+        serde_json::to_value(&winner).unwrap()
+    );
+    // A changed digest at the same ordinal is also a different owner state.
+    assert!(
+        !materialized::repair_materialized_session_if_current_to(
+            &database,
+            &replacement,
+            winner.applied_event_ordinal,
+            &observed.applied_event_digest
+        )
+        .unwrap()
+    );
+}

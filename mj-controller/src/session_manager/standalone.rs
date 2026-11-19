@@ -595,9 +595,7 @@ impl StandaloneSession {
                 )
                 .await
                 .context("relay cannot rebuild the projection from its genesis")?;
-            save_materialized_session(&replacement)?;
-            self.window = mj_core::state::ProjectionWindow::of(&replacement);
-            self.materialized = replacement;
+            self.install_repaired_projection(replacement).await?;
             return Ok(());
         };
         let checkpoint_path = checkpoint.archive_path.clone();
@@ -638,9 +636,28 @@ impl StandaloneSession {
             .context("relay rejected the verified checkpoint repair cursor")?;
         let replacement =
             materialized_session_from_canonical(&self.materialized.session_id, &canonical)?;
-        save_materialized_session(&replacement)?;
-        self.window = mj_core::state::ProjectionWindow::of(&replacement);
-        self.materialized = replacement;
+        self.install_repaired_projection(replacement).await?;
+        Ok(())
+    }
+
+    async fn install_repaired_projection(
+        &mut self,
+        replacement: MaterializedSession,
+    ) -> Result<()> {
+        let ordinal = self.materialized.applied_event_ordinal;
+        let digest = self.materialized.applied_event_digest.clone();
+        let installed = tokio::task::spawn_blocking(move || {
+            crate::database::repair_materialized_session_if_current(&replacement, ordinal, &digest)
+        })
+        .await
+        .context("projection repair writer failed")??;
+        // Reload either the repair or the concurrent winner; never replay from
+        // a replacement that lost its atomic writer decision.
+        (self.materialized, self.window) = load_projection(&self.materialized.session_id).await?;
+        if !installed {
+            tracing::debug!(session_id = %self.materialized.session_id,
+                "projection advanced during repair; using the durable winner");
+        }
         self.window.trim(
             &mut self.materialized,
             crate::database::PROJECTION_TAIL_ITEMS,

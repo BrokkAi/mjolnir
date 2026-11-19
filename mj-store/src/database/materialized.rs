@@ -1849,6 +1849,50 @@ pub fn save_materialized_session(materialized: &MaterializedSession) -> Result<(
     })
 }
 
+/// Repair only the projection whose exact cursor the caller observed. A
+/// concurrent projector owns its committed history, even when repair rewinds.
+pub fn repair_materialized_session_if_current(
+    materialized: &MaterializedSession,
+    expected_ordinal: u64,
+    expected_digest: &str,
+) -> Result<bool> {
+    let materialized = materialized.clone();
+    let expected_digest = expected_digest.to_owned();
+    submit_database_write("repair_materialized_session_if_current", move |_| {
+        repair_materialized_session_if_current_to(
+            &database_path(),
+            &materialized,
+            expected_ordinal,
+            &expected_digest,
+        )
+    })
+}
+
+pub(super) fn repair_materialized_session_if_current_to(
+    path: &Path,
+    materialized: &MaterializedSession,
+    expected_ordinal: u64,
+    expected_digest: &str,
+) -> Result<bool> {
+    materialized.validate()?;
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = tx.query_row(
+        "SELECT applied_event_ordinal, applied_event_digest FROM materialized_sessions WHERE session_id=?1",
+        [&materialized.session_id],
+        |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+    ).optional()?.unwrap_or((0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into()));
+    if current.0 != expected_ordinal || current.1 != expected_digest {
+        return Ok(false);
+    }
+    if !session_exists(&tx, &materialized.session_id)? {
+        bail!("unknown session {}", materialized.session_id);
+    }
+    write_materialized_session(&tx, materialized)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSession) -> Result<()> {
     materialized.validate()?;
     let mut connection = open(path)?;

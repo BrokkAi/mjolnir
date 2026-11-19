@@ -1977,21 +1977,22 @@ impl DurableRelay {
         }
         // Arrival after the marker does not associate an idle update with
         // this resume. Only running proof or an explicit goal change settles it.
-        let goal_reported = if let SessionUpdate::SessionInfoUpdate(info) = &update {
-            info.meta
-                .as_ref()
-                .is_some_and(|meta| mj_core::goal::goal_meta(meta).is_some())
+        let goal_report = if let SessionUpdate::SessionInfoUpdate(info) = &update {
+            info.meta.as_ref().and_then(mj_core::goal::goal_meta)
         } else {
-            false
+            None
         };
+        let explicitly_cleared = goal_report.is_some_and(serde_json::Value::is_null);
+        let goal_reported = goal_report.is_some();
         self.pending_native_resumes.retain(|pending| {
-            let settled = goal_reported
-                && pending.goal.as_ref().is_some_and(|expected| {
-                    native_after.snapshot.as_ref().is_none_or(|goal| {
-                        !goal.same_goal(expected)
-                            || (expected.status != goal.status && !goal.active())
-                    })
-                });
+            let settled = explicitly_cleared
+                || (goal_reported
+                    && pending.goal.as_ref().is_some_and(|expected| {
+                        native_after.snapshot.as_ref().is_none_or(|goal| {
+                            !goal.same_goal(expected)
+                                || (expected.status != goal.status && !goal.active())
+                        })
+                    }));
             !(settled
                 || (resumed_native
                     && self.snapshot.harness_turn.is_some()

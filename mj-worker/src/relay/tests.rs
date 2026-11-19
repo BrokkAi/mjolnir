@@ -9884,6 +9884,29 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         )
         .unwrap();
     assert!(rejected_cut.try_recv().unwrap().is_ok());
+    // Hard-won: 282a657: an explicit clear could not retire a resume with no known goal.
+    relay.lock().unwrap().native_goal_resume_sent(20, None);
+    assert!(
+        relay.observe().unwrap().pending_native_resumes[0]
+            .goal
+            .is_none()
+    );
+    let mut unknown_cut = relay.lock().unwrap().reserve_live_baseline();
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"idle"}}
+    })).unwrap()).unwrap();
+    assert!(unknown_cut.try_recv().is_err());
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"session_info_update", "_meta":{"goal":null}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(unknown_cut.try_recv().unwrap().is_ok());
     // Hard-won: 655be2b: a definitive refusal must not retire another request.
     relay.lock().unwrap().native_goal_resume_sent(3, None);
     relay.lock().unwrap().native_goal_resume_sent(4, None);
