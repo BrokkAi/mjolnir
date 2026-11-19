@@ -228,12 +228,13 @@ impl ExecutableIdentity {
 }
 
 struct ExecutableContents {
-    digest: String,
+    /// None only for a stamp-only read of an unpublished file.
+    digest: Option<String>,
     stamp: std::result::Result<String, &'static str>,
 }
 
 impl ExecutableContents {
-    fn read(input: &mut File) -> io::Result<Self> {
+    fn read(input: &mut File, hash: bool) -> io::Result<Self> {
         // Read each byte once for both the digest and build stamp. Only the
         // stamp parser needs to see bytes from the previous chunk again.
         let overlap = PREFIX.len() + STAMP_BYTES;
@@ -249,7 +250,9 @@ impl ExecutableContents {
             if bytes.len() == previous_len {
                 break;
             }
-            digest.update(&bytes[previous_len..]);
+            if hash {
+                digest.update(&bytes[previous_len..]);
+            }
             if let Ok(found) = &mut stamp {
                 for build in worker_build_stamps(&bytes) {
                     match found.as_deref() {
@@ -266,7 +269,7 @@ impl ExecutableContents {
             bytes.drain(..keep_from);
         }
         Ok(Self {
-            digest: crate::hex::lower_hex(digest.finalize()),
+            digest: hash.then(|| crate::hex::lower_hex(digest.finalize())),
             stamp: stamp.and_then(|found| {
                 found.ok_or("missing worker build stamp (legacy or invalid worker)")
             }),
@@ -320,7 +323,7 @@ fn executable_contents(path: &Path) -> Result<Arc<ExecutableContents>> {
     // Path, size and mtime cannot distinguish same-size replacements with
     // preserved timestamps on Windows. Read the file each time there.
     #[cfg(not(unix))]
-    let result = ExecutableContents::read(&mut input).map(Arc::new);
+    let result = ExecutableContents::read(&mut input, true).map(Arc::new);
 
     result.with_context(|| format!("read worker executable {}", path.display()))
 }
@@ -343,7 +346,7 @@ fn memoized_executable_contents(path: &Path, input: &mut File) -> Result<Arc<Exe
     if let Some(contents) = contents.as_ref() {
         return Ok(Arc::clone(contents));
     }
-    let scanned = ExecutableContents::read(input)?;
+    let scanned = ExecutableContents::read(input, true)?;
     ensure!(
         identity == ExecutableIdentity::from_metadata(&input.metadata()?),
         "worker executable changed while being read"
@@ -354,13 +357,32 @@ fn memoized_executable_contents(path: &Path, input: &mut File) -> Result<Arc<Exe
 }
 
 pub(crate) fn executable_digest(path: &Path) -> Result<String> {
-    Ok(executable_contents(path)?.digest.clone())
+    executable_contents(path)?
+        .digest
+        .clone()
+        .context("worker executable was read without its digest")
 }
 
 pub fn verify_worker_build(path: &Path) -> Result<()> {
-    let contents = executable_contents(path)?;
-    let found = contents
-        .stamp
+    check_worker_stamp(path, &executable_contents(path)?.stamp)
+}
+
+/// [`verify_worker_build`] for a file that is about to be published under
+/// another name, such as a download's temporary file: one stamp-only scan,
+/// outside the memo, so one-off paths are never recorded there.
+pub fn verify_unpublished_worker_build(path: &Path) -> Result<()> {
+    let mut input =
+        File::open(path).with_context(|| format!("open worker executable {}", path.display()))?;
+    let contents = ExecutableContents::read(&mut input, false)
+        .with_context(|| format!("read worker executable {}", path.display()))?;
+    check_worker_stamp(path, &contents.stamp)
+}
+
+fn check_worker_stamp(
+    path: &Path,
+    stamp: &std::result::Result<String, &'static str>,
+) -> Result<()> {
+    let found = stamp
         .as_deref()
         .map_err(|message| anyhow::Error::msg(*message))
         .with_context(|| {

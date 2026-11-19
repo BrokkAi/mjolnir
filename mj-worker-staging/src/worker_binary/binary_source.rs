@@ -534,7 +534,7 @@ pub fn publish_cached_worker(
     cache_root: &Path,
     digest: &str,
 ) -> Result<PathBuf> {
-    verify_worker_build(temporary.path())?;
+    mj_core::worker_build::verify_unpublished_worker_build(temporary.path())?;
     let directory = cache_root.join(digest);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create pinned worker cache {}", directory.display()))?;
