@@ -354,8 +354,12 @@ impl DashboardContext {
         let Self {
             selection,
             dashboard,
+            chats,
             ..
         } = self;
+        if let Some(event) = dashboard.route_question_press(selection, chat_owns_pointer, &event) {
+            return SelectionRouting::Forward(event);
+        }
         if let Event::Mouse(mouse) = &event
             && !(selection.owns_pointer()
                 && matches!(
@@ -367,7 +371,9 @@ impl DashboardContext {
             selection.clear();
             return SelectionRouting::Forward(event);
         }
-        route_prompt_selection(selection, dashboard, event)
+        let routing = route_prompt_selection(selection, dashboard, event);
+        dashboard.settle_question_press(selection, chats);
+        routing
     }
 
     /// Copies the finished selection, using only the terminal clipboard over SSH.

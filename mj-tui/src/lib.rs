@@ -963,6 +963,9 @@ pub struct DashboardState {
     pub(crate) served_attention:
         Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
+    /// A press on a question's answer control is both the form's pending click
+    /// and a selection candidate; see route_question_press.
+    question_press: bool,
     pending_welcome: Option<welcome::WelcomeDialog>,
     operator_presence: operator_away::OperatorPresence,
     #[cfg(test)]
@@ -1337,6 +1340,7 @@ impl DashboardState {
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
             paste_revision: 0,
+            question_press: false,
             profile_login_generation: 0,
             pending_setup_login: None,
             profile_hydration_requests: Default::default(),

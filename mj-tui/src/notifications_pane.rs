@@ -3256,6 +3256,119 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn dragging_an_answer_row_selects_its_drawn_text_and_a_click_still_answers() {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use mj_chat::selection::{SelectionAction, SelectionState, SurfaceId};
+        let mut dashboard = dashboard_with_session(running_session());
+        serve_attention(&mut dashboard, &["session-1"], SessionAttention::NeedsInput);
+        let mut request = question("session-1");
+        request.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::Boolean {
+            default: Some(false),
+        };
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut dashboard, "session-1", None, &request);
+        dashboard.notifications.size = PaneSize::Maximized;
+        dashboard.focus = Focus::Notifications;
+        let (chat, _) = form_chat("session-1", request);
+        let mut chats = std::collections::BTreeMap::from([("session-1".to_owned(), chat)]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 44)).unwrap();
+        let draw = |terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+                    dashboard: &mut DashboardState,
+                    chats: &mut _| {
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        dashboard,
+                        chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            buffer_lines(terminal.backend().buffer())
+        };
+        draw(&mut terminal, &mut dashboard, &mut chats);
+        let lines = draw(&mut terminal, &mut dashboard, &mut chats);
+        assert!(dashboard.notifications.form_area.is_some(), "{lines:#?}");
+        // The conversation pane shows the same question; use the card's copy.
+        let form = dashboard.notifications.form_area.unwrap();
+        let (x, row) = point(
+            &lines[usize::from(form.y)..],
+            mj_chat::components::Checkbox::marker(false),
+        );
+        let y = form.y + row;
+        let event = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let mut selection = SelectionState::new();
+
+        // A drag from the answer row selects what is drawn there; the form
+        // gets the press but never the click.
+        let press = event(MouseEventKind::Down(MouseButton::Left), x, y);
+        let forwarded = dashboard
+            .route_question_press(&mut selection, true, &press)
+            .expect("the press reaches the form");
+        dashboard
+            .handle_notification_form_event(&mut chats, &forwarded)
+            .unwrap();
+        let surfaces = dashboard.frame_surfaces().clone();
+        selection.on_mouse_drag(x + 6, y, &surfaces);
+        dashboard.settle_question_press(&selection, &mut chats);
+        let SelectionAction::CopyRequested { surface, range } =
+            selection.on_mouse_up(x + 6, y, &surfaces)
+        else {
+            panic!("a drag copies");
+        };
+        assert!(matches!(surface, SurfaceId::NotificationFormBody(_)));
+        let frame = *surfaces.surface(surface).unwrap();
+        let drawn = mj_chat::selection::extract_rows(terminal.backend().buffer(), &frame, &range);
+        let expected: String = lines[usize::from(y)]
+            .chars()
+            .skip(usize::from(x))
+            .take(7)
+            .collect();
+        assert_eq!(drawn, expected.trim_end());
+        let lines = draw(&mut terminal, &mut dashboard, &mut chats);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(mj_chat::components::Checkbox::marker(false))),
+            "the drag did not choose the option: {lines:#?}"
+        );
+        assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+
+        // A press and release in place is still a click.
+        let mut selection = SelectionState::new();
+        let release = event(MouseEventKind::Up(MouseButton::Left), x, y);
+        for pointer in [press, release] {
+            let forwarded = dashboard
+                .route_question_press(&mut selection, true, &pointer)
+                .expect("a click reaches the form");
+            dashboard
+                .handle_notification_form_event(&mut chats, &forwarded)
+                .unwrap();
+        }
+        let lines = draw(&mut terminal, &mut dashboard, &mut chats);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(mj_chat::components::Checkbox::marker(true))),
+            "the click chose the option: {lines:#?}"
+        );
+    }
+
+    #[tokio::test]
     async fn dragging_notification_text_uses_transcript_selection_and_card_identity() {
         use mj_chat::selection::{SelectionAction, SelectionState, SurfaceId};
         let mut dashboard = dashboard();

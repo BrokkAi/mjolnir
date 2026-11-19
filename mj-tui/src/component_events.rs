@@ -5,6 +5,66 @@ use crossterm::event::{Event, MouseEvent};
 use crate::{DashboardAction, DashboardState, Mode};
 
 impl DashboardState {
+    /// A press on a question's answer rows still reaches the form, which acts
+    /// on release, but the selection engine tracks it too so a drag can
+    /// select the drawn text instead. Returns the event to hand to the form,
+    /// or None when the caller routes it as usual.
+    pub fn route_question_press(
+        &mut self,
+        selection: &mut mj_chat::selection::SelectionState,
+        chat_owns_pointer: bool,
+        event: &crossterm::event::Event,
+    ) -> Option<crossterm::event::Event> {
+        use crossterm::event::{Event, MouseButton, MouseEventKind};
+        use mj_chat::selection::SurfaceId;
+        let Event::Mouse(mouse) = event else {
+            return None;
+        };
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.question_press = false;
+                let surfaces = self.frame_surfaces();
+                let answer_row = !self.modal_open()
+                    && surfaces
+                        .surface_at(mouse.column, mouse.row)
+                        .is_some_and(|surface| match surface.id {
+                            SurfaceId::NotificationFormBody(_) => true,
+                            SurfaceId::ModalBody => {
+                                surfaces.surface(SurfaceId::ElicitationMessage).is_some()
+                            }
+                            _ => false,
+                        });
+                if !(chat_owns_pointer && answer_row) {
+                    return None;
+                }
+                selection.on_mouse_down(mouse.column, mouse.row, self.frame_surfaces());
+                self.question_press = selection.owns_pointer();
+                Some(event.clone())
+            }
+            // No movement: the release is the form's click.
+            MouseEventKind::Up(MouseButton::Left)
+                if std::mem::take(&mut self.question_press) && selection.range().is_none() =>
+            {
+                selection.clear();
+                Some(event.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Once movement has made the press a text selection the form gets no
+    /// click, so release its armed control.
+    pub fn settle_question_press(
+        &mut self,
+        selection: &mj_chat::selection::SelectionState,
+        chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+    ) {
+        if self.question_press && selection.range().is_some() {
+            self.question_press = false;
+            self.cancel_all_component_pointers(chats);
+        }
+    }
+
     /// Global commands disarm every chat presentation, including warm forms
     /// whose session differs from the focused conversation.
     pub fn cancel_all_component_pointers(
