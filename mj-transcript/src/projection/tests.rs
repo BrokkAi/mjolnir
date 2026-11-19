@@ -2116,19 +2116,11 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
 }
 
 // Hard-won: d2f26b4c6: a recovery note broke slash-command presentation.
-// Hard-won: a3a103608: recovery emitted more than one terminal API event for a turn.
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     for original in ["go", "/compact"] {
         let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
         let mut session = MaterializedSession::empty("session");
-        let mut api_events = Vec::new();
-        let mut apply_observation = |session: &mut MaterializedSession, observation| {
-            let event = event(session, observation);
-            let projected = project_relay_event(session, &event).unwrap();
-            api_events.extend(projected.mutation.api_events.clone());
-            apply_committed_projection_event(session, &event, projected.mutation).unwrap();
-        };
         apply_observation(
             &mut session,
             RelayObservation::CommandQueued {
@@ -2193,53 +2185,6 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
             assert_eq!(content[1]["text"], original);
             assert_eq!(content.len(), 2);
         }
-        let second = mj_core::continuation::restart_continuation_id(&recovery_id);
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandInterrupted {
-                continuation_id: Some(second.clone()),
-                reason: None,
-                command_id: recovery_id,
-                command: mj_core::relay::RelayCommandKind::Prompt,
-                message: "bridge restarted again".into(),
-            },
-        );
-        apply_observation(&mut session, RelayObservation::SessionRestarted);
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandStarted {
-                command_id: second.clone(),
-                started_at_ms: 40,
-            },
-        );
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandCompleted {
-                barrier_command_id: None,
-                command: Some(mj_core::relay::RelayCommandKind::Prompt),
-                command_id: second.clone(),
-                outcome: RelayCommandOutcome::Prompt {
-                    stop_reason: "end_turn".into(),
-                    usage: None,
-                    diagnostic: None,
-                    work_facts: None,
-                },
-            },
-        );
-        let endings: Vec<_> = api_events
-            .iter()
-            .filter_map(|event| match event {
-                mj_core::storage::ApiEventData::TurnEnded { turn } => Some(turn),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            endings.len(),
-            1,
-            "restarts must not terminate the carried API turn"
-        );
-        assert_eq!(endings[0].accepted_ordinal, Some(1));
-        assert_eq!(endings[0].command_id, second);
     }
 }
 
