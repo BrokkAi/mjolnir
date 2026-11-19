@@ -63,7 +63,7 @@ class Server:
         # last memory.peak, OOM kills and tree CPU survive a timeout or an OOM kill.
         # The sampler reads once a second, so a peak in the last second before exit can be
         # missed; the record says so (sample_interval_s). An OOM kill is still caught through
-        # systemd's Result. Ranking uses getrusage CPU (exact for the waited tree), not cpu.stat.
+        # systemd's Result. Ranking uses cpu_to_ready_usec, read from cpu.stat at readiness.
         self.sample = {"peak_tree_kib": None, "oom_kill": 0, "tree_cpu_usec": None, "sample_interval_s": 1}
         self.cgroup = None
         self.sampling = True
@@ -213,6 +213,13 @@ def phase(binary, root, cache, log):
     try:
         server.initialize()
         payload, polls = server.wait_ready()
+        # The ranking's CPU: the whole scope's CPU up to the ready reply, read from its cgroup,
+        # so it covers every descendant and excludes shutdown and the driver's own commands.
+        d = server._cgroup_dir()
+        try:
+            rec["cpu_to_ready_usec"] = int(dict(l.split() for l in open(f"{d}/cpu.stat"))["usage_usec"]) if d else None
+        except (OSError, ValueError, KeyError):
+            rec["cpu_to_ready_usec"] = None
         rec.update(wall=time.monotonic() - t0, polls=polls,
                    ready=True, readiness={k: payload.get(k) for k in
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
@@ -248,8 +255,30 @@ def require_ec2():
         sys.exit("systemd-run --user --scope with MemoryMax is unavailable; the memory cap can't be enforced")
 
 
+def reap_leftover_scopes():
+    """Before any cleanup, stop every scope a previous run left behind and prove it's gone.
+    The driver runs one server at a time, so any live rql-bifrost scope at startup belongs to an
+    earlier invocation whose stop couldn't be confirmed. If one survives, exit without touching
+    any worktree or cache."""
+    units = subprocess.run(["systemctl", "--user", "list-units", "--all", "--type=scope", "--no-legend", "--plain"],
+                           capture_output=True, text=True, check=True).stdout.split("\n")
+    for unit in [u.split()[0] for u in units if u.strip().startswith("rql-bifrost-")]:
+        subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True)
+        deadline = time.monotonic() + STOP_SECONDS
+        while True:
+            state = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"],
+                                   capture_output=True, text=True).stdout.strip()
+            if state in ("inactive", "failed"):
+                subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True)
+                break
+            if time.monotonic() > deadline:
+                sys.exit(f"leftover {unit} won't stop (state={state!r}); refusing to clean up any worktree")
+            time.sleep(1)
+
+
 def main():
     require_ec2()
+    reap_leftover_scopes()
     # Each line is `owner__repo`, or `owner__repo <pinned sha> <origin url>`. The pinned form
     # clones from the origin (for hosts without /nfs/morannon) and measures at that commit.
     entries = [l.split() for l in open(sys.argv[1]) if l.strip()]
@@ -290,8 +319,12 @@ def main():
                 head = git("rev-parse", "HEAD", cwd=clone)
             base = git("rev-parse", f"{head}~50", cwd=clone)  # first parent
             wt = out / "wt" / repo
+            # A previous run may have left this worktree (registered or not). Its server scope is
+            # already proven gone by reap_leftover_scopes(), so removing the files is safe.
             if wt.exists():
-                git("worktree", "remove", "--force", str(wt), cwd=clone)
+                subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=clone, capture_output=True)
+                shutil.rmtree(wt, ignore_errors=True)
+            git("worktree", "prune", cwd=clone)
             git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
             rec.update(head=head, base=base, binary_sha256=binary_sha, memory_max=MEMORY_MAX,
                        rust_files=len([p for p in subprocess.run(
@@ -318,6 +351,10 @@ def main():
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
+        if "not confirmed stopped" in (rec.get("error") or ""):
+            # A server tree may still be alive: stop the batch here, leaving its worktree and
+            # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
+            sys.exit(f"{repo}: server scope not confirmed stopped; batch halted")
 
 
 if __name__ == "__main__":
