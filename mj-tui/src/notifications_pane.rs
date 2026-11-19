@@ -1373,10 +1373,13 @@ pub(crate) fn render(
         Rect::new(inner.x, inner.y, header_width, 1),
     );
     let form_requested = dashboard.notification_form_session().is_some();
-    let inline_form = form_requested
-        && chat
-            .as_ref()
-            .is_some_and(|chat| chat.elicitation_height(inner.width).is_some());
+    let form_open = chat
+        .as_ref()
+        .is_some_and(|chat| chat.elicitation_height(inner.width).is_some());
+    // The form's panel needs its two borders and one interior row inside the
+    // card body (the card's header and bottom margin take two rows).
+    let form_fits = inner.height.saturating_sub(2) >= 3;
+    let inline_form = form_requested && form_open && form_fits;
     let session_id = dashboard.notification_destination(entry);
     let reply_error = dashboard
         .notifications
@@ -1419,6 +1422,9 @@ pub(crate) fn render(
             text = format!("Could not load form: {reason}\n{text}");
         } else if chat.is_none() && dashboard.pane_session_is_suspended(&session_id) {
             text = format!("Could not load form: the session is suspended.\n{text}");
+        } else if form_open {
+            // The question comes first: it is what a cramped card must keep.
+            text = format!("{text}\nEnlarge this pane to answer here, or use Go to Session.");
         } else if chat.is_none() {
             text = format!("Loading form…\n{text}");
         } else {
