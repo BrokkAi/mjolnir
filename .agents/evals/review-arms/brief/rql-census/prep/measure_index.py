@@ -570,10 +570,27 @@ def main():
 
     latest = latest_records(results)  # the record readers use; resume follows it too
     done = {repo for repo, r in latest.items() if is_done(repo, r)}
+    def remove_repo_files(repo):
+        """Remove a repo's worktree and cache (sizes are in its record). Only called when no
+        server of that repo can still be using them."""
+        wt_dir, cache_dir = out / "wt" / repo, out / "cache" / repo
+        try:
+            if wt_dir.exists() and (clones / repo).exists():
+                git("worktree", "remove", "--force", "--force", str(wt_dir), cwd=clones / repo)
+        except (subprocess.CalledProcessError, Cancelled):
+            pass
+        except TeardownUnconfirmed as e:  # leave the files and halt
+            sys.exit(f"{repo}: cleanup git not confirmed stopped ({e}); batch halted")
+        shutil.rmtree(wt_dir, ignore_errors=True)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
     for repo in repos:
         if cancelled():
             sys.exit("cancelled; the last server's scope was torn down")
         if repo in done:
+            # Its record is saved; reclaim files an interrupted earlier run left (its servers
+            # were already proven gone by reap_leftover_scopes()).
+            remove_repo_files(repo)
             continue
         rec = {"repo": repo}
         try:
@@ -638,16 +655,7 @@ def main():
         # After an unconfirmed teardown a server may still use these files: leave them for the
         # next run's reaper. After cancellation, no further git runs; the reaper handles it too.
         if not rec.get("teardown_unconfirmed") and not rec.get("cancelled"):
-            wt_dir, cache_dir = out / "wt" / repo, out / "cache" / repo
-            try:
-                if wt_dir.exists() and (clones / repo).exists():
-                    git("worktree", "remove", "--force", "--force", str(wt_dir), cwd=clones / repo)
-            except (subprocess.CalledProcessError, Cancelled):
-                pass
-            except TeardownUnconfirmed as e:  # the record is saved; leave the files and halt
-                sys.exit(f"{repo}: cleanup git not confirmed stopped ({e}); batch halted")
-            shutil.rmtree(wt_dir, ignore_errors=True)
-            shutil.rmtree(cache_dir, ignore_errors=True)
+            remove_repo_files(repo)
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
