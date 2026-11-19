@@ -1117,16 +1117,19 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
         }
     }
     {
-        // SQLite parses each body to extract these fields; none is copied out
-        // except the few message fields.
+        // SQLite parses each body once for its kind and, for messages, the
+        // few fields that decide notices; rows of other kinds only have their
+        // timestamps counted, because a pair with an earlier cutoff withholds
+        // them as changed or later whatever they are.
         let mut statement = connection.prepare(
-            "SELECT created_at_ms, last_changed_at_ms, json_extract(body_json, '$.kind'),
-                    json_extract(body_json, '$.event.body.type'),
-                    json_extract(body_json, '$.event.body.number'),
-                    json_extract(body_json, '$.event.body.repo')
-             FROM materialized_transcript_items
-             WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2
-               AND json_extract(body_json, '$.kind') IN ('user', 'agent', 'tool', 'message')",
+            "SELECT created_at_ms, last_changed_at_ms, kind,
+                    CASE WHEN kind = 'message' THEN json_extract(body_json, '$.event.body.type') END,
+                    CASE WHEN kind = 'message' THEN json_extract(body_json, '$.event.body.number') END,
+                    CASE WHEN kind = 'message' THEN json_extract(body_json, '$.event.body.repo') END
+             FROM (SELECT created_at_ms, last_changed_at_ms, body_json,
+                          json_extract(body_json, '$.kind') AS kind
+                   FROM materialized_transcript_items
+                   WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2)",
         )?;
         let mut rows = statement.query(params![session_id, latest])?;
         while let Some(row) = rows.next()? {
@@ -1452,26 +1455,29 @@ mod history_snapshot_tests {
             ),
             // Created after every cutoff: only counted, so its body is never parsed.
             ("b", 2, 5000, "{not json"),
+            // Never shown, but a pair with an earlier cutoff still counts it as later.
+            ("c", 3, 3000, r#"{"kind":"thought","text":"x"}"#),
         ] {
             connection.execute("INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json) VALUES ('session-1',?1,?2,?3,?3,?4)", params![id, position, created, body]).unwrap();
         }
         let history = || {
             mj_transcript::github_history::SessionHistory::new(
                 "session-1",
-                vec![mj_transcript::github_history::HistoryPairSpec {
-                    cutoff_ms: 2000,
-                    repo: "owner/repo".into(),
-                    number: 42,
-                    sink: String::new(),
-                }],
+                [2000, 4000]
+                    .into_iter()
+                    .map(|cutoff_ms| mj_transcript::github_history::HistoryPairSpec {
+                        cutoff_ms,
+                        repo: "owner/repo".into(),
+                        number: 42,
+                        sink: String::new(),
+                    })
+                    .collect(),
             )
         };
-        let rendered = scan_github_history_from(&path, "session-1", history(), &|| false)
-            .unwrap()
-            .pop()
-            .unwrap()
-            .done;
-        assert!(rendered.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 1;"));
+        // Hard-won: review of 331d49d5f: SQL kind filtering dropped rows of unshown kinds from the later/changed counts of earlier cutoffs.
+        let rendered = scan_github_history_from(&path, "session-1", history(), &|| false).unwrap();
+        assert!(rendered[0].done.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 2;"));
+        assert!(rendered[1].done.contains("included: 1; withheld because changed after cutoff: 0; excluded because created later: 1;"));
         let error = scan_github_history_from(&path, "session-1", history(), &|| true).unwrap_err();
         assert!(error.downcast_ref::<GithubHistoryScanCancelled>().is_some());
     }
