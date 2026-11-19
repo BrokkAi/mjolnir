@@ -974,6 +974,7 @@ fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
 }
 
 // Hard-won: bbe5c1a01: retained questions intercepted live forms on the compatibility endpoint.
+// Hard-won: eb00602a0: matching legacy form ReadThrough selectors were rejected.
 #[tokio::test]
 async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
     let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
@@ -1042,10 +1043,11 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     // A retained stack question never intercepts a live form, including native
     // forms whose requests are not in pending_elicitations.
-    for (holder, request) in [
-        ("session-1", "elicitation-1"),
-        ("session-2", "child-approval"),
-        ("session-1", "native.session.1.approval"),
+    for (holder, request, unread_reply) in [
+        ("session-1", "elicitation-1", false),
+        ("session-2", "child-approval", false),
+        ("session-1", "native.session.1.approval", false),
+        ("session-1", "elicitation-1", true),
     ] {
         let (app, ..) = app_with_snapshot(|snapshot| {
             pending_elicitation_snapshot(snapshot);
@@ -1056,10 +1058,18 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
                 entries: vec![mj_core::attention::NotificationStackEntry {
                     completed_at_ms: 0,
                     completed_ordinal: 3,
-                    kind: mj_core::attention::NotificationKind::NeedsInput,
+                    kind: if unread_reply {
+                        mj_core::attention::NotificationKind::Important
+                    } else {
+                        mj_core::attention::NotificationKind::NeedsInput
+                    },
                     message: mj_core::attention::EntryMessage::Found("agent:retained".into()),
                 }],
-                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 3 }),
+                dismissal: Some(if unread_reply {
+                    mj_core::attention::NotificationDismissal::ReadThrough(3)
+                } else {
+                    mj_core::attention::NotificationDismissal::Stack { revision: 3 }
+                }),
                 holder: Some(holder.into()),
                 form: Some(mj_client::runtime_feed::CardForm {
                     raised_at_ms: 0,
@@ -1069,10 +1079,14 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
             });
         });
         let cookie = login_cookie(&app).await;
-        for query in [
+        let mut matching = vec![
             String::new(),
             format!("?holder={holder}&requests={request}"),
-        ] {
+        ];
+        if unread_reply {
+            matching.push(format!("?holder={holder}&requests={request}&through=3"));
+        }
+        for query in matching {
             let response = app
                 .clone()
                 .oneshot(
@@ -1101,6 +1115,7 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
         for query in [
             format!("?holder={holder}&requests=stale"),
             format!("?holder=wrong&requests={request}"),
+            format!("?holder={holder}&requests={request}&through=4"),
         ] {
             let response = app
                 .clone()

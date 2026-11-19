@@ -274,7 +274,10 @@ pub(super) async fn notification_message(
                             .pending_elicitations
                             .iter()
                             .any(|request| request.id == form.request_id));
-                if expected.through.is_some()
+                let matches_through = expected.through.is_none_or(|asked| {
+                    matches!(card.dismissal, Some(mj_core::attention::NotificationDismissal::ReadThrough(held)) if held == asked)
+                });
+                if !matches_through
                     || expected
                         .holder
                         .as_deref()

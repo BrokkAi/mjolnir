@@ -336,7 +336,20 @@ pub(crate) async fn run_alerts(
     loop {
         revisions.borrow_and_update();
         let runtime = state.runtime_publication()?;
-        if blocking(move || db::notification_reconcile(runtime)).await? {
+        let changed = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(()),
+            result = blocking(move || {
+                let result = db::notification_reconcile(runtime);
+                // The blocking owner retains admission even if shutdown stops
+                // awaiting it, and reports failures after that cancellation.
+                if let Err(error) = &result {
+                    tracing::error!(error = format!("{error:#}"), "notification reconciliation failed");
+                }
+                result
+            }) => result?,
+        };
+        if changed {
             state.publish_revision();
         }
         // Subscription and presence changes can enqueue deliveries without an alert.

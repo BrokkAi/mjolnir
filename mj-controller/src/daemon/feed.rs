@@ -479,6 +479,7 @@ mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
 
+    // Hard-won: eb00602a0: notification observations could queue writes after handoff drained.
     #[tokio::test]
     async fn alert_events_cross_the_protocol_107_feed_and_resume_after_restart() {
         const CHILD: &str = "MJ_TEST_ALERT_EVENTS_FEED";
@@ -697,6 +698,40 @@ mod tests {
             1,
             "the standalone daemon service produces alerts with phone disabled"
         );
+        cancellation.cancel();
+        observer.await.unwrap().unwrap();
+        let (before_drain, _) =
+            crate::web_push::blocking(|| crate::database::alert_events_since(None))
+                .await
+                .unwrap();
+        let mut deferred = state.runtime_publication().unwrap();
+        deferred
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("hidden")
+            .unwrap()
+            .entries[0]
+            .completed_ordinal += 1;
+        crate::upgrade::gate().begin_draining();
+        assert!(
+            !crate::web_push::blocking(move || crate::database::notification_reconcile(deferred))
+                .await
+                .unwrap(),
+            "draining refuses another disposable notification write"
+        );
+        let (after_drain, _) =
+            crate::web_push::blocking(|| crate::database::alert_events_since(None))
+                .await
+                .unwrap();
+        assert_eq!(before_drain, after_drain);
+        assert!(
+            crate::upgrade::gate().try_close(),
+            "refused reconciliation leaves no admission hold"
+        );
+        let cancellation = CancellationToken::new();
+        let observer = tokio::spawn(crate::web_push::run_alerts(state, cancellation.clone()));
         cancellation.cancel();
         observer.await.unwrap().unwrap();
     }

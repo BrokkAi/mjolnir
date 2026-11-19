@@ -107,6 +107,11 @@ fn alert_events_since_with(
 
 /// The daemon notification service is the sole observer of published items.
 pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<bool> {
+    // The blocking owner holds admission from queueing through commit. A drain
+    // refuses this disposable observation; the next daemon rebuilds it.
+    let Ok(_work) = crate::upgrade::activity_unless_draining("notification reconciliation") else {
+        return Ok(false);
+    };
     submit_database_write("observe notification entries", move |db| {
         let before = alert_events_since_with(db, None)?.0;
         let tx = db.transaction()?;
