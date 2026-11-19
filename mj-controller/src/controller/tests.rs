@@ -2457,6 +2457,17 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         );
         if delivered {
             assert!(projection.transcript[0].position < projection.transcript[1].position);
+            assert_eq!(cut.delivered_initial_prompts[0].command, brief.command);
+            let expected_content = brief
+                .command
+                .prompt_blocks()
+                .unwrap()
+                .iter()
+                .map(|block| serde_json::to_value(block).unwrap())
+                .collect::<Vec<_>>();
+            assert!(matches!(&projection.transcript[0].body,
+                mj_core::state::TranscriptBody::User { content }
+                    if *content == expected_content));
         }
         // Suspend settles the live turn before it writes the canonical archive.
         projection.execution = mj_core::state::MaterializedExecutionState::Idle;

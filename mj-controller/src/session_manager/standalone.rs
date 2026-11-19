@@ -30,14 +30,21 @@ impl StandaloneSession {
     }
 
     pub async fn connect(target: &RelaySessionTarget) -> Result<Self> {
-        Self::connect_inner(target, false).await
+        Self::connect_inner(target, false, None).await
     }
 
-    async fn connect_inner(target: &RelaySessionTarget, adopting: bool) -> Result<Self> {
+    async fn connect_inner(
+        target: &RelaySessionTarget,
+        adopting: bool,
+        prepared: Option<RelayClient>,
+    ) -> Result<Self> {
         // Reach the worker before reading the projection. A stored session can
         // be tens of megabytes, and the reconnect loop would otherwise pay that
         // whole synchronous read on every attempt against a worker that is down.
-        let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
+        let mut client = match prepared {
+            Some(client) => client,
+            None => RelayClient::connect(&target.spec, &target.session_id).await?,
+        };
         let session = target.session_id.clone();
         let protocol = client.protocol_version();
         tokio::task::spawn_blocking(move || {
@@ -193,7 +200,31 @@ impl StandaloneSession {
         Ok(())
     }
 
+    /// Keep the control connection across admission and record installation, so
+    /// unsupported orphan workers remain unclaimed and can still be destroyed.
+    pub(crate) async fn prepare_adoption(
+        spec: &CommandSpec,
+        session_id: &str,
+    ) -> Result<RelayClient> {
+        let mut client = RelayClient::connect(spec, session_id).await?;
+        if client.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL
+            && client.status().await?.retained_event_ordinal() > 0
+        {
+            return Err(crate::worker_client::LiveBaselineUnsupported.into());
+        }
+        Ok(client)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {
+        Self::connect_prepared_adopting(spec, session_id, None).await
+    }
+
+    pub(crate) async fn connect_prepared_adopting(
+        spec: &CommandSpec,
+        session_id: &str,
+        prepared: Option<RelayClient>,
+    ) -> Result<Self> {
         Self::connect_inner(
             &RelaySessionTarget {
                 session_id: session_id.to_owned(),
@@ -202,6 +233,7 @@ impl StandaloneSession {
                 project_memory: None,
             },
             true,
+            prepared,
         )
         .await
     }

@@ -144,12 +144,9 @@ fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool) {
             cut.delivered_initial_prompts[0].command_id,
             "original-brief"
         );
-        assert!(
-            cut.delivered_initial_prompts[0]
-                .command
-                .prompt_blocks()
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            cut.delivered_initial_prompts[0].command,
+            commands[0].command
         );
         assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     }

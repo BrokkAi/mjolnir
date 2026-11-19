@@ -45,24 +45,22 @@ fn project_steered_prompt(
     if !entry.kind.is_prompt() {
         bail!("steered queue entry is not a prompt");
     }
-    if current.active_turn.is_none() {
-        tracing::warn!(session_id = %current.session_id, command_id = queued_prompt_id,
-            "ignored turn attribution for steering into an unknown active turn");
-        return Ok(());
+    if current.active_turn.is_some() {
+        // The running turn becomes the steered prompt's turn, while the original
+        // harness turn remains the one whose completion closes it.
+        mutation.active_turn = Some(Some(MaterializedTurn {
+            command_id: queued_prompt_id.to_owned(),
+            accepted_ordinal: entry.accepted_ordinal,
+            turn_start_position: event.ordinal,
+            started_at_ms: event.recorded_at_ms,
+            steered_into: current.active_turn.as_ref().map(|turn| {
+                turn.steered_into
+                    .clone()
+                    .unwrap_or_else(|| turn.command_id.clone())
+            }),
+        }));
     }
-    // The running turn becomes the steered prompt's turn, while the original
-    // harness turn remains the one whose completion closes it.
-    mutation.active_turn = Some(Some(MaterializedTurn {
-        command_id: queued_prompt_id.to_owned(),
-        accepted_ordinal: entry.accepted_ordinal,
-        turn_start_position: event.ordinal,
-        started_at_ms: event.recorded_at_ms,
-        steered_into: current.active_turn.as_ref().map(|turn| {
-            turn.steered_into
-                .clone()
-                .unwrap_or_else(|| turn.command_id.clone())
-        }),
-    }));
+    // Delivery and its body are known even when the pre-cut turn identity is not.
     close_streams(index, mutation, event.recorded_at_ms);
     upsert(
         mutation,
@@ -548,7 +546,11 @@ pub(super) fn project_observation(
                     .config_results
                     .push((command_id.clone(), Some(message.clone())));
             }
-            let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
+            let prompt_was_started = current
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| turn.belongs_to(command_id))
+                || index.get(&format!("user:{command_id}")).is_some();
             let queued_entry = current
                 .queued_prompts
                 .iter()

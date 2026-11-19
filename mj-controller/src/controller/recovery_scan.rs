@@ -134,8 +134,8 @@ impl Controller {
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         let (record, newly_adopted) = match self.state.sessions.get(session_id).cloned() {
-            // Adoption records its session before the handshake, so a failed
-            // handshake leaves a tracked session that never connected. That
+            // Adoption records its session before projection attachment, so a
+            // failed attachment leaves a tracked session that never connected. That
             // record is the one to finish, not a reason to refuse the retry.
             Some(existing) if adoption_unfinished(&existing, target_id) => {
                 for (flag, requested, adopted) in [
@@ -263,15 +263,64 @@ impl Controller {
             .into_iter()
             .next()
             .context("reconnect plan is empty")?;
+        let prepared = StandaloneSession::prepare_adoption(&spec, session_id).await;
+        if prepared.as_ref().err().is_some_and(|error| {
+            error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<crate::worker_client::LiveBaselineUnsupported>()
+                    .is_some()
+            })
+        }) {
+            let needs_all_instances = self
+                .config
+                .targets
+                .get(target_id)
+                .and_then(|template| scan_target_workers(target_id, template, executor).ok())
+                .and_then(|candidates| {
+                    candidates
+                        .into_iter()
+                        .find(|candidate| same_resource(locator, &candidate.locator))
+                })
+                .and_then(|candidate| candidate.instance_id)
+                .as_deref()
+                != Some(mj_core::config::instance_identity().as_str());
+            let error = unsupported_orphan_adoption(session_id, target_id, needs_all_instances);
+            if !newly_adopted {
+                // Older attempts claimed the resource before checking capability.
+                // Retain their history and diagnostic, but release the locator so
+                // recovery scan/destroy can reach the still-running orphan.
+                let mut record = record;
+                record.target = None;
+                record.state = SessionState::Lost;
+                let diagnostic = format!("orphan adoption failed: {error:#}");
+                record.last_error = Some(match record.last_error {
+                    Some(previous) if !previous.contains(&diagnostic) => {
+                        format!("{previous}\n{diagnostic}")
+                    }
+                    _ => diagnostic,
+                });
+                record.updated_at = now();
+                crate::database::save_session(&record)?;
+                self.state.sessions.insert(session_id.to_owned(), record);
+            }
+            return Err(error);
+        }
         if newly_adopted {
             // Adoption authors the whole record for a session Hel has never
-            // tracked, so it writes the whole row, and it writes it before the
-            // handshake: a crash in between must not orphan the worker again.
+            // tracked, so it writes the whole row after capability is known and
+            // before projection attachment: a crash here remains retryable.
             // The record reaches memory only once it is durable.
             crate::database::save_session(&record)?;
             self.state.sessions.insert(session_id.to_owned(), record);
         }
-        match self.complete_adoption(session_id, &spec, executor).await {
+        let result = match prepared {
+            Ok(client) => {
+                self.complete_adoption(session_id, &spec, client, executor)
+                    .await
+            }
+            Err(error) => Err(error.context("orphan relay could not attach")),
+        };
+        match result {
             Ok(()) => Ok(()),
             // Provisioning leaves its failure on the session it failed for.
             // Adoption owes the same: the record it already committed is all
@@ -285,19 +334,13 @@ impl Controller {
         &mut self,
         session_id: &str,
         spec: &CommandSpec,
+        client: crate::worker_client::RelayClient,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        let mut relay = StandaloneSession::connect_adopting(spec, session_id)
-            .await
-            .map_err(|error| {
-                if error.chain().any(|cause| cause.downcast_ref::<crate::worker_client::LiveBaselineUnsupported>().is_some()) {
-                    let target = &self.state.sessions[session_id].target_template_id;
-                    let id = mj_core::targets::posix_quote(session_id);
-                    let target = mj_core::targets::posix_quote(target);
-                    anyhow::anyhow!("the worker's history no longer reaches its start, and it predates live-cut recovery, so it cannot be adopted. The agent's work continues on the worker, and its harness session files remain on the target. When you are done, run: mj recover destroy --session {id} --target {target} --confirm {id}")
-                } else { error }
-            })
-            .context("orphan relay could not attach")?;
+        let mut relay =
+            StandaloneSession::connect_prepared_adopting(spec, session_id, Some(client))
+                .await
+                .context("orphan relay could not attach")?;
         let harness = self
             .state
             .sessions
@@ -406,6 +449,26 @@ impl Controller {
             },
         )
     }
+}
+
+fn unsupported_orphan_adoption(
+    session_id: &str,
+    target: &str,
+    all_instances: bool,
+) -> anyhow::Error {
+    let id = mj_core::targets::posix_quote(session_id);
+    let target = mj_core::targets::posix_quote(target);
+    let instance = mj_core::config::instance_name()
+        .map(|name| format!(" --instance {}", mj_core::targets::posix_quote(&name)))
+        .unwrap_or_default();
+    let scope = if all_instances {
+        " --all-instances"
+    } else {
+        ""
+    };
+    anyhow::anyhow!(
+        "the worker's history no longer reaches its start, and it predates live-cut recovery, so it cannot be adopted. The agent's work continues on the worker, and its harness session files remain on the target. When you are done, run: mj{instance} recover destroy --session {id} --target {target} --confirm {id}{scope}"
+    )
 }
 
 /// States in which the controller is itself writing the session's locator.

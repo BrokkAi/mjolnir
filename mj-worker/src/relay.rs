@@ -386,7 +386,12 @@ impl DurableRelay {
         let active_turn = state
             .active_prompt
             .as_ref()
-            .filter(|_| self.snapshot.steering.is_none())
+            .filter(|active| {
+                self.snapshot
+                    .steering
+                    .as_ref()
+                    .is_none_or(|steering| steering.active_prompt_id != active.command_id)
+            })
             .map(|active| mj_core::state::MaterializedTurn {
                 command_id: active.command_id.clone(),
                 accepted_ordinal: self
@@ -418,10 +423,9 @@ impl DurableRelay {
             };
             delivered.then(|| LiveQueuedCommand {
                 command_id: initial.command_id.clone(),
-                command: RelayCommand::Prompt {
-                    prompt: receipt.and_then(|receipt| receipt.command.as_ref())
-                        .and_then(RelayCommand::prompt_blocks).unwrap_or_default().into_owned(),
-                },
+                // Startup owns the original brief even after terminal receipt
+                // compaction. Receipts decide delivery, never display content.
+                command: initial.command.clone(),
                 created_at_ms: state.active_prompt.as_ref()
                     .filter(|active| active.command_id == initial.command_id)
                     .map_or(0, |active| active.created_at_ms),

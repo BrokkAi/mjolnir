@@ -6447,6 +6447,20 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
         "id":"mode", "name":"Mode", "type":"select", "currentValue":"old", "options":[{"value":"old","name":"Old"},{"value":"new","name":"New"}]
     })).unwrap()] }).unwrap();
     relay
+        .record_observation(RelayObservation::SessionModesConfigured {
+            modes: Some(
+                serde_json::from_value(serde_json::json!({
+                    "currentModeId":"legacy", "availableModes":[{"id":"legacy","name":"Legacy"}]
+                }))
+                .unwrap(),
+            ),
+        })
+        .unwrap();
+    assert_eq!(
+        relay.live_session_baseline().unwrap().state.config["mode"],
+        "old"
+    );
+    relay
         .record_session_update(
             serde_json::from_value(
                 serde_json::json!({"sessionUpdate":"current_mode_update", "currentModeId":"new"}),
@@ -6619,10 +6633,190 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
         assert!(projected.active_turn.is_none());
         assert!(projected.last_turn_outcome.is_none());
         assert!(
+            projected
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == "user:queued-prompt")
+        );
+        assert!(
             !projected
                 .transcript
                 .iter()
                 .any(|item| item.stable_id == "tool:pre-cut-tool")
+        );
+    });
+    // A stale steering operation belongs to the old prompt, not the next one.
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "later").unwrap();
+    let remaining = relay
+        .operational_state()
+        .queued_prompts
+        .iter()
+        .map(|entry| entry.command_id.clone())
+        .collect::<Vec<_>>();
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "clear-remaining-queue".into(),
+            command: RelayCommand::ClearQueuedPrompts,
+            created_at_ms: 3,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandCompleted {
+            command_id: "clear-remaining-queue".into(),
+            command: Some(mj_core::relay::RelayCommandKind::ClearQueuedPrompts),
+            barrier_command_id: None,
+            outcome: mj_core::relay::RelayCommandOutcome::QueueChanged {
+                removed_command_ids: remaining,
+            },
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "later-known-prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("next task")],
+            },
+            created_at_ms: 4,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandStarted {
+            command_id: "later-known-prompt".into(),
+            started_at_ms: 5,
+        })
+        .unwrap();
+    let cut = relay.live_session_baseline().unwrap();
+    assert_eq!(
+        cut.active_turn.as_ref().unwrap().command_id,
+        "later-known-prompt"
+    );
+    relay.handle(RelayRequestEnvelope {
+        request_id: "prune-later-cut".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Acknowledge {
+            through_ordinal: cut.state.latest_ordinal,
+            through_digest: cut.state.latest_digest.clone(),
+        },
+    });
+    drop(relay);
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        MOVE_QUEUE_SESSION_ID,
+    ))
+    .unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_adopting(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            connection
+                .snapshot()
+                .materialized
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .command_id,
+            "later-known-prompt"
+        );
+    });
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "interrupted").unwrap();
+    relay
+        .record_observation(RelayObservation::CommandInterrupted {
+            command_id: "later-known-prompt".into(),
+            command: mj_core::relay::RelayCommandKind::Prompt,
+            reason: Some(mj_core::event_outcome::OutcomeReason::RuntimeFailure),
+            message: "runtime stopped after cut".into(),
+        })
+        .unwrap();
+    drop(relay);
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let projection = connection.snapshot().materialized;
+        assert_eq!(
+            projection.execution,
+            mj_core::state::MaterializedExecutionState::Idle
+        );
+        assert!(projection.active_turn.is_none());
+        assert!(
+            projection
+                .last_turn_outcome
+                .as_ref()
+                .unwrap()
+                .accepted_ordinal
+                .is_some()
+        );
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
+        canonical.validate().unwrap();
+    });
+    // Autonomous work has a clock and execution state even without a prompt ID.
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "autonomous").unwrap();
+    let autonomous_start = relay
+        .record_observation(RelayObservation::HarnessTurnStarted {
+            started_at_ms: 123456,
+        })
+        .unwrap();
+    let cut = relay.live_session_baseline().unwrap();
+    assert!(cut.active_turn.is_none());
+    relay.handle(RelayRequestEnvelope {
+        request_id: "prune-autonomous-cut".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Acknowledge {
+            through_ordinal: cut.state.latest_ordinal,
+            through_digest: cut.state.latest_digest.clone(),
+        },
+    });
+    drop(relay);
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        MOVE_QUEUE_SESSION_ID,
+    ))
+    .unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_adopting(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let projection = connection.snapshot().materialized;
+        assert!(projection.active_turn.is_none());
+        assert_eq!(
+            projection.execution,
+            mj_core::state::MaterializedExecutionState::Running {
+                started_at_ms: 123456
+            }
+        );
+    });
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "autonomous-settled").unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: autonomous_start,
+                stop_reason: "end_turn".into(),
+                work_facts: None,
+            }),
+            origin: Some("agent".into()),
+            prompt_in_flight: false,
+        })
+        .unwrap();
+    drop(relay);
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            connection.snapshot().materialized.execution,
+            mj_core::state::MaterializedExecutionState::Idle
         );
     });
 }
@@ -6758,6 +6952,258 @@ fn adoption_reattaches_from_genesis_before_requiring_a_live_baseline() {
         assert!(!text.contains("restart"), "orphan refusal must not offer an unreachable restart: {text}");
     });
     assert!(!root.join("baseline-frontier").exists());
+}
+
+#[cfg(unix)]
+// Hard-won: cdb0af1: capability refusal claimed the orphan and advertised an unusable destroy command.
+#[test]
+fn adoption_refusal_keeps_a_foreign_orphan_scannable_and_destroyable() {
+    use mj_core::relay::{RelayObservation, RelayRequestEnvelope};
+    const MARKER: &str = "MJ_ADOPT_FOREIGN_ORPHAN_CHILD";
+    let name = test_name("adoption_refusal_keeps_a_foreign_orphan_scannable_and_destroyable");
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("worker");
+        install_move_queue_relay_worker(&root, &directory.path().join("served"), true);
+        fs::write(root.join("protocol-version"), "71").unwrap();
+        let listing = serde_json::to_string(&serde_json::json!([{"Labels":{
+            "dev.mj.managed":"true", "dev.mj.session":MOVE_QUEUE_SESSION_ID,
+            "dev.mj.instance":"foreign-instance"
+        }}]))
+        .unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        install_fake_command(
+            &bin,
+            "podman",
+            &format!(
+                r#"#!/bin/sh
+case "$1" in
+ps) if [ -e {stopped} ]; then printf '[]'; else printf '%s' {listing}; fi ;;
+exec) case "$*" in
+  *'worker proxy'*) exec {relay} ;;
+  *'worker stop'*) touch {stopped} ;;
+  *ownership.json*|*'test -d'*) exit 1 ;;
+  *) exit 0 ;;
+esac ;;
+container) case "$2" in
+  inspect) [ ! -e {removed} ] || exit 1
+    case "$*" in
+      *Config.Labels*) printf 'true|{session}' ;;
+      *State.Running*) if [ -e {stopped} ]; then printf false; else printf true; fi ;;
+      *) printf '[]' ;;
+    esac ;;
+  exists) [ ! -e {removed} ] ;;
+  *) exit 1 ;;
+esac ;;
+stop) touch {stopped} ;;
+rm) touch {stopped} {removed} ;;
+info) exit 0 ;;
+*) exit 1 ;;
+esac
+"#,
+                stopped = shell_literal(&root.join("stopped")),
+                removed = shell_literal(&root.join("removed")),
+                session = MOVE_QUEUE_SESSION_ID,
+                listing = mj_core::targets::posix_quote(&listing),
+                relay = shell_literal(&root.join("hel"))
+            ),
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        IsolatedTest::new(name)
+            .isolated_store(directory.path())
+            .env(MARKER, &root)
+            .env("PATH", path)
+            .env("MJ_INSTANCE", "orphan-recovery-test")
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = PathBuf::from(std::env::var_os(MARKER).unwrap());
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "legacy").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "legacy-native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let through = mj_core::relay::RelayCursor {
+        ordinal: relay.latest_ordinal(),
+        digest: relay.latest_digest().to_owned(),
+    };
+    relay.handle(RelayRequestEnvelope {
+        request_id: "checkpoint-floor".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "checkpoint-floor".into(),
+            command: RelayCommand::AdvanceRecoveryFloor { through },
+        },
+    });
+    relay.handle(RelayRequestEnvelope {
+        request_id: "prune-legacy".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Acknowledge {
+            through_ordinal: relay.latest_ordinal(),
+            through_digest: relay.latest_digest().to_owned(),
+        },
+    });
+    drop(relay);
+    let repository = committed_repository();
+    let home = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    add_codex_profile(&mut config, home.path());
+    config
+        .bundles
+        .insert("project".into(), local_bundle(repository.path()));
+    config.targets.insert(
+        "old-target".into(),
+        mj_core::config::TargetTemplate::LocalPodman {
+            container: mj_core::config::ContainerTemplate {
+                image: "ignored".into(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+                build_cache: None,
+            },
+        },
+    );
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let refuse = |controller: &mut Controller| {
+        runtime.block_on(async {
+            controller
+                .adopt_orphan_worker(
+                    MOVE_QUEUE_SESSION_ID,
+                    "old-target",
+                    Some("codex"),
+                    Some("project"),
+                    true,
+                    &ProcessExecutor,
+                )
+                .await
+                .unwrap_err()
+        })
+    };
+    let error = refuse(&mut controller);
+    let expected = format!(
+        "mj --instance 'orphan-recovery-test' recover destroy --session '{MOVE_QUEUE_SESSION_ID}' --target 'old-target' --confirm '{MOVE_QUEUE_SESSION_ID}' --all-instances"
+    );
+    assert!(format!("{error:#}").ends_with(&expected), "{error:#}");
+    assert!(
+        !controller
+            .state
+            .sessions
+            .contains_key(MOVE_QUEUE_SESSION_ID)
+    );
+    assert!(
+        crate::database::load_session_record(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        controller
+            .scan_orphan_workers(&ProcessExecutor, true)
+            .candidates
+            .len(),
+        1
+    );
+    // An earlier version may already have saved its provisional locator. Keep
+    // its history and diagnostic, release the resource, and make normal destroy legal.
+    let mut provisional = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    provisional.state = SessionState::Disconnected;
+    provisional.native_session_id = None;
+    provisional.target_template_id = "old-target".into();
+    provisional.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: crate::targets::resource_name(MOVE_QUEUE_SESSION_ID).unwrap(),
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::ContainerLayer,
+        borrowed_from: None,
+    }));
+    provisional.last_error = Some("earlier adoption diagnostic".into());
+    crate::database::save_session(&provisional).unwrap();
+    controller
+        .state
+        .sessions
+        .insert(MOVE_QUEUE_SESSION_ID.into(), provisional);
+    let mut saved = mj_core::state::MaterializedSession::empty(MOVE_QUEUE_SESSION_ID);
+    saved
+        .configuration
+        .values
+        .insert("retained-history-proof".into(), serde_json::json!(true));
+    crate::database::save_materialized_session(&saved).unwrap();
+    let error = refuse(&mut controller);
+    assert!(format!("{error:#}").ends_with(&expected), "{error:#}");
+    let leftover = &controller.state.sessions[MOVE_QUEUE_SESSION_ID];
+    assert_eq!(leftover.state, SessionState::Lost);
+    assert!(leftover.target.is_none());
+    assert!(
+        leftover
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("earlier adoption diagnostic")
+    );
+    assert!(
+        crate::database::load_materialized_session(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .configuration
+            .values["retained-history-proof"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(
+        controller
+            .scan_orphan_workers(&ProcessExecutor, true)
+            .candidates
+            .len(),
+        1
+    );
+    // The printed command's instance and cross-instance scope match this exact
+    // recovery target; its destroy operation must now reach the orphan.
+    assert_eq!(
+        mj_core::config::instance_name().as_deref(),
+        Some("orphan-recovery-test")
+    );
+    crate::controller::test_support::worker_test_scope(MOVE_QUEUE_SESSION_ID, || {
+        controller.destroy_orphan_worker(
+            MOVE_QUEUE_SESSION_ID,
+            "old-target",
+            MOVE_QUEUE_SESSION_ID,
+            true,
+            &ProcessExecutor,
+        )
+    })
+    .unwrap();
+    crate::controller::test_support::worker_test_scope(MOVE_QUEUE_SESSION_ID, || {
+        controller.destroy_session_controlled(MOVE_QUEUE_SESSION_ID, &ProcessExecutor)
+    })
+    .unwrap();
+    assert!(
+        crate::database::load_session_record(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .is_none()
+    );
+    assert!(root.join("stopped").exists());
+    assert!(
+        controller
+            .scan_orphan_workers(&ProcessExecutor, true)
+            .candidates
+            .is_empty()
+    );
 }
 
 #[cfg(unix)]

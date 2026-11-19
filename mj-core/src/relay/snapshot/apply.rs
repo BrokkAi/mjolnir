@@ -541,10 +541,18 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         }
         RelayObservation::SessionModesConfigured { modes } => {
             snapshot.modes = modes.clone();
-            if let Some(modes) = modes {
-                snapshot
-                    .config
-                    .insert("mode".into(), modes.current_mode_id.to_string());
+            if let Some(mode) =
+                crate::acp::surface::config_current_value(&snapshot.config_options, "mode").or_else(
+                    || {
+                        modes
+                            .as_ref()
+                            .map(|modes| modes.current_mode_id.to_string())
+                    },
+                )
+            {
+                // Initial negotiation prefers the ACP option over legacy modes,
+                // as the live runtime does. Later CurrentModeUpdate is ordered.
+                snapshot.config.insert("mode".into(), mode);
             }
         }
         RelayObservation::CommandQueued {
