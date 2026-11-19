@@ -1071,7 +1071,7 @@ async fn refresh_profile_with_cache_root(
             harness,
             windows: Vec::new(),
             extra: None,
-            error: Some(error.to_string()),
+            error: Some(format!("{error:#}")),
             refreshed_at_epoch_seconds,
             rate_limited_until_epoch_seconds: schedule.map(|(until, _)| until),
             next_check_at_epoch_seconds: schedule.map(|(_, next_check)| next_check),

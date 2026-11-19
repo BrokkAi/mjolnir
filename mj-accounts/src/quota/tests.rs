@@ -748,13 +748,28 @@ done
     assert_eq!(first.report.error, None);
     assert!(client.is_some());
     std::fs::remove_file(directory.path().join("codex")).unwrap();
-    let (second, client) = refresh_profile_with_cache_root(request, client, None).await;
+    let (second, client) = refresh_profile_with_cache_root(request.clone(), client, None).await;
     // Stop the child even if the assertion below detects the regression.
     client.expect("cached app-server survives").shutdown().await;
     assert_eq!(second.report.error, None);
     assert_eq!(
         second.report.five_hour_window().unwrap().remaining_percent,
         Some(75)
+    );
+    // Hard-won: ce1937477: a fresh installation failure lost its actionable cause in the quota report.
+    let (unavailable, client) = refresh_profile_with_cache_root(request, None, None).await;
+    assert!(client.is_none());
+    let error = unavailable
+        .report
+        .error
+        .expect("the stopped client cannot serve this poll");
+    assert!(
+        error.contains("could not prepare the pinned harness"),
+        "{error}"
+    );
+    assert!(
+        error.contains("managed harness cache root must be absolute"),
+        "{error}"
     );
 }
 
