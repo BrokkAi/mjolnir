@@ -384,9 +384,7 @@ pub(crate) fn render_quotas_at(
     render_session_scrollbar(frame, area, lines.len(), offset, viewport);
 }
 
-use super::quota_pools::{
-    PoolMember, PoolPeriod, QuotaPool, QuotaRow, refill_widths, segment_widths,
-};
+use super::quota_pools::{PoolMember, PoolPeriod, QuotaPool, QuotaRow, refill_widths};
 use mj_core::config::QuotaProvider;
 
 #[allow(
@@ -501,6 +499,7 @@ fn pool_bar(
     width: usize,
     now: u64,
     accent: Color,
+    refreshing: &std::collections::BTreeSet<String>,
 ) -> (Vec<Span<'static>>, Vec<String>) {
     let weight = pool.reported_weight();
     if weight == 0.0 {
@@ -508,12 +507,15 @@ fn pool_bar(
     }
     let refills: Vec<_> = pool
         .reported_members()
-        .filter(|member| member.remaining < 100)
+        .filter(|member| member.remaining < 100 || refreshing.contains(&member.id))
         .map(|member| (member, member.weight * f64::from(100 - member.remaining)))
         .collect();
-    let capacities = std::iter::once(pool.available_capacity())
-        .chain(refills.iter().map(|&(_, capacity)| capacity));
-    let widths = refill_widths(capacities, weight * 100.0, width);
+    let widths = refill_widths(
+        pool.available_capacity(),
+        refills.iter().map(|&(_, capacity)| capacity),
+        weight * 100.0,
+        width,
+    );
     let ascii = theme::ascii();
     let use_glyphs =
         ascii || theme::current() == theme::UiTheme::Mono || !matches!(accent, Color::Rgb(..));
@@ -538,33 +540,61 @@ fn pool_bar(
     let mut fallback = Vec::new();
     let mut alternate = false;
     for ((member, capacity), cells) in refills.into_iter().zip(widths.into_iter().skip(1)) {
-        let reset = format!(
-            "{}{}",
-            theme::glyphs().resuming,
-            reset_label(member.reset, member.reset_text.as_deref(), now)
-        );
+        let is_refreshing = refreshing.contains(&member.id);
+        let status = if is_refreshing {
+            format!("refreshing{}", theme::glyphs().ellipsis)
+        } else {
+            format!(
+                "{}{}",
+                theme::glyphs().resuming,
+                reset_label(member.reset, member.reset_text.as_deref(), now)
+            )
+        };
         let banked = member
             .banked
             .filter(|&count| count > 0)
-            .map(|count| format!(" {}{count}", if ascii { "B" } else { "⟲" }))
-            .unwrap_or_default();
-        let full_label = format!("{reset}{banked}");
+            .map(|count| format!("{}{count}", if ascii { "B" } else { "⟲" }));
         // Leave a glyph visible where the tint alone cannot mark the boundary.
         let label_budget = cells.saturating_sub(usize::from(use_glyphs));
         let label_width = |label: &str| Span::raw(label).width();
-        let label = if label_width(&full_label) <= label_budget {
-            full_label.as_str()
-        } else if label_width(&reset) <= label_budget {
-            reset.as_str()
-        } else {
-            let share = capacity / weight;
-            let amount = if share < 0.5 {
-                "<1".to_string()
+        let short_status = std::iter::once(status.as_str())
+            .chain(
+                is_refreshing
+                    .then_some(["refresh", "check"])
+                    .into_iter()
+                    .flatten(),
+            )
+            .find(|label| label_width(label) <= label_budget);
+        let label = if let Some(short_status) = short_status {
+            if let Some(banked) = banked {
+                let full_label = format!("{short_status} {banked}");
+                if label_width(&full_label) <= label_budget {
+                    full_label
+                } else {
+                    fallback.push(format!("{} {banked} banked", member.id));
+                    short_status.to_string()
+                }
             } else {
-                format!("{share:.0}")
-            };
-            fallback.push(format!("{} +{amount}% {full_label}", member.id));
-            ""
+                short_status.to_string()
+            }
+        } else {
+            let mut entry = member.id.clone();
+            if capacity > 0.0 {
+                let share = capacity / weight;
+                let amount = if share < 0.5 {
+                    "<1".to_string()
+                } else {
+                    format!("{share:.0}")
+                };
+                entry.push_str(&format!(" +{amount}%"));
+            }
+            entry.push(' ');
+            entry.push_str(&status);
+            if let Some(banked) = banked {
+                entry.push_str(&format!(" {banked}"));
+            }
+            fallback.push(entry);
+            String::new()
         };
         if cells == 0 {
             continue;
@@ -577,122 +607,12 @@ fn pool_bar(
         };
         let background = tint(accent, tint_strength);
         spans.push(Span::styled(
-            format!("{}{label}", glyph.repeat(cells - label_width(label))),
+            format!("{}{label}", glyph.repeat(cells - label_width(&label))),
             Style::default().fg(readable_on(background)).bg(background),
         ));
         alternate = !alternate;
     }
     (spans, fallback)
-}
-
-fn expanded_pool_bar(
-    pool: &QuotaPool,
-    width: usize,
-    now: u64,
-    accent: Color,
-    refreshing: &std::collections::BTreeSet<String>,
-) -> Vec<Span<'static>> {
-    let gaps = pool
-        .members
-        .len()
-        .saturating_sub(1)
-        .min(width.saturating_sub(pool.members.len().min(width)));
-    let widths = segment_widths(&pool.members, width.saturating_sub(gaps));
-    let mut spans = Vec::new();
-    for (index, (member, cells)) in pool.members.iter().zip(widths).enumerate() {
-        if index > 0 && index <= gaps {
-            spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
-        }
-        // A reading older than its own reset says nothing about what is left.
-        let mut filled = if member.awaiting_reading {
-            0
-        } else {
-            (cells * usize::from(member.remaining) + 50) / 100
-        };
-        // Quota that is left never draws as spent, however narrow the segment.
-        if !member.awaiting_reading && member.remaining > 0 && cells > 0 {
-            filled = filled.max(1);
-        }
-        let mut label = vec![' '; cells];
-        let mut text = if member.awaiting_reading {
-            "reset due".to_string()
-        } else if refreshing.contains(&member.id) {
-            format!("refreshing{}", theme::glyphs().ellipsis)
-        } else {
-            reset_label(member.reset, member.reset_text.as_deref(), now)
-        };
-        if refreshing.contains(&member.id) && text.chars().count() >= cells {
-            text = if cells >= 8 { "refresh" } else { "check" }.into();
-        }
-        let banked = member
-            .banked
-            .filter(|banked| *banked > 0)
-            .map(|banked| format!("{}{banked}", if theme::ascii() { "B" } else { "⟲" }));
-        if let Some(banked) = banked
-            && text.chars().count() + 1 + banked.chars().count() <= cells
-        {
-            text.push_str(&format!(" {banked}"));
-        }
-        // The lanes show the full labels. Keep a one-cell marker for an
-        // unknown or refreshing reading so it does not read as spent quota.
-        let mut text: Vec<_> = text.chars().collect();
-        if text.len() > cells {
-            text = if member.awaiting_reading {
-                vec!['?']
-            } else if refreshing.contains(&member.id) {
-                // One cell, distinct from the spent fill in every theme.
-                vec![if theme::ascii() { '~' } else { '…' }]
-            } else {
-                Vec::new()
-            };
-        }
-        if text.len() <= cells {
-            label[cells - text.len()..].copy_from_slice(&text);
-        }
-        for (cell, ch) in label.into_iter().enumerate() {
-            let background = if cell < filled {
-                accent
-            } else {
-                tint(accent, 0.22)
-            };
-            spans.push(Span::styled(
-                if ch != ' ' {
-                    ch.to_string()
-                } else if theme::ascii() {
-                    if cell < filled {
-                        "#".into()
-                    } else {
-                        ".".into()
-                    }
-                } else if theme::current() == theme::UiTheme::Mono {
-                    if cell < filled {
-                        "█".into()
-                    } else {
-                        "░".into()
-                    }
-                } else {
-                    " ".into()
-                },
-                Style::default()
-                    .add_modifier(
-                        // An accent that cannot be tinted (indexed colours) gives
-                        // filled and spent cells one colour; mark fill by video.
-                        if cell < filled
-                            && (theme::ascii()
-                                || theme::current() == theme::UiTheme::Mono
-                                || !matches!(accent, Color::Rgb(..)))
-                        {
-                            Modifier::REVERSED
-                        } else {
-                            Modifier::empty()
-                        },
-                    )
-                    .fg(readable_on(background))
-                    .bg(background),
-            ));
-        }
-    }
-    spans
 }
 
 fn lane(
@@ -957,14 +877,8 @@ fn quota_lines(
                     Style::default()
                 },
             )];
-            let (bar, refill_labels) = if expanded {
-                (
-                    expanded_pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing),
-                    Vec::new(),
-                )
-            } else {
-                pool_bar(&pool, bar_width, now, accent)
-            };
+            let (bar, refill_labels) =
+                pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
             spans.extend(bar);
             spans.push(Span::styled(
                 percentage,
@@ -1227,7 +1141,7 @@ mod tests {
                 pool.members[0].awaiting_reading = false;
                 let accent = theme::palette().muted;
                 assert!(!matches!(accent, Color::Rgb(..)));
-                let (spans, _) = pool_bar(&pool, 10, now, accent);
+                let (spans, _) = pool_bar(&pool, 10, now, accent, &Default::default());
                 let style_at = |segment: usize| spans[segment].style;
                 assert_ne!(
                     (style_at(0).bg, style_at(0).add_modifier),
@@ -1389,7 +1303,7 @@ mod tests {
                     refreshing.remove("claude2");
                     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
                         reports: refreshing,
-                        probing: ["claude2".into(), "claude5".into()].into(),
+                        probing: ["claude2".into(), "claude5".into(), "claude6".into()].into(),
                         ..Default::default()
                     });
                     capture(
@@ -1729,31 +1643,33 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [(PoolPeriod::Week, 25), (PoolPeriod::Month, 40)]
             );
-            // Hard-won: quota review: label text over a light fill used the theme's near-white colour.
-            theme::with_theme(theme::UiTheme::Midnight, || {
-                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-                terminal
-                    .draw(|frame| {
-                        render_quotas_at(
-                            frame,
-                            frame.area(),
-                            &mut dashboard,
-                            None,
-                            now,
-                            fixture_clock,
-                        )
-                    })
-                    .unwrap();
-                let buffer = terminal.backend().buffer();
-                let light = provider_accent(&QuotaProvider::XAI);
-                let labelled: Vec<_> = buffer
-                    .content()
-                    .iter()
-                    .filter(|cell| cell.bg == light && cell.symbol() != " ")
-                    .collect();
-                assert!(!labelled.is_empty());
-                assert!(labelled.iter().all(|cell| cell.fg == readable_on(light)));
-                assert_ne!(readable_on(light), theme::palette().text);
+            // Hard-won: quota review: foreground over a light fill used the theme's near-white colour.
+            theme::with_symbols(SymbolSet::Ascii, || {
+                theme::with_theme(theme::UiTheme::Midnight, || {
+                    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render_quotas_at(
+                                frame,
+                                frame.area(),
+                                &mut dashboard,
+                                None,
+                                now,
+                                fixture_clock,
+                            )
+                        })
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let light = provider_accent(&QuotaProvider::XAI);
+                    let filled: Vec<_> = buffer
+                        .content()
+                        .iter()
+                        .filter(|cell| cell.bg == light && cell.symbol() == "#")
+                        .collect();
+                    assert!(!filled.is_empty());
+                    assert!(filled.iter().all(|cell| cell.fg == readable_on(light)));
+                    assert_ne!(readable_on(light), theme::palette().text);
+                })
             });
             use std::fmt::Write;
             writeln!(

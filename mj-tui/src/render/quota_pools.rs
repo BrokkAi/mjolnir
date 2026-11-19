@@ -692,15 +692,16 @@ pub(crate) fn provider_pools(
 }
 
 /// Largest-remainder apportionment for the available quota and refill chunks.
-/// Tiny shares may round to zero; the caller can still show their labels.
+/// Positive availability gets at least one cell when the bar has room.
 pub(super) fn refill_widths(
-    capacities: impl Iterator<Item = f64>,
+    available: f64,
+    refills: impl Iterator<Item = f64>,
     total: f64,
     cells: usize,
 ) -> Vec<usize> {
     let mut widths = Vec::new();
     let mut fractions = Vec::new();
-    for (index, capacity) in capacities.enumerate() {
+    for (index, capacity) in std::iter::once(available).chain(refills).enumerate() {
         let exact = cells as f64 * capacity / total;
         widths.push(exact.floor() as usize);
         fractions.push((index, exact.fract()));
@@ -710,36 +711,13 @@ pub(super) fn refill_widths(
     for (index, _) in fractions.into_iter().take(leftover) {
         widths[index] += 1;
     }
-    widths
-}
-
-/// Largest-remainder apportionment, with one cell per member whenever they fit.
-pub(crate) fn segment_widths(members: &[PoolMember], cells: usize) -> Vec<usize> {
-    let mut widths = vec![0; members.len()];
-    if cells < members.len() {
-        widths.iter_mut().take(cells).for_each(|width| *width = 1);
-        return widths;
-    }
-    let weight: f64 = members.iter().map(|member| member.weight).sum();
-    let mut fractions = Vec::new();
-    for (index, member) in members.iter().enumerate() {
-        let exact = cells as f64 * member.weight / weight;
-        widths[index] = (exact.floor() as usize).max(1);
-        fractions.push((index, exact.fract()));
-    }
-    while widths.iter().sum::<usize>() > cells {
-        let index = widths
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, width)| **width)
-            .map(|(index, _)| index)
-            .expect("nonempty widths");
-        widths[index] -= 1;
-    }
-    fractions.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let leftover = cells - widths.iter().sum::<usize>();
-    for (index, _) in fractions.into_iter().take(leftover) {
-        widths[index] += 1;
+    if cells > 0
+        && available > 0.0
+        && widths[0] == 0
+        && let Some(largest) = widths[1..].iter_mut().max()
+    {
+        *largest -= 1;
+        widths[0] = 1;
     }
     widths
 }
