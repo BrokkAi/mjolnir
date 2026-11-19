@@ -36,10 +36,6 @@ fn session_message_terminal_reason(state: Option<SessionState>) -> Option<String
 }
 
 impl RuntimeState {
-    pub(crate) fn worker_background_gate(&self) -> Arc<mj_controller::recovery_gate::RecoveryGate> {
-        self.recovery_observer.gate.clone()
-    }
-
     pub(crate) fn new(
         session_manager: SessionManagerControl,
         controller: Controller,

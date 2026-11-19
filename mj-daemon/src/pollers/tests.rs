@@ -2294,7 +2294,7 @@ fn only_a_refused_login_or_a_failed_reconciliation_reaches_the_person() {
         registry.accept(&result.profile_id, result.trigger.as_ref().unwrap());
         let verdict = registry.conclude(result, Some(&profile));
         CredentialSyncNotices::default()
-            .leveled_notice(result, Some(harness), &State::default(), verdict.as_ref())
+            .leveled_notice(result, &State::default(), verdict.as_ref())
             .map(|notice| notice.text)
     };
     let claude = notice(&result, HarnessKind::Claude).unwrap();
@@ -2378,7 +2378,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         partial: false,
     };
     let leveled = CredentialSyncNotices::default()
-        .leveled_notice(&result, None, &State::default(), None)
+        .leveled_notice(&result, &State::default(), None)
         .unwrap();
     assert!(!leveled.routine, "a failed sync stays a warning");
     let notice = leveled.text;
@@ -3154,7 +3154,6 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
         let notice = CredentialSyncNotices::default()
             .leveled_notice(
                 result,
-                None,
                 &state,
                 Some(&mj_core::credentials::LoginFailureVerdict::Refused),
             )

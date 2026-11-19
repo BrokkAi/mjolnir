@@ -215,7 +215,6 @@ impl Policy {
         }));
         let credentials = CredentialSyncCoordinator::spawn_guarded(
             manager.clone(),
-            state.worker_background_gate(),
             state.clone(),
             rejected.clone(),
         );
@@ -633,7 +632,6 @@ impl Policy {
                 .conclude(&result, profile.as_ref());
             let notice = self.notices.leveled_notice(
                 &result,
-                profile.as_ref().map(|p| p.kind),
                 &self.state.owner().controller().state,
                 verdict.as_ref(),
             );

@@ -315,9 +315,6 @@ impl CredentialSyncCoordinator {
 
     pub fn spawn_guarded(
         manager: SessionManagerControl,
-        // Credential sync no longer enters the gate. Callers drop this
-        // argument once nobody passes one.
-        _gate: Arc<crate::recovery_gate::RecoveryGate>,
         runtime: Arc<dyn CredentialSyncRuntime>,
         rejected: DeliveryRegistry,
     ) -> Self {

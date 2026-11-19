@@ -16,7 +16,7 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
 
 - [x] (2026-11-19 04:10Z) Diagnosis from live logs; design from the Advisor session; read-only code map of the gate, actor, coordinator, classification and tests.
 - [x] (2026-11-19) Milestone 1: credential sync leaves the RecoveryGate; the actor owns the "login owed" wake; gate-only deferral and backoff code deleted; hard-won integration test passes.
-- [ ] Milestone 2: a daemon that finds a login renewed by another process syncs at once.
+- [x] (2026-11-19) Milestone 2: a daemon that finds a login renewed by another process syncs at once (commit `14c323648`).
 - [x] (2026-11-19) Milestone 3: the refused-or-stale decision reads the host login under the native login lock.
 - [x] (2026-11-19) Milestone 4: notices reduced to the cases that need the user; code made unreachable by Milestones 1-3 deleted.
 - [x] (2026-11-19) Clippy on touched crates (core, controller, daemon, store) is clean; `cargo fmt --check` differs only in files this change does not touch (`mj-core/src/state/tests.rs`, `mj-store/src/database/sessions.rs`, `mj-worker/src/relay/journal/tests.rs`).
@@ -109,10 +109,19 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
   Date/Author: 2026-11-19, implementer.
 - Decision (review fixes): `read_login_under_native_lock` and `rejected_login_is_current` are async, not blocking as the plan said. Taking the locks queues blocking work, so waiting for them from a `spawn_blocking` thread could starve the pool; the locked read itself runs on the pool with the lock held. A new session actor starts owing a credential sync, so a sync the coordinator asked for before the actor existed is not lost (the retry timer is gone). `leveled_notice` reports a reconciliation failure before the renewed-login cases. Declined: a lock timeout leaves a failed turn unknown and is not rechecked (no daemon retry state for an unobserved case).
   Date/Author: 2026-11-19, implementer.
+- Decision (Milestone 2, supersedes the earlier "policy remembers the due time per profile" decision): the renewal loop in `pollers/quota.rs` remembers the due time, not the policy. Rationale: the loop forwards only `Renewed` checks and checks with rejected logins, so the policy never saw a passive `Waiting` check and could not compare due times. Only a check that carries a due time updates the remembered value (a check without one leaves it alone).
+  Date/Author: 2026-11-19, parent session, integrated by implementer.
+
+- Decision (integration): removed the leftover `_gate` argument of `spawn_guarded`, the `_harness` argument of `leveled_notice` (the test helper `notice` keeps an ignored one to avoid editing about forty call sites), and `RuntimeState::worker_background_gate`, which nothing used afterwards. Deleted `rejected_login_is_current`: it had no production caller. Its lock-ordering test now goes through `read_login_under_native_lock`, which production uses; the timeout case is kept. This supersedes the Milestone 3 decision that kept the function for yes-or-no callers.
+  Date/Author: 2026-11-19, parent session request.
 
 ## Outcomes & Retrospective
 
-Not started.
+A renewed Claude login now reaches every connected session without waiting on a review, a worker upgrade or a recovery copy. The session actor owns "this session is owed a credential sync" and wakes the coordinator when its connection is usable. A daemon notices another daemon's renewal at its next check and syncs at once. The refused-or-stale decision reads the login under the native lock, so a renewal in progress is never judged a refusal. Notices appear only for a refused login or a failed reconciliation. The acceptance test `a_renewed_login_reaches_a_session_whatever_background_work_holds_it` failed on the base source (the review case) and passes now.
+
+Remaining: the live check after installation (a renewal while a review or upgrade runs, with no `credential sync admission unavailable` lines and no `Auth failure on profile` notice for a continuing turn). No test drives the reconnect wake. The review declined six findings, recorded in the Decision Log.
+
+Lessons: ask where each decision is made before choosing where to store its input (the policy never saw passive checks). Deleting a mechanism also removes the tests that pinned it and the flags that existed only for it, so search for those. A blocking helper that waits for async-backed locks can starve the blocking pool; make it async.
 
 
 ## Context and Orientation
@@ -160,9 +169,9 @@ Add the acceptance test described under Validation and Acceptance. Fold `a_new_l
 
 At the end of this milestone, a daemon whose renewal check finds a login that changed since its previous check syncs that profile at once instead of at its next 60-second tick.
 
-In `mj-daemon/src/daemon/delegation/policy.rs`, the policy struct gains a map from Claude profile id to the renewal due time (`due_at_ms`) of the last `ClaudeGrantCheck` that carried one. Where the check result is handled (around lines 505-530), call `self.credentials.handle().sync_profile_now(&request.profile_id, None)` as today on `Renewed` and on the existing rejected-logins case. Also call it when the result is `Waiting { due_at_ms: Some(d) }`, the map already holds a due time for this profile, and that due time is not `d`. Then store `d`, or the due time carried by `Renewed`. The first check after a daemon starts only stores a value. Profiles removed from configuration can stay in the map; it holds one number per profile. Do not change `mj-accounts`. If reading the code shows that the due time can change without a new login, stop and record it in Surprises & Discoveries, because the comparison would then need the login's fingerprint instead.
+The per-profile renewal loop `renew_claude_grant_when_due` (`mj-daemon/src/pollers/quota.rs`) remembers the renewal due time (`due_at_ms`) of its last check that carried one. A check whose due time differs from the remembered one means another process renewed the login, so the loop sends the policy a `QuotaUpdate::ClaudeGrant` with `login_changed: true`, and the policy calls `sync_profile_now` at once (`claude_grant_requires_sync` in `policy.rs`). Only a check that carries a due time updates the remembered value, so the first check after a daemon starts only stores one. The loop already sends `Renewed` checks and checks with rejected logins and drops the rest; `login_changed` adds the passive case. Do not change `mj-accounts`.
 
-Test this in the policy's existing test module (around lines 866-899). Feed the policy one `Waiting` result for a profile, then a `Waiting` result with a later due time, as happens when another daemon renews between this daemon's checks. Assert that exactly one sync request is sent, after the second result. The test must fail before the change.
+The test is `another_daemons_claude_login_change_is_forwarded_to_policy` in `mj-daemon/src/pollers/tests.rs`. It feeds the loop a `Waiting` result, then one with a later due time, and asserts that the policy update carries `login_changed: true`.
 
 
 ### Milestone 3: decide refused or stale under the native lock
@@ -267,11 +276,19 @@ In `mj-controller/src/worker_client/credential_sync.rs`:
         pub fn take(&self) -> BTreeSet<String>;
     }
 
-In `mj-core/src/credentials.rs`, with the profile type the surrounding code already uses:
+In `mj-core/src/credentials.rs`:
 
-    /// Blocking. `Some(true)`: the rejected token is the host's current login.
-    /// `Some(false)`: it is an older login. `None`: unknown (lock or read failed).
-    pub fn rejected_login_is_current(profile: &HarnessProfile, rejected_fingerprint: &str, lock_wait: Duration) -> Option<bool>;
+    /// Runs `read` while holding the native login lock. `None`: the lock could
+    /// not be taken within `lock_wait`. Async, so a waiter never occupies a
+    /// blocking-pool thread that the lock's own work needs.
+    pub async fn read_login_under_native_lock<T: Send + 'static>(
+        kind: HarnessKind,
+        store: &HarnessLoginStore,
+        lock_wait: Duration,
+        read: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T>;
+
+In `mj-daemon/src/pollers/types.rs`, `QuotaUpdate::ClaudeGrant` gains `login_changed: bool`, set by the renewal loop when a check's due time differs from the previous one.
 
 `mj-store/src/recovery_gate.rs` loses `BackgroundWork::CredentialSync` and all credential wake members. Nothing outside the files named above may depend on them after Milestone 1.
 

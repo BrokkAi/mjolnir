@@ -736,46 +736,6 @@ pub async fn read_login_under_native_lock<T: Send + 'static>(
     }
 }
 
-/// Whether the token the provider rejected is the host login's current one,
-/// read under the native login lock (see [`read_login_under_native_lock`]).
-/// `Some(true)`: it is, so the provider refused the profile's current login.
-/// `Some(false)`: it is an older login, renewed since. `None`: unknown (the
-/// lock or the login could not be read).
-///
-/// Reads the login from its file. A macOS Keychain login is read by callers
-/// that can run `security`, through [`read_login_under_native_lock`].
-pub async fn rejected_login_is_current(
-    profile: &HarnessProfile,
-    rejected_fingerprint: &str,
-    lock_wait: Duration,
-) -> Option<bool> {
-    if profile.kind != HarnessKind::Claude || !profile.auth_scheme().uses_native_login_file() {
-        return None;
-    }
-    let crate::config::HarnessLoginStore::File { marker } = profile
-        .kind
-        .login_store(crate::config::HarnessHost::current(), &profile.home)
-    else {
-        return None;
-    };
-    let store = crate::config::HarnessLoginStore::File {
-        marker: marker.clone(),
-    };
-    let kind = profile.kind;
-    let rejected = rejected_fingerprint.to_owned();
-    read_login_under_native_lock(
-        kind,
-        &store,
-        lock_wait,
-        move || match LoginFingerprint::read_file(kind, &marker) {
-            Ok(Some(LoginFingerprint::AccessToken(current))) => Some(current == rejected),
-            _ => None,
-        },
-    )
-    .await
-    .flatten()
-}
-
 /// What an authentication failure means, decided once against the profile's
 /// current login (#1547). Every consumer (the push, the refusal, the notice)
 /// reads this answer instead of comparing logins on its own snapshot.

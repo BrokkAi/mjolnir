@@ -1284,32 +1284,43 @@ fn claude_login_with_token(token: &str) -> Vec<u8> {
 }
 
 // Hard-won: #1600: a failure during a renewal was judged against the login being replaced and called refused
-// macOS keeps a Claude login in the Keychain, which mj-core cannot read.
-#[cfg(not(target_os = "macos"))]
+// Hard-won: #1600: a failure during a renewal was judged against the login being replaced and called refused
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_login_is_judged_against_the_login_the_renewer_writes() {
     let home = tempfile::tempdir().expect("temporary home");
-    let profile = HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf());
-    let marker = harness_authentication_marker(HarnessKind::Claude, home.path());
-    std::fs::write(&marker, claude_login_with_token("old")).unwrap();
+    let store = crate::config::HarnessLoginStore::File {
+        marker: harness_authentication_marker(HarnessKind::Claude, home.path()),
+    };
+    let crate::config::HarnessLoginStore::File { marker } = &store else {
+        unreachable!()
+    };
+    std::fs::write(marker, claude_login_with_token("old")).unwrap();
     let rejected = claude_access_token_fingerprint(&claude_login_with_token("old")).unwrap();
+    // The decision: is the rejected token still the file's current one?
+    let decide = |wait: Duration| {
+        let (store, marker, rejected) = (store.clone(), marker.clone(), rejected.clone());
+        async move {
+            read_login_under_native_lock(HarnessKind::Claude, &store.clone(), wait, move || {
+                match LoginFingerprint::read_file(HarnessKind::Claude, &marker) {
+                    Ok(Some(LoginFingerprint::AccessToken(current))) => Some(current == rejected),
+                    _ => None,
+                }
+            })
+            .await
+            .flatten()
+        }
+    };
 
     // Another daemon is renewing: it holds the native lock until the new
     // login is written.
-    let renewer = CredentialWriteGuard::acquire(HarnessKind::Claude, &marker)
+    let renewer = CredentialWriteGuard::acquire(HarnessKind::Claude, marker)
         .await
         .unwrap();
     // While the lock is held, the answer is unknown, not "refused".
-    assert_eq!(
-        rejected_login_is_current(&profile, &rejected, Duration::from_millis(200)).await,
-        None
-    );
-    let decision = tokio::spawn({
-        let rejected = rejected.clone();
-        async move { rejected_login_is_current(&profile, &rejected, Duration::from_secs(10)).await }
-    });
+    assert_eq!(decide(Duration::from_millis(200)).await, None);
+    let decision = tokio::spawn(decide(Duration::from_secs(10)));
     tokio::time::sleep(Duration::from_millis(300)).await;
-    std::fs::write(&marker, claude_login_with_token("new")).unwrap();
+    std::fs::write(marker, claude_login_with_token("new")).unwrap();
     drop(renewer);
 
     assert_eq!(decision.await.unwrap(), Some(false));

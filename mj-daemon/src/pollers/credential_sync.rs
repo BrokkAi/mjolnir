@@ -169,10 +169,10 @@ impl CredentialSyncNotices {
     pub fn notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        harness: Option<mj_core::config::HarnessKind>,
+        _harness: Option<mj_core::config::HarnessKind>,
         state: &State,
     ) -> Option<String> {
-        self.leveled_notice(result, harness, state, None)
+        self.leveled_notice(result, state, None)
             .map(|notice| notice.text)
     }
 
@@ -182,9 +182,6 @@ impl CredentialSyncNotices {
     pub fn leveled_notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        // Unused since the refused notice stopped advising setup tokens; the
-        // caller in `delegation/policy.rs` drops it once that file is free.
-        _harness: Option<mj_core::config::HarnessKind>,
         state: &State,
         login_verdict: Option<&LoginFailureVerdict>,
     ) -> Option<CredentialNotice> {
