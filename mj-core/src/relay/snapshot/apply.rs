@@ -2162,6 +2162,9 @@ fn terminalize_removed_prompts(
             .get_mut(command_id)
             .expect("removed command ledger was just checked")
             .failure = Some("queued command was removed".into());
+        // A removed entry never starts, so nothing else will release the
+        // mailbox context it holds (a restart continuation inherits one).
+        snapshot.mailbox_prompt_contexts.remove(command_id);
     }
     snapshot.queued_prompts.retain(|queued| {
         !removed_command_ids

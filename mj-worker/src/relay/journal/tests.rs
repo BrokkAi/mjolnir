@@ -2372,6 +2372,50 @@ fn restart_continuation_keeps_an_existing_mailbox_claim_and_leaves_new_mail_pend
     );
 }
 
+// Hard-won: 3b487762f: removing a queued recovery orphaned its inherited mailbox context.
+#[test]
+fn removing_a_queued_restart_continuation_releases_its_mailbox_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit_relay(&mut relay, "user-request", prompt("continue the task"));
+    submit_relay(
+        &mut relay,
+        "deliver-first",
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "first".into(),
+                source: "parent".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                    text: "first".into(),
+                },
+            },
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    drop(relay);
+    // Reopen without readiness, so the recovery stays queued.
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let recovery = relay.snapshot.queued_prompts[0].command_id.clone();
+    assert!(mj_core::continuation::is_restart_continuation(&recovery));
+    assert!(relay.snapshot.mailbox_prompt_contexts.contains_key(&recovery));
+    submit_relay(
+        &mut relay,
+        "remove-recovery",
+        RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: recovery.clone(),
+        },
+    );
+    assert!(relay.snapshot.queued_prompts.is_empty());
+    assert!(relay.snapshot.mailbox_prompt_contexts.is_empty());
+}
+
 // Hard-won: d2f26b4c6: recovery metadata could exceed a completely full snapshot.
 #[test]
 fn restart_continuation_reports_queue_exhaustion_without_wedging_open() {
