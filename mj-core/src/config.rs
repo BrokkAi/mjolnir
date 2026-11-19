@@ -2119,6 +2119,18 @@ impl Config {
         Self::load_from(&config_path()).map(Self::with_local_targets)
     }
 
+    /// Read current configuration while excluding cooperating config edits.
+    /// Hold the opaque guard through the commit that relies on this snapshot.
+    pub fn load_locked() -> Result<(Self, ConfigReadGuard)> {
+        let path = config_path();
+        let guard = ConfigReadGuard {
+            _lock: ConfigLock::acquire(&path)?,
+            path,
+        };
+        let config = Self::load_from(&guard.path)?.with_local_targets();
+        Ok((config, guard))
+    }
+
     /// Supply standard local choices without requiring setup or writing a file.
     /// These are candidates: callers must check availability before offering launch.
     /// Explicit entries with the same name override the standard defaults.
@@ -2295,7 +2307,20 @@ impl Config {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        Self::update_to(path, |config| {
+        let guard = ConfigReadGuard {
+            _lock: ConfigLock::acquire(path)?,
+            path: path.to_owned(),
+        };
+        Self::update_locked(&guard, edit)
+    }
+
+    /// Edit and save while an existing opaque owner retains the config lock.
+    /// The owner can span a subsequent reference migration or rollback.
+    pub fn update_locked<T, F>(guard: &ConfigReadGuard, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        Self::update_to_locked(&guard.path, |config| {
             // Edits see the same local candidates as reads, but unrelated
             // changes must not write implicit defaults into the user's file.
             let mut runtime = config.clone().with_local_targets();
@@ -2328,6 +2353,13 @@ impl Config {
         F: FnOnce(&mut Self) -> Result<T>,
     {
         let _lock = ConfigLock::acquire(path)?;
+        Self::update_to_locked(path, edit)
+    }
+
+    fn update_to_locked<T, F>(path: &Path, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
         let mut config = Self::load_from(path)?;
         let value = edit(&mut config)?;
         config.save_to_locked(path)?;
@@ -2392,6 +2424,13 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Opaque owner of the configuration snapshot's cross-process lock.
+/// It exposes no lock internals; dropping it releases ownership.
+pub struct ConfigReadGuard {
+    _lock: ConfigLock,
+    path: PathBuf,
 }
 
 /// Cross-process lock for one config path. The lock has a stable inode beside

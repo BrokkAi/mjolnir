@@ -1043,6 +1043,24 @@ impl DurableRelay {
         Ok(false)
     }
 
+    fn has_redundant_journal_files(&self) -> Result<bool> {
+        let journal = self.root.join(RELAY_JOURNAL_DIR);
+        if !journal.exists() {
+            return Ok(false);
+        }
+        let canonical: std::collections::BTreeSet<_> =
+            self.journal_spans.iter().map(|span| &span.path).collect();
+        for entry in fs::read_dir(journal)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|extension| extension == "gz")
+                && !canonical.contains(&path)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn garbage_collect_relay_history(&mut self) -> Result<()> {
         let through = self.snapshot.retained_through();
         let journal_floor = self
@@ -1075,7 +1093,9 @@ impl DurableRelay {
         {
             first.after_ordinal = first.after_ordinal.max(through);
         }
-        self.journal_cleanup_pending = false;
+        // A legacy rewrite can leave noncanonical sealed copies whose end
+        // is still above this ACK. Keep considering them as later ACKs advance.
+        self.journal_cleanup_pending = include_redundant && self.has_redundant_journal_files()?;
         // The pruned ledger reaches memory only after its own durable write
         // succeeds, so a transient failure cannot forget command IDs while the
         // daemon keeps serving retries. A catch-up ACK usually prunes nothing

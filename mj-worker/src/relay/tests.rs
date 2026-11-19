@@ -9985,3 +9985,59 @@ fn startup_collects_an_acknowledged_full_active_segment_before_appending() {
         RelayObservation::SessionRestarted
     ));
 }
+
+// Hard-won: 7a9a7ec: legacy duplicate sealed files lost cleanup eligibility before a later ACK covered them.
+#[test]
+fn later_acknowledgements_collect_legacy_rewrite_duplicates_without_restarting() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "legacy").unwrap();
+    record_paged_history(&mut relay, 80);
+    let spans = relay.journal_spans.clone();
+    let sealed: Vec<_> = spans
+        .iter()
+        .filter(|span| span.path.extension().is_some_and(|ext| ext == "gz"))
+        .map(|span| span.path.clone())
+        .collect();
+    assert!(sealed.len() >= 2);
+    let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+    let partial = spans[0].file_last_ordinal - 1;
+    let partial_digest = relay.digest_at(partial).unwrap().unwrap();
+    let frontier = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    relay.snapshot.acknowledged_through = partial;
+    relay.snapshot.acknowledged_digest = partial_digest;
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    // A legacy rewrite installed its complete replacement active file and
+    // crashed before deleting the sealed originals it had copied.
+    let mut replacement = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut replacement, &event).unwrap();
+        replacement.push(b'\n');
+    }
+    fs::write(
+        temp.path()
+            .join(RELAY_JOURNAL_DIR)
+            .join(RELAY_ACTIVE_SEGMENT),
+        replacement,
+    )
+    .unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "current").unwrap();
+    assert_eq!(relay.journal_spans.len(), 1);
+    assert!(relay.journal_cleanup_pending);
+    assert!(sealed.iter().all(|path| path.exists()));
+    let first_end = spans[0].file_last_ordinal;
+    acknowledge_relay(&mut relay, "first-duplicate-covered", first_end);
+    assert!(!sealed[0].exists());
+    assert!(relay.journal_cleanup_pending);
+    acknowledge_relay(&mut relay, "all-duplicates-covered", frontier);
+    assert!(sealed.iter().all(|path| !path.exists()));
+    assert!(!relay.journal_cleanup_pending);
+    assert!(relay.events_after(frontier, &digest).unwrap().is_empty());
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
+    assert_eq!(relay.events_after(frontier, &digest).unwrap().len(), 1);
+}

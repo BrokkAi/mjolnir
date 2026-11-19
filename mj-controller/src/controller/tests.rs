@@ -3912,3 +3912,75 @@ mod profile_homes {
         }
     }
 }
+
+// Hard-won: 7a9a7ec: rename released the config lock before migrating session rows.
+#[test]
+fn profile_rename_holds_configuration_through_reference_migration() {
+    const NAME: &str = "profile_rename_holds_configuration_through_reference_migration";
+    const CHILD: &str = "MJ_PROFILE_RENAME_LOCK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let hooks = root.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .isolated_store(root.path())
+            .env(
+                "MJ_TEST_HOOK",
+                "config_replacement_before_reference_migration",
+            )
+            .env("MJ_TEST_HOOK_DIR", &hooks)
+            .env("MJ_CHAOS_ISOLATED", "1")
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let config = registration_config();
+    config.save().unwrap();
+    let record = super::test_support::checkpoint_test_session("renaming-session");
+    crate::database::save_session(&record).unwrap();
+    let mut controller = Controller {
+        config,
+        state: crate::database::load_state().unwrap(),
+    };
+    let hooks = std::path::PathBuf::from(std::env::var_os("MJ_TEST_HOOK_DIR").unwrap());
+    let reached = hooks.join("config_replacement_before_reference_migration.reached");
+    let continuation = hooks.join("config_replacement_before_reference_migration.continue");
+    let renaming = std::thread::spawn(move || controller.rename_profile_id("codex", "renamed"));
+    let observed = (0..1000).any(|_| {
+        if reached.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        false
+    });
+    let (ready, started) = std::sync::mpsc::channel();
+    let (result, received) = std::sync::mpsc::channel();
+    let reading = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        let (config, _owner) = Config::load_locked().unwrap();
+        let record = crate::database::read_durable_session_record("renaming-session")
+            .unwrap()
+            .unwrap();
+        result
+            .send((
+                config.profiles.contains_key(&record.last_profile),
+                record.last_profile,
+            ))
+            .unwrap();
+    });
+    started.recv().unwrap();
+    let premature = received.recv_timeout(std::time::Duration::from_millis(100));
+    // Release and join both owners before assertions, even if the regression returns.
+    std::fs::write(continuation, b"continue").unwrap();
+    renaming.join().unwrap().unwrap();
+    reading.join().unwrap();
+    assert!(observed, "rename never reached its save/migrate boundary");
+    assert!(
+        premature.is_err(),
+        "a dependent reader entered before reference migration"
+    );
+    let (consistent, profile) = received.recv().unwrap();
+    assert!(consistent);
+    assert_eq!(profile, "renamed");
+}

@@ -6966,6 +6966,8 @@ fn adoption_reattaches_from_genesis_before_requiring_a_live_baseline() {
         "local-bare".into(),
         mj_core::config::TargetTemplate::LocalBare,
     );
+    add_codex_profile(&mut retry.config, directory.path());
+    retry.config.save().unwrap();
     retry
         .state
         .sessions
@@ -7405,6 +7407,8 @@ enum AdoptionProbe {
     Install,
     PreparingFails,
     PublicationRejected,
+    ProfileRenamed,
+    InstallInterrupted,
     Unusable(&'static str),
 }
 
@@ -7473,7 +7477,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
     drop(relay);
     if matches!(
         disposition,
-        AdoptionProbe::Drain | AdoptionProbe::Disconnect
+        AdoptionProbe::Drain | AdoptionProbe::Disconnect | AdoptionProbe::ProfileRenamed
     ) {
         fs::write(root.join("block-install-status"), b"1").unwrap();
     }
@@ -7493,6 +7497,8 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
         "local-bare".into(),
         mj_core::config::TargetTemplate::LocalBare,
     );
+    add_codex_profile(&mut config, directory.path());
+    config.save().unwrap();
     let mut controller = Controller {
         config,
         state: crate::database::load_state().unwrap(),
@@ -7519,6 +7525,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             AdoptionProbe::Install
                 | AdoptionProbe::PreparingFails
                 | AdoptionProbe::PublicationRejected
+                | AdoptionProbe::InstallInterrupted
         )
         .then_some(installed);
         let work = tokio::spawn(async move {
@@ -7562,6 +7569,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             AdoptionProbe::Install
                 | AdoptionProbe::PreparingFails
                 | AdoptionProbe::PublicationRejected
+                | AdoptionProbe::InstallInterrupted
         ) {
             let publication = tokio::time::timeout(std::time::Duration::from_secs(5), notice)
                 .await
@@ -7587,6 +7595,49 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     .0
                     > 0
             );
+            // Configuration ownership ends at commit, before the installed
+            // notice is acknowledged or ordinary attachment can begin.
+            let (_, config_guard) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(Config::load_locked),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            drop(config_guard);
+            if matches!(disposition, AdoptionProbe::InstallInterrupted) {
+                cancellation.cancel();
+                drop(publication);
+                let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(outcome.result.is_err());
+                drop(outcome.admission);
+                fs::write(root.join("release-native-identity"), b"1").unwrap();
+                fs::write(root.join("test-native-ready"), b"1").unwrap();
+                let mut retry = Controller::load().unwrap();
+                retry
+                    .adopt_orphan_worker(
+                        MOVE_QUEUE_SESSION_ID,
+                        "local-bare",
+                        None,
+                        None,
+                        false,
+                        &ProcessExecutor,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    SessionState::Running
+                );
+                return;
+            }
             fs::write(root.join("block-ordinary-attach"), b"1").unwrap();
             drop(publication.admission);
             publication.acknowledged.send(()).unwrap();
@@ -7756,6 +7807,31 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 .iter()
                 .any(|label| label.contains("adoption"))
         );
+        if matches!(disposition, AdoptionProbe::ProfileRenamed) {
+            // The orphan has no row for rename's reference migration to find.
+            crate::database::delete_session(MOVE_QUEUE_SESSION_ID).unwrap();
+            let mut renaming = Controller::load().unwrap();
+            renaming.rename_profile_id("codex", "renamed").unwrap();
+            fs::write(root.join("release-install-status"), b"1").unwrap();
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+                .await
+                .unwrap()
+                .unwrap();
+            let error = format!("{:#}", outcome.result.unwrap_err());
+            assert!(error.contains("no longer configured"), "{error}");
+            drop(outcome.admission);
+            assert!(
+                crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .is_none()
+            );
+            let (_, guard) = tokio::task::spawn_blocking(Config::load_locked)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(guard);
+            return;
+        }
         if matches!(disposition, AdoptionProbe::Disconnect) {
             cancellation.cancel();
         } else {
@@ -7913,6 +7989,8 @@ fn adoption_genesis_replay_failure_stays_disconnected_and_retryable() {
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
     let _proxy_guard =
         install_move_queue_relay_worker(&root, &directory.path().join("served"), true);
+    // This fixture represents a surviving configured bridge, not startup.
+    fs::write(root.join("test-native-ready"), b"1").unwrap();
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "current").unwrap();
     relay
         .record_observation(mj_core::relay::RelayObservation::SessionOpened {
@@ -7960,6 +8038,8 @@ fn adoption_genesis_replay_failure_stays_disconnected_and_retryable() {
         "local-bare".into(),
         mj_core::config::TargetTemplate::LocalBare,
     );
+    add_codex_profile(&mut config, directory.path());
+    config.save().unwrap();
     let mut controller = Controller {
         config,
         state: crate::database::load_state().unwrap(),
@@ -8043,5 +8123,27 @@ fn adoption_rejected_publication_keeps_admission_through_the_error_reply() {
         true,
         AdoptionProbe::PublicationRejected,
         "adoption_rejected_publication_keeps_admission_through_the_error_reply",
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: 7a9a7ec: an adoption wait installed a profile ID after its rename missed the rowless orphan.
+#[test]
+fn adoption_revalidates_a_profile_renamed_before_install() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::ProfileRenamed,
+        "adoption_revalidates_a_profile_renamed_before_install",
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: 7a9a7ec: configuration ownership must end at durable installation even if notice delivery is interrupted.
+#[test]
+fn interrupted_adoption_install_releases_configuration_and_retries() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::InstallInterrupted,
+        "interrupted_adoption_install_releases_configuration_and_retries",
     );
 }

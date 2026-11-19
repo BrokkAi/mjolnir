@@ -498,6 +498,19 @@ impl Controller {
             status = client.status() => status.context("worker disappeared before adoption install; cut discarded")?,
         };
         ensure_adoptable_worker(&operational)?;
+        // No remote work runs under this owner. A rename either sees this new
+        // row in its migration, or completes first and invalidates this lookup.
+        let (current_config, config_owner) = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled before configuration validation"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before configuration validation"),
+            config = tokio::task::spawn_blocking(mj_core::config::Config::load_locked) => config.context("read current adoption configuration")??,
+        };
+        anyhow::ensure!(
+            current_config.profiles.contains_key(&record.last_profile),
+            "profile {:?} is no longer configured; worker continues running; retry recover adopt with --profile selecting a configured profile",
+            record.last_profile
+        );
         let guard = AdoptionInstall {
             _session: install_owner,
             _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
@@ -506,9 +519,10 @@ impl Controller {
             biased;
             _ = control.cancelled.cancelled() => bail!("adoption cancelled before writer acceptance; cut discarded"),
             _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before writer acceptance; cut discarded; rerun recover adopt"),
-            accepted = crate::database::enqueue_adopted_session(record.clone(), cut, now(), guard) => accepted?,
+            accepted = crate::database::enqueue_adopted_session(record.clone(), cut, now(), (guard, config_owner)) => accepted?,
         };
-        let (result, guard) = accepted.finish().await?;
+        let (result, (guard, config_owner)) = accepted.finish().await?;
+        drop(config_owner);
         let current = match result {
             Ok(current) => current,
             Err(error) => {

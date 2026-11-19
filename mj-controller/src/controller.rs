@@ -1234,13 +1234,15 @@ impl Controller {
             );
             return Ok(());
         }
+        // Serialize config replacement and row migration with dependent installs.
+        let (_, config_owner) = Config::load_locked()?;
         let journal = ConfigRenameJournal {
             kind: ConfigRenameKind::Profile,
             old_id: old_id.to_owned(),
             new_id: new_id.to_owned(),
         };
         write_config_rename_journal(&journal)?;
-        let (config, ()) = match Config::update(|config| {
+        let (config, ()) = match Config::update_locked(&config_owner, |config| {
             ensure!(
                 config.profiles.contains_key(old_id),
                 "unknown profile {old_id:?}"
@@ -1266,7 +1268,7 @@ impl Controller {
         self.config = config;
         mj_core::test_hooks::reach_test_hook("config_replacement_before_reference_migration")?;
         if let Err(error) = crate::database::rename_profile_references(old_id, new_id) {
-            let restore = Config::update(|config| {
+            let restore = Config::update_locked(&config_owner, |config| {
                 let profile = config
                     .profiles
                     .remove(new_id)
