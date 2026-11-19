@@ -2212,9 +2212,8 @@ fn github_tokens_sync_to_every_session_target() {
     assert!(!target_syncs_github_token(None));
 }
 
-// Hard-won: c94c68c0: the shared Claude refresh grant could expire during a long-running session
 #[test]
-fn a_refused_claude_login_offers_the_long_lived_token() {
+fn only_a_refused_login_or_a_failed_reconciliation_reaches_the_person() {
     use mj_core::config::{HarnessKind, HarnessProfile};
     use mj_core::credentials::{
         CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, RejectedLogins,
@@ -2247,31 +2246,25 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
         let verdict = registry.conclude(result, Some(&profile));
         CredentialSyncNotices::default()
             .leveled_notice(result, Some(harness), &State::default(), verdict.as_ref())
-            .unwrap()
-            .text
+            .map(|notice| notice.text)
     };
-    let claude = notice(&result, HarnessKind::Claude);
+    let claude = notice(&result, HarnessKind::Claude).unwrap();
     assert!(
-        claude.ends_with(
-            "Run `mj login --profile claude-max`, or store a long-lived token with `mj login --profile claude-max --setup-token`."
-        ),
+        claude.ends_with("Run `mj login --profile claude-max`."),
         "{claude}"
     );
+    assert!(!claude.contains("setup-token"), "{claude}");
 
-    // Only Claude can rotate ahead of expiry this way.
-    let codex = notice(&result, HarnessKind::Codex);
+    let codex = notice(&result, HarnessKind::Codex).unwrap();
     assert!(
         codex.ends_with("Run `mj login --profile claude-max`."),
         "{codex}"
     );
 
+    // A stale login that the renewed one replaces needs nothing from the person.
     let mut stale = result.clone();
     stale.outcomes[0].current_access_token = Some("renewed-token".into());
-    let stale = notice(&stale, HarnessKind::Claude);
-    assert!(
-        stale.contains("stale login") && !stale.contains("mj login"),
-        "{stale}"
-    );
+    assert_eq!(notice(&stale, HarnessKind::Claude), None);
 
     // A failed check cannot establish that signing in again will help.
     let failed = CredentialSyncResult {
@@ -2285,7 +2278,7 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
         partial: false,
         ..result
     };
-    let claude_failure = notice(&failed, HarnessKind::Claude);
+    let claude_failure = notice(&failed, HarnessKind::Claude).unwrap();
     assert!(!claude_failure.contains("mj login"), "{claude_failure}");
 }
 
@@ -3114,7 +3107,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
                 result,
                 None,
                 &state,
-                Some(&mj_core::credentials::LoginFailureVerdict::Renewed),
+                Some(&mj_core::credentials::LoginFailureVerdict::Refused),
             )
             .unwrap()
             .text;

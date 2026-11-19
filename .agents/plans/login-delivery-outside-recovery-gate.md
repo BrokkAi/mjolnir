@@ -18,8 +18,9 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
 - [x] (2026-11-19) Milestone 1: credential sync leaves the RecoveryGate; the actor owns the "login owed" wake; gate-only deferral and backoff code deleted; hard-won integration test passes.
 - [ ] Milestone 2: a daemon that finds a login renewed by another process syncs at once.
 - [x] (2026-11-19) Milestone 3: the refused-or-stale decision reads the host login under the native login lock.
-- [ ] Milestone 4: notices reduced to the cases that need the user; code made unreachable by Milestones 1-3 deleted.
-- [ ] Clippy and formatting on touched crates; review; commit; push.
+- [x] (2026-11-19) Milestone 4: notices reduced to the cases that need the user; code made unreachable by Milestones 1-3 deleted.
+- [x] (2026-11-19) Clippy on touched crates (core, controller, daemon, store) is clean; `cargo fmt --check` differs only in files this change does not touch (`mj-core/src/state/tests.rs`, `mj-store/src/database/sessions.rs`, `mj-worker/src/relay/journal/tests.rs`).
+- [ ] Review; push (the parent does both).
 
 
 ## Surprises & Discoveries
@@ -103,6 +104,8 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
   Date/Author: 2026-11-19, implementer.
 
 - Decision (Milestone 3): `RejectedLogins::refusal` keeps its plain file read. It only re-checks a refusal that reconciliation already established, and its callers hold a mutex on async threads, so it cannot wait for the lock. During a renewal it can only keep an existing refusal a moment longer, never create one. `CredentialWriteGuard::acquire_within` takes the Claude lock budget as a parameter (`acquire` passes `CLAUDE_REFRESH_LOCK_WAIT`).
+  Date/Author: 2026-11-19, implementer.
+- Decision (Milestone 4): `leveled_notice` keeps its `harness` parameter as `_harness`, because its caller is in `delegation/policy.rs` (Milestone 2's file). Drop the parameter after Milestone 2 merges. `setup_token_advice` is deleted. The test that pinned the setup-token advice (marked Hard-won c94c68c0) is renamed `only_a_refused_login_or_a_failed_reconciliation_reaches_the_person` and no longer carries that marker, because it now pins the opposite behaviour. The notice-naming test uses a `Refused` verdict, since the stale verdicts no longer produce a notice.
   Date/Author: 2026-11-19, implementer.
 
 ## Outcomes & Retrospective

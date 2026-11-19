@@ -155,24 +155,6 @@ pub fn log_credential_sync_actions(result: &mj_core::credentials::CredentialSync
     }
 }
 
-/// The extra option a Claude profile has after an auth failure.
-///
-/// Claude Code cannot refresh its rotating login early, so a container copy
-/// can lose the single-use refresh race with the host. A setup token does not
-/// rotate, which takes the race away rather than retrying it.
-pub(super) fn setup_token_advice(
-    profile_id: &str,
-    harness: Option<mj_core::config::HarnessKind>,
-) -> String {
-    if harness == Some(mj_core::config::HarnessKind::Claude) {
-        format!(
-            ", or store a long-lived token with `mj login --profile {profile_id} --setup-token`"
-        )
-    } else {
-        String::new()
-    }
-}
-
 /// One credential-sync notice and whether it only reports routine syncs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialNotice {
@@ -200,7 +182,9 @@ impl CredentialSyncNotices {
     pub fn leveled_notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        harness: Option<mj_core::config::HarnessKind>,
+        // Unused since the refused notice stopped advising setup tokens; the
+        // caller in `delegation/policy.rs` drops it once that file is free.
+        _harness: Option<mj_core::config::HarnessKind>,
         state: &State,
         login_verdict: Option<&LoginFailureVerdict>,
     ) -> Option<CredentialNotice> {
@@ -208,7 +192,6 @@ impl CredentialSyncNotices {
             text,
             routine: false,
         };
-        let advice = setup_token_advice(&result.profile_id, harness);
         // Completed event-triggered syncs always speak. An authentication
         // failure is handled once per failed turn; only an empty response
         // waits out the per-session cooldown upstream.
@@ -222,21 +205,40 @@ impl CredentialSyncNotices {
             });
             if trigger.reason == CredentialSyncReason::AuthenticationFailure {
                 let profile = &result.profile_id;
+                // The person hears only what they must act on: a refused
+                // login, or a reconciliation that failed. A stale login that
+                // was or will be replaced by the renewed one needs nothing
+                // from them, and the worker retries the turn by itself.
                 let conclusion = match login_verdict {
                     Some(LoginFailureVerdict::Refused) => format!(
-                        "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`{advice}."
+                        "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`."
                     ),
                     Some(LoginFailureVerdict::Renewed) if result.pushed_to(session_id) => {
-                        "the session held a stale login. The renewed login was pushed.".into()
+                        tracing::info!(
+                            profile_id = %profile,
+                            session_id = %session_id,
+                            "the session held a stale login. The renewed login was pushed."
+                        );
+                        return None;
                     }
                     Some(LoginFailureVerdict::Renewed) => {
-                        "the session failed on a stale login. The profile's login has since been renewed.".into()
+                        tracing::info!(
+                            profile_id = %profile,
+                            session_id = %session_id,
+                            "the session failed on a stale login. The profile's login has since been renewed."
+                        );
+                        return None;
                     }
                     _ if let Some(detail) = sync_failure => {
                         format!("credential reconciliation failed: {detail}.")
                     }
                     Some(LoginFailureVerdict::Unrefused { reason }) => {
-                        format!("a refusal of the profile's current login was not established: {reason}.")
+                        tracing::info!(
+                            profile_id = %profile,
+                            session_id = %session_id,
+                            "a refusal of the profile's current login was not established: {reason}."
+                        );
+                        return None;
                     }
                     _ => return None,
                 };
