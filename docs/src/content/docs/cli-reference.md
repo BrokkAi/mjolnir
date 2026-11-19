@@ -421,7 +421,7 @@ mj ui show <session-id> [--right | --below] [--json]
 mj ui settings <path>=<value>... [--json]
 ```
 
-`mj sessions` prints each session's ID, STATE and TITLE, then an indented line with its target, host and profile. `--target <id>` lists only sessions on that target, and `--host <name>` only sessions on that machine; both use the names `mj hosts` shows. A fleet of EC2 instances appears as one host, so select a fleet's sessions with `--target`. A name that `mj hosts` does not list fails with the known names instead of printing an empty list.
+`mj sessions` prints each session's ID, STATE and TITLE, then an indented line with its target, host and profile. The host is the machine the session's target points at now. `--target <id>` lists only sessions on that target, and `--host <name>` only sessions on that machine; both use the names `mj hosts` shows. A fleet of EC2 instances appears as one host, so select a fleet's sessions with `--target`. A name that `mj hosts` does not list fails with the known names instead of printing an empty list.
 
 `mj new --at <sha>` starts the workspace checked out at that full commit ID in
 the bundle's primary repository, before the first prompt. It requires
