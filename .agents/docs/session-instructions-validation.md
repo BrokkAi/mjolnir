@@ -212,3 +212,21 @@ One deterministic test per finding: startup_retry_preserves_parent_message_and_l
 - `cargo clippy -p brokk-mj-controller -p brokk-mj-store -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review6-clippy.log`).
 
 The exact finality writer is save_startup_cleanup_outcome: its archive branch writes archived=1, then settles unaccepted ParentMessages before committing. Generic lifecycle writers no longer settle. No schema, relay snapshot or RuntimeEvent shape changed. Formatting/diff checks are clean; diagnostic logs remain untracked. No still-failing checks or default-instance operations. No review findings from this round are overridden.
+
+
+## Seventh review: recovering child-create mailbox ownership
+
+recover_creates previously restarted a durable child create with an empty manager registration map. It now awaits restore_starting for the child before starting the recovered lifecycle. Startup recovery completes this admission before serving sends. The existing manager owner handles an idempotent Restore event and follows its existing committed-state/handover rules; no persisted field, wire shape or alternate route predicate was added.
+
+The deterministic regression persists a provisioning child's create intent and first queued message, stops its manager, restores a new manager twice, then sends a new request before any worker attaches. Both messages remain mailbox-queued and neither has a turn acceptance. The first run's fixture reset did not create the durable intent (`memory-instructions-review7-recovery-test.log`); the fixture now seeds it through the actual cleanup/retry owner transaction. WSL restarts interrupted subsequent compilation; each resume checked for surviving processes before rebuilding. Source checkpoint 5604ba37b preceded long validation and is amended into the final commit.
+
+Checks outside the sandbox on the dev profile, with inherited MJ_CONFIG_DIR and MJ_DATA_DIR cleared; the tests then install their own isolated configuration/data directories and named instance:
+
+- `cargo test -p brokk-mj-daemon recovered_child_create_queues_new_messages_before_attachment`: 1 passed (`memory-instructions-review7-recovery-final-test.log`).
+- `cargo test -p brokk-mj-daemon a_failure_after_a_sub_agent_registers_moves_it_to_error`: 1 passed (`memory-instructions-review7-registration-test.log`).
+- `cargo test -p brokk-mj-daemon launch_reservation_releases_on_precommit_abort_and_terminal_publication`: 1 passed (`memory-instructions-review7-reservation-test.log`).
+- `cargo test -p brokk-mj-daemon send_to_registered_child_before_attachment_queues_mailbox_without_a_turn`: 1 passed (`memory-instructions-review7-routing-test.log`).
+- `cargo test -p brokk-mj-daemon outbox_`: 3 passed (`memory-instructions-review7-outbox-tests.log`).
+- `cargo clippy -p brokk-mj-controller -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review7-clippy.log`).
+
+No still-failing checks. Formatting/diff checks are clean. No default instance, live harness acceptance or push was used. Diagnostic logs remain untracked; the final candidate is submitted for re-review.

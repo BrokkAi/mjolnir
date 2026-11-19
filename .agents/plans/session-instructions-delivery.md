@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Seventh review: recover_creates now restores manager-owned mailbox routing for durable child creates before restarting their lifecycle and before serving sends. Restoration is idempotent. A deterministic replacement regression persists an initial queued message/create intent, replaces the manager, and sends another message before any worker attachment. The first run exposed missing intent setup in the fixture; the seed now uses the cleanup/retry owner transaction. Local checkpoint 5604ba37b was saved before long validation because WSL restarts kill processes. Recovery (1), registration failure (1), reservation (1), no-attachment routing (1), outbox (3) tests and controller/daemon clippy pass; amend the checkpoint into the final commit and request re-review.
+
 - [x] (2026-11-18) Sixth review: parent replaced the state-based terminal rule. Only the non-retry cleanup owner's archived outcome settles failed-startup messages; record removal handles destruction. StartupCleanup, Destroying and ordinary Error preserve pending work. Registration persists through retry and hands over to a published worker protocol. Retry, worker acceptance, archived late-enqueue, reservation and no-attachment routing regressions pass (1 each); existing outbox tests (3), store mailbox tests (4) and controller/store/daemon clippy pass. No findings are overridden.
 
 - [x] (2026-11-18) Fifth review: verified with current real CLI/worker that an Error child's pending outbox message survives an explicit Resume and reaches the native prompt once. Parent clarified that Error is recoverable; preserve its queue and settle only terminal StartupCleanup/Destroying (removed records already return TargetGone). Enqueue now commits a typed Failed receipt before returning its durable failure to the original sender. The existing no-attachment regression adds recoverable-Error and route-before-terminal/enqueue-after-terminal orderings; focused terminal regression (1), outbox tests (3), message tests (9), store mailbox tests (4) and edited store/daemon clippy pass. The recovery probe daemon is stopped; commit and request re-review.
@@ -123,6 +125,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Outcomes & Retrospective
+
+Seventh-review recovery routing is implemented and validated. Durable child creates restore manager ownership before their recovered lifecycle starts and before startup serves sends. The existing owner handles idempotent restoration; no persistence or route predicate was added. The deterministic manager-replacement test and affected registration/reservation/outbox tests pass, as does edited controller/daemon clippy. Tests clear inherited MJ_CONFIG_DIR/MJ_DATA_DIR and use their isolated-store helper. The WIP source checkpoint is amended into the final reviewed candidate; no push or Milestone 3 acceptance was performed.
 
 Sixth-review corrections use owner-decided finality. Only the final non-retry cleanup archive transaction settles failed-startup messages. Intermediate cleanup, Destroying and recoverable Error preserve the queue; registration survives retry until final archival/removal or attached-worker handover. The three finding regressions, reservation/routing checks, existing outbox/store suites and edited-crate clippy pass. No findings were overridden in this round. Corrections proceed to re-review; no push or Milestone 3 acceptance was performed.
 

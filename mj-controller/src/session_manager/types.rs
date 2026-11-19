@@ -62,6 +62,20 @@ impl StartingSessions {
             self.reconcile_committed(&committed.state);
         }
         match event {
+            StartingEvent::Restore { session_id, reply } => {
+                let result = if let Some(committed) = committed {
+                    self.0
+                        .entry(session_id)
+                        .or_insert(StartingSessionPhase::AwaitingTarget);
+                    self.reconcile_committed(&committed.state);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "launch restoration requires the durable state feed"
+                    ))
+                };
+                let _ = reply.send(result);
+            }
             StartingEvent::Register {
                 session_id,
                 launches,

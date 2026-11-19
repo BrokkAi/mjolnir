@@ -8,6 +8,10 @@ pub(super) enum ManagerCommand {
 }
 
 pub(super) enum StartingEvent {
+    Restore {
+        session_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Register {
         session_id: String,
         launches: mpsc::UnboundedSender<StartingEvent>,

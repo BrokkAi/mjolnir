@@ -3899,6 +3899,97 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
     manager.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: b0a5dd7c0: daemon replacement forgot mailbox routing for a recovered child create.
+#[tokio::test]
+async fn recovered_child_create_queues_new_messages_before_attachment() {
+    if !isolated_parked_test("recovered_child_create_queues_new_messages_before_attachment") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut child = mj_controller::database::load_session_record("child-1")
+        .unwrap()
+        .unwrap();
+    child.state = SessionState::Provisioning;
+    mj_controller::database::save_startup_cleanup_outcome(&child, false).unwrap();
+    let first = mj_controller::session_manager::spawn_session_manager().unwrap();
+    let owner = first.control.clone();
+    tokio::task::spawn_blocking(move || owner.register_starting_blocking("child-1")?.publish())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "before-daemon-replacement".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "queued context".into(),
+        },
+    };
+    let backend = ApiBackend::new(
+        first.control.client(),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    );
+    assert!(matches!(
+        backend
+            .deliver_subagent_input("child-1", "queued context", &request)
+            .await
+            .unwrap(),
+        super::subagent_input::SubagentInputDelivery::Mailbox
+    ));
+    first.shutdown.shutdown().await.unwrap();
+    let intents = mj_controller::database::load_session_create_intents().unwrap();
+    assert!(intents.iter().any(|intent| intent.session_id == "child-1"));
+    // A new manager has no actor or registration from the prior daemon.
+    // Restore from the durable create before exposing it to send_message,
+    // exactly as recover_creates does before starting the recovered lifecycle.
+    let recovered = mj_controller::session_manager::spawn_session_manager().unwrap();
+    for _ in 0..2 {
+        recovered
+            .control
+            .restore_starting("child-1".into())
+            .await
+            .unwrap();
+    }
+    assert!(
+        recovered
+            .control
+            .find_session("child-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let backend = ApiBackend::new(
+        recovered.control.client(),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    );
+    let mut followup = request.clone();
+    followup.request_id = "after-daemon-replacement".into();
+    assert!(matches!(
+        backend
+            .deliver_subagent_input("child-1", "new context", &followup)
+            .await
+            .unwrap(),
+        super::subagent_input::SubagentInputDelivery::Mailbox
+    ));
+    let pending = mj_controller::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 2);
+    for request in [&request, &followup] {
+        assert!(
+            mj_controller::database::load_prompt_acceptance(
+                "child-1",
+                &mj_core::continuation::GeneratedPrompt::subagent_input_id(&request.request_id)
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+    recovered.shutdown.shutdown().await.unwrap();
+}
+
 // Hard-won: 7b9292ec6: intermediate cleanup lost the queued message and launch registration before retry.
 #[tokio::test]
 async fn startup_retry_preserves_parent_message_and_launch_registration() {

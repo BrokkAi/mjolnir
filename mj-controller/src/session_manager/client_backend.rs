@@ -211,6 +211,16 @@ impl SessionManagerControl {
             .context("session manager stopped")?
     }
 
+    /// Restore ownership of an already committed child create before serving
+    /// messages or resuming its launch after daemon replacement.
+    pub async fn restore_starting(&self, session_id: String) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.launches
+            .send(StartingEvent::Restore { session_id, reply })
+            .context("session manager stopped")?;
+        response.await.context("session manager stopped")?
+    }
+
     /// Narrow this controller-owned manager to session lookup for a control surface.
     pub fn client(&self) -> mj_client::session::SessionControl {
         mj_client::session::SessionControl::new(ClientSessionControl(self.clone()))

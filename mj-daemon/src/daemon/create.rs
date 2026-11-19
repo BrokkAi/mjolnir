@@ -848,7 +848,12 @@ impl RuntimeState {
             }
             tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
             let inputs = match mj_controller::database::load_subagent(&intent.session_id)? {
-                Some(relation) => CreateInputs::Subagent(Box::new(relation)),
+                Some(relation) => {
+                    self.session_manager
+                        .restore_starting(intent.session_id.clone())
+                        .await?;
+                    CreateInputs::Subagent(Box::new(relation))
+                }
                 None => CreateInputs::TopLevel {
                     publication: None,
                     remember_launch_choices: intent.remember_launch_choices,
