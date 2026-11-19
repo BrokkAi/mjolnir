@@ -4154,8 +4154,20 @@ async fn standby_and_parked_composers_keep_one_session_history_read() {
         SessionHeaderIdentity::default(),
         Notices::default(),
     );
+    let prepare = |session: mj_client::session::SessionHandle| {
+        ActiveChat::prepare_with_persistence(
+            session,
+            "bundle-1",
+            None,
+            fixture.control.clone(),
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+            None,
+        )
+    };
     let mut chat = ActiveChat::prepare_with_persistence(
-        session,
+        session.clone(),
         "bundle-1",
         None,
         fixture.control.clone(),
@@ -4174,6 +4186,9 @@ async fn standby_and_parked_composers_keep_one_session_history_read() {
     // its read is still in flight; that read must survive.
     let parked = chat.take_live_composer().unwrap();
     chat.adopt_live_composer(parked);
+    // A warm reattach hands it to the replacement chat; same rule.
+    let warm = chat.take_live_composer().unwrap();
+    let mut chat = prepare(session).open_with_composer(warm);
     reply
         .send(Ok(vec![PromptHistoryEntry {
             id: 1,

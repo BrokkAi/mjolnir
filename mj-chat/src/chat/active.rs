@@ -623,7 +623,11 @@ impl ActiveChat {
             state.adopt_live_composer(composer);
         }
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
-        state.request_session_history();
+        // See `adopt_live_composer`: a composer a warm chat handed over
+        // carries its history or its in-flight read.
+        if !state.session_history_requested() {
+            state.request_session_history();
+        }
         state.dispatch_composer_requests(
             || std::future::ready(Ok(session.clone())),
             persistence.as_ref(),
