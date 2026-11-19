@@ -85,10 +85,13 @@ class Server:
         threading.Thread(target=self._sample, daemon=True).start()
 
     def _cgroup_dir(self):
+        """The server's own scope cgroup, or None until systemd-run has moved the process into it
+        (an earlier read would see the driver's cgroup and its unrelated counters)."""
         try:
-            return "/sys/fs/cgroup" + open(f"/proc/{self.proc.pid}/cgroup").read().split("::", 1)[1].strip()
+            path = open(f"/proc/{self.proc.pid}/cgroup").read().split("::", 1)[1].strip()
         except (OSError, IndexError):
             return None
+        return "/sys/fs/cgroup" + path if path.endswith(f"/{self.unit}.scope") else None
 
     def _sample(self):
         while self.sampling and self.proc.poll() is None:
@@ -169,12 +172,24 @@ class Server:
 
 
     def stop(self):
+        # Teardown is bounded (each wait is STOP_SECONDS) and must finish: defer SIGTERM/SIGINT
+        # until the scope is proven gone, then honor them.
+        import signal
+        pending = []
+        handlers = {sig: signal.signal(sig, lambda signum, _f: pending.append(signum))
+                    for sig in (signal.SIGTERM, signal.SIGINT)}
         try:
-            return self._stop()
+            rc = self._stop()
         except TeardownUnconfirmed:
             raise
         except BaseException as e:  # any failure before the proof leaves the tree unaccounted for
             raise TeardownUnconfirmed(f"{self.unit}.scope: teardown failed before confirmation: {e!r}") from e
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
+        if pending:  # the tree is proven gone; now honor the deferred signal
+            sys.exit(128 + pending[0])
+        return rc
 
     def _stop(self):
         try:
