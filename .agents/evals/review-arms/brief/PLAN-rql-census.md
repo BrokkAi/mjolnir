@@ -64,7 +64,7 @@ It reports:
 - Each added step's semantics are written down before any answer is generated: which constructs it crosses and to what depth.
 - Queries must parse against the frozen grammar, with no free text.
 
-**Answer engine.** It sees the post-change tree of the introducing commit only: no diff, no `.git`, no network. Its model is Claude Opus/high on claude7, for both classification and value-flow hops. The gold set's second-family enumerator is Sol/high. Memorized fixes are a second route to prescience; the decisive-versus-other recall check covers that too.
+**Answer engine.** It sees the post-change tree of the introducing commit only: no diff, no `.git`, no network. Its model is Claude Opus/high on the Claude profiles the coordinator allots, for both classification and value-flow hops. The gold set's second-family enumerator is Sol/high. Memorized fixes are a second route to prescience; the decisive-versus-other recall check covers that too.
 - **Candidates:** Bifrost ∪ rust-analyzer ∪ identifier grep (for fields: `.name`, and `name:` in literals and patterns). Each row is tagged with its sources, which gives today's Bifrost recall against the union for free.
 - **Classification:** a model classifies one candidate site at a time, from a few lines of context, with no diff and no other candidates. It copies value expressions verbatim, and a mechanical check confirms each is on that line. No paraphrase.
 - **Value flow:** traced as repeated single hops (assignment, argument to parameter, return). Each hop draws candidates mechanically, so it can be checked hop by hop.
@@ -172,7 +172,7 @@ Also reported:
   - the simulator and the gold set.
 - **Test:** about 7 times the pilot for 12 repos.
 - **Indexing:** Bifrost and rust-analyzer compute for each bug's introducing commit, reusing incremental indexes within a repo. Every Bifrost or rust-analyzer run in this study, including the answer engine's candidate generation at each introducing revision, runs only on EC2 hosts, never the user's workstation. Each runs in its own systemd scope with a MemoryMax cap and MemorySwapMax=0, as `measure_index.py` does, and records its whole-tree peak. A cap hit is a recorded failure for that revision. A safe measurement at the two pinned commits doesn't make older revisions safe. Clones come from each repo's origin at pinned commits.
-- **Quota:** Sol and Terra on codex, Opus on claude7. Keep every profile above 25% of its week, checked before each launch, and don't use codex4.
+- **Quota:** Sol and Terra on codex; Opus on the Claude profiles the coordinator allots (load-balanced by `mj new --model opus`; claude7's week ran out on 2026-11-19, and the methodology needs only the Opus family at high effort). Keep every profile used above 25% of its week, checked before each launch, and don't use codex4.
 
 ## Work and ownership
 

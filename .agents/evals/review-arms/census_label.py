@@ -729,10 +729,20 @@ def run_turn(sid, prompt, phase, title):
     # An accepted turn runs until it ends; there is no overall limit. Each wait answers
     # "timeout" after 20 minutes only so the runner can wait again, never to abandon the turn.
     while True:
-        waited = driver.mj("wait", "--session", sid, "--turn", response["turn_id"],
-                           "--return-on-input", "--timeout", 1200, timeout=1230)
-        if waited.get("outcome") != "timeout":
-            break
+        # mj wait exits nonzero with a structured "timeout" outcome when its poll expires, and
+        # driver.mj raises on any nonzero exit, so decode the JSON here before deciding.
+        result = subprocess.run([str(driver.MJX), "wait", "--session", sid, "--turn", str(response["turn_id"]),
+                                 "--return-on-input", "--timeout", "1200", "--json"],
+                                capture_output=True, timeout=1230)
+        try:
+            waited = json.loads(result.stdout)
+        except ValueError:
+            raise RuntimeError(f"{title}: mj wait: {result.stderr.decode(errors='replace')[-1500:]}") from None
+        if waited.get("outcome") == "timeout":
+            continue
+        if result.returncode:
+            raise RuntimeError(f"{title}: mj wait: {waited}")
+        break
     requested_turn = waited.get("requested_turn_id")
     if requested_turn is None:
         requested_turn = waited.get("turn_id")
