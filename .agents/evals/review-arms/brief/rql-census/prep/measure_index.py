@@ -439,11 +439,13 @@ def main():
     # One driver per host: a second invocation would reap the first's live scopes and race on
     # its worktrees. The lock is held for the process lifetime.
     import fcntl
-    lock = open(pathlib.Path.home() / ".rql-index-measure.lock", "w")
+    # Host-wide, not per HOME or account: one batch per host keeps one 48G scope per host. A
+    # lock file owned by another account can't be opened for writing, which also refuses.
     try:
+        lock = open("/var/tmp/rql-index-measure.lock", "a")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        sys.exit("another measure_index.py is running on this host")
+    except (BlockingIOError, PermissionError) as e:
+        sys.exit(f"another measure_index.py holds this host ({e!r})")
     reap_leftover_scopes()
     # Each line is `owner__repo <pinned sha> <origin url>`: the repo is cloned from its origin
     # and measured at that commit, so a reused record always matches its revision.
@@ -462,6 +464,13 @@ def main():
     with open(binary, "rb") as f:
         binary_sha = hashlib.file_digest(f, "sha256").hexdigest()
     # A record is reusable only for the same repo, pinned revision and Bifrost binary.
+    # Measurement conditions beyond revision, binary and cap: the instance type, CPU count and
+    # any Bifrost thread setting. A record measured under different conditions isn't reused.
+    environment = {
+        "instance_type": open("/sys/devices/virtual/dmi/id/product_name").read().strip(),
+        "nproc": os.cpu_count(),
+        "bifrost_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("BIFROST_")},
+    }
     latest = {}  # the latest record per repo is the one readers use; resume follows it too
     if results.exists():
         for l in open(results):
@@ -470,6 +479,7 @@ def main():
     done = {repo for repo, r in latest.items()
             if repo in pins and not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
             and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
+            and r.get("environment") == environment
             and r.get("head") == pins[repo][0]}
     for repo in repos:
         if cancelled():
@@ -482,7 +492,11 @@ def main():
             sha, url = pins[repo]
             url = url.replace("git@github.com:", "https://github.com/")
             if not clone.exists():
-                git("clone", "-q", "--no-checkout", url, str(clone))
+                # Clone beside it, then rename: an interrupted clone never looks reusable.
+                partial = clone.with_name(clone.name + ".partial")
+                shutil.rmtree(partial, ignore_errors=True)
+                git("clone", "-q", "--no-checkout", url, str(partial))
+                partial.rename(clone)
             try:
                 head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
             except subprocess.CalledProcessError:
@@ -499,6 +513,7 @@ def main():
             git("worktree", "prune", cwd=clone)
             git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
             rec.update(head=head, base=base, binary_sha256=binary_sha, memory_max=MEMORY_MAX,
+                       environment=environment,
                        rust_files=len([p for p in subprocess.run(
                            ["git", "-C", str(wt), "ls-files", "-z", "*.rs"], check=True,
                            capture_output=True).stdout.split(b"\0") if p]))
@@ -531,6 +546,20 @@ def main():
             # A server tree may still be alive: stop the batch here, leaving its worktree and
             # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
             sys.exit(f"{repo}: server scope not confirmed stopped; batch halted")
+
+    usable = [r for r in latest_records(results).values() if r["repo"] in pins
+              and not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
+    if not usable:
+        sys.exit("no repository produced a usable cold/warm pair; see the per-repo records")
+
+
+def latest_records(results):
+    latest = {}
+    if results.exists():
+        for l in open(results):
+            r = json.loads(l)
+            latest[r["repo"]] = r
+    return latest
 
 
 if __name__ == "__main__":
