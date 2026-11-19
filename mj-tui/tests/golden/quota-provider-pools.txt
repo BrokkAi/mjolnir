@@ -1056,7 +1056,7 @@ background runs (x..end, colour):
 background runs (x..end, colour):
 0: 0..132 Reset BOLD
 1: 0..10 Reset BOLD, 10..131 Reset NONE, 131..132 Reset BOLD
-2: 0..1 Reset BOLD, 1..4 Reset BOLD | REVERSED, 4..17 Reset REVERSED, 17..125 Reset NONE, 125..132 Reset BOLD
+2: 0..1 Reset BOLD, 1..4 Reset BOLD | REVERSED, 4..125 Reset NONE, 125..132 Reset BOLD
 3: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
 4: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
 5: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
@@ -1070,17 +1070,17 @@ background runs (x..end, colour):
 13: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
 14: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
 15: 0..7 Reset BOLD, 7..131 Reset NONE, 131..132 Reset BOLD
-16: 0..1 Reset BOLD, 1..9 Reset NONE, 9..26 Reset REVERSED, 26..123 Reset NONE, 123..132 Reset BOLD
-17: 0..1 Reset BOLD, 1..7 Reset NONE, 7..65 Reset REVERSED, 65..123 Reset NONE, 123..132 Reset BOLD
+16: 0..1 Reset BOLD, 1..123 Reset NONE, 123..132 Reset BOLD
+17: 0..1 Reset BOLD, 1..123 Reset NONE, 123..132 Reset BOLD
 18: 0..7 Reset BOLD, 7..131 Reset NONE, 131..132 Reset BOLD
-19: 0..1 Reset BOLD, 1..11 Reset NONE, 11..112 Reset REVERSED, 112..123 Reset NONE, 123..132 Reset BOLD
+19: 0..1 Reset BOLD, 1..123 Reset NONE, 123..132 Reset BOLD
 20: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
-21: 0..1 Reset BOLD, 1..17 Reset NONE, 17..68 Reset REVERSED, 68..123 Reset NONE, 123..132 Reset BOLD
+21: 0..1 Reset BOLD, 1..123 Reset NONE, 123..132 Reset BOLD
 22: 0..4 Reset BOLD, 4..131 Reset NONE, 131..132 Reset BOLD
-23: 0..1 Reset BOLD, 1..11 Reset NONE, 11..119 Reset REVERSED, 119..123 Reset NONE, 123..132 Reset BOLD
+23: 0..1 Reset BOLD, 1..123 Reset NONE, 123..132 Reset BOLD
 24: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
 25: 0..9 Reset BOLD, 9..131 Reset NONE, 131..132 Reset BOLD
-26: 0..1 Reset BOLD, 1..10 Reset NONE, 10..56 Reset REVERSED, 56..126 Reset NONE, 126..132 Reset BOLD
+26: 0..1 Reset BOLD, 1..126 Reset NONE, 126..132 Reset BOLD
 27: 0..1 Reset BOLD, 1..131 Reset NONE, 131..132 Reset BOLD
 28: 0..9 Reset BOLD, 9..131 Reset NONE, 131..132 Reset BOLD
 29: 0..132 Reset BOLD
@@ -1096,7 +1096,7 @@ background runs (x..end, colour):
 1: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
 2: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
 3: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
-4: 0..1 Reset BOLD, 1..7 Reset BOLD | REVERSED, 7..14 Reset REVERSED, 14..21 Reset NONE, 21..30 Reset BOLD
+4: 0..1 Reset BOLD, 1..7 Reset BOLD | REVERSED, 7..21 Reset NONE, 21..30 Reset BOLD
 5: 0..30 Reset BOLD
 === small balance and long profile at narrow width (60x40) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
@@ -1293,7 +1293,7 @@ background runs (x..end, colour):
 │ANTHROPIC                                                                                         ▐
 │>-                                                                                             ?%*▐
 │  1 profile not reporting                                                                         ▐
-│  claude2 reset due, awaiting reading                                                             ▐
+│  claude2 reset due, awaiting reading ⟲1 banked                                                   ▐
 │          12:26  16:26  20:26  00:26  04:26  08:26                                                ▐
 │  claude2 ··········································  week reset due, awaiting reading · ⟲1 banked▐
 │XAI                                                                                               ▐
@@ -1482,7 +1482,7 @@ background runs (x..end, colour):
 background runs (x..end, colour):
 0: 0..30 Reset BOLD
 1: 0..7 Reset BOLD, 7..29 Reset NONE, 29..30 Reset BOLD
-2: 0..1 Reset BOLD, 1..7 Reset BOLD | REVERSED, 7..16 Reset REVERSED, 16..21 Reset NONE, 21..30 Reset BOLD
+2: 0..1 Reset BOLD, 1..7 Reset BOLD | REVERSED, 7..21 Reset NONE, 21..30 Reset BOLD
 3: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
 4: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
 5: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD

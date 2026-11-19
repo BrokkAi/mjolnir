@@ -494,6 +494,16 @@ fn clock_label(epoch: i64, format: &str) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// The line naming a profile whose reset passed without a new reading. Its
+/// banked resets are a separate balance and stay known.
+fn overdue_entry(member: &PoolMember, ascii: bool) -> String {
+    let mut entry = format!("{} reset due, awaiting reading", member.id);
+    if let Some(count) = member.banked.filter(|&count| count > 0) {
+        entry.push_str(&format!(" {}{count} banked", if ascii { "B" } else { "⟲" }));
+    }
+    entry
+}
+
 fn pool_bar(
     pool: &QuotaPool,
     width: usize,
@@ -507,7 +517,7 @@ fn pool_bar(
             .members
             .iter()
             .filter(|member| member.awaiting_reading)
-            .map(|member| format!("{} reset due, awaiting reading", member.id))
+            .map(|member| overdue_entry(member, theme::ascii()))
             .collect();
         return (vec![Span::raw(" ".repeat(width))], overdue);
     }
@@ -532,17 +542,25 @@ fn pool_bar(
     } else {
         " "
     };
-    let mut spans = vec![Span::styled(
-        fill_glyph.repeat(widths[0]),
+    // A full block draws in the foreground colour, so in Unicode glyph mode
+    // the fill is the block itself; reversing it would paint the background
+    // over the whole cell. ASCII `#` keeps reverse video to stay solid.
+    let fill_style = if ascii {
         Style::default()
             .fg(readable_on(accent))
             .bg(accent)
-            .add_modifier(if use_glyphs {
-                Modifier::REVERSED
-            } else {
-                Modifier::empty()
-            }),
-    )];
+            .add_modifier(Modifier::REVERSED)
+    } else if use_glyphs {
+        let colour = if theme::current() == theme::UiTheme::Mono {
+            theme::palette().text
+        } else {
+            accent
+        };
+        Style::default().fg(colour).bg(theme::palette().background)
+    } else {
+        Style::default().fg(readable_on(accent)).bg(accent)
+    };
+    let mut spans = vec![Span::styled(fill_glyph.repeat(widths[0]), fill_style)];
     let mut fallback = Vec::new();
     let mut alternate = false;
     for ((member, capacity), cells) in refills.into_iter().zip(widths.into_iter().skip(1)) {
@@ -621,7 +639,7 @@ fn pool_bar(
     // A profile whose reset passed without a new reading adds nothing to the
     // bar; name it so the pane says which profile is waiting.
     for member in pool.members.iter().filter(|member| member.awaiting_reading) {
-        fallback.push(format!("{} reset due, awaiting reading", member.id));
+        fallback.push(overdue_entry(member, ascii));
     }
     // A full profile has no refill chunk, but its banked resets still matter.
     for member in pool
