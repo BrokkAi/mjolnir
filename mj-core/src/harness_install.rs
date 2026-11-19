@@ -1254,8 +1254,12 @@ async fn download_verified_inner(
         .get(url)
         .send()
         .await
+        // reqwest's errors carry the final URL after redirects, which can be a
+        // signed URL with a token in its query; `url` is our validated one.
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("request artifact {url}"))?
         .error_for_status()
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("download artifact {url}"))?;
     if response
         .content_length()
@@ -1273,6 +1277,7 @@ async fn download_verified_inner(
     while let Some(chunk) = response
         .chunk()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("read artifact {url}"))?
     {
         received = received.saturating_add(chunk.len() as u64);
@@ -1542,12 +1547,13 @@ fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
 }
 
 fn node_distribution_url(environment: &BTreeMap<String, String>, file: &str) -> Result<String> {
+    // The first setting present wins, even when empty: an explicitly empty
+    // NODEJS_ORG_MIRROR selects the official distribution over an inherited
+    // NVM_NODEJS_ORG_MIRROR.
     let configured = ["NODEJS_ORG_MIRROR", "NVM_NODEJS_ORG_MIRROR"]
         .into_iter()
-        .find_map(|name| {
-            let value = environment.get(name)?;
-            (!value.is_empty()).then_some((name, value.as_str()))
-        });
+        .find_map(|name| Some((name, environment.get(name)?.as_str())))
+        .filter(|(_, value)| !value.is_empty());
     let (setting, base) = configured.unwrap_or(("the default mirror", DEFAULT_NODE_DIST_URL));
     // Errors name the setting and the rule, never any part of the URL: a
     // rejected value can hold credentials anywhere (a missing "https://" turns
@@ -2685,6 +2691,19 @@ mod tests {
             format!("https://mirror.example/node/v{NODE_VERSION}/{file}")
         );
 
+        // An explicitly empty NODEJS_ORG_MIRROR clears the inherited NVM one.
+        let environment = BTreeMap::from([
+            ("NODEJS_ORG_MIRROR".into(), String::new()),
+            (
+                "NVM_NODEJS_ORG_MIRROR".into(),
+                "https://nvm.example/node".into(),
+            ),
+        ]);
+        assert_eq!(
+            node_distribution_url(&environment, &file).unwrap(),
+            format!("https://nodejs.org/dist/v{NODE_VERSION}/{file}")
+        );
+
         let environment = BTreeMap::from([
             (
                 "NVM_NODEJS_ORG_MIRROR".into(),
@@ -2709,8 +2728,9 @@ mod tests {
             "user:secret@mirror.example/node",
         ] {
             let environment = BTreeMap::from([("NODEJS_ORG_MIRROR".into(), mirror.into())]);
-            let error = node_distribution_url(&environment, &file)
-                .expect_err(&format!("{mirror:?} was accepted"));
+            let Err(error) = node_distribution_url(&environment, &file) else {
+                panic!("{mirror:?} was accepted");
+            };
             // The daemon logs this error, so it must not echo the secret.
             let message = format!("{error:#}");
             assert!(
