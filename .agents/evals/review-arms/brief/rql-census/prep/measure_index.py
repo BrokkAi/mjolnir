@@ -58,6 +58,17 @@ class Server:
              "-p", f"MemoryMax={MEMORY_MAX}", "-p", "MemorySwapMax=0",
              binary, "--root", str(root), "--mcp", "extended|workspace"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env, cwd=root)
+        try:
+            self._start()
+        except BaseException:
+            # Setup failed (or SIGTERM arrived) after the scope launched: tear it down before
+            # propagating, so the batch never advances past a live scope.
+            self.sample = getattr(self, "sample", {})
+            self.cgroup = getattr(self, "cgroup", None)
+            self.stop()
+            raise
+
+    def _start(self):
         self.seq = 0
         # A reader thread owns stdout, so a deadline can bound each wait even when several
         # replies arrive in one read (select on a buffered pipe would miss buffered lines).
@@ -106,16 +117,17 @@ class Server:
             self.lines.put(line)
         self.lines.put(None)  # EOF
 
-    def request(self, method, params):
+    def request(self, method, params, deadline=None):
         self.seq += 1
         self.proc.stdin.write((json.dumps(dict(jsonrpc="2.0", id=self.seq, method=method, params=params)) + "\n").encode())
         self.proc.stdin.flush()
-        deadline = time.monotonic() + REQUEST_SECONDS
+        deadline = min(time.monotonic() + REQUEST_SECONDS, deadline or float("inf"))
         while True:
             try:
                 line = self.lines.get(timeout=max(0, deadline - time.monotonic()))
             except queue.Empty:
-                raise TimeoutError(f"no reply to {method} within {REQUEST_SECONDS} s")
+                raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
+                                   f"readiness {READINESS_SECONDS} s)")
             if not line:
                 raise RuntimeError(f"server exited with {self.proc.poll()}")
             msg = json.loads(line)
@@ -135,7 +147,7 @@ class Server:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"workspace not ready within {READINESS_SECONDS} s")
             polls += 1
-            msg = self.request("tools/call", dict(name="get_active_workspace", arguments={}))
+            msg = self.request("tools/call", dict(name="get_active_workspace", arguments={}), deadline=deadline)
             err = msg.get("error")
             if err:
                 incomplete = (err.get("data") or {}).get("io.bifrost/workspace-incomplete") or {}
@@ -365,7 +377,12 @@ def main():
                 url = url.replace("git@github.com:", "https://github.com/")
                 if not clone.exists():
                     git("clone", "-q", "--no-checkout", url, str(clone))
-                head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
+                try:
+                    head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
+                except subprocess.CalledProcessError:
+                    # A revised pin can name a commit newer than this clone: fetch it, then retry.
+                    git("fetch", "-q", "origin", sha, cwd=clone)
+                    head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
             else:
                 if not clone.exists():
                     git("clone", "-q", "--no-hardlinks", str(SRC / repo), str(clone))
