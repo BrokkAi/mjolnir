@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 pub(super) const HARNESS_READINESS_TIMEOUT: Duration =
-    crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
+    mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 #[derive(Debug, Clone)]
 pub struct HarnessStartupFailure {
@@ -54,7 +54,7 @@ impl HarnessStartupWatch {
             operational.and_then(|state| state.harness_preparation.as_ref())
         {
             return Some(
-                crate::controller::HarnessPreparationFailure {
+                mj_session_types::HarnessPreparationFailure {
                     step: step.clone(),
                     error: error.clone(),
                 }

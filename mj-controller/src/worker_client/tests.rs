@@ -149,9 +149,10 @@ fn global_log_in_isolated_child(test: &str) -> Option<CapturedLog> {
     const CHILD: &str = "MJ_WORKER_CLIENT_GLOBAL_LOG_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().expect("temp dir");
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(module_path!(), test),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            test,
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();
@@ -463,12 +464,10 @@ fn a_missing_worker_socket_retries_on_the_same_shard() {
     const CHILD: &str = "MJ_WORKER_SOCKET_SHARD_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().expect("temp dir");
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(
-                module_path!(),
-                "a_missing_worker_socket_retries_on_the_same_shard",
-            ),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "a_missing_worker_socket_retries_on_the_same_shard",
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();
@@ -889,7 +888,7 @@ for line in sys.stdin:
 
     for token in ["initial-session-pat", "rotated-session-pat"] {
         std::fs::write(&token_path, token).unwrap();
-        let selected = crate::controller::github_token_for_session(
+        let selected = crate::github_app::github_token_for_session(
             target.session_id.clone(),
             target.github.clone(),
         )
@@ -5565,12 +5564,10 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     const CHILD: &str = "MJ_TEST_CREDENTIAL_ACTOR_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(
-                module_path!(),
-                "a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns",
-            ),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns",
+        ))
         .env(CHILD, "1")
         .env("MJ_INSTANCE", "credential-lease-wake")
         .isolated_store(directory.path())
@@ -5578,7 +5575,7 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    crate::database::save_session(&crate::controller::test_support::checkpoint_test_session(
+    crate::database::save_session(&crate::database::test_fixtures::checkpoint_test_session(
         SESSION_ID,
     ))
     .unwrap();

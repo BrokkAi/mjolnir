@@ -1,8 +1,8 @@
 pub(crate) use super::stand_in::*;
 use super::*;
-#[cfg(unix)]
-use crate::controller::test_support::{IsolatedTest, test_name};
 use crate::targets::{CommandPlan, TargetRecoveryPlan};
+#[cfg(unix)]
+use crate::test_isolation::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 
 /// I1-12: a relay's final rejection reaches the user as the relay's reason
@@ -339,7 +339,7 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
     commands_tx
         .send(ActorCommand::Lease {
             returns: _releases_tx.clone(),
-            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
@@ -1142,7 +1142,7 @@ fn leased_actor_defers_replacement_and_uses_latest_queued_target() {
     let mut lifecycle = ActorLifecycle::default();
     lifecycle.activate_lease(
         7,
-        crate::controller::test_support::relay_admission("session-1"),
+        crate::database::test_fixtures::relay_admission("session-1"),
     );
 
     assert_eq!(
@@ -1172,7 +1172,7 @@ fn leased_actor_defers_removal_until_its_connection_returns() {
     let mut lifecycle = ActorLifecycle::default();
     lifecycle.activate_lease(
         11,
-        crate::controller::test_support::relay_admission("session-1"),
+        crate::database::test_fixtures::relay_admission("session-1"),
     );
 
     assert_eq!(
@@ -1195,7 +1195,7 @@ fn queued_change_back_to_current_target_cancels_retirement() {
     let mut lifecycle = ActorLifecycle::default();
     lifecycle.activate_lease(
         3,
-        crate::controller::test_support::relay_admission("session-1"),
+        crate::database::test_fixtures::relay_admission("session-1"),
     );
 
     assert_eq!(
@@ -1932,7 +1932,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
 
     // A plan queued while Closing must read Destroying only after cleanup
     // releases ownership, rather than use the actor's old observation.
-    let guard = crate::controller::test_support::worker_test_permit(&record.id, "test destruction")
+    let guard = crate::database::test_fixtures::worker_test_permit(&record.id, "test destruction")
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2345,7 +2345,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     let mut connection = None;
     assert!(
         submit_actor_command(
-            &crate::controller::test_support::worker_test_gate(),
+            &crate::database::test_fixtures::worker_test_gate(),
             &target,
             &mut connection,
             &crate::mailbox_outbox::mailbox_command_id(&before.key),
@@ -2356,7 +2356,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     );
     assert_eq!(
         submit_actor_command(
-            &crate::controller::test_support::worker_test_gate(),
+            &crate::database::test_fixtures::worker_test_gate(),
             &target,
             &mut connection,
             &crate::mailbox_outbox::mailbox_command_id(&after.key),
@@ -2492,7 +2492,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         }
         .into(),
     });
-    let owner = crate::controller::test_support::worker_test_permit(
+    let owner = crate::database::test_fixtures::worker_test_permit(
         LEASED_RELAY_SESSION,
         "test failed replacement",
     )
@@ -2514,7 +2514,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         })
         .unwrap();
     let mut connection = None;
-    let gate = crate::controller::test_support::worker_test_gate();
+    let gate = crate::database::test_fixtures::worker_test_gate();
     // Hard-won: 583e6ea48: an actor reported ordinary unpark startup as a vanished running worker.
     std::fs::write(
         relay_root.join("worker-unreachable"),
@@ -2565,7 +2565,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         drop(copy);
     }
     sync_actor_connection(
-        &crate::controller::test_support::worker_test_gate(),
+        &crate::database::test_fixtures::worker_test_gate(),
         &target,
         &mut connection,
     )
@@ -2624,7 +2624,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
     handle.sync_now().await.unwrap();
     assert!(
         crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
-            &crate::controller::test_support::session_admission(handle.session_id()),
+            &crate::database::test_fixtures::session_admission(handle.session_id()),
             &handle,
             mj_core::config::HarnessKind::Claude,
         )
@@ -2635,7 +2635,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
     );
     std::fs::remove_file(shell_path).unwrap();
     let mut lease = crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
-        &crate::controller::test_support::session_admission(handle.session_id()),
+        &crate::database::test_fixtures::session_admission(handle.session_id()),
         &handle,
         mj_core::config::HarnessKind::Claude,
     )
@@ -2673,7 +2673,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
     handle.sync_now().await.unwrap();
     assert!(
         crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
-            &crate::controller::test_support::session_admission(handle.session_id()),
+            &crate::database::test_fixtures::session_admission(handle.session_id()),
             &handle,
             mj_core::config::HarnessKind::Claude,
         )
@@ -2717,7 +2717,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     let mut connection = None;
     let first = sync_actor_connection(
-        &crate::controller::test_support::worker_test_gate(),
+        &crate::database::test_fixtures::worker_test_gate(),
         &target,
         &mut connection,
     )
@@ -2739,7 +2739,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
     crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     sync_actor_connection(
-        &crate::controller::test_support::worker_test_gate(),
+        &crate::database::test_fixtures::worker_test_gate(),
         &target,
         &mut connection,
     )
@@ -2749,7 +2749,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
     crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     sync_actor_connection(
-        &crate::controller::test_support::worker_test_gate(),
+        &crate::database::test_fixtures::worker_test_gate(),
         &target,
         &mut connection,
     )
@@ -2801,7 +2801,7 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
     let target = leased_relay_target(relay_root.path());
     let mut connection = None;
     let first = sync_actor_connection(
-        &crate::controller::test_support::worker_test_gate(),
+        &crate::database::test_fixtures::worker_test_gate(),
         &target,
         &mut connection,
     )
@@ -2819,7 +2819,7 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
     );
 
     sync_actor_connection(
-        &crate::controller::test_support::worker_test_gate(),
+        &crate::database::test_fixtures::worker_test_gate(),
         &target,
         &mut connection,
     )
@@ -2867,7 +2867,7 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
     commands_tx
         .send(ActorCommand::Lease {
             returns: releases_tx.clone(),
-            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
@@ -2911,7 +2911,7 @@ async fn released_connection_can_be_leased_again_immediately() {
         .commands
         .try_send(ActorCommand::Lease {
             returns: actor.releases.clone(),
-            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
@@ -2935,7 +2935,7 @@ async fn released_connection_can_be_leased_again_immediately() {
             .commands
             .try_send(ActorCommand::Lease {
                 returns: actor.releases.clone(),
-                admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+                admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
                 reply,
                 idle_harness: None,
             })
@@ -2993,7 +2993,7 @@ async fn cancelled_lease_request_is_skipped_before_sync() {
         .commands
         .try_send(ActorCommand::Lease {
             returns: actor.releases.clone(),
-            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
@@ -3016,7 +3016,7 @@ async fn cancelled_lease_request_is_skipped_before_sync() {
         .commands
         .send(ActorCommand::Lease {
             returns: actor.releases.clone(),
-            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             idle_harness: None,
             reply,
         })
@@ -3841,7 +3841,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         target: recovery_source_target(),
         desired_build: "new-build".into(),
     };
-    crate::controller::test_support::worker_test_run_blocking(
+    crate::database::test_fixtures::worker_test_run_blocking(
         &record.id,
         "test intent",
         &crate::targets::ProcessExecutor,
@@ -3854,7 +3854,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         Some(crate::database::WorkerRestartPhase::AwaitingReadiness),
     ] {
         if let Some(phase) = phase {
-            crate::controller::test_support::worker_test_run_blocking(
+            crate::database::test_fixtures::worker_test_run_blocking(
                 &record.id,
                 "test intent",
                 &crate::targets::ProcessExecutor,
@@ -3873,7 +3873,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         assert_eq!(*executor.commands.lock().unwrap(), vec!["probe"]);
     }
     // An old attempt cannot erase a newer replacement's ownership.
-    crate::controller::test_support::worker_test_run_blocking(
+    crate::database::test_fixtures::worker_test_run_blocking(
         &record.id,
         "test intent",
         &crate::targets::ProcessExecutor,
@@ -3898,7 +3898,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         worker_root: PathBuf::from("/another-worker"),
     };
     assert!(
-        crate::controller::test_support::worker_test_run_blocking(
+        crate::database::test_fixtures::worker_test_run_blocking(
             &record.id,
             "test intent",
             &crate::targets::ProcessExecutor,
@@ -3906,7 +3906,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         )
         .is_err()
     );
-    crate::controller::test_support::worker_test_run_blocking(
+    crate::database::test_fixtures::worker_test_run_blocking(
         &record.id,
         "test intent",
         &crate::targets::ProcessExecutor,
@@ -3923,7 +3923,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     );
     // Conditional claim cannot overwrite this boot, even on the same target.
     assert!(
-        crate::controller::test_support::worker_test_run_blocking(
+        crate::database::test_fixtures::worker_test_run_blocking(
             &record.id,
             "test intent",
             &crate::targets::ProcessExecutor,
@@ -3937,7 +3937,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     );
     // A first hello without native readiness cannot complete the handoff.
     let mut snapshot = view_at_ordinal(0).snapshot.unwrap();
-    let observer = crate::controller::test_support::worker_test_observation(&record.id)
+    let observer = crate::database::test_fixtures::worker_test_observation(&record.id)
         .unwrap()
         .unwrap();
     crate::worker_lifecycle::observe_worker_restart_outcome(
@@ -3954,13 +3954,13 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     drop(observer);
     snapshot.operational.checkpoint_only = true;
     let checkpoint_owner =
-        crate::controller::test_support::worker_test_permit(&record.id, "checkpoint")
+        crate::database::test_fixtures::worker_test_permit(&record.id, "checkpoint")
             .unwrap()
             .unwrap();
     // Even a nested observation cannot acquire an active owner's swap.
     checkpoint_owner.scope_blocking(|| {
         assert!(
-            crate::controller::test_support::worker_test_observation(&record.id)
+            crate::database::test_fixtures::worker_test_observation(&record.id)
                 .unwrap()
                 .is_none()
         )
@@ -3971,7 +3971,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
             .is_some()
     );
     drop(checkpoint_owner);
-    let observer = crate::controller::test_support::worker_test_observation(&record.id)
+    let observer = crate::database::test_fixtures::worker_test_observation(&record.id)
         .unwrap()
         .unwrap();
     crate::worker_lifecycle::observe_worker_restart_outcome(
@@ -4231,7 +4231,9 @@ async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() 
     profile.models = vec!["hidden".into()];
     // Disabling a profile for new sessions must not remove its live-session policy.
     profile.enabled = false;
-    manager.control.update_model_policies(&controller);
+    manager
+        .control
+        .update_model_policies(&controller.config, &controller.state);
     // A sync already under way may still publish what it saw before the
     // edit; the edit must reach the next views, not necessarily the first.
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -4711,7 +4713,7 @@ async fn lifecycle_lease_stops_delegation_dials_until_control_returns() {
         .commands
         .send(ActorCommand::Lease {
             returns: actor.releases.clone(),
-            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             idle_harness: None,
             reply,
         })

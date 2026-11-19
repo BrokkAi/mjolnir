@@ -113,6 +113,7 @@ pub mod stand_in;
 pub(crate) mod tests;
 
 mod model_policy;
+pub mod move_ownership;
 use model_policy::SessionModelPolicy;
 
 mod pollable;

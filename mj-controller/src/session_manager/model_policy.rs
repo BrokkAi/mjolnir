@@ -88,9 +88,12 @@ impl SessionModelPolicy {
 }
 
 impl SessionManagerControl {
-    pub fn update_model_policies(&self, controller: &crate::controller::Controller) {
-        let policies = controller
-            .state
+    pub fn update_model_policies(
+        &self,
+        config: &mj_core::config::Config,
+        state: &mj_core::state::State,
+    ) {
+        let policies = state
             .sessions
             .iter()
             .map(|(id, session)| {
@@ -98,8 +101,7 @@ impl SessionManagerControl {
                     id.clone(),
                     SessionModelPolicy {
                         profile: session.last_profile.clone(),
-                        models: controller
-                            .config
+                        models: config
                             .profiles
                             .get(&session.last_profile)
                             .map(|profile| profile.models.clone())

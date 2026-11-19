@@ -30,7 +30,6 @@ use mj_core::remote_git::is_github_https_url;
 
 use super::backend::{backend_locator, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
-use super::github_app::{GithubAppTokenProvider, github_repositories};
 use super::provisioning::{
     ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
@@ -52,6 +51,7 @@ use super::{
     Controller, SessionResumeOptions, execute_checked, now, selected_host_container_size,
     target_profile_home,
 };
+use crate::github_app::{GithubAppTokenProvider, github_repositories};
 
 pub use mj_core::state::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,

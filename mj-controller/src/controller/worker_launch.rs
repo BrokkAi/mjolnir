@@ -947,3 +947,16 @@ impl Controller {
         }))
     }
 }
+
+/// Plans recovery from the configuration and records as they are stored now.
+pub struct DurableRecoveryPlanner;
+
+impl crate::session_manager::RecoveryPlanner for DurableRecoveryPlanner {
+    fn replan_after_move(
+        &self,
+        session_id: &str,
+        operation: &mj_core::state::MoveOperation,
+    ) -> Result<WorkerRecoveryPlan> {
+        Controller::load()?.worker_recovery_plan(session_id, Some(operation))
+    }
+}

@@ -14,15 +14,16 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use mj_core::config::{
-    GithubAppConfig, GithubConfig, GithubPermissionLevel, GithubPermissionSet, ProjectBundle,
-    ProjectRepository, valid_github_owner_login,
+    Config, GithubAppConfig, GithubConfig, GithubPermissionLevel, GithubPermissionSet,
+    ProjectBundle, ProjectRepository, valid_github_owner_login,
 };
 use mj_core::remote_git::{github_owner_repo, resolve_repository};
 
-use super::worker_binary::configured_session_github_token;
-pub use super::worker_binary::install_configured_session_github_token;
-use super::{Controller, controller_github_token};
+use crate::github_credential::controller_github_token;
 use crate::targets::{CommandExecutor, ProcessExecutor};
+use mj_core::state::State;
+use mj_worker_staging::worker_binary::configured_session_github_token;
+pub use mj_worker_staging::worker_binary::install_configured_session_github_token;
 
 const TOKEN_REFRESH_THRESHOLD: Duration = Duration::from_secs(10 * 60);
 const JWT_BACKDATE_SECS: i64 = 60;
@@ -696,118 +697,119 @@ impl GithubBundleSelectionError {
     }
 }
 
-impl Controller {
-    /// Reject a new bundle before admitting its session when its repositories
-    /// resolve to more than one App installation.
-    pub async fn validate_github_bundle_installations(
-        &self,
-        bundle_id: &str,
-    ) -> std::result::Result<(), GithubBundleSelectionError> {
-        if self.config.github.session_token_path.is_some() {
-            return Ok(());
-        }
-        let Some(app) = self.config.github.app.as_ref() else {
-            return Ok(());
-        };
-        let bundle = self.config.bundles.get(bundle_id).cloned().ok_or_else(|| {
-            GithubBundleSelectionError::UnknownBundle(format!("unknown bundle {bundle_id:?}"))
-        })?;
-        let provider =
-            GithubAppTokenProvider::shared(app).map_err(GithubBundleSelectionError::Provider)?;
-        let repositories = tokio::task::spawn_blocking(move || {
-            github_repositories(&bundle, None, &ProcessExecutor)
-        })
-        .await
-        .map_err(|error| {
-            GithubBundleSelectionError::Provider(anyhow!(
-                "GitHub repository source task failed: {error}"
-            ))
-        })?
-        .map_err(GithubBundleSelectionError::Provider)?;
-        provider
-            .token_for_owner_repo_pairs(bundle_id, &repositories)
-            .await?;
-        Ok(())
+/// Reject a new bundle before admitting its session when its repositories
+/// resolve to more than one App installation.
+pub async fn validate_bundle_installations(
+    config: &Config,
+    bundle_id: &str,
+) -> std::result::Result<(), GithubBundleSelectionError> {
+    if config.github.session_token_path.is_some() {
+        return Ok(());
     }
-
-    /// Resolve this session's GitHub credential, using the App installation
-    /// selected by its accepted repository bundle.
-    pub async fn github_token_for_session(&self, session_id: &str) -> Result<Option<String>> {
-        if let Some(token) = session_token_override(&self.config.github).await? {
-            return Ok(Some(token));
-        }
-        if self.config.github.app.is_none() {
-            return Ok(controller_github_token().await);
-        }
-        self.github_app_token_for_session(session_id).await
-    }
-
-    /// Repository source preflight only needs a token when the accepted bundle
-    /// contains a GitHub repository. Preserve the legacy path's lazy lookup so
-    /// unrelated resumes do not spawn `gh auth token`.
-    pub(crate) async fn github_token_for_repository_preflight(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>> {
-        let has_github_repository = self
-            .state
-            .sessions
-            .get(session_id)
-            .and_then(|session| session.project_bundle(&self.config))
-            .is_some_and(|bundle| {
-                bundle
-                    .repositories
-                    .iter()
-                    .any(|repository| repository.github.is_some())
-            });
-        if !has_github_repository {
-            return Ok(None);
-        }
-        self.github_token_for_session(session_id).await
-    }
-
-    pub(crate) async fn github_app_token_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>> {
-        let Some(app) = self.config.github.app.as_ref() else {
-            return Ok(None);
-        };
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        let Some(bundle) = session.project_bundle(&self.config).cloned() else {
-            return Ok(None);
-        };
-        let bundle_id = session.bundle_id.clone();
-        let network_sources = session
-            .project
-            .as_ref()
-            .map(|project| project.network_sources.clone());
-        let repositories = tokio::task::spawn_blocking(move || {
-            github_repositories(&bundle, network_sources.as_ref(), &ProcessExecutor)
-        })
-        .await
-        .context("GitHub repository source task failed")??;
-        let provider = GithubAppTokenProvider::shared(app)?;
-        let Some(scope) = provider
-            .token_for_owner_repo_pairs(&bundle_id, &repositories)
+    let Some(app) = config.github.app.as_ref() else {
+        return Ok(());
+    };
+    let bundle = config.bundles.get(bundle_id).cloned().ok_or_else(|| {
+        GithubBundleSelectionError::UnknownBundle(format!("unknown bundle {bundle_id:?}"))
+    })?;
+    let provider =
+        GithubAppTokenProvider::shared(app).map_err(GithubBundleSelectionError::Provider)?;
+    let repositories =
+        tokio::task::spawn_blocking(move || github_repositories(&bundle, None, &ProcessExecutor))
             .await
-            .map_err(GithubBundleSelectionError::into_anyhow)?
-        else {
-            return Ok(None);
-        };
-        provider
-            .token_for_installation(
-                scope.installation_id,
-                &scope.repositories,
-                app.session_permissions.as_ref(),
-            )
-            .await
-            .map(Some)
+            .map_err(|error| {
+                GithubBundleSelectionError::Provider(anyhow!(
+                    "GitHub repository source task failed: {error}"
+                ))
+            })?
+            .map_err(GithubBundleSelectionError::Provider)?;
+    provider
+        .token_for_owner_repo_pairs(bundle_id, &repositories)
+        .await?;
+    Ok(())
+}
+
+/// Resolve this session's GitHub credential, using the App installation
+/// selected by its accepted repository bundle.
+pub async fn token_for_session(
+    config: &Config,
+    state: &State,
+    session_id: &str,
+) -> Result<Option<String>> {
+    if let Some(token) = session_token_override(&config.github).await? {
+        return Ok(Some(token));
     }
+    if config.github.app.is_none() {
+        return Ok(controller_github_token().await);
+    }
+    app_token_for_session(config, state, session_id).await
+}
+
+/// Repository source preflight only needs a token when the accepted bundle
+/// contains a GitHub repository. Preserve the legacy path's lazy lookup so
+/// unrelated resumes do not spawn `gh auth token`.
+pub async fn token_for_repository_preflight(
+    config: &Config,
+    state: &State,
+    session_id: &str,
+) -> Result<Option<String>> {
+    let has_github_repository = state
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.project_bundle(config))
+        .is_some_and(|bundle| {
+            bundle
+                .repositories
+                .iter()
+                .any(|repository| repository.github.is_some())
+        });
+    if !has_github_repository {
+        return Ok(None);
+    }
+    token_for_session(config, state, session_id).await
+}
+
+pub async fn app_token_for_session(
+    config: &Config,
+    state: &State,
+    session_id: &str,
+) -> Result<Option<String>> {
+    let Some(app) = config.github.app.as_ref() else {
+        return Ok(None);
+    };
+    let session = state
+        .sessions
+        .get(session_id)
+        .with_context(|| format!("unknown session {session_id}"))?;
+    let Some(bundle) = session.project_bundle(config).cloned() else {
+        return Ok(None);
+    };
+    let bundle_id = session.bundle_id.clone();
+    let network_sources = session
+        .project
+        .as_ref()
+        .map(|project| project.network_sources.clone());
+    let repositories = tokio::task::spawn_blocking(move || {
+        github_repositories(&bundle, network_sources.as_ref(), &ProcessExecutor)
+    })
+    .await
+    .context("GitHub repository source task failed")??;
+    let provider = GithubAppTokenProvider::shared(app)?;
+    let Some(scope) = provider
+        .token_for_owner_repo_pairs(&bundle_id, &repositories)
+        .await
+        .map_err(GithubBundleSelectionError::into_anyhow)?
+    else {
+        return Ok(None);
+    };
+    provider
+        .token_for_installation(
+            scope.installation_id,
+            &scope.repositories,
+            app.session_permissions.as_ref(),
+        )
+        .await
+        .map(Some)
 }
 
 pub async fn github_token_for_session(
@@ -820,21 +822,21 @@ pub async fn github_token_for_session(
     if github.app.is_none() {
         return Ok(controller_github_token().await);
     }
-    let controller = tokio::task::spawn_blocking(Controller::load)
+    let (config, state) = tokio::task::spawn_blocking(crate::database::load_config_and_state)
         .await
         .context("load controller for GitHub credential sync")??;
-    controller.github_token_for_session(&session_id).await
+    token_for_session(&config, &state, &session_id).await
 }
 
 pub async fn renew_session_github_app_token(session_id: String) -> Result<Option<String>> {
-    let controller = tokio::task::spawn_blocking(Controller::load)
+    let (config, state) = tokio::task::spawn_blocking(crate::database::load_config_and_state)
         .await
         .context("load controller for GitHub App export token")??;
     // Export may renew an App token, but must not replace an explicit PAT.
-    if controller.config.github.session_token_path.is_some() {
+    if config.github.session_token_path.is_some() {
         return Ok(None);
     }
-    controller.github_app_token_for_session(&session_id).await
+    app_token_for_session(&config, &state, &session_id).await
 }
 
 async fn session_token_override(github: &GithubConfig) -> Result<Option<String>> {
@@ -847,7 +849,7 @@ async fn session_token_override(github: &GithubConfig) -> Result<Option<String>>
         .context("read session GitHub token task stopped")?
 }
 
-pub(super) fn github_repositories(
+pub fn github_repositories(
     bundle: &ProjectBundle,
     network_sources: Option<&BTreeMap<String, mj_core::remote_git::NetworkGitSource>>,
     executor: &impl CommandExecutor,
@@ -995,6 +997,12 @@ mod tests {
 
     use super::*;
 
+    /// The configuration and records a token lookup reads.
+    struct Controller {
+        config: mj_core::config::Config,
+        state: mj_core::state::State,
+    }
+
     const TEST_KEY: &[u8] = include_bytes!("testdata/github-app-test.pem");
 
     #[tokio::test]
@@ -1011,8 +1019,7 @@ mod tests {
         for token in ["github_pat_first", "github_pat_rotated"] {
             fs::write(&path, format!("{token}\n")).unwrap();
             assert_eq!(
-                controller
-                    .github_token_for_session("absent")
+                token_for_session(&controller.config, &controller.state, "absent")
                     .await
                     .unwrap()
                     .as_deref(),
@@ -1032,15 +1039,13 @@ mod tests {
             vec![b'a'; mj_core::credentials::MAX_GITHUB_TOKEN_BYTES + 1],
         ] {
             fs::write(&path, invalid).unwrap();
-            let error = controller
-                .github_token_for_session("absent")
+            let error = token_for_session(&controller.config, &controller.state, "absent")
                 .await
                 .unwrap_err();
             assert!(format!("{error:#}").contains("session_token_path"));
         }
         fs::remove_file(&path).unwrap();
-        let error = controller
-            .github_token_for_session("absent")
+        let error = token_for_session(&controller.config, &controller.state, "absent")
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("session_token_path"));
@@ -1635,8 +1640,7 @@ mod tests {
             state: mj_core::state::State::default(),
         };
 
-        let error = controller
-            .validate_github_bundle_installations("multi")
+        let error = validate_bundle_installations(&controller.config, "multi")
             .await
             .unwrap_err();
         let GithubBundleSelectionError::MultipleInstallations(message) = error else {

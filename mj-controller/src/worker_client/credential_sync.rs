@@ -1401,20 +1401,11 @@ async fn target_is_current(
     if let Some(runtime) = runtime {
         return runtime.credential_target_is_current(target);
     }
-    let candidate = target.clone();
-    tokio::task::spawn_blocking(move || {
-        // Read only: cancellation may leave this blocking read finishing
-        // after admission has been released.
-        let controller = crate::controller::Controller {
-            config: mj_core::config::Config::load()?,
-            state: crate::database::load_state()?,
-        };
-        Ok::<_, anyhow::Error>(super::credential_sync_target_is_current(
-            controller, &candidate,
-        ))
-    })
-    .await
-    .context("reload credential sync target")?
+    // The daemon owns the session records, and only it runs a gated sync.
+    bail!(
+        "credential sync for session {} runs under a gate without a daemon to say whether the session is current",
+        target.session_id
+    )
 }
 
 /// Run `work` for the session under background admission, when the session is
@@ -1505,7 +1496,7 @@ async fn reconcile_target(
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
         let github = if target.sync_github_token {
-            match crate::controller::github_token_for_session(
+            match crate::github_app::github_token_for_session(
                 target.session_id.clone(),
                 target.github.clone(),
             )

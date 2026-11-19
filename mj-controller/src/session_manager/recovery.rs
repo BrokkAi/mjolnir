@@ -47,7 +47,8 @@ fn storage_forbids_restart(
     if dead && let Some(command) = &plan.exit_record {
         match executor.execute(command) {
             Ok(output) => {
-                if let Some((reason, at)) = crate::controller::recorded_exit_reason(&output.stdout)
+                if let Some((reason, at)) =
+                    mj_worker_staging::worker_binary::recorded_exit_reason(&output.stdout)
                     && mj_core::targets::storage::reports_no_space(&reason)
                 {
                     // The worker stops when it cannot write its journal,
@@ -91,7 +92,9 @@ pub(super) fn refresh_worker_binary_if_stale(
         // Pick the binary for the target's architecture and copy only
         // if it differs. Runs here in the recovery task, never on the UI path.
         Some(WorkerBinaryRefresh::Deferred(refresh)) => {
-            crate::controller::refresh_target_worker_binary_if_stale(executor, refresh)
+            mj_worker_staging::worker_binary::refresh_target_worker_binary_if_stale(
+                executor, refresh,
+            )
         }
     }
 }
@@ -119,11 +122,19 @@ pub(super) async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
 ) -> Result<WorkerRecoveryOutcome> {
-    recover_worker_for_session(Arc::default(), plan, restart_unresponsive, None).await
+    recover_worker_for_session(
+        Arc::default(),
+        Arc::new(NoRecoveryPlanner),
+        plan,
+        restart_unresponsive,
+        None,
+    )
+    .await
 }
 
 pub(super) async fn recover_worker_for_session(
     gate: Arc<crate::recovery_gate::RecoveryGate>,
+    planner: Arc<dyn RecoveryPlanner>,
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<String>,
@@ -154,6 +165,7 @@ pub(super) async fn recover_worker_for_session(
                 .as_ref()
                 .map(crate::recovery_gate::HoldsSession::admission)
                 .as_ref(),
+            planner.as_ref(),
             &executor,
         )
     })
@@ -161,11 +173,42 @@ pub(super) async fn recover_worker_for_session(
     .context("worker recovery task failed")?
 }
 
+/// Builds a session's recovery plan afresh from the durable records.
+///
+/// A plan is made where sessions are launched, above the session manager, and
+/// an actor keeps the one it was given. After a failed Move that plan can be
+/// older than the launch the Move recorded, so recovery asks for a new one.
+pub trait RecoveryPlanner: Send + Sync {
+    fn replan_after_move(
+        &self,
+        session_id: &str,
+        operation: &mj_core::state::MoveOperation,
+    ) -> Result<WorkerRecoveryPlan>;
+}
+
+/// The planner of a session manager that was spawned without one. Only the
+/// daemon's manager recovers sessions that a Move has touched, and it is
+/// spawned with the controller's planner.
+pub struct NoRecoveryPlanner;
+
+impl RecoveryPlanner for NoRecoveryPlanner {
+    fn replan_after_move(
+        &self,
+        session_id: &str,
+        _operation: &mj_core::state::MoveOperation,
+    ) -> Result<WorkerRecoveryPlan> {
+        bail!(
+            "session {session_id} needs a new recovery plan after its Move, and this session manager was started without a planner"
+        )
+    }
+}
+
 pub(crate) fn recover_worker_admitted(
     mut plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,
     admission: Option<&crate::recovery_gate::SessionAdmission>,
+    planner: &dyn RecoveryPlanner,
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
     let owner = match session_id {
@@ -191,7 +234,7 @@ pub(crate) fn recover_worker_admitted(
                     && session.target.as_deref() == Some(&plan.source_target)
             });
             if !eligible
-                || crate::controller::move_session::move_owns_session(id)
+                || crate::session_manager::move_ownership::move_owns_session(id)
                 || crate::database::container_upgrade_owns_target(id)?
             {
                 return Ok(WorkerRecoveryOutcome::Suppressed);
@@ -204,8 +247,7 @@ pub(crate) fn recover_worker_admitted(
             && operation.source_checkpoint_only
             && operation.destination_target.is_none()
         {
-            plan = crate::controller::Controller::load()?
-                .worker_recovery_plan(id, Some(&operation))?;
+            plan = planner.replan_after_move(id, &operation)?;
         }
         if ensure_recovery_target_running(executor, plan.target.as_ref())
             .context("restore relay worker target")?
@@ -216,7 +258,7 @@ pub(crate) fn recover_worker_admitted(
         // The probe plan stages the current worker, then runs it.
         let output = plan
             .liveness_probe
-            .execute(executor, &crate::controller::ControlWorker)
+            .execute(executor, &mj_worker_staging::worker_binary::ControlWorker)
             .context("probe relay worker liveness")?
             .pop()
             .context("the liveness probe produced no output")?;
@@ -237,7 +279,7 @@ pub(crate) fn recover_worker_admitted(
                     return Ok(full);
                 }
                 if let Some(workspace) = plan.workspace.as_ref()
-                    && !crate::controller::path_exists_on_managed_target(
+                    && !crate::targets::path_exists_on_managed_target(
                         executor,
                         &workspace.target,
                         &workspace.directory,
@@ -255,7 +297,7 @@ pub(crate) fn recover_worker_admitted(
                     return Ok(full);
                 }
                 if let Some(workspace) = plan.workspace.as_ref()
-                    && !crate::controller::path_exists_on_managed_target(
+                    && !crate::targets::path_exists_on_managed_target(
                         executor,
                         &workspace.target,
                         &workspace.directory,
@@ -299,7 +341,9 @@ fn restart_owned_worker(
         _ => None,
     };
     let staged = deferred
-        .map(|refresh| crate::controller::prepare_recovery_worker_binary(executor, refresh))
+        .map(|refresh| {
+            mj_worker_staging::worker_binary::prepare_recovery_worker_binary(executor, refresh)
+        })
         .transpose()?
         .flatten();
     let _swap = crate::upgrade::activity_unless_draining("worker recovery swap")?;
@@ -328,9 +372,9 @@ fn restart_owned_worker(
                 .context("session disappeared before installing its GitHub token")?;
             if !session.no_github_credentials {
                 let backend =
-                    crate::controller::backend_locator(&plan.source_target, &session, &config)?;
+                    crate::targets::backend_locator(&plan.source_target, &session, &config)?;
                 let root = crate::targets::worker_root(&backend, id)?;
-                crate::controller::install_configured_session_github_token(
+                mj_worker_staging::worker_binary::install_configured_session_github_token(
                     &config.github,
                     executor,
                     &backend,
@@ -340,7 +384,7 @@ fn restart_owned_worker(
         }
     }
     plan.restart
-        .execute(executor, &crate::controller::ControlWorker)?;
+        .execute(executor, &mj_worker_staging::worker_binary::ControlWorker)?;
     if let Some(owner) = owner.as_ref() {
         crate::database::advance_worker_restart(
             owner.session_id(),
@@ -359,7 +403,7 @@ pub fn recover_worker_controlled(
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
     let admission = match session_id {
-        Some(id) => match crate::controller::test_support::worker_test_gate()
+        Some(id) => match crate::database::test_fixtures::worker_test_gate()
             .try_start(id, crate::recovery_gate::BackgroundWork::RelayRecovery)
         {
             Ok(a) => Some(crate::recovery_gate::SessionAdmission::Background(a)),
@@ -372,6 +416,7 @@ pub fn recover_worker_controlled(
         restart_unresponsive,
         session_id,
         admission.as_ref(),
+        &NoRecoveryPlanner,
         executor,
     )
 }

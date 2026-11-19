@@ -30,7 +30,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
     credential_sync_targets_with_auth(controller, &schemes)
 }
 
-pub(crate) fn credential_sync_targets_with_auth(
+pub fn credential_sync_targets_with_auth(
     controller: &Controller,
     schemes: &BTreeMap<String, bool>,
 ) -> Vec<CredentialSyncTarget> {
@@ -55,9 +55,7 @@ pub fn staged_credential_sessions(controller: &Controller) -> BTreeSet<String> {
         .filter(|session| {
             session_target_is_pollable(session) && session.state != SessionState::Disconnected
         })
-        .filter(|session| {
-            crate::controller::local_profile_homes::session_has_a_staged_home_of_its_own(session)
-        })
+        .filter(|session| super::local_profile_homes::session_has_a_staged_home_of_its_own(session))
         .map(|session| session.id.clone())
         .collect()
 }
@@ -92,7 +90,7 @@ pub fn credential_sync_targets_from_sources(
                 profile_home: profile.home.clone(),
                 aws_credentials,
                 skips_login_file_sync: *schemes.get(&session.last_profile)?
-                    || crate::controller::local_profile_homes::session_shares_profile_login(
+                    || super::local_profile_homes::session_shares_profile_login(
                         session,
                         profile.kind,
                     ),
@@ -113,7 +111,7 @@ pub fn target_syncs_github_token(target: Option<&mj_core::state::TargetLocator>)
 /// Revalidate a copied target while holding background admission: a lifecycle
 /// may have completed since the dashboard published its target list.
 pub fn credential_sync_target_is_current(
-    mut controller: crate::controller::Controller,
+    mut controller: Controller,
     candidate: &CredentialSyncTarget,
 ) -> bool {
     controller

@@ -2,7 +2,7 @@ use mj_core::config::HarnessKind;
 use serde_json::json;
 
 use super::*;
-use crate::controller::test_support::test_git as git;
+use crate::database::test_fixtures::test_git as git;
 use mj_checkpoint::archive::*;
 use std::cell::RefCell;
 

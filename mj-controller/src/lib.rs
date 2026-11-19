@@ -56,6 +56,8 @@ pub mod checkpoint_transfer;
 pub use mj_store::recovery_gate;
 pub use mj_targets::image_pull_gate;
 
+pub mod github_app;
+pub mod github_credential;
 pub mod github_rate_limit;
 pub use mj_store::mailbox_outbox;
 pub use mj_store::upgrade;

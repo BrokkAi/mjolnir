@@ -7,8 +7,10 @@ pub mod checkpoint;
 mod container_upgrade;
 pub mod environment;
 pub use crate::database::SessionResumeOptions;
+use crate::github_app;
 pub(crate) use mj_build_cache::git_cache;
-mod github_app;
+pub mod credential_targets;
+mod github_tokens;
 mod interrupted;
 pub use interrupted::interrupted_lifecycle_cause;
 pub mod lifecycle;
@@ -42,6 +44,7 @@ pub mod test_support;
 pub mod update;
 pub(crate) use mj_worker_staging::worker_binary;
 mod worker_launch;
+pub use worker_launch::DurableRecoveryPlanner;
 mod worker_project_memory;
 mod worker_restart;
 #[cfg(test)]
@@ -92,8 +95,8 @@ use crate::targets::CommandSpec;
 use crate::targets::{self, AdditionalMount, CommandExecutor, SshTarget};
 
 pub use crate::targets::image_refresh_plan;
+pub use crate::targets::path_exists_on_managed_target;
 pub use backend::backend_locator;
-pub(crate) use backend::controller_github_token;
 pub use backend::validate_resource_allocation;
 pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
@@ -116,7 +119,6 @@ pub use worker_binary::{
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
     shared_content_ssh, worker_source_problem,
 };
-pub use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,

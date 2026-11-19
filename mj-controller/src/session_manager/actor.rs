@@ -574,6 +574,7 @@ pub(super) async fn run_session_actor(
                             owner_changes.borrow_and_update();
                             match recover_worker_for_session(
                                 updates.session_gate.clone(),
+                                updates.recovery_planner.clone(),
                                 plan,
                                 restart_unresponsive,
                                 Some(target.session_id.clone()),
@@ -808,7 +809,7 @@ pub(super) async fn run_session_actor(
                         command,
                         reply,
                     } => {
-                        if crate::controller::move_session::move_refuses_command(
+                        if crate::session_manager::move_ownership::move_refuses_command(
                             &target.session_id,
                             &command,
                         ) {
@@ -940,7 +941,7 @@ pub(super) async fn run_session_actor(
                     } => {
                         tracing::info!(session_id = %target.session_id, elapsed_ms = queued_at.elapsed().as_millis(), "review actor queue completed");
                         if lifecycle.is_leased()
-                            || crate::controller::move_session::move_owns_session(
+                            || crate::session_manager::move_ownership::move_owns_session(
                                 &target.session_id,
                             )
                         {
@@ -1373,7 +1374,7 @@ pub(super) async fn deliver_submit(
         let _ = reply.send(Err(refusal.into()));
         return;
     }
-    if crate::controller::move_session::move_refuses_command(&target.session_id, &command) {
+    if crate::session_manager::move_ownership::move_refuses_command(&target.session_id, &command) {
         let _ = reply.send(Err(
             "session is moving; keep the draft and retry after Move finishes".into(),
         ));
@@ -1905,12 +1906,13 @@ async fn reopen_subagent_admission_after_move(
                 return Ok((false, false));
             };
             let subagent = crate::database::load_subagent(&id)?;
-            let queue_enabled = crate::controller::move_session::worker_subagent_queue_enabled(
-                &session.subagents.clone().unwrap_or_default(),
-                session.harness_kind,
-                subagent.as_ref().map(|child| child.handback_tool),
-                true,
-            );
+            let queue_enabled =
+                crate::session_manager::move_ownership::worker_subagent_queue_enabled(
+                    &session.subagents.clone().unwrap_or_default(),
+                    session.harness_kind,
+                    subagent.as_ref().map(|child| child.handback_tool),
+                    true,
+                );
             let move_active = crate::database::has_active_in_place_move(&id)?;
             Ok((queue_enabled, move_active))
         })
