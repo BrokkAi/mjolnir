@@ -146,6 +146,18 @@ impl QuotaRefreshRequest {
         mj_core::hex::lower_hex(hash.finalize())
     }
 
+    /// Whether this profile's check runs a host harness program, through
+    /// `quota_harness::locate`, rather than answering from configuration or
+    /// an HTTP endpoint.
+    pub(crate) fn runs_host_harness(&self) -> bool {
+        match self.harness {
+            HarnessKind::Grok => true,
+            HarnessKind::Claude => self.auth_scheme != AuthScheme::AwsCredentialChain,
+            HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
+            _ => false,
+        }
+    }
+
     /// Build the request for one configured profile. The harness home
     /// environment is composed here so every caller asks for quota the same
     /// way, and so a provider key is read from exactly one place.
@@ -218,6 +230,8 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
+#[cfg(unix)]
+pub use crate::quota_harness::prepare_managed;
 pub use mj_core::retry_after::retry_after_header;
 
 /// The hold for a 429: what the provider asked for, kept between one minute

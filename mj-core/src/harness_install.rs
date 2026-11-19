@@ -3354,6 +3354,81 @@ mod tests {
         assert!(managed.command.exists());
     }
 
+    // Cancelling a background preparation (the daemon's quota prewarm, #1595)
+    // must stop npm's whole process group and publish nothing, and a later
+    // installation must complete from the same cache.
+    #[test]
+    fn cancelling_an_install_stops_npm_and_leaves_a_cache_the_next_install_completes() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let install_counter = temp.path().join("installs");
+        let environment = fake_node_tools(temp.path(), &install_counter);
+        let pid_file = temp.path().join("npm-child.pid");
+        executable(
+            &temp.path().join("bin/npm"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\nsleep 300 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        );
+
+        let error = run_async(async {
+            let token = tokio_util::sync::CancellationToken::new();
+            let install = crate::subprocess::with_preparation_cancellation(
+                token.clone(),
+                resolve_at_async(
+                    &cache,
+                    HarnessKind::Codex,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                ),
+            );
+            tokio::pin!(install);
+            while !pid_file.exists() {
+                tokio::select! {
+                    result = &mut install => panic!("install ended before npm started: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+            token.cancel();
+            install.await.unwrap_err()
+        });
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+
+        let child = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", &child])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        for _ in 0..100 {
+            if !alive() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "npm's child outlived the cancelled install");
+        let published = std::fs::read_dir(cache.join(HarnessKind::Codex.id()))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with(".install"))
+            .collect::<Vec<_>>();
+        assert!(published.is_empty(), "cancelled install published {published:?}");
+
+        let environment = fake_node_tools(temp.path(), &install_counter);
+        let managed = resolve_at(
+            &cache,
+            HarnessKind::Codex,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
+        assert!(managed.command.exists());
+    }
+
     // Hard-won: #1434: repairing an incomplete install deleted it in place and
     // failed with ENOTEMPTY while an older release's collector recreated files in it.
     #[test]

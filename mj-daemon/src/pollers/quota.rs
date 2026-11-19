@@ -10,6 +10,45 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// Install, in the background, the pinned harnesses the quota checks would
+/// otherwise install inline on their first run (#1595), so that wait is
+/// usually over before a check needs it. It holds no handoff admission: the
+/// installation is safe to stop, the daemon's cancellation ends it (killing
+/// the installer's process group and leaving only staging the next
+/// installation sweeps), and the next daemon prepares again. A failure is
+/// logged and not retried; the next check that needs the harness installs it.
+pub fn spawn_quota_harness_prewarm(
+    requests: Vec<QuotaRefreshRequest>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            // The scope cancels its token when it ends, so it gets a child.
+            let scope = cancellation.child_token();
+            // Awaited to the end rather than dropped: on cancellation the
+            // installer stops its child process group and returns.
+            let failures = mj_core::subprocess::with_preparation_cancellation(
+                scope,
+                mj_controller::quota::prepare_managed(&requests),
+            )
+            .await;
+            if cancellation.is_cancelled() {
+                return;
+            }
+            for (harness, error) in failures {
+                tracing::warn!(
+                    harness = harness.id(),
+                    error = %format!("{error:#}"),
+                    "could not prepare the pinned harness ahead of quota checks; the next check retries"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (requests, cancellation);
+    })
+}
+
 /// The disabled Claude profiles whose sessions are live, from the credential
 /// sync's published targets (the one owner of which sessions hold which
 /// profile's copy). A session copy holds no refresh token, so the profile's

@@ -435,6 +435,11 @@ pub(super) async fn run_daemon_runtime(
         state.clone(),
     );
     let compatibility_watch = spawn_store_compatibility_watch(cancellation.clone());
+    // Holds no admission: handoff cancels it (see the spawn's own comment).
+    let quota_harness_prewarm = crate::pollers::spawn_quota_harness_prewarm(
+        state.with_controller(crate::pollers::quota_refresh_profiles),
+        cancellation.clone(),
+    );
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
@@ -984,6 +989,11 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join reviewer prewarm",
         reviewer_prewarm.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join quota harness prewarm",
+        quota_harness_prewarm.await.map_err(anyhow::Error::new),
     );
     epilogue.record(
         &mut outcome,
