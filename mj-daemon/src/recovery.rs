@@ -118,7 +118,7 @@ impl RecoveryCoordinator {
                                     let mut state = State::default();
                                     state.sessions.insert(task_session_id.clone(), session);
                                     let controller = Controller {
-                                        config: observation.config,
+                                        config: (*observation.config).clone(),
                                         state,
                                     };
                                     let executor = CancellableProcessExecutor::new(task_cancelled.cancellation())
@@ -534,7 +534,7 @@ mod tests {
     fn observation(position: u64) -> RecoveryObservation {
         RecoveryObservation {
             session: session_record("session-1"),
-            config: Config::default(),
+            config: Arc::new(Config::default()),
             latest_completed_turn_ordinal: latest_completed_turn_ordinal(&completed(position)),
             checkpoint_wait: None,
         }

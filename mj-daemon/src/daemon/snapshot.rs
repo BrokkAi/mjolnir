@@ -29,7 +29,7 @@ impl RuntimeState {
     fn observe_background_policy(
         &self,
         session: &SessionRecord,
-        config: &Config,
+        config: &Arc<Config>,
         policy: &BackgroundPolicyState,
         recovery_copies: bool,
     ) {
@@ -37,7 +37,7 @@ impl RuntimeState {
             self.worker_upgrade_observer
                 .observe(WorkerUpgradeObservation {
                     session: session.clone(),
-                    config: config.clone(),
+                    config: Arc::clone(config),
                     worker_build: policy.worker_build.clone(),
                     quiet: true,
                 });
@@ -46,7 +46,7 @@ impl RuntimeState {
             self.recovery_observer.observe(RecoveryObservation {
                 checkpoint_wait: policy.checkpoint_wait,
                 session: session.clone(),
-                config: config.clone(),
+                config: Arc::clone(config),
                 latest_completed_turn_ordinal: policy.latest_completed_turn_ordinal,
             });
         }
@@ -57,7 +57,7 @@ impl RuntimeState {
     pub(super) fn refresh_background_policies(&self) {
         let mut owner = self.owner();
         let records = owner.controller().state.sessions.clone();
-        let config = owner.controller().config.clone();
+        let config = Arc::new(owner.controller().config.clone());
         let subagents = owner.controller().state.subagents.clone();
         owner.background_policies.retain(|session_id, policy| {
             let Some(session) = records
@@ -356,9 +356,10 @@ impl RuntimeState {
                     latest_completed_turn_ordinal: snapshot.latest_completed_turn_ordinal(),
                     worker_build: snapshot.worker_build.clone(),
                 };
+                let config = Arc::new(controller.config.clone());
                 self.observe_background_policy(
                     session,
-                    &controller.config,
+                    &config,
                     &policy,
                     keeps_recovery_copies(&controller.state.subagents, &session_id),
                 );
