@@ -790,8 +790,9 @@ mod tests {
             )?;
             Ok(())
         }).await.unwrap();
+        // Hard-won: 4bf70672c: an observation with an unreadable item waited for an unrelated revision, so an idle daemon never retried it.
+        // No revision is published here: the observer's own failure backoff must retry the repaired item.
         revisions.borrow_and_update();
-        state.publish_revision();
         loop {
             tokio::select! {
                 changed = revisions.changed() => { changed.unwrap(); },

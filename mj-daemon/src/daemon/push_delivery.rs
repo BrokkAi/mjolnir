@@ -17,6 +17,9 @@ pub(crate) enum NotificationObservation {
     Deferred,
     /// The write failed; the inputs stay unrecorded so the next revision retries.
     Failed,
+    /// Readable items committed but at least one item's text could not be read;
+    /// the inputs stay unrecorded and the observer retries on the failure backoff.
+    Incomplete(bool),
     Observed(bool),
 }
 
@@ -59,7 +62,11 @@ impl NotificationReconciler {
                 // Partial observations commit successful items, but the next
                 // runtime revision must retry any unreadable items.
                 self.previous = result.complete.then_some(inputs);
-                Ok(NotificationObservation::Observed(result.alerts_changed))
+                Ok(if result.complete {
+                    NotificationObservation::Observed(result.alerts_changed)
+                } else {
+                    NotificationObservation::Incomplete(result.alerts_changed)
+                })
             }
             None => Ok(NotificationObservation::Deferred),
         }
@@ -80,8 +87,12 @@ pub(crate) async fn wait_for_notification_change(
                 if resumed { Ok(true) } else { cancellation.cancelled().await; Ok(false) }
             }
         }
-    } else if observation == NotificationObservation::Failed {
-        // A failed write retries on the backoff or the next revision, whichever is first.
+    } else if matches!(
+        observation,
+        NotificationObservation::Failed | NotificationObservation::Incomplete(_)
+    ) {
+        // A failed write or unreadable item retries on the backoff or the next
+        // revision, whichever is first: an idle daemon may publish no revision.
         tokio::select! {
             _ = cancellation.cancelled() => Ok(false),
             changed = revisions.changed() => { changed.context("notification runtime feed closed")?; Ok(true) },
@@ -121,7 +132,14 @@ pub(crate) async fn run_alerts(
             _ = cancellation.cancelled() => return Ok(()),
             result = observer.reconcile(runtime) => result?,
         };
-        if changed == NotificationObservation::Failed {
+        if let NotificationObservation::Incomplete(true) = changed {
+            state.publish_revision();
+            wake();
+        }
+        if matches!(
+            changed,
+            NotificationObservation::Failed | NotificationObservation::Incomplete(_)
+        ) {
             let waited = backoff;
             backoff = (backoff * 2).min(ALERT_RETRY_LONGEST);
             if !wait_for_notification_change(changed, &mut revisions, &cancellation, waited).await?
