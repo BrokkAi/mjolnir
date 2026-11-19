@@ -6967,6 +6967,44 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     let after = evidence(&relay);
     assert_eq!(after.user_prompt_tail, before.user_prompt_tail);
     assert_eq!(after.transcript_summary, before.transcript_summary);
+    // Hard-won: cc8c246: ACK pruning removed the only restart source for judge text tails.
+    let mut relay = relay;
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"REPLY AFTER THE CORRECTION"}
+    })).unwrap()).unwrap();
+    let expected = evidence(&relay);
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-judgment-history", through);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "after-ack").unwrap();
+    let recovered = evidence(&relay);
+    assert_eq!(recovered.user_prompt_tail, expected.user_prompt_tail);
+    assert_eq!(recovered.assistant_text_tail, expected.assistant_text_tail);
+    assert!(!recovered.user_prompt_tail.is_empty());
+    assert!(!recovered.assistant_text_tail.is_empty());
+    assert!(
+        !relay
+            .turn_context()
+            .authorization_context()
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    // A newer delivered request must not inherit the prior request's reply.
+    let mut relay = relay;
+    submit_relay(
+        &mut relay,
+        "next-person-request",
+        prompt("NEXT REQUEST WITHOUT A REPLY"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-next-request", through);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "next-request-after-ack").unwrap();
+    let recovered = evidence(&relay);
+    assert_eq!(recovered.user_prompt_tail, "NEXT REQUEST WITHOUT A REPLY");
+    assert!(recovered.assistant_text_tail.is_empty());
 }
 
 /// I1-11: a finished turn leaves its compact receipt in the ledger until the

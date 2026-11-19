@@ -889,12 +889,12 @@ impl DurableRelay {
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {
             let mut prompts = BTreeMap::<String, String>::new();
-            if relay
+            let earlier_history_omitted = relay
                 .hot_events
                 .front()
                 .is_none_or(|event| event.ordinal > 1)
-                && relay.snapshot.latest_ordinal > 0
-            {
+                && relay.snapshot.latest_ordinal > 0;
+            if earlier_history_omitted {
                 relay.turn_context.mark_earlier_history_omitted();
             }
             for event in &relay.hot_events {
@@ -932,6 +932,13 @@ impl DurableRelay {
                 relay
                     .turn_context
                     .observe_relay(&event.observation, prompt.as_deref());
+            }
+            if earlier_history_omitted && let Some(history) = relay.snapshot.authorization_context()
+            {
+                // ACK collection can remove the turn's original observations.
+                // Reuse persisted prompt/reply text; the historical tool-transcript
+                // summary is not reconstructed for this judgment aid.
+                relay.turn_context.restore_text_tails(&history);
             }
         }
         relay

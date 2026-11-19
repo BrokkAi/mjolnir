@@ -150,7 +150,11 @@ impl StandaloneSession {
                         baseline.state.session_id == target.session_id,
                         "live recovery baseline belongs to another session"
                     );
-                    for queued in &baseline.queue {
+                    for queued in baseline
+                        .queue
+                        .iter()
+                        .chain(&baseline.delivered_initial_prompts)
+                    {
                         if let Some(prompt) = queued.command.prompt_blocks() {
                             connection.cache_prompt_attachments(&prompt).await?;
                         }
@@ -210,7 +214,22 @@ impl StandaloneSession {
         if client.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL
             && client.status().await?.retained_event_ordinal() > 0
         {
-            return Err(crate::worker_client::LiveBaselineUnsupported.into());
+            let session = session_id.to_owned();
+            let cursor = tokio::task::spawn_blocking(move || {
+                crate::database::materialized_event_frontier(&session)
+            })
+            .await
+            .context("read adoption retry cursor")??;
+            let retained = client.status().await?.retained_event_ordinal();
+            let Some((ordinal, digest)) =
+                cursor.filter(|(ordinal, _)| *ordinal > 0 && *ordinal >= retained)
+            else {
+                return Err(crate::worker_client::LiveBaselineUnsupported.into());
+            };
+            // A previous adoption may have committed and ACKed its projection
+            // before losing the connected-state update. Prove that durable
+            // cursor still attaches before deciding a live cut is necessary.
+            client.attach(ordinal, &digest).await?;
         }
         Ok(client)
     }

@@ -215,6 +215,34 @@ impl TurnContext {
         }
     }
 
+    /// Recover textual judgment evidence from the relay owner's existing
+    /// durable authorization history after the journal prefix was collected.
+    pub fn restore_text_tails(&self, history: &mj_core::assessment::ContextHistory) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.user_prompt_tail = history
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| tail(&message.text, USER_PROMPT_BYTES))
+            .unwrap_or_default();
+        let after_user = history
+            .messages
+            .iter()
+            .rposition(|message| message.role == "user")
+            .map_or(0, |index| index + 1);
+        let reply = history.messages[after_user..]
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant");
+        state.assistant_text_tail.clear();
+        state.last_completed_message = reply
+            .map(|message| tail(&message.text, ASSISTANT_TEXT_BYTES))
+            .unwrap_or_default();
+        state.message_id = None;
+        state.generation = state.generation.wrapping_add(1);
+    }
+
     pub fn authorization_context(&self) -> Option<mj_core::assessment::ContextHistory> {
         self.0
             .lock()

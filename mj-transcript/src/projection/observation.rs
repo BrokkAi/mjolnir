@@ -561,7 +561,10 @@ pub(super) fn project_observation(
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }
-            if prompt_was_started
+            let unknown_running_prompt = *command == RelayCommandKind::Prompt
+                && current.active_turn.is_none()
+                && queued_entry.is_none();
+            if (prompt_was_started || unknown_running_prompt)
                 && !current
                     .configuration
                     .goal
@@ -579,35 +582,39 @@ pub(super) fn project_observation(
                     .as_ref()
                     .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
-                mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
-                    work_facts: None,
-                    answered_through: None,
-                    diagnostic: None,
-                    usage: None,
-                    command_id: command_id.clone(),
-                    accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
-                        queued_entry
-                            .as_ref()
-                            .and_then(|entry| entry.accepted_ordinal)
-                    }),
-                    turn_start_position: active.map(|turn| turn.turn_start_position),
-                    completed_ordinal: event.ordinal,
-                    completed_at_ms: event.recorded_at_ms,
-                    outcome: if matches!(
-                        event.observation,
-                        RelayObservation::CommandRejected { .. }
-                    ) {
-                        TurnOutcomeKind::Rejected {
-                            reason: *reason,
-                            message: outcome_text,
-                        }
-                    } else {
-                        TurnOutcomeKind::Interrupted {
-                            reason: *reason,
-                            message: outcome_text,
-                        }
-                    },
-                });
+                if active.is_some() || queued_entry.is_some() || prompt_was_started {
+                    mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        work_facts: None,
+                        answered_through: None,
+                        diagnostic: None,
+                        usage: None,
+                        command_id: command_id.clone(),
+                        accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(
+                            || {
+                                queued_entry
+                                    .as_ref()
+                                    .and_then(|entry| entry.accepted_ordinal)
+                            },
+                        ),
+                        turn_start_position: active.map(|turn| turn.turn_start_position),
+                        completed_ordinal: event.ordinal,
+                        completed_at_ms: event.recorded_at_ms,
+                        outcome: if matches!(
+                            event.observation,
+                            RelayObservation::CommandRejected { .. }
+                        ) {
+                            TurnOutcomeKind::Rejected {
+                                reason: *reason,
+                                message: outcome_text,
+                            }
+                        } else {
+                            TurnOutcomeKind::Interrupted {
+                                reason: *reason,
+                                message: outcome_text,
+                            }
+                        },
+                    });
+                }
                 if active.is_some() {
                     mutation.active_turn = Some(None);
                 }

@@ -30,6 +30,23 @@ pub fn materialized_session_from_live_baseline(
                 .get(&option.id.to_string())
                 .cloned()
         {
+            // A catalogue may report a transcript model ID that is not a
+            // selectable picker value. Preserve the owner's accepted selector.
+            let value = if canonical == "model" {
+                mj_core::acp::AcceptedSessionConfig::from_configuration(
+                    &state.config,
+                    &state.config_options,
+                )
+                .model
+                .map(Value::String)
+                .unwrap_or(value)
+            } else {
+                value
+            };
+            projection
+                .configuration
+                .values
+                .insert(option.id.to_string(), value.clone());
             projection
                 .configuration
                 .values
