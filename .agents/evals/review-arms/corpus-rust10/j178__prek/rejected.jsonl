@@ -1,0 +1,36 @@
+{"order_index": 1, "fix_commit": "b33c2993fffa4b2162e9725b71c85f10ccc71b4c", "rule": "real_behavior", "reason": "Clippy lint cleanup only, no runtime behavior change."}
+{"order_index": 3, "fix_commit": "aa6173b6bda9559f3a0c608ac45d46e6c5703d50", "rule": "real_behavior", "reason": "Clippy lint cleanup only, no runtime behavior change."}
+{"order_index": 4, "fix_commit": "df852e914a110f1184c98e37ff2909066999ad33", "rule": "real_behavior", "reason": "UX enhancement adding a CI hint message when hooks fail, not a bug fix."}
+{"order_index": 6, "fix_commit": "624f5b3f82998111f6a12c48056a78f2214dc2f4", "rule": "real_behavior", "reason": "Compile/early-dev fix (string indexing did not compile on Windows cfg); not a runtime behavioral defect on a working build."}
+{"order_index": 8, "fix_commit": "adec98d2be5a8c9da271175c887fbe3b072ed2ae", "rule": "real_behavior", "reason": "Early-dev commit ('Many fixes') adding #[serde(deny_unknown_fields)] and updating snapshot tests."}
+{"order_index": 10, "fix_commit": "6b72fdf5d5bf00de9e6e7a7f6a75ad9641f8f9d0", "rule": "real_behavior", "reason": "Typo/grammar tweak in install message ('moved'), not a behavioral bug."}
+{"order_index": 11, "fix_commit": "7783bdc8916aba373336f7fc1956341b5a4decb2", "rule": "findable_from_diff", "reason": "npm lowercase `npm_config_global_prefix` env override behavior is an external npm/npx quirk not visible from ae7793ba8b."}
+{"order_index": 12, "fix_commit": "62438bc9dc0e9078ccb2a01075e4f42103aa38e9", "rule": "real_behavior", "reason": "Test-only portability fix for Docker image and Go version tests."}
+{"order_index": 14, "fix_commit": "34c1609b6e26af4c15c954ba1f03916f4ef492b7", "rule": "pre_flagged", "reason": "Intro c30dbb8490 explicitly documented the conservative skip in cache_gc.rs: '// If we don't have any positively-identified versions, be conservative.'"}
+{"order_index": 16, "fix_commit": "8d28063a5dd485f739f60be7f7fbdf98946cb153", "rule": "real_behavior", "reason": "UX enhancement adding a warning when config exists but fails to parse during install, not a defect."}
+{"order_index": 17, "fix_commit": "ee7110b49bb1aa8d7b3ccee51c5241550cb0aec2", "rule": "pre_flagged", "reason": "Intro 8e230b1141 had an explicit '// TODO: preserve the quote style' right on the replaced lines in auto_update.rs."}
+{"order_index": 18, "fix_commit": "152c8d51d1e39096dde20ae39d6701bd556862c6", "rule": "pre_flagged", "reason": "Intro 73493aa6ff had an explicit '// TODO: parse Python style version...' right above parse_version."}
+{"order_index": 21, "fix_commit": "2e2b9dea94528320f54d2e2f8c737026fb8d7193", "rule": "pre_flagged", "reason": "Intro 5b89765f93 had an explicit '// TODO: does this check really necessary?' right on the removed filter in filter.rs."}
+{"order_index": 24, "fix_commit": "28a9130d25db587204904cdc71753629a962cc50", "rule": "pre_flagged", "reason": "Intro 76d2869d46 had an explicit '// TODO: unique repos' right on the fixed loop in src/hook.rs:158."}
+{"order_index": 25, "fix_commit": "a4043b7e006c77c9977fb5a86dc6a4e4c195a214", "rule": "real_behavior", "reason": "Test-only integration test fix."}
+{"order_index": 26, "fix_commit": "fbde74870e83b8e224459ec6e828e36cefc7919e", "rule": "real_behavior", "reason": "Test-only Windows test fix."}
+{"order_index": 29, "fix_commit": "e8f65dfd580bfb3446837208228ab1d39efd2966", "rule": "findable_from_diff", "reason": "Enhancement adding TempDir cleanup when hook installation fails (not a defect introduced by one commit)."}
+{"order_index": 33, "fix_commit": "d1f364278ce3d668e73498aef73e60c4a4553dff", "rule": "pre_flagged", "reason": "Intro a5a1b3b2b0 had an explicit '// TODO: fix in workspace mode' right above CWD in docker.rs:172."}
+{"order_index": 34, "fix_commit": "decff291e67453cb606b98022801880e0c27108f", "rule": "real_behavior", "reason": "Cosmetic extra trailing newline in sample-config output."}
+{"order_index": 37, "fix_commit": "81d745a5c06bad3ddcc13380269db82372a4af2c", "rule": "real_behavior", "reason": "Test-only fix."}
+{"order_index": 38, "fix_commit": "97148cb51514aa889ec7f801485c09a94ca68381", "rule": "findable_from_diff", "reason": "Workaround for external npm 11 DirFetcher/GitFetcher behavior change, not visible from 3b8b5c53ea alone."}
+{"order_index": 42, "fix_commit": "6d07a0e112a335bbcfdbf9b8c427b80da305b49c", "rule": "real_behavior", "reason": "New feature retrying auth-failed git clones with terminal prompts enabled, not a bug fix."}
+{"order_index": 43, "fix_commit": "7f96131b0725fef4fd8c60163b22d46604de3832", "rule": "real_behavior", "reason": "Early-dev commit ('Fix') switching display formatting in LockedFile logging."}
+{"order_index": 44, "fix_commit": "1e2abfb81f5213990413f222ad4d7444af430518", "rule": "findable_from_diff", "reason": "Refines external uv Python discovery order and removes UV_PYTHON_PREFERENCE override; policy/external uv behavior."}
+{"order_index": 47, "fix_commit": "bf09a45e64fbeb4e3928246a3881ba071e3f0a8e", "rule": "real_behavior", "reason": "New CLI flag feature (--no-fail-fast), not a bug fix."}
+{"order_index": 48, "fix_commit": "bca8066597ebcb74b6f87d8cf4314999f05ce632", "rule": "real_behavior", "reason": "New CLI flag feature (--hide-status), not a bug fix."}
+{"order_index": 50, "fix_commit": "156f06977ab3f21559d4bb444c53c1a1ff3cf830", "rule": "findable_from_diff", "reason": "Limitation of third-party serde_yaml::Value::apply_merge on nested YAML merge keys; replaced with yaml_merge_keys crate."}
+{"order_index": 52, "fix_commit": "304c1653f07fe5fa2c101cfe2358c81e494fd6ed", "rule": "real_behavior", "reason": "Test-only fix."}
+{"order_index": 54, "fix_commit": "f7ea2dc349173028a157fb4fc27e62cb937c1147", "rule": "real_behavior", "reason": "Test-only fix for test collision."}
+{"order_index": 55, "fix_commit": "2fca955c38ed38fde239c3ff67d40598e3c8910e", "rule": "findable_from_diff", "reason": "Adds serde_stacker recursion handling for pathological deeply nested JSON input; hardening rather than a bug introduced by 9b6d1cbef8."}
+{"order_index": 56, "fix_commit": "2cd8f0fcb8766200231716215b558bfb1faf1c95", "rule": "pre_flagged", "reason": "Intro c5fb6ec7f6 had an explicit '// TODO: In workspace mode, local hooks should be relative to the project root.' in pep723.rs:263."}
+{"order_index": 60, "fix_commit": "67d956e8a00777480b69976b83c1a3a6bd14de31", "rule": "real_behavior", "reason": "New CLI flag feature (--fail-fast), not a bug fix."}
+{"order_index": 61, "fix_commit": "3f1f9e1056c86fa04d8b54bdec39fa8a0d25258a", "rule": "attribution", "reason": "Bundles multiple unrelated init-template-dir and directory tweaks across several commits."}
+{"order_index": 63, "fix_commit": "5cd12dc8c4a9fccad0990eb97115527980d9f603", "rule": "pre_flagged", "reason": "Intro fac3516167 had an explicit '// FIXME: /r/n should be kept as is' in fix_end_of_file.rs:34."}
+{"order_index": 64, "fix_commit": "156c0cec12847513ba764d1d87543ab6d0785c64", "rule": "findable_from_diff", "reason": "External Julia Pkg.add vs Pkg.REPLMode.pkgstr specifier syntax difference, not visible from the Rust repo at 0a4be22599."}
+{"order_index": 68, "fix_commit": "56bcab73370eb7e7bde739c1da75f879f9a05170", "rule": "spread", "reason": "Workspace path handling in meta_hooks.rs on intro a5a1b3b2b0 (already admitted via idx 5, 15, 57 on a5a1b3b2b0)."}
