@@ -301,3 +301,16 @@ Extended the shared-profile regression to cover a linked XDG root containing a r
 - `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-review11-clippy.log`).
 
 Formatting/diff checks are clean. No failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings were overridden; the candidate is submitted for re-review.
+
+
+## Final review: session profile store boundary
+
+The final verdict identified a concrete security defect in the newly added native writer: profiles/<session>/opencode could still reach shared files through a linked profiles directory. The retained ConfinedDir is now anchored at profiles for remote/container sessions, or at the worker root for a local profile directory. Every session/harness component below that ownership boundary is opened without following links. The preliminary legacy-link checks cover the same boundary so existing visible warning and automated-role failure behavior is retained.
+
+Extended the shared-profile regression to seven layouts, including linked profile stores for Kimi, OpenCode and Grok. The successful native replacement regression now runs below a regular private profiles/session directory. Source was checkpointed before long builds. Checks ran outside the sandbox on the dev profile with inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared and existing isolated test directories retained:
+
+- `cargo test -p brokk-mj-worker-runtime legacy_native_profile_links_warn_without_writing_shared_home`: 1 passed across seven layouts (`memory-instructions-final-legacy-test.log`).
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed (`memory-instructions-final-worker-tests.log`).
+- `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings`: first failed because Path became test-only after the ambient reopen was removed (`memory-instructions-final-clippy.log`); moved that import into the test module. The same command then passed (`memory-instructions-final-clippy-fixed.log`).
+
+Formatting/diff checks are clean. No still-failing checks. The final verdict had no overridden or deferred findings. By the parent's explicit landing instruction, this corrected commit is handed back without another review request. No default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked.

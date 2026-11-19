@@ -1,7 +1,6 @@
 //! Standing session instructions, composed once and delivered before every native open.
 use super::*;
 use agent_client_protocol::v1::schema::SystemPrompt;
-use std::path::Path;
 
 #[derive(Debug, Clone, Copy)]
 pub enum InstructionRole {
@@ -190,7 +189,6 @@ pub(super) async fn deliver(
         .harness
         .home_from_environment(&profile_root)
         .join(spec.harness.agent_instructions_file());
-    let nested_home = spec.harness.nested_home().then_some(spec.harness.id());
     // One worker owns one staged instruction file. Move the write lease into
     // the I/O thread so a canceled open cannot let a replacement overtake it.
     let lease = NATIVE_FILE_WRITE.clone().lock_owned().await;
@@ -199,7 +197,16 @@ pub(super) async fn deliver(
         std::panic::AssertUnwindSafe(move || {
             let _lease = lease;
             let parent = path.parent().context("instruction file has no directory")?;
-            for directory in [&profile_root, parent] {
+            // Local profiles live below a worker root; remote/container profiles
+            // live below the session profile store. Neither boundary may be a link.
+            let ownership_root = profile_root
+                .parent()
+                .filter(|directory| {
+                    profile_root.file_name() == Some(std::ffi::OsStr::new("profile"))
+                        || directory.file_name() == Some(std::ffi::OsStr::new("profiles"))
+                })
+                .unwrap_or(&profile_root);
+            for directory in [ownership_root, &profile_root, parent] {
                 if std::fs::symlink_metadata(directory)?
                     .file_type()
                     .is_symlink()
@@ -207,21 +214,23 @@ pub(super) async fn deliver(
                     return Ok(Some(std::fs::read_link(directory)?));
                 }
             }
-            // Anchor at the staged config root, then open each nested component
-            // without following links. Reopening the leaf by its ambient path
-            // would trust a linked OpenCode XDG root, including a concurrent swap.
-            let root = mj_core::confined_path::ConfinedDir::open_root(&profile_root)?
-                .with_context(|| format!("staged profile {} is missing", profile_root.display()))?;
-            let root = if let Some(directory) = nested_home {
-                root.open_dir(Path::new(directory))?.with_context(|| {
+            // Keep the ownership boundary open while resolving every component
+            // below it without following links, including the session directory.
+            let root = mj_core::confined_path::ConfinedDir::open_root(ownership_root)?
+                .with_context(|| {
+                    format!(
+                        "staged profile store {} is missing",
+                        ownership_root.display()
+                    )
+                })?;
+            let root = root
+                .open_dir(parent.strip_prefix(ownership_root)?)?
+                .with_context(|| {
                     format!(
                         "staged instruction directory {} is missing",
                         parent.display()
                     )
-                })?
-            } else {
-                root
-            };
+                })?;
             replace_native_section(
                 &root,
                 path.file_name().context("instruction file has no name")?,
@@ -324,39 +333,48 @@ const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only advisor to an
 mod tests {
     use super::*;
     use mj_core::subagent::SubagentMcpRole;
+    use std::path::Path;
 
     // Hard-won: 621276a78: quoted native end markers prevented the next open.
     // Hard-won: bc66f0faa: nested markers deleted user bytes and FIFO profiles stalled opens.
     // Hard-won: 1a5e072f9: legacy shared profile links broke native opens after worker upgrade.
     // Hard-won: 67edd7b68: a linked XDG root bypassed the OpenCode leaf ownership check.
+    // Hard-won: b46eceee6: a linked profiles store bypassed the session-directory check.
     #[cfg(unix)]
     #[tokio::test]
     async fn legacy_native_profile_links_warn_without_writing_shared_home() {
-        for (harness, linked_root) in [
-            (HarnessKind::Kimi, false),
-            (HarnessKind::OpenCode, false),
-            (HarnessKind::Grok, false),
-            (HarnessKind::OpenCode, true),
+        for (harness, linked_level) in [
+            (HarnessKind::Kimi, 0),
+            (HarnessKind::OpenCode, 0),
+            (HarnessKind::Grok, 0),
+            (HarnessKind::OpenCode, 1),
+            (HarnessKind::OpenCode, 2),
+            (HarnessKind::Kimi, 2),
+            (HarnessKind::Grok, 2),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let shared = temp.path().join("shared");
             std::fs::create_dir_all(&shared).unwrap();
-            let shared_home = if linked_root {
-                shared.join(harness.id())
-            } else {
-                shared.clone()
+            let shared_home = match linked_level {
+                2 => harness.home_from_environment(shared.join("session")),
+                1 => shared.join(harness.id()),
+                _ => shared.clone(),
             };
             std::fs::create_dir_all(&shared_home).unwrap();
             let file = shared_home.join(harness.agent_instructions_file());
             std::fs::write(&file, "user-owned instructions").unwrap();
-            let legacy = temp.path().join("legacy").join(harness.id());
+            let legacy = temp.path().join("legacy").join(if linked_level == 2 {
+                "profiles"
+            } else {
+                harness.id()
+            });
             std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(&shared, &legacy).unwrap();
             let mut spec = super::super::tests::reload_fallback_spec(harness);
-            let home = if linked_root {
-                legacy.join(harness.id())
-            } else {
-                legacy.clone()
+            let home = match linked_level {
+                2 => harness.home_from_environment(legacy.join("session")),
+                1 => legacy.join(harness.id()),
+                _ => legacy.clone(),
             };
             harness.configure_staged_home_environment(&home, &mut spec.environment);
             let (events, mut received) = mpsc::channel(16);
@@ -414,7 +432,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let (events, _rx) = mpsc::channel(256);
             let mut spec = super::super::tests::reload_fallback_spec(harness);
-            let home = harness.home_from_environment(temp.path());
+            let home = harness.home_from_environment(temp.path().join("profiles/session"));
             std::fs::create_dir_all(&home).unwrap();
             let shared = temp.path().join("other-profile");
             std::fs::create_dir_all(&shared).unwrap();

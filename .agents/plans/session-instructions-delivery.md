@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Final review: native writes must also refuse a linked session profile store. Anchor the retained handle at profiles (or the local worker root), then walk the session and harness directories without following links. Regression covers all three native harnesses under a linked profiles store, plus successful private-store writes. Checkpoint saved before focused validation; shared-profile regression (1 across seven layouts), instruction suite (4) and worker all-target clippy pass. Moved a test-only import after the initial lint failure. Parent directs commit and handback without another review request; no overrides or deferred findings.
+
 - [x] (2026-11-19) Eleventh review: reject linked staged config roots as well as instruction directories. Anchor the native writer at the config-root directory handle and open the nested OpenCode directory without following links. Extended the existing shared-profile regression to the linked XDG-root layout. Checkpoint saved before validation; shared-profile regression (1), instruction suite (4) and worker all-target clippy pass. No overrides; request re-review.
 
 - [x] (2026-11-19) Tenth review: carry Claude profile registration outcome through the existing launch field; compose agent guidance only for installed profile tools. Escape root paths, repository identifiers and unavailable-index reasons as prompt data. Source checkpoint saved before builds. Escaping regression (1), shared-profile regression (1), instruction suite (three passed initially, lifecycle passed after fixture correction) and core/worker all-target clippy pass. No overrides; request re-review.
@@ -51,6 +53,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Surprises & Discoveries
+
+- Final review found one more concrete ownership boundary: remote/container homes live below profiles/<session>, so a linked profiles store bypassed checks of the session and harness directories. Native delivery now opens the profiles store itself without following links and walks every session/harness component through that retained handle. Local profile layout similarly anchors at the worker root. The regression covers all three native harnesses under a linked store; successful private-store writes remain covered.
 
 - Eleventh review found that checking only the instruction-directory leaf allowed a linked OpenCode XDG root to lead to a regular shared opencode directory. Native delivery now checks both directories for legacy links and retains a confined handle opened at the staged config root through nested lookup and atomic replacement, rather than reopening the ambient leaf path.
 
