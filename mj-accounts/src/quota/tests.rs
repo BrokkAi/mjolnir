@@ -773,7 +773,8 @@ done
     );
 }
 
-#[cfg(unix)]
+// macOS filesystems reject the non-UTF-8 directory name this fixture needs.
+#[cfg(all(unix, not(target_os = "macos")))]
 // Hard-won: 7f4649508: an ambient CLI's non-UTF-8 directory was replaced before process startup.
 #[tokio::test]
 async fn inherited_native_path_reports_a_non_utf8_quota_harness() {
