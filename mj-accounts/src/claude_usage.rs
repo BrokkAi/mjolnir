@@ -79,19 +79,15 @@ impl fmt::Display for ClaudeUsageError {
 /// the credentials in the Keychain, where only Claude Code itself reads them.
 /// The API has no token to send there, so its print-mode `/usage` output is
 /// the only quota macOS can report.
-///
-/// With `container`, a login refresh runs the agent-dev image's `claude`
-/// instead of one on this host. macOS never uses it: the image cannot read
-/// the Keychain.
 pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
-    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     if cfg!(target_os = "macos") {
+        let program = ClaudeLauncher::Managed.locate(&environment).await?;
         let executor = Arc::new(CancellableProcessExecutor::with_timeout(CLI_USAGE_TIMEOUT));
         let _cancel = executor.cancel_on_drop();
-        let mut report = query_cli_with(environment, executor.clone()).await?;
+        let mut report = query_cli_with(environment, executor.clone(), program).await?;
         let source = LoginSource::Keychain {
             lock_marker: home.join(".credentials.json"),
             security: executor,
@@ -110,78 +106,25 @@ pub async fn query(
         environment,
         USAGE_URL,
         executor,
-        container,
         ClaudeLauncher::Managed,
     )
     .await
 }
 
-/// The program a host check starts.
-fn claude_program() -> &'static str {
-    if cfg!(windows) {
-        "claude.cmd"
-    } else {
-        "claude"
-    }
-}
-
 /// Where a host renewal gets its `claude`.
 #[derive(Debug, Clone)]
 pub enum ClaudeLauncher {
-    /// The pinned Claude Code Mjolnir installs and sessions run, from the same
-    /// resolver `mj login` uses. Mjolnir installs no Claude Code on Windows,
-    /// where the person's own `claude.cmd` on the profile's `PATH` is the only
-    /// one there is.
+    /// This host's Claude Code, or the pinned installation prepared by the
+    /// same resolver as bare workers.
     Managed,
     /// A program chosen by the caller (tests).
     #[cfg(any(test, feature = "test-support"))]
     Program(PathBuf),
 }
 
-/// The person's own `claude` on the profile's `PATH`, where Mjolnir has no
-/// installation of Claude Code to offer.
-#[cfg(not(unix))]
-fn host_claude_on_path(environment: &HashMap<String, String>) -> Option<PathBuf> {
-    let path = environment
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("PATH"));
-    mj_core::program_path::find_executable_on_path(claude_program(), path.as_deref())
-}
-
-/// What keeps a managed Claude Code installed while a renewal runs it.
-/// Mjolnir installs none on Windows, so there is nothing to hold there.
-#[cfg(unix)]
-type Installation = mj_core::harness_install::Located;
-#[cfg(not(unix))]
-type Installation = std::convert::Infallible;
-
-/// The `claude` a host renewal runs, and what keeps it installed meanwhile.
-struct ClaudeProgram {
-    command: PathBuf,
-    environment: HashMap<String, String>,
-    _installation: Option<Installation>,
-}
+type ClaudeProgram = crate::quota_harness::QuotaProgram;
 
 impl ClaudeLauncher {
-    /// Whether this host can run Claude Code through this launcher: always where
-    /// Mjolnir installs it (Unix), and where it does not (Windows) when the
-    /// person's own `claude.cmd` is on the profile's `PATH`. Quota runtime
-    /// `auto` falls back to a container exactly when this is false.
-    pub fn host_can_run(&self, environment: &HashMap<String, String>) -> bool {
-        match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Program(_) => true,
-            #[cfg(unix)]
-            Self::Managed => {
-                let _ = environment;
-                true
-            }
-            #[cfg(not(unix))]
-            Self::Managed => host_claude_on_path(environment).is_some(),
-        }
-    }
-
     /// Resolve the program, installing the pinned Claude Code when this host
     /// has none yet. A failure says why no `claude` can run, so it is
     /// reported on every renewal that needs it.
@@ -196,55 +139,11 @@ impl ClaudeLauncher {
                 environment: HashMap::new(),
                 _installation: None,
             }),
-            #[cfg(unix)]
             Self::Managed => {
-                let execution_policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
-                let (command, args) = mj_core::harness_runtime::fallback_launch(
-                    mj_core::config::HarnessKind::Claude,
-                    execution_policy,
-                );
-                let search = std::env::vars_os()
-                    .filter_map(|(name, value)| {
-                        Some((name.into_string().ok()?, value.into_string().ok()?))
-                    })
-                    .chain(environment.clone())
-                    .collect();
-                let located = mj_core::harness_install::locate(
-                    mj_core::placement::local_harness_runtime(),
-                    mj_core::config::HarnessKind::Claude,
-                    execution_policy,
-                    std::path::Path::new(&command),
-                    &args,
-                    &search,
-                )
-                .await
-                .map_err(|error| {
-                    ClaudeUsageError::Refresh(format!("no Claude Code to run: {error:#}"))
-                })?;
-                let command = located.cli_entrypoint.clone().ok_or_else(|| {
-                    ClaudeUsageError::Refresh(
-                        "no Claude Code to run: the installation names no claude program".into(),
-                    )
-                })?;
-                Ok(ClaudeProgram {
-                    command,
-                    environment: located.environment.clone().into_iter().collect(),
-                    _installation: Some(located),
-                })
+                crate::quota_harness::locate(mj_core::config::HarnessKind::Claude, environment)
+                    .await
+                    .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))
             }
-            #[cfg(not(unix))]
-            Self::Managed => host_claude_on_path(environment)
-                .map(|command| ClaudeProgram {
-                    command,
-                    environment: HashMap::new(),
-                    _installation: None,
-                })
-                .ok_or_else(|| {
-                    ClaudeUsageError::Refresh(format!(
-                        "no Claude Code to run: Mjolnir installs none on this platform and {} is not on PATH",
-                        claude_program()
-                    ))
-                }),
         }
     }
 }
@@ -264,8 +163,9 @@ fn admit_renewal(
 async fn query_cli_with(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
+    program: ClaudeProgram,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let output = run_claude_usage(environment, executor, "read Claude usage")
+    let output = run_claude_usage(environment, executor, "read Claude usage", program)
         .await
         .map_err(ClaudeUsageError::Query)?;
     // Claude Code reports a missing login on stdout and exits zero, so both
@@ -308,7 +208,6 @@ async fn query_with(
         environment,
         usage_url,
         executor,
-        None,
         ClaudeLauncher::Program(PathBuf::from("claude")),
     )
     .await
@@ -319,7 +218,6 @@ async fn query_with_runtime(
     environment: HashMap<String, String>,
     usage_url: &str,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
-    container: Option<crate::quota_runtime::ContainerCheck>,
     launcher: ClaudeLauncher,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let client = reqwest::Client::builder()
@@ -337,10 +235,7 @@ async fn query_with_runtime(
                     environment,
                     executor,
                     Some(token.to_owned()),
-                    RenewalRuntime {
-                        container,
-                        launcher,
-                    },
+                    launcher,
                 )
                 .await
             }
@@ -354,10 +249,7 @@ async fn query_with_runtime(
                 environment,
                 executor,
                 None,
-                RenewalRuntime {
-                    container,
-                    launcher,
-                },
+                launcher,
             )
             .await
         }
@@ -498,12 +390,6 @@ async fn query_paid_credits(
     mj_client::quota::PaidCredits::limited(balance).ok_or_else(invalid)
 }
 
-/// Where a renewal runs `claude`: in a quota container, or the host's program.
-struct RenewalRuntime {
-    container: Option<crate::quota_runtime::ContainerCheck>,
-    launcher: ClaudeLauncher,
-}
-
 async fn refresh_and_retry(
     client: &reqwest::Client,
     usage_url: &str,
@@ -511,16 +397,9 @@ async fn refresh_and_retry(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     rejected_token: Option<String>,
-    runtime: RenewalRuntime,
+    launcher: ClaudeLauncher,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let RenewalRuntime {
-        container,
-        launcher,
-    } = runtime;
-    let program = match &container {
-        Some(_) => None,
-        None => Some(launcher.locate(&environment).await?),
-    };
+    let program = launcher.locate(&environment).await?;
     // Held until the renewal has persisted the new login, even if this
     // future is dropped (see `run_claude_refresh`).
     let admission = admit_renewal(crate::upgrade::gate())?;
@@ -543,7 +422,6 @@ async fn refresh_and_retry(
             _admission: admission,
             program,
         },
-        container,
     )
     .await?;
     let token = oauth_access_token(&credentials, mj_core::clock::epoch_millis())
@@ -597,7 +475,6 @@ pub async fn refresh_grant_if_due(
     source: LoginSource,
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
-    container: Option<crate::quota_runtime::ContainerCheck>,
     launcher: &ClaudeLauncher,
     gate: &Arc<crate::upgrade::Gate>,
     trigger: GrantRefreshTrigger<'_>,
@@ -636,10 +513,7 @@ pub async fn refresh_grant_if_due(
     }
     // Due. Find a runnable `claude` first: with none, say so on every attempt
     // rather than strip copies nothing can renew.
-    let program = match &container {
-        Some(_) => None,
-        None => Some(launcher.locate(&environment).await?),
-    };
+    let program = launcher.locate(&environment).await?;
     // Admission covers the exchange only, from here until the new login is
     // persisted (it moves into the subprocess's thread with the locks). A
     // waiting handoff is not delayed by a renewal that has not begun.
@@ -669,7 +543,7 @@ pub async fn refresh_grant_if_due(
         _admission: admission,
         program,
     };
-    let renewed = renew_locked(active, &source, environment, executor, renewal, container).await?;
+    let renewed = renew_locked(active, &source, environment, executor, renewal).await?;
     Ok(GrantRefresh::Renewed {
         by_this_call: true,
         expires_at_ms: renewed.get("claudeAiOauth").and_then(oauth_expires_at),
@@ -778,7 +652,7 @@ impl LoginSource {
 struct Renewal {
     _locks: mj_core::credentials::CredentialWriteGuard,
     _admission: crate::upgrade::Work,
-    program: Option<ClaudeProgram>,
+    program: ClaudeProgram,
 }
 
 /// Run `claude auth login` with the stored refresh token while the caller
@@ -790,17 +664,15 @@ async fn renew_locked(
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     renewal: Renewal,
-    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<Value, ClaudeUsageError> {
     let before = active
         .pointer("/claudeAiOauth/accessToken")
         .and_then(Value::as_str)
         .map(str::to_owned);
     source.configure_environment(&mut environment);
-    let refresh_error =
-        run_claude_refresh(active, source, environment, executor, renewal, container)
-            .await
-            .err();
+    let refresh_error = run_claude_refresh(active, source, environment, executor, renewal)
+        .await
+        .err();
     let credentials = match source.read().await {
         Ok(credentials) => credentials,
         Err(error) => return Err(refresh_error.unwrap_or(error)),
@@ -828,17 +700,22 @@ async fn run_claude_usage(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     purpose: &'static str,
+    program: ClaudeProgram,
 ) -> Result<CommandOutput, String> {
     let mut command = CommandSpec::new(
-        claude_program(),
+        mj_core::target_path::text(&program.command),
         ["-p", "/usage", "--no-session-persistence"],
     )
     .purpose(purpose);
     command.env.extend(environment);
-    tokio::task::spawn_blocking(move || executor.execute(&command))
-        .await
-        .map_err(|error| format!("worker failed: {error}"))?
-        .map_err(|error| error.to_string())
+    command.env.extend(program.environment.clone());
+    tokio::task::spawn_blocking(move || {
+        let _program = program;
+        executor.execute(&command)
+    })
+    .await
+    .map_err(|error| format!("worker failed: {error}"))?
+    .map_err(|error| error.to_string())
 }
 
 async fn run_claude_refresh(
@@ -847,7 +724,6 @@ async fn run_claude_refresh(
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     renewal: Renewal,
-    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<(), ClaudeUsageError> {
     let oauth = &credentials["claudeAiOauth"];
     let refresh = oauth["refreshToken"]
@@ -870,45 +746,14 @@ async fn run_claude_refresh(
         "CLAUDE_CODE_OAUTH_CLIENT_ID".into(),
         oauth["clientId"].as_str().unwrap_or_default().to_owned(),
     );
-    let (mut command, quota_container) = match &container {
-        None => {
-            let program = renewal
-                .program
-                .as_ref()
-                .ok_or_else(|| ClaudeUsageError::Refresh("no Claude Code to run".into()))?;
-            let mut command = CommandSpec::new(
-                mj_core::target_path::text(&program.command),
-                ["auth", "login"],
-            );
-            command.env.extend(program.environment.clone());
-            command.env.extend(environment);
-            source.confine_command(&mut command);
-            (command, None)
-        }
-        Some(check) => {
-            if matches!(source, LoginSource::Keychain { .. }) {
-                // The image cannot write the host's Keychain.
-                return Err(ClaudeUsageError::Refresh(
-                    "a login held in the macOS Keychain can only be renewed by Claude Code on this Mac"
-                        .into(),
-                ));
-            }
-            check
-                .runtime
-                .ensure_image_async()
-                .await
-                .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))?;
-            let launch = check.launch(
-                "claude",
-                &["auth", "login"],
-                &environment.into_iter().collect(),
-            );
-            let mut command =
-                CommandSpec::new(mj_core::target_path::text(&launch.program), launch.args);
-            command.env.extend(launch.env);
-            (command, Some(launch.container))
-        }
-    };
+    let program = &renewal.program;
+    let mut command = CommandSpec::new(
+        mj_core::target_path::text(&program.command),
+        ["auth", "login"],
+    );
+    command.env.extend(environment);
+    command.env.extend(program.environment.clone());
+    source.confine_command(&mut command);
     command.purpose = "refresh Claude login".to_owned();
     command.sensitive_output = true;
     // Once the child starts it runs to its own end. Anthropic spends the
@@ -927,9 +772,6 @@ async fn run_claude_refresh(
         executor.execute(&command)
     })
     .await;
-    if let Some(container) = quota_container {
-        container.remove().await;
-    }
     let output = output
         .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
         .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
@@ -2339,7 +2181,6 @@ Last 7d · 5966 requests · 78 sessions
             source,
             environment,
             mac.clone(),
-            None,
             &ClaudeLauncher::Program(PathBuf::from("claude")),
             &Arc::new(crate::upgrade::Gate::default()),
             GrantRefreshTrigger {

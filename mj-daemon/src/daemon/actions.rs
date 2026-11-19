@@ -846,7 +846,7 @@ pub(super) async fn handle_action(
         } => {
             let config = state.owner().controller().config.clone();
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let runtime = mj_controller::quota::QuotaRuntimeConfig::of(&config);
+
             let mut requests = Vec::new();
             for id in &profile_ids {
                 let profile = config
@@ -857,7 +857,6 @@ pub(super) async fn handle_action(
                     id,
                     profile,
                     cwd.clone(),
-                    runtime.clone(),
                 ));
             }
             state.probe_quota_profiles(requests, forced)?;

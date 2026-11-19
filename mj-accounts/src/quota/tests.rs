@@ -49,12 +49,7 @@ fn an_inline_token_provider_credential_does_not_become_native_openai() {
     );
     std::fs::write(path, config).unwrap();
     profile.environment.clear();
-    let request = QuotaRefreshRequest::for_profile(
-        "custom",
-        &profile,
-        home.path().to_owned(),
-        crate::quota::QuotaRuntimeConfig::host(),
-    );
+    let request = QuotaRefreshRequest::for_profile("custom", &profile, home.path().to_owned());
     assert!(
         matches!(
             &request.codex_source,
@@ -81,12 +76,7 @@ async fn a_provider_without_a_readable_key_never_reads_the_chatgpt_quota() {
         ..keyless.clone()
     };
     for (id, profile) in [("keyless", keyless), ("ollama", ollama)] {
-        let request = QuotaRefreshRequest::for_profile(
-            id,
-            &profile,
-            home.path().to_path_buf(),
-            crate::quota::QuotaRuntimeConfig::host(),
-        );
+        let request = QuotaRefreshRequest::for_profile(id, &profile, home.path().to_path_buf());
         assert!(
             matches!(request.codex_source, CodexQuotaSource::UsagePriced { .. }),
             "{id}: {:?}",
@@ -117,7 +107,6 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
-        crate::quota::QuotaRuntimeConfig::host(),
     );
     let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
     assert_eq!(outcome.report.error, None);
@@ -139,12 +128,8 @@ async fn bedrock_claude_reports_usage_pricing_without_an_oauth_login() {
         },
     }))
     .unwrap();
-    let request = QuotaRefreshRequest::for_profile(
-        "aws-model",
-        &profile,
-        home.path().to_path_buf(),
-        crate::quota::QuotaRuntimeConfig::host(),
-    );
+    let request =
+        QuotaRefreshRequest::for_profile("aws-model", &profile, home.path().to_path_buf());
     let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
 
     assert_eq!(outcome.report.profile_id, "aws-model");
@@ -407,7 +392,6 @@ fn codex_quota_request(
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 
@@ -908,9 +892,12 @@ fn a_codex_refresh_margin_is_an_hour_or_a_tenth_of_the_token_life() {
     assert!(!codex_login_needs_refresh(None, Some(now - hour), now));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     let directory = tempfile::tempdir().unwrap();
+
+    mj_core::test_hooks::install_fake_command(directory.path(), "grok", "#!/bin/sh\nexit 1\n");
 
     let (outcome, _) = refresh_profile_with_cache_root(
         QuotaRefreshRequest {
@@ -925,7 +912,6 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
             opencode_usage_priced: false,
-            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -936,7 +922,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     assert!(report.windows.is_empty());
     assert_eq!(
         report.error.as_deref(),
-        Some("Grok Build executable not found")
+        Some("grok agent stdio exited before answering the usage request")
     );
 }
 
@@ -988,7 +974,6 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
     manager
@@ -1095,7 +1080,6 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
     let said = |text: &str| {
@@ -1296,7 +1280,6 @@ async fn expired_claude_credentials_report_login_expired() {
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
             opencode_usage_priced: false,
-            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -1553,7 +1536,6 @@ while IFS= read -r line; do :; done
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
     let mut quotas = QuotaManager {
@@ -1681,7 +1663,6 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
-        crate::quota::QuotaRuntimeConfig::host(),
     );
     let identity = request.cache_identity();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1763,12 +1744,7 @@ async fn opencode_reports_api_for_a_profile_signed_in_only_with_a_stored_api_key
         enabled: true,
         ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
     };
-    let request = QuotaRefreshRequest::for_profile(
-        "ds8bit",
-        &profile,
-        home.path().to_path_buf(),
-        QuotaRuntimeConfig::host(),
-    );
+    let request = QuotaRefreshRequest::for_profile("ds8bit", &profile, home.path().to_path_buf());
     assert!(
         request.opencode_usage_priced,
         "a stored login that is itself a plain API key is still billed by usage"
@@ -1792,12 +1768,7 @@ async fn opencode_stays_unreported_when_a_stored_login_is_oauth() {
             .collect(),
         ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
     };
-    let request = QuotaRefreshRequest::for_profile(
-        "mixed",
-        &profile,
-        home.path().to_path_buf(),
-        QuotaRuntimeConfig::host(),
-    );
+    let request = QuotaRefreshRequest::for_profile("mixed", &profile, home.path().to_path_buf());
     assert!(
         !request.opencode_usage_priced,
         "an OAuth login leaves billing unknown even beside an environment key for another provider"

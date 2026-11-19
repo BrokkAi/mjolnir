@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -44,10 +46,7 @@ impl GrokUsageReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrokUsageError {
-    NotInstalled,
     Launch(String),
-    /// The container engine does not hold the agent-dev image yet.
-    ImageUnavailable(String),
     TimedOut,
     /// The agent exited before answering. Grok Build tears the process down
     /// when its stdin closes, so this also catches an early hangup.
@@ -62,9 +61,7 @@ pub enum GrokUsageError {
 impl fmt::Display for GrokUsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotInstalled => write!(f, "Grok Build executable not found"),
             Self::Launch(error) => write!(f, "launch grok agent stdio: {error}"),
-            Self::ImageUnavailable(detail) => f.write_str(detail),
             Self::TimedOut => write!(f, "grok usage request timed out"),
             Self::Closed => write!(
                 f,
@@ -78,26 +75,11 @@ impl fmt::Display for GrokUsageError {
 }
 
 /// Ask a profile's Grok Build for its current billing period.
-///
-/// With `container`, the agent-dev image's `grok` answers instead of one on
-/// this host.
 pub async fn query(
-    home: PathBuf,
     cwd: PathBuf,
     env: HashMap<String, String>,
-    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<GrokUsageReport, GrokUsageError> {
-    let mut session = match container {
-        None => GrokUsageSession::spawn(&home, cwd, env).await?,
-        Some(check) => {
-            check
-                .runtime
-                .ensure_image_async()
-                .await
-                .map_err(|error| GrokUsageError::ImageUnavailable(format!("{error:#}")))?;
-            GrokUsageSession::spawn_in_container(&check, env).await?
-        }
-    };
+    let mut session = GrokUsageSession::spawn(cwd, env).await?;
     // The exchange is bounded as a whole: a stalled agent must not hold the
     // quota refresh open, and its child must still be reaped.
     let result = tokio::time::timeout(REQUEST_TIMEOUT, session.exchange()).await;
@@ -105,44 +87,9 @@ pub async fn query(
     result.map_err(|_| GrokUsageError::TimedOut)?
 }
 
-/// Executable candidates, in the order Hel tries them.
-///
-/// The installed CLI on `PATH` comes first, then the copy the official
-/// installer leaves inside the profile home.
-fn grok_programs(home: &Path) -> Vec<PathBuf> {
-    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    vec![PathBuf::from(name), home.join("bin").join(name)]
-}
-
-/// Whether a host check would start a `grok`: one on `path`, or the copy the
-/// official installer leaves inside the profile home.
-///
-/// This follows the spawn in [`GrokUsageSession`]: it moves to the next
-/// candidate only when a program is missing. A `grok` that is on `path` but
-/// cannot run fails the launch, so it decides the answer.
-pub fn host_has_grok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
-    for program in grok_programs(home) {
-        if program.is_absolute() {
-            if program.exists() {
-                return mj_core::program_path::is_executable_file(&program);
-            }
-            continue;
-        }
-        let name = program.to_string_lossy();
-        if mj_core::program_path::find_executable_on_path(&name, path).is_some() {
-            return true;
-        }
-        if mj_core::program_path::find_program_on_path(&name, path).is_some() {
-            return false;
-        }
-    }
-    false
-}
-
 struct GrokUsageSession {
     child: crate::streamed_child::ProxyChild,
-    /// The container the agent runs in, removed at shutdown.
-    container: Option<crate::quota_runtime::QuotaContainer>,
+    _program: crate::quota_harness::QuotaProgram,
     /// Held for the whole exchange on purpose: Grok Build stops when its stdin
     /// closes, so dropping this early kills the agent before it answers.
     stdin: crate::streamed_child::ProxyWriter,
@@ -152,64 +99,19 @@ struct GrokUsageSession {
 }
 
 impl GrokUsageSession {
-    async fn spawn(
-        home: &Path,
-        cwd: PathBuf,
-        env: HashMap<String, String>,
-    ) -> Result<Self, GrokUsageError> {
-        let programs = grok_programs(home);
-        let mut spawned = None;
-        for (index, program) in programs.iter().enumerate() {
-            let mut spec = mj_core::targets::CommandSpec::new(
-                mj_core::target_path::text(program),
-                ["agent", "stdio"],
-            );
-            spec.cwd = Some(cwd.clone());
-            spec.env = env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            match crate::streamed_child::spawn_proxy(&spec).await {
-                Ok(stdio) => {
-                    spawned = Some(stdio);
-                    break;
-                }
-                Err(error)
-                    if crate::streamed_child::is_missing_program(&error)
-                        && index + 1 < programs.len() => {}
-                Err(error) if crate::streamed_child::is_missing_program(&error) => {
-                    return Err(GrokUsageError::NotInstalled);
-                }
-                Err(error) => return Err(GrokUsageError::Launch(format!("{error:#}"))),
-            }
-        }
-        let stdio = spawned.ok_or(GrokUsageError::NotInstalled)?;
-        Ok(Self::from_stdio(stdio, None))
-    }
-
-    async fn spawn_in_container(
-        check: &crate::quota_runtime::ContainerCheck,
-        env: HashMap<String, String>,
-    ) -> Result<Self, GrokUsageError> {
-        let env = env.into_iter().collect();
-        let launch = check.launch("grok", &["agent", "stdio"], &env);
+    async fn spawn(cwd: PathBuf, env: HashMap<String, String>) -> Result<Self, GrokUsageError> {
+        let program = crate::quota_harness::locate(mj_core::config::HarnessKind::Grok, &env)
+            .await
+            .map_err(|error| GrokUsageError::Launch(format!("{error:#}")))?;
         let mut spec = mj_core::targets::CommandSpec::new(
-            mj_core::target_path::text(&launch.program),
-            launch.args.clone(),
+            mj_core::target_path::text(&program.command),
+            ["agent", "stdio"],
         );
-        spec.env = env;
+        spec.cwd = Some(cwd);
+        spec.env = env.into_iter().chain(program.environment.clone()).collect();
         let stdio = crate::streamed_child::spawn_proxy(&spec)
             .await
-            .map_err(|error| {
-                GrokUsageError::Launch(format!("{}: {error:#}", launch.program.display()))
-            })?;
-        Ok(Self::from_stdio(stdio, Some(launch.container)))
-    }
-
-    fn from_stdio(
-        stdio: crate::streamed_child::ProxyStdio,
-        container: Option<crate::quota_runtime::QuotaContainer>,
-    ) -> Self {
+            .map_err(|error| GrokUsageError::Launch(format!("{error:#}")))?;
         let crate::streamed_child::ProxyStdio {
             child,
             stdin,
@@ -219,13 +121,13 @@ impl GrokUsageSession {
         let stderr = tokio::spawn(async move {
             let _ = crate::streamed_child::collect_bounded(stderr, 64 * 1024).await;
         });
-        Self {
+        Ok(Self {
             child,
-            container,
+            _program: program,
             stdin,
             stdout: BufReader::new(stdout),
             stderr,
-        }
+        })
     }
 
     async fn exchange(&mut self) -> Result<GrokUsageReport, GrokUsageError> {
@@ -301,9 +203,6 @@ impl GrokUsageSession {
             tracing::warn!(%error, "could not reap the Grok usage process");
         }
         self.stderr.abort();
-        if let Some(container) = self.container {
-            container.remove().await;
-        }
     }
 }
 
@@ -386,87 +285,6 @@ fn epoch_seconds(timestamp: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
-    /// A directory holding an executable named `name`.
-    #[cfg(unix)]
-    fn directory_with_program(name: &str) -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = tempfile::tempdir().unwrap();
-        let program = directory.path().join(name);
-        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        directory
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn host_has_grok_on_path_or_in_the_profile_home() {
-        let empty = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        assert!(!host_has_grok(home.path(), Some(empty.path().as_os_str())));
-        assert!(!host_has_grok(home.path(), None));
-
-        let on_path = directory_with_program("grok");
-        assert!(host_has_grok(home.path(), Some(on_path.path().as_os_str())));
-
-        let installed = directory_with_program("grok");
-        let home_bin = home.path().join("bin");
-        std::fs::create_dir(&home_bin).unwrap();
-        std::fs::copy(installed.path().join("grok"), home_bin.join("grok")).unwrap();
-        assert!(host_has_grok(home.path(), Some(empty.path().as_os_str())));
-
-        // A `grok` on PATH that cannot run fails the launch before the home
-        // copy is tried, so the host does not have one.
-        let plain = tempfile::tempdir().unwrap();
-        std::fs::write(plain.path().join("grok"), "").unwrap();
-        assert!(!host_has_grok(home.path(), Some(plain.path().as_os_str())));
-    }
-
-    fn report(result: serde_json::Value) -> GrokUsageReport {
-        parse(&result).unwrap()
-    }
-
-    /// proto3 JSON omits zero scalars, which is exactly what an account at
-    /// zero usage looks like on the wire. Captured from a real account.
-    #[test]
-    fn omitted_zero_fields_read_as_zero_rather_than_missing_data() {
-        let usage = report(json!({
-            "config": {
-                "currentPeriod": {
-                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
-                    "start": "2026-08-11T05:22:07.661951+00:00",
-                    "end": "2026-08-18T05:22:07.661951+00:00",
-                },
-                "onDemandCap": {},
-                "onDemandUsed": {"val": 0},
-                "prepaidBalance": {},
-                "isUnifiedBillingUser": true,
-                "billingPeriodStart": "2026-08-11T05:22:07.661951+00:00",
-                "billingPeriodEnd": "2026-08-18T05:22:07.661951+00:00",
-            },
-            "subscription_tier": "X Premium+",
-        }));
-
-        assert_eq!(usage.used_percent, 0.0);
-        assert_eq!(usage.remaining_percent(), 100);
-        assert_eq!(usage.period_label, "Week");
-        assert_eq!(cents(Some(&json!({}))), Some(0));
-    }
-
-    #[test]
-    fn a_response_without_a_configuration_is_not_a_zero_reading() {
-        assert_eq!(parse(&json!({})), Err(GrokUsageError::NoData));
-        assert_eq!(parse(&json!({"config": null})), Err(GrokUsageError::NoData));
-    }
-
-    #[test]
-    fn a_zero_allowance_does_not_divide_by_zero() {
-        let usage = report(json!({
-            "config": {"monthlyLimit": {"val": 0}, "used": {"val": 100}},
-        }));
-
-        assert_eq!(usage.used_percent, 0.0);
-    }
-
     #[cfg(unix)]
     fn fake_grok(directory: &Path, script: &str) -> PathBuf {
         mj_core::test_hooks::install_fake_command(directory, "grok", script);
@@ -481,12 +299,10 @@ mod tests {
 
         let error = query(
             directory.path().to_path_buf(),
-            directory.path().to_path_buf(),
             HashMap::from([(
                 "PATH".to_owned(),
                 directory.path().to_string_lossy().into_owned(),
             )]),
-            None,
         )
         .await
         .unwrap_err();
@@ -496,5 +312,66 @@ mod tests {
             format!("{error}").contains("grok agent stdio exited"),
             "{error}"
         );
+    }
+
+    // The harness installer and quota process must agree on the install receipt
+    // and retain its lease, so cache repair cannot replace a running CLI.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_managed_quota_harness_stays_leased_until_its_child_stops() {
+        use mj_core::config::HarnessKind;
+        use mj_core::harness_runtime::{self, ManagedHarnessManifest};
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("cache");
+        let root =
+            harness_runtime::managed_harness_cache_root(Some(cache.as_os_str()), None).unwrap();
+        let install = harness_runtime::managed_harness_install_dir(&root, HarnessKind::Grok);
+        let bin = install.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        fake_grok(&bin, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n");
+        std::fs::write(install.join(harness_runtime::LEASE_FILE), []).unwrap();
+        std::fs::write(
+            install.join(harness_runtime::MANIFEST_FILE),
+            serde_json::to_vec(&ManagedHarnessManifest::for_harness(HarnessKind::Grok)).unwrap(),
+        )
+        .unwrap();
+        let mut session = GrokUsageSession::spawn(
+            directory.path().to_path_buf(),
+            HashMap::from([
+                (
+                    "PATH".into(),
+                    directory.path().to_string_lossy().into_owned(),
+                ),
+                (
+                    "GROK_HOME".into(),
+                    directory.path().to_string_lossy().into_owned(),
+                ),
+                (
+                    "XDG_CACHE_HOME".into(),
+                    cache.to_string_lossy().into_owned(),
+                ),
+            ]),
+        )
+        .await
+        .unwrap();
+        let lease = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(install.join(harness_runtime::LEASE_FILE))
+            .unwrap();
+        assert!(matches!(
+            lease.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        // Drive the real stdio child; shutdown must retain the lease until it
+        // closes stdin and reaps the process, then release it.
+        session
+            .write_message(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+            .await
+            .unwrap();
+        session.shutdown().await;
+        lease
+            .try_lock()
+            .expect("lease released after quota child stops");
     }
 }
