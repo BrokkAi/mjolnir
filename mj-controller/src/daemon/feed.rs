@@ -479,6 +479,7 @@ mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
 
+    // Hard-won: 6b12ea8ea: transcript-only revisions repeatedly submitted notification writes.
     // Hard-won: eb00602a0: notification observations could queue writes after handoff drained.
     #[tokio::test]
     async fn alert_events_cross_the_protocol_107_feed_and_resume_after_restart() {
@@ -665,8 +666,14 @@ mod tests {
         assert!(replica.projection.metadata.alert_events.is_empty());
         // A client disconnected before the event catches up through a snapshot.
         let resumed = replacement.runtime_changes(attached, false).await.unwrap();
+        let mut disconnected = RuntimeReplica::default();
+        disconnected.apply(resumed.clone()).unwrap();
+        assert_eq!(disconnected.projection.metadata.alert_events.len(), 1);
         replica.apply(resumed).unwrap();
-        assert_eq!(replica.projection.metadata.alert_events.len(), 1);
+        assert!(
+            replica.projection.metadata.alert_events.is_empty(),
+            "an acknowledged batch must not replay on replacement snapshots"
+        );
         let mut fresh = RuntimeReplica::default();
         fresh
             .apply(replacement.runtime_changes(None, false).await.unwrap())
@@ -700,6 +707,38 @@ mod tests {
         );
         cancellation.cancel();
         observer.await.unwrap().unwrap();
+        let mut observer_inputs = crate::web_push::NotificationReconciler::default();
+        let mut streaming = state.runtime_publication().unwrap();
+        assert!(
+            observer_inputs
+                .reconcile(streaming.clone())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        tokio::task::spawn_blocking(move || _writer.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        streaming.revision += 1;
+        let mut transcript = mj_core::state::MaterializedSession::empty("hidden");
+        transcript.applied_event_ordinal = 50;
+        streaming.transcripts.insert(
+            "hidden".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &transcript,
+                &mj_core::state::ProjectionWindow::default(),
+                1024,
+            ),
+        );
+        assert!(
+            observer_inputs
+                .reconcile(streaming)
+                .await
+                .unwrap()
+                .is_none(),
+            "streaming-only revisions must not submit work to the stopped writer"
+        );
         let (before_drain, _) =
             crate::web_push::blocking(|| crate::database::alert_events_since(None))
                 .await
@@ -716,9 +755,10 @@ mod tests {
             .completed_ordinal += 1;
         crate::upgrade::gate().begin_draining();
         assert!(
-            !crate::web_push::blocking(move || crate::database::notification_reconcile(deferred))
+            crate::web_push::blocking(move || crate::database::notification_reconcile(deferred))
                 .await
-                .unwrap(),
+                .unwrap()
+                .is_none(),
             "draining refuses another disposable notification write"
         );
         let (after_drain, _) =

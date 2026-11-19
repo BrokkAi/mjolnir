@@ -106,11 +106,11 @@ fn alert_events_since_with(
 }
 
 /// The daemon notification service is the sole observer of published items.
-pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<bool> {
+pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<Option<bool>> {
     // The blocking owner holds admission from queueing through commit. A drain
     // refuses this disposable observation; the next daemon rebuilds it.
     let Ok(_work) = crate::upgrade::activity_unless_draining("notification reconciliation") else {
-        return Ok(false);
+        return Ok(None);
     };
     submit_database_write("observe notification entries", move |db| {
         let before = alert_events_since_with(db, None)?.0;
@@ -119,7 +119,7 @@ pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<bool>
             push_observe_in(&tx, &runtime, &entries, Utc::now().timestamp())?;
         }
         tx.commit()?;
-        Ok(alert_events_since_with(db, None)?.0 != before)
+        Ok(Some(alert_events_since_with(db, None)?.0 != before))
     })
 }
 
@@ -172,7 +172,7 @@ fn push_reconcile_with(
 fn push_observe_in(
     tx: &Transaction<'_>,
     runtime: &RuntimeProjection,
-    entries: &BTreeMap<String, PushEntry<'_>>,
+    entries: &BTreeMap<String, PushEntry<&str>>,
     now: i64,
 ) -> Result<()> {
     // The cutover baseline applies even to devices enrolled later. An absent
@@ -290,7 +290,7 @@ const READY_PUSH: &str = "WITH ranked AS (
 fn push_claim_in(
     tx: &Transaction<'_>,
     runtime: &RuntimeProjection,
-    entries: Option<&BTreeMap<String, PushEntry<'_>>>,
+    entries: Option<&BTreeMap<String, PushEntry<&str>>>,
     automatic: bool,
     now: i64,
 ) -> Result<Vec<PushDelivery>> {
@@ -373,7 +373,7 @@ fn push_claim_in(
 fn push_entry_text(
     db: &Connection,
     runtime: &RuntimeProjection,
-    entry: &PushEntry<'_>,
+    entry: &PushEntry<&str>,
 ) -> Result<Option<String>> {
     use mj_core::transcript::materialized_agent_message_text;
     if let Some(text) = entry.text {

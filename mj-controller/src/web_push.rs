@@ -220,17 +220,20 @@ fn phone_line(text: &str, fallback: &str) -> String {
     }
 }
 
-pub(crate) struct PushEntry<'a> {
-    pub session: &'a str,
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PushEntry<S> {
+    pub session: S,
     pub completed_ordinal: Option<u64>,
     pub paused: bool,
-    pub holder: &'a str,
+    pub holder: S,
     pub kind: NotificationKind,
-    pub text: Option<&'a str>,
-    pub message_id: Option<&'a str>,
+    pub text: Option<S>,
+    pub message_id: Option<S>,
 }
 
-pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, PushEntry<'_>>> {
+pub(crate) fn card_entries(
+    runtime: &RuntimeProjection,
+) -> Option<BTreeMap<String, PushEntry<&str>>> {
     let cards = runtime.metadata.notification_cards.as_ref()?;
     // Attention supplies only worker availability. Card publication owns
     // notification eligibility, including ignored sessions and managed children.
@@ -244,7 +247,7 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
             )
         )
     };
-    let mut entries = BTreeMap::new();
+    let mut entries: BTreeMap<String, PushEntry<&str>> = BTreeMap::new();
     for (session, card) in cards {
         let holder = card.item_destination(session, card.entries.len());
         for entry in &card.entries {
@@ -296,7 +299,19 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
     Some(entries)
 }
 
-impl PushEntry<'_> {
+impl PushEntry<&str> {
+    fn owned(&self) -> PushEntry<String> {
+        PushEntry {
+            session: self.session.to_owned(),
+            completed_ordinal: self.completed_ordinal,
+            paused: self.paused,
+            holder: self.holder.to_owned(),
+            kind: self.kind,
+            text: self.text.map(str::to_owned),
+            message_id: self.message_id.map(str::to_owned),
+        }
+    }
+
     pub fn notice(
         &self,
         runtime: &RuntimeProjection,
@@ -323,6 +338,45 @@ impl PushEntry<'_> {
     }
 }
 
+type NotificationInputs = Option<BTreeMap<String, PushEntry<String>>>;
+
+/// Remembers only notification inputs, never transcript history or delivery state.
+#[derive(Default)]
+pub(crate) struct NotificationReconciler {
+    previous: Option<NotificationInputs>,
+}
+
+impl NotificationReconciler {
+    pub(crate) async fn reconcile(&mut self, runtime: RuntimeProjection) -> Result<Option<bool>> {
+        let inputs = card_entries(&runtime).map(|entries| {
+            entries
+                .into_iter()
+                .map(|(identity, entry)| (identity, entry.owned()))
+                .collect()
+        });
+        if self.previous.as_ref() == Some(&inputs) {
+            return Ok(None);
+        }
+        let result = blocking(move || {
+            let result = db::notification_reconcile(runtime);
+            if let Err(error) = &result {
+                tracing::error!(
+                    error = format!("{error:#}"),
+                    "notification reconciliation failed"
+                );
+            }
+            result
+        })
+        .await?;
+        // Refused observations were not accepted: retain the previous inputs so
+        // a lapsed handoff can reobserve them, as a fresh daemon would.
+        if result.is_some() {
+            self.previous = Some(inputs);
+        }
+        Ok(result)
+    }
+}
+
 /// Durable notify decisions belong to the daemon, independently of phone delivery.
 pub(crate) async fn run_alerts(
     state: Arc<RuntimeState>,
@@ -333,27 +387,21 @@ pub(crate) async fn run_alerts(
         _ = crate::upgrade::wait_for_startup_recovery() => {},
     }
     let mut revisions = state.revisions();
+    let mut observer = NotificationReconciler::default();
     loop {
         revisions.borrow_and_update();
         let runtime = state.runtime_publication()?;
         let changed = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
-            result = blocking(move || {
-                let result = db::notification_reconcile(runtime);
-                // The blocking owner retains admission even if shutdown stops
-                // awaiting it, and reports failures after that cancellation.
-                if let Err(error) = &result {
-                    tracing::error!(error = format!("{error:#}"), "notification reconciliation failed");
-                }
-                result
-            }) => result?,
+            result = observer.reconcile(runtime) => result?,
         };
-        if changed {
-            state.publish_revision();
+        if let Some(changed) = changed {
+            if changed {
+                state.publish_revision();
+            }
+            wake();
         }
-        // Subscription and presence changes can enqueue deliveries without an alert.
-        wake();
         tokio::select! {
             _ = cancellation.cancelled() => return Ok(()),
             changed = revisions.changed() => { changed.context("notification runtime feed closed")?; },

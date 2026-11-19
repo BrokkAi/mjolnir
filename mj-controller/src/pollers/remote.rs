@@ -339,7 +339,12 @@ pub(super) async fn poll_daemon_runtime(
         if replica.cursor.is_none() {
             continue;
         }
-        return Ok(replica.projection.clone());
+        // Cursor acknowledgement remains in the replica; the transient batch
+        // belongs to this publication only, including across unchanged polls.
+        let events = std::mem::take(&mut replica.projection.metadata.alert_events);
+        let mut projection = replica.projection.clone();
+        projection.metadata.alert_events = events;
+        return Ok(projection);
     }
 }
 
@@ -348,6 +353,7 @@ mod expired_tail_cursor_tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    // Hard-won: 6b12ea8ea: acknowledged alert batches were copied into every later publication.
     #[tokio::test]
     async fn bootstrap_poll_keeps_tails_available_and_cancels_the_old_family_scope() {
         const CHILD: &str = "MJ_TEST_RUNTIME_BOOTSTRAP_SCOPE";
@@ -449,13 +455,24 @@ mod expired_tail_cursor_tests {
                     result: Ok(DaemonReply::RuntimeChanges(Box::new(
                         RuntimeFrame::Snapshot {
                             cursor: RuntimeCursor {
-                                alert_sequence: 0,
+                                alert_sequence: 7,
                                 incarnation: "replacement-daemon".into(),
                                 sequence: 1,
                                 subagent_parents: subagent_parents.clone(),
                             },
                             projection: Box::new(RuntimeProjection {
                                 revision: 1,
+                                metadata: mj_client::runtime_feed::RuntimeMetadata {
+                                    alert_high_sequence: 7,
+                                    alert_events: vec![mj_client::runtime_feed::AlertEvent {
+                                        sequence: 7,
+                                        destination: "parent".into(),
+                                        session_title: "Parent".into(),
+                                        text: "Caught up".into(),
+                                        kind: mj_core::attention::NotificationKind::Important,
+                                    }],
+                                    ..Default::default()
+                                },
                                 subagent_parents,
                                 ..Default::default()
                             }),
@@ -474,6 +491,37 @@ mod expired_tail_cursor_tests {
                 0,
                 "the old long poll must be disconnected"
             );
+            for sequence in [2, 2] {
+                let (mut poll, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope =
+                    mj_client::daemon::read_frame(&mut poll).await.unwrap();
+                let DaemonAction::RuntimeChanges {
+                    cursor: Some(from), ..
+                } = request.action
+                else {
+                    panic!("follow the acknowledged cursor");
+                };
+                assert_eq!(from.alert_sequence, 7);
+                let mut cursor = from.clone();
+                cursor.sequence = sequence;
+                mj_client::daemon::write_frame(
+                    &mut poll,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(DaemonReply::RuntimeChanges(Box::new(RuntimeFrame::Delta {
+                            from,
+                            cursor,
+                            changes: Box::new(mj_client::runtime_feed::RuntimeDelta {
+                                revision: Some(sequence),
+                                ..Default::default()
+                            }),
+                        }))),
+                    },
+                )
+                .await
+                .unwrap();
+            }
         });
         let poll = tokio::spawn(poll_daemon_runtime(replica.clone(), 7, scope_rx));
         tokio::time::timeout(Duration::from_secs(2), held.notified())
@@ -503,6 +551,26 @@ mod expired_tail_cursor_tests {
             replica.lock().await.cursor.as_ref().unwrap().incarnation,
             "replacement-daemon"
         );
+        assert_eq!(projection.metadata.alert_events.len(), 1);
+        assert!(
+            replica
+                .lock()
+                .await
+                .projection
+                .metadata
+                .alert_events
+                .is_empty(),
+            "the delivered batch is moved out before cloning subsequent projections"
+        );
+        for _ in 0..2 {
+            let next = poll_daemon_runtime(replica.clone(), 0, scopes.subscribe())
+                .await
+                .unwrap();
+            assert!(
+                next.metadata.alert_events.is_empty(),
+                "metadata-free and unchanged deltas cannot re-enqueue the batch"
+            );
+        }
         server.await.unwrap();
     }
 

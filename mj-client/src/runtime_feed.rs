@@ -932,7 +932,16 @@ impl RuntimeReplica {
     pub fn apply(&mut self, frame: RuntimeFrame) -> Result<bool> {
         match frame {
             RuntimeFrame::Snapshot { cursor, projection } => {
+                let acknowledged = self
+                    .cursor
+                    .as_ref()
+                    .map_or(self.projection.metadata.alert_high_sequence, |cursor| {
+                        cursor.alert_sequence
+                    });
                 self.projection = *projection;
+                self.projection.metadata.alert_events.retain(|event| {
+                    event.sequence > acknowledged && event.sequence <= cursor.alert_sequence
+                });
                 self.cursor = Some(cursor);
                 Ok(true)
             }
@@ -942,6 +951,7 @@ impl RuntimeReplica {
                 changes,
             } => {
                 if self.cursor.as_ref() == Some(&cursor) {
+                    self.projection.metadata.alert_events.clear();
                     return Ok(false);
                 }
                 ensure!(self.cursor.as_ref() == Some(&from), "runtime cursor gap");
@@ -952,11 +962,16 @@ impl RuntimeReplica {
                                 && from.alert_sequence < cursor.alert_sequence)),
                     "invalid runtime cursor transition"
                 );
+                self.projection.metadata.alert_events.clear();
                 changes.apply(&mut self.projection);
+                self.projection.metadata.alert_events.retain(|event| {
+                    event.sequence > from.alert_sequence && event.sequence <= cursor.alert_sequence
+                });
                 self.cursor = Some(cursor);
                 Ok(true)
             }
             RuntimeFrame::ResetRequired => {
+                self.projection.metadata.alert_events.clear();
                 self.cursor = None;
                 Ok(false)
             }
