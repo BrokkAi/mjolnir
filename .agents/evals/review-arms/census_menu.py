@@ -64,7 +64,10 @@ def main():
                             "total_decided": sum(decided[kind][repo] for repo in repos),
                             "per_repo": {repo: [decided[kind][repo], relation_bugs[repo]] for repo in repos}})
         ranking.sort(key=lambda row: (-row["mean_share"], -row["total_decided"], row["kind"]))
-        return ranking, [row["kind"] for row in ranking if row["kind"] != "other"][:K]
+        # Only a kind that decides at least one development relation bug can be added; with
+        # fewer such kinds the menu is shorter, and with none it is empty.
+        return ranking, [row["kind"] for row in ranking
+                         if row["kind"] != "other" and row["total_decided"] > 0][:K]
 
     repos = sorted(relation_bugs)
     ranking, menu = rank(repos)

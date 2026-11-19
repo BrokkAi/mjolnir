@@ -726,8 +726,13 @@ def run_turn(sid, prompt, phase, title):
     command_id = f"rql-{sid[:16]}-{phase}"
     response = driver.mj("message", "--session", sid, "--command-id", command_id,
                          "--prompt-file", prompt)
-    waited = driver.mj("wait", "--session", sid, "--turn", response["turn_id"],
-                       "--return-on-input", "--timeout", 1200, timeout=1230)
+    # An accepted turn runs until it ends; there is no overall limit. Each wait answers
+    # "timeout" after 20 minutes only so the runner can wait again, never to abandon the turn.
+    while True:
+        waited = driver.mj("wait", "--session", sid, "--turn", response["turn_id"],
+                           "--return-on-input", "--timeout", 1200, timeout=1230)
+        if waited.get("outcome") != "timeout":
+            break
     requested_turn = waited.get("requested_turn_id")
     if requested_turn is None:
         requested_turn = waited.get("turn_id")
