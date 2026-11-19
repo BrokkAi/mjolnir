@@ -136,3 +136,18 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Release builds trade run time for build time and memory. Mjolnir waits on
+# child processes, sockets and timers; its own code is not where its time goes.
+# Its crates are built at opt-level 1 and every dependency at 3, which keeps
+# compression, hashing, SQLite and TLS as fast as before.
+#
+# Measured on three cores, building `mj` and `mj-worker` from scratch
+# (2026-11-19): 694 s and a 5.0 GB peak with everything at opt-level 3; 486 s
+# and 4.1 GB with these settings; `mj` goes from 223 MB to 186 MB. The macOS
+# release runner has three cores and 7 GB, and builds each architecture in turn.
+[profile.release]
+opt-level = 1
+
+[profile.release.package."*"]
+opt-level = 3
