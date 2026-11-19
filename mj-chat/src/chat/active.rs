@@ -690,10 +690,13 @@ impl ActiveChat {
     /// Reconcile transferred local state with this attachment's authoritative view.
     pub fn adopt_live_composer(&mut self, composer: super::LiveComposer) {
         self.state.adopt_live_composer(composer);
-        // The adopted composer may never have loaded this session's history
-        // (a standby composer), and it replaces the one that did.
-        self.state.request_session_history();
-        self.dispatch_composer_requests();
+        // A standby composer never asked for this session's history. One a
+        // chat parked carries its loaded history or its in-flight read, which
+        // a new request would abort.
+        if !self.state.session_history_requested() {
+            self.state.request_session_history();
+            self.dispatch_composer_requests();
+        }
         // The view may have advanced while the composer was parked. Applying
         // it restores the authoritative queue and uses the same submission
         // reconciliation as every feed update, without retaining another copy.

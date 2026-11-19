@@ -4133,7 +4133,7 @@ async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
 
 // Hard-won: standby adoption dropped the session-history read
 #[tokio::test]
-async fn opening_with_standby_composer_loads_session_history_for_up_navigation() {
+async fn standby_and_parked_composers_keep_one_session_history_read() {
     use mj_core::storage::PromptHistoryEntry;
     let fixture = mj_client::session::replacement_session_test_fixture("standby-history", 1);
     fixture
@@ -4170,6 +4170,10 @@ async fn opening_with_standby_composer_loads_session_history_for_up_navigation()
         .await
         .expect("adopted composer requests history")
         .unwrap();
+    // A lifecycle transition parks the composer and hands it back while
+    // its read is still in flight; that read must survive.
+    let parked = chat.take_live_composer().unwrap();
+    chat.adopt_live_composer(parked);
     reply
         .send(Ok(vec![PromptHistoryEntry {
             id: 1,
