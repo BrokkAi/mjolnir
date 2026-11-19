@@ -601,8 +601,11 @@ pub(crate) fn provider_pools(
                     {
                         return false;
                     }
-                    let eligible =
-                        pool.key.scope.is_none() || profile.kind == HarnessKind::Antigravity;
+                    // An Antigravity profile belongs only to the pools it uses.
+                    let eligible = pool.key.scope.is_none()
+                        || profile.antigravity_pools().into_iter().any(|candidate| {
+                            Some(candidate.model_scope()) == pool.key.scope.as_deref()
+                        });
                     let Some(report) = quotas.get(*id) else {
                         return eligible;
                     };
