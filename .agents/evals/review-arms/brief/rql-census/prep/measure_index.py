@@ -637,7 +637,12 @@ def main():
             if rec["cold"].get("ready"):
                 # The head checkout serves only the warm phase: after a measured cold failure it's
                 # skipped, so a checkout problem can't replace that result with a setup error.
-                git("checkout", "-q", "--detach", head, cwd=wt)
+                # Restore the disposable worktree to exactly the pinned tree: a plain checkout keeps
+                # tracked edits and untracked files the cold build may have left (a regenerated
+                # lockfile, generated sources). The Bifrost cache lives outside the worktree, under
+                # its own BIFROST_CACHE_ROOT, so the warm phase still starts warm.
+                git("checkout", "-q", "--force", "--detach", head, cwd=wt)
+                git("clean", "-q", "-ffdx", cwd=wt)
                 rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
                 rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
                 if rec["warm_restart"].get("cancelled"):

@@ -163,7 +163,7 @@ Also reported:
   - about 700 Opus judge calls and 700 Opus hand checks, one each per reviewer output;
   - the simulator and the gold set.
 - **Test:** about 7 times the pilot for 12 repos.
-- **Indexing:** Bifrost and rust-analyzer compute for each bug's introducing commit, reusing incremental indexes within a repo. Runs on local clones copied from `/nfs/morannon` (never written).
+- **Indexing:** Bifrost and rust-analyzer compute for each bug's introducing commit, reusing incremental indexes within a repo. Every Bifrost or rust-analyzer run in this study, including the answer engine's candidate generation at each introducing revision, runs only on EC2 hosts, never the user's workstation. Each runs in its own systemd scope with a MemoryMax cap and MemorySwapMax=0, as `measure_index.py` does, and records its whole-tree peak. A cap hit is a recorded failure for that revision. A safe measurement at the two pinned commits doesn't make older revisions safe. Clones come from each repo's origin at pinned commits.
 - **Quota:** Sol and Terra on codex, Opus on claude7. Keep every profile above 25% of its week, checked before each launch, and don't use codex4.
 
 ## Work and ownership
