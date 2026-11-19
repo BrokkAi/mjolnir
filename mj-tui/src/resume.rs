@@ -2234,9 +2234,9 @@ fn native_project_target(project_directory: &str) -> String {
         )
 }
 
-/// The least room the preview pane is worth drawing in: a border plus four
-/// rows of text.
-const PREVIEW_MINIMUM_HEIGHT: u16 = 6;
+/// The least room the preview pane is worth drawing in: a border plus three
+/// rows of text. Five session rows outrank a taller preview.
+const PREVIEW_MINIMUM_HEIGHT: u16 = 5;
 
 /// How tall the preview pane under the list is when the dialog shows one.
 /// With room for [`LIST_MINIMUM_ROWS`] session rows plus the preview's
