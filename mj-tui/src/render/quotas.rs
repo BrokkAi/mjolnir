@@ -940,7 +940,11 @@ fn quota_lines(
                     theme::muted(),
                 ));
             }
-            lines.extend(refill_lines(refill_labels, width));
+            // Expanded lanes already give each profile's reset and banked
+            // resets; the list only supplies what a collapsed bar cannot fit.
+            if !expanded {
+                lines.extend(refill_lines(refill_labels, width));
+            }
             // Warnings (a refused check, unknown windows) stay visible while
             // collapsed; each line names one member and opens its menu.
             for member in &pool.members {
