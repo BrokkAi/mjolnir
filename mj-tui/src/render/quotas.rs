@@ -519,7 +519,9 @@ fn pool_bar(
         } else {
             (cells * usize::from(member.remaining) + 50) / 100
         };
-        if cells > 1 && member.remaining > 0 && member.remaining < 100 {
+        // A partly used reading never draws full or empty, so its label stays
+        // in the bar; an expired reading stays empty.
+        if !member.awaiting_reading && cells > 1 && member.remaining > 0 && member.remaining < 100 {
             filled = filled.clamp(1, cells - 1);
         }
         let mut label = vec![' '; cells];

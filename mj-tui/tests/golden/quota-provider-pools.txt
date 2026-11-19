@@ -1312,7 +1312,7 @@ background runs (x..end, colour):
 background runs (x..end, colour):
 0: 0..1 Rgb(22, 27, 30) NONE, 1..29 Rgb(22, 27, 30) BOLD, 29..100 Rgb(22, 27, 30) NONE
 1: 0..1 Rgb(22, 27, 30) NONE, 1..10 Rgb(22, 27, 30) BOLD, 10..100 Rgb(22, 27, 30) NONE
-2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..5 Rgb(217, 119, 87) NONE, 5..93 Rgb(59, 40, 35) NONE, 93..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..93 Rgb(59, 40, 35) NONE, 93..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
 3: 0..100 Rgb(22, 27, 30) NONE
 4: 0..100 Rgb(22, 27, 30) NONE
 5: 0..11 Rgb(22, 27, 30) NONE, 11..53 Rgb(15, 18, 20) NONE, 53..100 Rgb(22, 27, 30) NONE
