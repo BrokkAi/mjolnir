@@ -1136,7 +1136,7 @@ mod tests {
     // A top-level launch ranks a profile inside a five-hour window below
     // unwindowed and unknown quota but above paid credits and usage-priced
     // profiles, which bill per request; a five-hour window that has already
-    // reset is not in force. Child placements keep the plain quota order.
+    // reset, or an idle one with no reset time, is not in force. Child placements keep the plain quota order.
     #[test]
     fn top_level_ranking_places_five_hour_windowed_profiles_above_billed_ones() {
         let build = || {
@@ -1157,17 +1157,37 @@ mod tests {
                 five_hour_candidate("windowed-high", Some(90), &["luna"]),
                 candidate("weekly-low", Some(40), &["luna"]),
                 lapsed,
+                // Codex reports an idle five-hour window with no reset time.
+                five_hour_candidate("windowed-idle", Some(100), &["luna"]),
+                // An undated reading older than the window: that window ended.
+                five_hour_candidate("windowed-stale", Some(50), &["luna"]),
                 candidate("unknown", None, &["luna"]),
                 five_hour_candidate("windowed-empty", Some(0), &["luna"]),
             ]
+            .into_iter()
+            .map(|mut candidate| {
+                if candidate.profile_id != "windowed-stale"
+                    && let CandidateQuota::Subscription {
+                        refreshed_at_epoch_seconds,
+                        ..
+                    } = &mut candidate.quota
+                {
+                    *refreshed_at_epoch_seconds = NOW as u64;
+                }
+                candidate
+            })
+            .collect::<Vec<_>>()
         };
+        const NOW: i64 = 6 * 60 * 60;
         let mut children = build();
-        rank_candidates(&mut children, None, &[], "luna", 0, Placement::Child);
+        rank_candidates(&mut children, None, &[], "luna", NOW, Placement::Child);
         assert_eq!(
             ids(&children),
             vec![
+                "windowed-idle",
                 "windowed-high",
                 "windowed-lapsed",
+                "windowed-stale",
                 "weekly-low",
                 "unknown",
                 "paid",
@@ -1176,11 +1196,13 @@ mod tests {
             ]
         );
         let mut top_level = build();
-        rank_candidates(&mut top_level, None, &[], "luna", 0, Placement::TopLevel);
+        rank_candidates(&mut top_level, None, &[], "luna", NOW, Placement::TopLevel);
         assert_eq!(
             ids(&top_level),
             vec![
+                "windowed-idle",
                 "windowed-lapsed",
+                "windowed-stale",
                 "weekly-low",
                 "unknown",
                 "windowed-high",

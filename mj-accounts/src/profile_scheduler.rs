@@ -224,9 +224,11 @@ pub enum Placement {
 }
 
 /// Whether a five-hour window is in force for `model`: the report carries
-/// one that applies to the model and has not reset since it was read.
-/// Providers report no five-hour window while none is running (Claude omits
-/// it until first use), so only profiles actually inside a window match.
+/// one that applies to the model and either has a reset still ahead or, with
+/// no reset time, was partly used when read less than one window ago. Claude
+/// omits the window until first use, and Codex can report an idle window with
+/// no reset time and nothing used; neither is in force, and an undated reading
+/// older than the window describes a window that has since ended.
 fn has_five_hour_window_in_force(
     candidate: &SubagentCandidate,
     model: &str,
@@ -234,13 +236,24 @@ fn has_five_hour_window_in_force(
 ) -> bool {
     matches!(
         &candidate.quota,
-        CandidateQuota::Subscription { windows, .. }
+        CandidateQuota::Subscription { windows, refreshed_at_epoch_seconds, .. }
             if windows.iter().any(|window| {
                 window.is_five_hour()
                     && crate::quota::window_applies(window, model)
-                    && window
-                        .resets_at_epoch_seconds
-                        .is_none_or(|reset| reset > now_seconds)
+                    && match window.resets_at_epoch_seconds {
+                        Some(reset) => reset > now_seconds,
+                        None => {
+                            let used = window.remaining_percent.is_some_and(|left| left < 100)
+                                || window.used.is_some_and(|used| used > 0);
+                            let duration = window
+                                .duration_seconds
+                                .filter(|duration| *duration > 0)
+                                .unwrap_or(5 * 60 * 60);
+                            let read_at = i64::try_from(*refreshed_at_epoch_seconds)
+                                .unwrap_or(i64::MAX);
+                            used && now_seconds.saturating_sub(read_at) < duration
+                        }
+                    }
             })
     )
 }
