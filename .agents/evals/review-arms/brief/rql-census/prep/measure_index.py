@@ -383,7 +383,9 @@ def git(*args, cwd=None):
     proc = subprocess.Popen(["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
                              # No automatic gc or maintenance: a detached repack could outlive
                              # this call and run outside any memory cap during a measurement.
-                             "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
+                             # No hooks either: a post-checkout hook could leave a job behind.
+                             "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                             "-c", "core.hooksPath=/dev/null", *args],
                             cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             pass_fds=HOST_LOCK_FDS)
     while True:
@@ -414,6 +416,17 @@ def git(*args, cwd=None):
                 except BaseException as e:
                     raise TeardownUnconfirmed(f"{unit}.scope: git teardown failed: {e!r}") from e
                 raise Cancelled(f"cancelled during git {args[0]}")
+    # git exiting (or its pipes closing) doesn't prove its scope is empty: stop the scope and
+    # prove it gone, with the same check as a server, before anything else runs.
+    run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
+    deadline = time.monotonic() + STOP_SECONDS
+    while True:
+        gone, detail = scope_tree_gone(f"{unit}.scope")
+        if gone:
+            break
+        if time.monotonic() > deadline:
+            raise TeardownUnconfirmed(f"{unit}.scope not confirmed empty after git {args[0]} ({detail})")
+        time.sleep(1)
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
     return out.strip()
@@ -596,6 +609,7 @@ def main():
             rec["traceback"] = traceback.format_exc()[-2000:]
             rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
             rec["cancelled"] = isinstance(e, Cancelled)
+        append_record(results, rec)  # saved before cleanup, so an interrupted cleanup loses nothing
         # Keep disk bounded after success and recoverable failures alike (sizes are recorded).
         # After an unconfirmed teardown a server may still use these files: leave them for the
         # next run's reaper. After cancellation, no further git runs; the reaper handles it too.
@@ -606,9 +620,10 @@ def main():
                     git("worktree", "remove", "--force", "--force", str(wt_dir), cwd=clones / repo)
             except (subprocess.CalledProcessError, Cancelled):
                 pass
+            except TeardownUnconfirmed as e:  # the record is saved; leave the files and halt
+                sys.exit(f"{repo}: cleanup git not confirmed stopped ({e}); batch halted")
             shutil.rmtree(wt_dir, ignore_errors=True)
             shutil.rmtree(cache_dir, ignore_errors=True)
-        append_record(results, rec)
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
