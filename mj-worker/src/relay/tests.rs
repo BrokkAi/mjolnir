@@ -6776,8 +6776,6 @@ fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
         relay.operational_state().native_session_id.as_deref(),
         Some("original")
     );
-    // Hard-won: b4038cc: /clear left an ambiguous resume owned by the dead bridge.
-    relay.native_goal_resume_sent(99, None);
     let mut cut = relay.reserve_live_baseline();
     assert!(cut.try_recv().is_err());
     relay
@@ -10100,5 +10098,80 @@ fn forms_opened_during_bridge_startup_survive_session_open_and_ack_pruning() {
             .record_observation(RelayObservation::SessionRestarted)
             .unwrap();
         assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+    }
+}
+
+// Hard-won: 2a0aae9: failed /clear rollback retained a goal resume owned by the exited bridge.
+#[cfg(unix)]
+#[test]
+fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
+    use mj_core::acp::RuntimeEvent;
+    for replacement_succeeds in [false, true] {
+        for replacement_has_resume in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let relay = Arc::new(RelayCell::new(clearable_relay(temp.path())));
+            {
+                let mut state = relay.lock().unwrap();
+                submit_relay(&mut state, "clear-request", RelayCommand::ClearContext);
+                assert_eq!(state.claim_pending_commands(true).unwrap().len(), 1);
+                state.native_goal_resume_sent(1, None);
+            }
+            let mut cut = relay.lock().unwrap().reserve_live_baseline();
+            assert!(cut.try_recv().is_err());
+            let mut in_flight =
+                BTreeMap::from([("clear-request".into(), RelayCommand::ClearContext)]);
+            crate::worker_runtime::record_runtime_event(
+                &relay,
+                &mut in_flight,
+                RuntimeEvent::ContextClearing {
+                    request_id: "clear-request".into(),
+                },
+            )
+            .unwrap();
+            assert!(relay.lock().unwrap().pending_native_resumes.is_empty());
+            // Retiring the old bridge must not retire a later bridge's work
+            // when either outcome of the clear is subsequently applied.
+            if replacement_has_resume {
+                relay.lock().unwrap().native_goal_resume_sent(2, None);
+            }
+            assert!(cut.try_recv().is_err());
+            crate::worker_runtime::record_runtime_event(
+                &relay,
+                &mut in_flight,
+                if replacement_succeeds {
+                    RuntimeEvent::ContextCleared {
+                        request_id: "clear-request".into(),
+                        native_session_id: "replacement".into(),
+                        memory: None,
+                    }
+                } else {
+                    RuntimeEvent::CommandRejected {
+                        request_id: "clear-request".into(),
+                        reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                        message: "Could not clear context; restoring the previous conversation"
+                            .into(),
+                    }
+                },
+            )
+            .unwrap();
+            if replacement_has_resume {
+                assert!(cut.try_recv().is_err());
+                relay.lock().unwrap().native_goal_resume_rejected(2);
+            }
+            assert!(cut.try_recv().unwrap().is_ok());
+            assert_eq!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .native_session_id
+                    .as_deref(),
+                Some(if replacement_succeeds {
+                    "replacement"
+                } else {
+                    "original"
+                })
+            );
+        }
     }
 }

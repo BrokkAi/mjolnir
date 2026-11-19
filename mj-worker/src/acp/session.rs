@@ -951,13 +951,6 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
-                emit_runtime_event(
-                    events,
-                    RuntimeEvent::ContextClearing {
-                        request_id: request_id.clone(),
-                    },
-                )
-                .await?;
                 let mut options: Vec<_> = config_options.iter().collect();
                 options.sort_by_key(|option| match option.category {
                     Some(SessionConfigOptionCategory::Model) => 0,

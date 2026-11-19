@@ -464,6 +464,15 @@ async fn run_inner(
             },
         };
         if let Some((request_id, previous)) = restart.clear_context {
+            // run_bridge has reaped the old process. Retire its relay-owned
+            // work before either the replacement or rollback bridge opens.
+            emit_runtime_event(
+                &events,
+                RuntimeEvent::ContextClearing {
+                    request_id: request_id.request_id.clone(),
+                },
+            )
+            .await?;
             rollback = Some((
                 previous,
                 spec.native_session_may_have_history || restart.native_session_used,

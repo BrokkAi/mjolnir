@@ -1008,7 +1008,11 @@ pub(crate) fn record_runtime_event_with_facts(
                 message: "ACP initialized without capability metadata".into(),
             })?;
         }
-        RuntimeEvent::ContextClearing { .. } => {}
+        RuntimeEvent::ContextClearing { .. } => {
+            // The previous bridge has exited, including when opening the new
+            // conversation fails and /clear rolls back to its native session.
+            relay.clear_agent_terminals()?;
+        }
         RuntimeEvent::ContextCleared {
             request_id,
             native_session_id,

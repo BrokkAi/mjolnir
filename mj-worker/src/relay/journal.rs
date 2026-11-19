@@ -791,17 +791,6 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
-        if matches!(
-            &event.observation,
-            RelayObservation::CommandCompleted {
-                outcome: RelayCommandOutcome::ContextCleared { .. },
-                ..
-            }
-        ) {
-            // /clear replaces the bridge without SessionRestarted. Its old
-            // process-owned reservations cannot survive that native reset.
-            self.forget_harness_processes();
-        }
         if self.classifies_turns() && self.snapshot.assessment != previous_assessment {
             self.publish_assessment_diagnostic();
         }

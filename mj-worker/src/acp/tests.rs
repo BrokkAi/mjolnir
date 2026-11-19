@@ -8436,6 +8436,12 @@ for line in sys.stdin:
         })
         .await
         .unwrap();
+    // Hard-won: 2a0aae9: rollback skipped the old bridge's retirement signal.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event,
+        RuntimeEvent::ContextClearing { request_id } if request_id == "clear-request")
+    })
+    .await;
     if fail_replacement {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message , ..} if request_id == "clear-request" && message.contains("replacement refused"))).await;
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
