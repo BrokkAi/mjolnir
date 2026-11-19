@@ -605,7 +605,17 @@ impl DashboardState {
                     self.record_event_handled();
                     return DashboardAction::None;
                 }
+                (KeyCode::PageUp, false) if self.focus == Focus::Quota => {
+                    self.move_selection(-1);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
                 (KeyCode::Down | KeyCode::Char('j'), false) | (KeyCode::Char('n'), true) => {
+                    self.move_selection(1);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::PageDown, false) if self.focus == Focus::Quota => {
                     self.move_selection(1);
                     self.record_event_handled();
                     return DashboardAction::None;

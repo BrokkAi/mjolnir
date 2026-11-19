@@ -1066,6 +1066,8 @@ pub struct DashboardState {
     pub(crate) sessions_scroll: Cell<usize>,
     pub(crate) targets_scroll: Cell<usize>,
     pub(crate) quota_scroll: Cell<usize>,
+    /// Height of the quota viewport at the previous render, in lines.
+    pub(crate) quota_viewport: Cell<usize>,
     /// Selection and line range from the previous quota render, before refresh reordering.
     pub(crate) quota_rendered_selection:
         RefCell<Option<(render::quota_pools::QuotaRow, usize, usize)>>,
@@ -1402,6 +1404,7 @@ impl DashboardState {
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
+            quota_viewport: Cell::new(0),
             quota_rendered_selection: RefCell::new(None),
             recenter_on_selection: Cell::new(None),
             sessions_wheel_scrolled_from: RefCell::new(None),

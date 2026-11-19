@@ -314,6 +314,7 @@ pub(crate) fn render_quotas_at(
     let (lines, pool_rows, profile_rows) =
         quota_lines(dashboard, usize::from(inner.width), now, focused, clock);
     let viewport = usize::from(inner.height);
+    dashboard.quota_viewport.set(viewport);
     let mut offset = dashboard
         .quota_scroll
         .get()
@@ -407,6 +408,36 @@ fn tint(accent: Color, strength: f64) -> Color {
     let mix =
         |a: u8, b: u8| (f64::from(b) + (f64::from(a) - f64::from(b)) * strength).round() as u8;
     Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb))
+}
+
+/// Label colour with legible contrast on a provider fill: dark text on light
+/// backgrounds, light text on dark ones. Non-RGB and monochrome keep the theme text.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Contrast is computed from the fill's own RGB value, not from a theme colour."
+)]
+fn readable_on(background: Color) -> Color {
+    let Color::Rgb(r, g, b) = background else {
+        return theme::palette().text;
+    };
+    if theme::current() == theme::UiTheme::Mono || theme::ascii() {
+        return theme::palette().text;
+    }
+    let linear = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    // Black text beats white above this luminance (equal contrast ratios).
+    if luminance > 0.179 {
+        Color::Rgb(16, 16, 16)
+    } else {
+        Color::Rgb(245, 245, 245)
+    }
 }
 
 pub(crate) fn reset_duration(reset: Option<i64>, now: u64) -> String {
@@ -504,6 +535,11 @@ fn pool_bar(
             ));
         }
         for (cell, ch) in label.into_iter().enumerate() {
+            let background = if cell < filled {
+                accent
+            } else {
+                tint(accent, 0.22)
+            };
             spans.push(Span::styled(
                 if ch != ' ' {
                     ch.to_string()
@@ -532,12 +568,8 @@ fn pool_bar(
                             Modifier::empty()
                         },
                     )
-                    .fg(theme::palette().text)
-                    .bg(if cell < filled {
-                        accent
-                    } else {
-                        tint(accent, 0.22)
-                    }),
+                    .fg(readable_on(background))
+                    .bg(background),
             ));
         }
     }
@@ -552,6 +584,17 @@ fn lane(
     accent: Color,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
+    if member.awaiting_reading {
+        // The cached reading predates its own reset: nothing is known to be
+        // available, so draw no availability.
+        let symbol = if theme::ascii() { "?" } else { "·" };
+        return vec![Span::styled(
+            symbol.repeat(cells),
+            Style::default()
+                .fg(theme::palette().muted)
+                .bg(theme::palette().background),
+        )];
+    }
     for cell in 0..cells {
         let t0 = now.saturating_add(cell as u64 * 86400 / cells as u64);
         let t1 = now.saturating_add((cell + 1) as u64 * 86400 / cells as u64);
@@ -625,6 +668,9 @@ fn lane_note(
     now: u64,
     clock: fn(i64, &str) -> String,
 ) -> String {
+    if member.awaiting_reading {
+        return "reset due, awaiting reading".into();
+    }
     let mut note = if member.remaining == 0 {
         format!(
             "{} back {} ({})",
@@ -832,7 +878,10 @@ fn quota_lines(
                     )];
                     let timeline = lane(member, &pool.key.period, lane_width, now, accent);
                     if timeline.iter().any(|span| span.content == "*") {
-                        note.push_str(" · *=W+5 (both resets)");
+                        note.push_str(&format!(
+                            " · *={}+5 (both resets)",
+                            pool.key.period.marker()
+                        ));
                     }
                     spans.extend(timeline);
                     if name_width + lane_width + 2 + Span::raw(&note).width() <= width {
@@ -1358,6 +1407,20 @@ mod tests {
                 assert_eq!(dashboard.quota_scroll.get(), first + step);
                 assert_eq!(dashboard.selected_quota_row(), selection);
             }
+            // Hard-won: quota review: keyboard-only users could not reach the rest of a wrapped note.
+            for (key, step) in [(KeyCode::Up, 1), (KeyCode::Up, 2), (KeyCode::PageDown, 1)] {
+                dashboard.handle_dashboard_key(KeyEvent::new(key, KeyModifiers::NONE));
+                capture(
+                    &mut output,
+                    &format!("wrapped lane key continuation {key:?} {step}"),
+                    &mut dashboard,
+                    now,
+                    60,
+                    3,
+                );
+                assert_eq!(dashboard.selected_quota_row(), selection);
+            }
+            assert_eq!(dashboard.quota_scroll.get(), first + 1);
             dashboard.quota_expanded = dashboard
                 .quota_pools()
                 .into_iter()
@@ -1398,6 +1461,77 @@ mod tests {
                 9,
             );
             let minimized = minimized_quota_line(&dashboard, 110, true);
+            // Hard-won: quota review: Kimi's Week balance vanished behind its Month window.
+            let (mut dashboard, now) = fixture();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| matches!(id.as_str(), "kimi" | "claude2" | "grok"));
+            let kimi = dashboard.quotas.get_mut("kimi").unwrap();
+            let mut week = kimi.windows[0].clone();
+            week.label = "Week".into();
+            week.remaining_percent = Some(25);
+            week.resets_at_epoch_seconds = Some(now as i64 + 3 * 3600);
+            kimi.windows.push(week);
+            // The cached reset has passed with no newer reading.
+            let stale = dashboard.quotas.get_mut("claude2").unwrap();
+            stale.windows[0].remaining_percent = Some(80);
+            stale.windows[0].resets_at_epoch_seconds = Some(now as i64 - 600);
+            stale.refreshed_at_epoch_seconds = now - 3600;
+            dashboard.set_quotas(dashboard.quotas.clone());
+            dashboard.quota_expanded = dashboard
+                .quota_pools()
+                .into_iter()
+                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .collect();
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "Week and Month pools, and a reset due without a reading",
+                &mut dashboard,
+                now,
+                100,
+                20,
+            );
+            let pools = dashboard.quota_pools();
+            let moonshot = pools
+                .iter()
+                .find(|provider| provider.provider == QuotaProvider::Moonshot)
+                .unwrap();
+            assert_eq!(
+                moonshot
+                    .pools
+                    .iter()
+                    .map(|pool| (pool.key.period.clone(), pool.remaining))
+                    .collect::<Vec<_>>(),
+                [(PoolPeriod::Week, 25), (PoolPeriod::Month, 40)]
+            );
+            // Hard-won: quota review: label text over a light fill used the theme's near-white colour.
+            theme::with_theme(theme::UiTheme::Midnight, || {
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_quotas_at(
+                            frame,
+                            frame.area(),
+                            &mut dashboard,
+                            None,
+                            now,
+                            fixture_clock,
+                        )
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let light = provider_accent(&QuotaProvider::XAI);
+                let labelled: Vec<_> = buffer
+                    .content()
+                    .iter()
+                    .filter(|cell| cell.bg == light && cell.symbol() != " ")
+                    .collect();
+                assert!(!labelled.is_empty());
+                assert!(labelled.iter().all(|cell| cell.fg == readable_on(light)));
+                assert_ne!(readable_on(light), theme::palette().text);
+            });
             use std::fmt::Write;
             writeln!(
                 &mut output,

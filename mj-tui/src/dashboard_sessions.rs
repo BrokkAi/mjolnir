@@ -1549,7 +1549,32 @@ impl DashboardState {
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
+        if self.focus == Focus::Quota && self.scroll_tall_quota_row(delta) {
+            return;
+        }
         self.scroll_selection_for(self.focus, delta);
+    }
+
+    /// A selected quota row taller than the viewport (a wrapped note) shows
+    /// its remaining lines before a single-step move leaves it.
+    fn scroll_tall_quota_row(&mut self, delta: isize) -> bool {
+        let viewport = self.quota_viewport.get();
+        let Some((_, first, last)) = self.quota_rendered_selection.borrow().clone() else {
+            return false;
+        };
+        let offset = self.quota_scroll.get();
+        let next = if delta > 0 && last + 1 > offset + viewport && last + 1 - first > viewport {
+            offset + 1
+        } else if delta < 0 && offset > first && last + 1 - first > viewport {
+            offset - 1
+        } else {
+            return false;
+        };
+        self.quota_scroll.set(next);
+        if self.recenter_on_selection.get() == Some(Focus::Quota) {
+            self.recenter_on_selection.set(None);
+        }
+        true
     }
 
     /// Scrolls the Sessions list by `delta` rows without moving the selection.

@@ -7,119 +7,186 @@ use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider};
 
 use super::quota_remaining_percent;
 
-// Select the longest readable allowance without changing summary_window's other callers.
-fn readable_window(report: &ProfileQuota) -> Option<&QuotaWindow> {
-    report
-        .windows
-        .iter()
-        .filter(|window| window.model_scope.is_none() && quota_remaining_percent(window).is_some())
-        .max_by_key(|window| {
-            window.duration_seconds.unwrap_or_else(|| {
-                if report.weekly_window() == Some(window) {
-                    604800
-                } else if report.five_hour_window() == Some(window) {
-                    18000
-                } else {
-                    0
-                }
-            })
+// Real length of a recognised window label, used when the report gives no duration.
+fn period_seconds(window: &QuotaWindow) -> i64 {
+    window
+        .duration_seconds
+        .unwrap_or_else(|| match window.label.to_ascii_lowercase().as_str() {
+            "5h" | "5-hour" | "5 hour" => 18000,
+            "week" | "weekly" | "7d" => 604800,
+            "month" | "monthly" => 2_592_000,
+            _ => 0,
         })
 }
 
-type Providers = BTreeMap<String, QuotaProvider>;
+/// A profile's pooled allowances: its Week window and its Month window each
+/// join their own pool; without either, the longest readable window stands in.
+fn readable_windows(report: &ProfileQuota) -> Vec<&QuotaWindow> {
+    let readable: Vec<_> = report
+        .windows
+        .iter()
+        .filter(|window| window.model_scope.is_none() && quota_remaining_percent(window).is_some())
+        .collect();
+    let long: Vec<_> = readable
+        .iter()
+        .copied()
+        .filter(|window| matches!(PoolPeriod::of(window), PoolPeriod::Week | PoolPeriod::Month))
+        .collect();
+    if !long.is_empty() {
+        // One window per period, in the order the report lists them.
+        let mut seen = Vec::new();
+        return long
+            .into_iter()
+            .filter(|window| {
+                let period = PoolPeriod::of(window);
+                !seen.contains(&period) && {
+                    seen.push(period);
+                    true
+                }
+            })
+            .collect();
+    }
+    readable
+        .into_iter()
+        .max_by_key(|window| period_seconds(window))
+        .into_iter()
+        .collect()
+}
 
-#[derive(Debug, Default)]
+/// Profile and provider read for it, and the refresh generation that read it.
+type Providers = BTreeMap<String, (HarnessProfile, QuotaProvider, u64)>;
+
+struct ProviderTask {
+    profile: HarnessProfile,
+    generation: u64,
+    handle: JoinHandle<QuotaProvider>,
+}
+
+/// Codex and OpenCode providers come from files, so each profile is read on
+/// its own background thread and published as soon as it finishes.
+#[derive(Default)]
 pub(crate) struct ProviderDiscovery {
-    profiles: BTreeMap<String, HarnessProfile>,
     resolved: Providers,
-    task: Option<JoinHandle<Providers>>,
+    tasks: BTreeMap<String, ProviderTask>,
+    generation: u64,
     refresh_requested: bool,
+}
+
+impl std::fmt::Debug for ProviderDiscovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderDiscovery")
+            .field("resolved", &self.resolved.keys().collect::<Vec<_>>())
+            .field("in_flight", &self.tasks.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+fn reads_files(profile: &HarnessProfile) -> bool {
+    matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode)
+}
+
+fn provider_unavailable(profile: &HarnessProfile) -> QuotaProvider {
+    QuotaProvider::Other(format!(
+        "{} (provider unavailable)",
+        profile.kind.display_name()
+    ))
 }
 
 impl ProviderDiscovery {
     pub(crate) fn start(config: &Config) -> Self {
-        let profiles = config.profiles.clone();
-        let resolved = profiles
-            .iter()
-            .filter(|(_, profile)| {
-                !matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode)
-            })
-            .map(|(id, profile)| (id.clone(), profile.quota_provider()))
-            .collect();
-        let pending: Vec<_> = profiles
-            .iter()
-            .filter(|(_, profile)| {
-                matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode)
-            })
-            .map(|(id, profile)| (id.clone(), profile.clone()))
-            .collect();
-        let task = (!pending.is_empty()).then(|| {
-            std::thread::spawn(move || {
-                pending
-                    .into_iter()
-                    .map(|(id, profile)| (id, profile.quota_provider()))
-                    .collect()
-            })
-        });
-        Self {
-            profiles,
-            resolved,
-            task,
-            refresh_requested: false,
-        }
+        let mut discovery = Self::default();
+        discovery.spawn_missing(config);
+        discovery
     }
 
     pub(crate) fn request_refresh(&mut self) {
         self.refresh_requested = true;
     }
 
-    fn provider(&self, id: &str, profile: &HarnessProfile) -> Option<&QuotaProvider> {
-        (self.profiles.get(id) == Some(profile))
-            .then(|| self.resolved.get(id))
-            .flatten()
+    /// Start one task per enabled file-backed profile that has no reading
+    /// for its current configuration and none in flight.
+    fn spawn_missing(&mut self, config: &Config) {
+        for (id, profile) in config.enabled_profiles() {
+            if !reads_files(profile)
+                || self.tasks.contains_key(id)
+                || self.resolved.get(id).is_some_and(|(seen, _, generation)| {
+                    seen == profile && *generation == self.generation
+                })
+            {
+                continue;
+            }
+            let owned = profile.clone();
+            self.tasks.insert(
+                id.to_owned(),
+                ProviderTask {
+                    profile: profile.clone(),
+                    generation: self.generation,
+                    handle: std::thread::spawn(move || owned.quota_provider()),
+                },
+            );
+        }
+    }
+
+    fn provider(&self, id: &str, profile: &HarnessProfile) -> Option<QuotaProvider> {
+        if !reads_files(profile) {
+            return Some(profile.quota_provider());
+        }
+        self.resolved
+            .get(id)
+            .filter(|(seen, _, _)| seen == profile)
+            .map(|(_, provider, _)| provider.clone())
     }
 
     pub(crate) fn ready(&self) -> bool {
-        self.task.as_ref().is_some_and(JoinHandle::is_finished)
+        self.tasks.values().any(|task| task.handle.is_finished())
+    }
+
+    /// Join a finished task. A refresh or configuration change since it
+    /// started makes its reading stale, and it is dropped to be read again.
+    fn finish(&mut self, id: String, task: ProviderTask) -> bool {
+        let stale = task.generation != self.generation;
+        let (provider, failed) = match task.handle.join() {
+            Ok(provider) => (provider, false),
+            Err(_) => (provider_unavailable(&task.profile), true),
+        };
+        if !stale {
+            self.resolved
+                .insert(id, (task.profile, provider, task.generation));
+        }
+        failed
     }
 
     pub(crate) fn poll(&mut self, config: &Config) -> Option<String> {
-        let mut error = None;
-        if self.ready() {
-            match self.task.take().expect("finished task").join() {
-                Ok(providers) => self.resolved.extend(providers),
-                Err(_) => {
-                    for (id, profile) in &self.profiles {
-                        self.resolved.entry(id.clone()).or_insert_with(|| {
-                            QuotaProvider::Other(format!(
-                                "{} (provider unavailable)",
-                                profile.kind.display_name()
-                            ))
-                        });
-                    }
-                    error =
-                        Some("Quota provider discovery failed; refresh profiles to retry.".into())
-                }
+        if std::mem::take(&mut self.refresh_requested) {
+            // Keep showing the previous reading until the new one arrives.
+            self.generation += 1;
+        }
+        let finished: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.handle.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut failed = Vec::new();
+        for id in finished {
+            let task = self.tasks.remove(&id).expect("finished task");
+            if self.finish(id.clone(), task) {
+                failed.push(id);
             }
         }
-        // Finish supervising the previous read before replacing its snapshot.
-        if self.task.is_none() && (self.profiles != config.profiles || self.refresh_requested) {
-            let mut next = Self::start(config);
-            for (id, provider) in &self.resolved {
-                if self.profiles.get(id) == config.profiles.get(id) {
-                    next.resolved.insert(id.clone(), provider.clone());
-                }
-            }
-            *self = next;
-        }
-        error
+        self.spawn_missing(config);
+        (!failed.is_empty()).then(|| {
+            format!(
+                "Quota provider discovery failed for {}; refresh profiles to retry.",
+                failed.join(", ")
+            )
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn settle(&mut self) {
-        if let Some(task) = self.task.take() {
-            self.resolved
-                .extend(task.join().expect("quota provider discovery"));
+        for (id, task) in std::mem::take(&mut self.tasks) {
+            assert!(!self.finish(id, task), "quota provider discovery");
         }
     }
 }
@@ -135,28 +202,30 @@ pub(crate) struct PoolKey {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PoolPeriod {
     Week,
+    Month,
     FiveHour,
     Other { label: String, seconds: Option<i64> },
 }
 
 impl PoolPeriod {
-    fn of(report: &ProfileQuota, window: &QuotaWindow) -> Self {
-        if report.weekly_window() == Some(window)
-            && matches!(
-                window.label.to_ascii_lowercase().as_str(),
-                "week" | "weekly" | "7d"
-            )
-            && window.duration_seconds.is_none_or(|s| s == 604800)
+    fn of(window: &QuotaWindow) -> Self {
+        let label = window.label.to_ascii_lowercase();
+        let seconds = window.duration_seconds;
+        if matches!(label.as_str(), "week" | "weekly" | "7d") && seconds.is_none_or(|s| s == 604800)
         {
             Self::Week
-        } else if report.five_hour_window() == Some(window)
-            && window.duration_seconds.is_none_or(|s| s == 18000)
+        } else if matches!(label.as_str(), "month" | "monthly")
+            && seconds.is_none_or(|s| s > 604800)
+        {
+            Self::Month
+        } else if matches!(label.as_str(), "5h" | "5-hour" | "5 hour")
+            && seconds.is_none_or(|s| s == 18000)
         {
             Self::FiveHour
         } else {
             Self::Other {
                 label: window.label.clone(),
-                seconds: window.duration_seconds,
+                seconds,
             }
         }
     }
@@ -164,16 +233,22 @@ impl PoolPeriod {
     pub(crate) fn label(&self) -> &str {
         match self {
             Self::Week => "week",
+            Self::Month => "Month",
             Self::FiveHour => "5H",
             Self::Other { label, .. } => label,
         }
     }
 
+    /// One character naming the period on timelines and in the legend.
     pub(crate) fn marker(&self) -> char {
         match self {
             Self::Week => 'W',
+            Self::Month => 'M',
             Self::FiveHour => '5',
-            Self::Other { .. } => 'R',
+            Self::Other { label, .. } => label
+                .chars()
+                .find(|ch| ch.is_alphabetic())
+                .map_or('R', |ch| ch.to_ascii_uppercase()),
         }
     }
 }
@@ -254,6 +329,8 @@ pub(crate) struct PoolMember {
     pub limit: Option<i64>,
     pub remaining: u8,
     pub reset: Option<i64>,
+    /// The reset time has passed and no reading taken since has arrived.
+    pub awaiting_reading: bool,
     pub banked: Option<u64>,
     pub five_hour: Option<QuotaWindow>,
     pub five_hour_idle: bool,
@@ -269,7 +346,7 @@ pub(crate) fn provider_pools(
 ) -> Vec<ProviderQuota> {
     let mut grouped = BTreeMap::<QuotaProvider, ProviderQuota>::new();
     for (id, profile) in config.enabled_profiles() {
-        let provider = providers.provider(id, profile).cloned().unwrap_or_else(|| {
+        let provider = providers.provider(id, profile).unwrap_or_else(|| {
             if matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode) {
                 QuotaProvider::Other(format!("{} (resolving)", profile.kind.display_name()))
             } else {
@@ -329,72 +406,76 @@ pub(crate) fn provider_pools(
         };
         let mut added = false;
         for (scope, report) in reports {
-            let Some(window) = readable_window(&report) else {
-                continue;
-            };
-            let Some(remaining) = quota_remaining_percent(window) else {
-                continue;
-            };
-            added = true;
-            let key = PoolKey {
-                provider: group.provider.clone(),
-                scope: scope.clone(),
-                period: PoolPeriod::of(&report, window),
-            };
-            let index = group
-                .pools
-                .iter()
-                .position(|pool| pool.key == key)
-                .unwrap_or_else(|| {
-                    group.pools.push(QuotaPool {
-                        key,
-                        label: match scope.as_deref() {
-                            Some("gemini") => "Gemini".into(),
-                            Some("claude,gpt") => "Claude & GPT".into(),
-                            _ => String::new(),
-                        },
-                        members: Vec::new(),
-                        remaining: 0,
-                        unweighted: false,
-                        missing: 0,
+            for window in readable_windows(&report) {
+                let Some(remaining) = quota_remaining_percent(window) else {
+                    continue;
+                };
+                added = true;
+                let key = PoolKey {
+                    provider: group.provider.clone(),
+                    scope: scope.clone(),
+                    period: PoolPeriod::of(window),
+                };
+                let index = group
+                    .pools
+                    .iter()
+                    .position(|pool| pool.key == key)
+                    .unwrap_or_else(|| {
+                        group.pools.push(QuotaPool {
+                            key,
+                            label: match scope.as_deref() {
+                                Some("gemini") => "Gemini".into(),
+                                Some("claude,gpt") => "Claude & GPT".into(),
+                                _ => String::new(),
+                            },
+                            members: Vec::new(),
+                            remaining: 0,
+                            unweighted: false,
+                            missing: 0,
+                        });
+                        group.pools.len() - 1
                     });
-                    group.pools.len() - 1
+                group.pools[index].members.push(PoolMember {
+                    id: id.into(),
+                    weight: quota.monthly_price_usd.map(f64::from).unwrap_or(0.0),
+                    limit: window.limit.filter(|limit| *limit > 0),
+                    remaining,
+                    reset: window.resets_at_epoch_seconds,
+                    awaiting_reading: window.resets_at_epoch_seconds.is_some_and(|reset| {
+                        reset >= 0
+                            && reset as u64 <= now
+                            && quota.refreshed_at_epoch_seconds < reset as u64
+                    }),
+                    banked: report.banked_resets_for_window(window),
+                    five_hour: report
+                        .five_hour_window()
+                        .filter(|five| *five != window)
+                        .cloned(),
+                    // Claude omits the short window until first use; other adapters
+                    // do not define an absent window as idle.
+                    five_hour_idle: profile.kind == HarnessKind::Claude,
+                    fable: quota
+                        .fable_weekly_window()
+                        .and_then(quota_remaining_percent),
+                    note: {
+                        let mut notes: Vec<String> = report
+                            .windows
+                            .iter()
+                            .filter(|window| {
+                                window.model_scope.is_none()
+                                    && quota_remaining_percent(window).is_none()
+                            })
+                            .map(|window| format!("{} unknown", window.label))
+                            .collect();
+                        let extra = match (quota.rate_limit_label(now), &quota.extra) {
+                            (Some(rate), Some(extra)) => Some(format!("{rate} · {extra}")),
+                            (rate, extra) => rate.or_else(|| extra.clone()),
+                        };
+                        notes.extend(extra);
+                        (!notes.is_empty()).then(|| notes.join(" · "))
+                    },
                 });
-            group.pools[index].members.push(PoolMember {
-                id: id.into(),
-                weight: quota.monthly_price_usd.map(f64::from).unwrap_or(0.0),
-                limit: window.limit.filter(|limit| *limit > 0),
-                remaining,
-                reset: window.resets_at_epoch_seconds,
-                banked: quota.banked_resets,
-                five_hour: report
-                    .five_hour_window()
-                    .filter(|five| *five != window)
-                    .cloned(),
-                // Claude omits the short window until first use; other adapters
-                // do not define an absent window as idle.
-                five_hour_idle: profile.kind == HarnessKind::Claude,
-                fable: quota
-                    .fable_weekly_window()
-                    .and_then(quota_remaining_percent),
-                note: {
-                    let mut notes: Vec<String> = report
-                        .windows
-                        .iter()
-                        .filter(|window| {
-                            window.model_scope.is_none()
-                                && quota_remaining_percent(window).is_none()
-                        })
-                        .map(|window| format!("{} unknown", window.label))
-                        .collect();
-                    let extra = match (quota.rate_limit_label(now), &quota.extra) {
-                        (Some(rate), Some(extra)) => Some(format!("{rate} · {extra}")),
-                        (rate, extra) => rate.or_else(|| extra.clone()),
-                    };
-                    notes.extend(extra);
-                    (!notes.is_empty()).then(|| notes.join(" · "))
-                },
-            });
+            }
         }
         if !added {
             group.text.push((
@@ -408,9 +489,13 @@ pub(crate) fn provider_pools(
     }
     for group in grouped.values_mut() {
         // Gemini first, matching the existing independent-pool presentation.
-        group
-            .pools
-            .sort_by_key(|pool| pool.key.scope.as_deref() != Some("gemini"));
+        // A Month pool follows its Week pool whatever order the report lists them.
+        group.pools.sort_by_key(|pool| {
+            (
+                pool.key.scope.as_deref() != Some("gemini"),
+                pool.key.period == PoolPeriod::Month,
+            )
+        });
         let multiple_periods = group.pools.iter().any(|pool| {
             group.pools.iter().any(|other| {
                 other.key.scope == pool.key.scope && other.key.period != pool.key.period
@@ -433,7 +518,7 @@ pub(crate) fn provider_pools(
                 .filter(|(id, profile)| {
                     if !providers
                         .provider(id, profile)
-                        .is_some_and(|provider| *provider == group.provider)
+                        .is_some_and(|provider| provider == group.provider)
                         || pool.members.iter().any(|member| member.id == *id)
                     {
                         return false;
@@ -464,7 +549,7 @@ pub(crate) fn provider_pools(
                     };
                     scoped.is_some_and(|report| {
                         report.windows.iter().any(|window| {
-                            PoolPeriod::of(&report, window) == pool.key.period
+                            PoolPeriod::of(window) == pool.key.period
                                 && quota_remaining_percent(window).is_none()
                         })
                     })
