@@ -138,6 +138,9 @@ class Server:
         while True:
             if CANCEL.is_set():
                 raise Cancelled("cancelled while waiting for a reply")
+            if time.monotonic() >= deadline:  # also while notifications keep arriving
+                raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
+                                   f"readiness {READINESS_SECONDS} s)")
             try:
                 line = self.lines.get(timeout=max(0, min(1.0, deadline - time.monotonic())))
             except queue.Empty:
@@ -259,6 +262,8 @@ def du(path):
 
 
 def phase(binary, root, cache, log):
+    if CANCEL.is_set():  # never launch a server after cancellation (e.g. during a checkout)
+        raise Cancelled("cancelled before launching a server")
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0 = time.monotonic()
     server = Server(binary, root, cache, log)
@@ -301,7 +306,21 @@ def phase(binary, root, cache, log):
 
 
 def git(*args, cwd=None):
-    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+    """Run git, but stop it if the batch is cancelled: a long clone or fetch mustn't delay
+    cancellation, and nothing launches after it (phase() checks CANCEL first)."""
+    proc = subprocess.Popen(["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    while True:
+        try:
+            out, err = proc.communicate(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            if CANCEL.is_set():
+                proc.terminate()
+                proc.communicate()
+                raise Cancelled(f"cancelled during git {args[0]}")
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
+    return out.strip()
 
 
 def require_ec2():
