@@ -639,7 +639,14 @@ async fn classify_recorded_items(
             };
             slots.push((index, item, session, attempts, evidence));
         }
-        let mut built = match build_session_evidence(&session_id, inputs).await {
+        // Dropping this future must also stop the blocking scan and release its snapshot.
+        let scan_stop = stop.child_token();
+        let _stop_scan_on_drop = scan_stop.clone().drop_guard();
+        let built = build_session_evidence(&session_id, inputs, scan_stop).await;
+        if stop.is_cancelled() {
+            return Ok(());
+        }
+        let mut built = match built {
             Ok(built) => built.into_iter().map(|e| Ok(Some(e))).collect(),
             Err(error) => {
                 let message = format!("{error:#}");
@@ -740,6 +747,7 @@ async fn prepare_session_evidence(
 async fn build_session_evidence(
     session_id: &str,
     pairs: Vec<PreparedPair>,
+    stop: CancellationToken,
 ) -> Result<Vec<GithubItemEvidence>> {
     if pairs.is_empty() {
         return Ok(Vec::new());
@@ -760,14 +768,12 @@ async fn build_session_evidence(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut history = mj_transcript::github_history::SessionHistory::new(&session_id, specs);
-        mj_controller::database::scan_github_history(&session_id, &mut history)?;
-        history
-            .finish()?
+        let history = mj_transcript::github_history::SessionHistory::new(&session_id, specs);
+        mj_controller::database::scan_github_history(&session_id, history, &|| stop.is_cancelled())?
             .into_iter()
             .zip(&pairs)
-            .map(|(scanner, pair)| {
-                mj_transcript::github_history::build_evidence(&pair.base, scanner.finish())
+            .map(|(spans, pair)| {
+                mj_transcript::github_history::build_evidence(&pair.base, spans)
                     .map(|(evidence, _)| evidence)
             })
             .collect()

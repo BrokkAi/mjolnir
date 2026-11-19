@@ -139,7 +139,7 @@ impl PartialEq<&str> for Value {
     }
 }
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 fn re(s: &str) -> Regex {
     Regex::new(s).expect("frozen expression")
@@ -147,11 +147,10 @@ fn re(s: &str) -> Regex {
 fn chars(s: &str) -> Vec<char> {
     s.chars().collect()
 }
-fn slice(s: &[char], a: usize, b: usize) -> String {
-    s[a..b].iter().collect()
-}
 pub fn redact(s: &str) -> String {
-    re(r"[A-Za-z0-9_.+\-]{24,}")
+    static LONG_TOKEN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    LONG_TOKEN
+        .get_or_init(|| re(r"[A-Za-z0-9_.+\-]{24,}"))
         .replace_all(s, "[redacted]")
         .into_owned()
 }
@@ -281,9 +280,32 @@ impl TextSink for String {
     }
 }
 
+/// Recovers a window's text, and the text of the stamp that governs it, from
+/// the source of the transcript: `(start, end, stamp position)`, in code points.
+pub type WindowRecovery<'a> =
+    dyn FnMut(usize, usize, Option<usize>) -> Result<(String, Option<String>)> + 'a;
+
+/// A sink that ends in a result once the whole transcript has been pushed.
+pub trait HistorySink: TextSink {
+    type Output;
+    fn complete(self, recover: &mut WindowRecovery<'_>) -> Result<Self::Output>;
+}
+impl HistorySink for String {
+    type Output = String;
+    fn complete(self, _: &mut WindowRecovery<'_>) -> Result<String> {
+        Ok(self)
+    }
+}
+
 impl TextSink for HistoryScanner {
     fn push_str(&mut self, text: &str) {
         HistoryScanner::push_str(self, text);
+    }
+}
+impl HistorySink for HistoryScanner {
+    type Output = Vec<Span>;
+    fn complete(self, recover: &mut WindowRecovery<'_>) -> Result<Vec<Span>> {
+        self.finish(recover)
     }
 }
 
@@ -298,21 +320,78 @@ struct IdState {
     hits: usize,
 }
 
-/// A 500-code-point window around at least one hit.
+enum Verdict {
+    /// Still collecting text.
+    Open,
+    /// Not a duplicate of the session digest; the trimmed length in code points.
+    Passed(usize),
+    Dead,
+}
+
+/// A window of up to 500 code points around at least one hit. Its text is held
+/// only while the window is open; afterwards it is recovered from the source
+/// if the window is selected.
 struct Candidate {
-    text: String,
+    text: Option<String>,
     cps: usize,
     /// Identifier indexes, ascending: the weights are summed in this order.
     ids: Vec<usize>,
-    time: Option<String>,
+    /// Position of the last stamp at or before the window's start.
+    stamp: Option<usize>,
+    verdict: Verdict,
+}
+
+/// The 100-code-point windows of the session digest, found by hash and compared exactly.
+struct Known {
+    digest: Vec<char>,
+    windows: Vec<(u64, usize)>,
+}
+fn window_hash(window: &[char]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    window.hash(&mut hasher);
+    hasher.finish()
+}
+impl Known {
+    fn new(digest: Vec<char>) -> Self {
+        let mut windows = (0..digest.len().saturating_sub(99))
+            .map(|i| (window_hash(&digest[i..i + 100]), i))
+            .collect::<Vec<_>>();
+        windows.sort_unstable();
+        Self { digest, windows }
+    }
+    fn contains(&self, window: &[char]) -> bool {
+        let hash = window_hash(window);
+        let from = self.windows.partition_point(|&(h, _)| h < hash);
+        self.windows[from..]
+            .iter()
+            .take_while(|&&(h, _)| h == hash)
+            .any(|&(_, i)| self.digest[i..i + 100] == *window)
+    }
+}
+
+/// Whether a finished window survives the duplicate checks against the session digest.
+fn judge(existing: &str, known: &Known, text: &str) -> Verdict {
+    let raw = text.trim_matches(|c| u::contains(u::SPACE, c));
+    let rt = redact(raw);
+    let r = chars(&rt);
+    if existing.contains(&rt)
+        || (0..r.len().saturating_sub(99))
+            .step_by(50)
+            .any(|i| known.contains(&r[i..i + 100]))
+    {
+        Verdict::Dead
+    } else {
+        Verdict::Passed(raw.chars().count())
+    }
 }
 
 /// Single-pass form of the frozen retrieval: the transcript is pushed in pieces
-/// and only the last few hundred code points and the candidate windows are
-/// kept. Positions are code point indexes, as in the Python original.
+/// and only the last few hundred code points and compact per-window records
+/// are kept. Positions are code point indexes, as in the Python original.
 pub struct HistoryScanner {
-    digest: String,
     existing: String,
+    known: Known,
     ids: Vec<(String, f64)>,
     info: Vec<IdState>,
     automaton: Option<aho_corasick::nfa::contiguous::NFA>,
@@ -326,12 +405,19 @@ pub struct HistoryScanner {
     /// Raw occurrences ending at `seen`; the next code point decides their boundary.
     pending: Vec<(usize, usize)>,
     candidates: BTreeMap<usize, Candidate>,
+    /// Windows still collecting text.
     open: Vec<usize>,
-    stamps: std::collections::VecDeque<(usize, String)>,
-    stamp_open: Option<(usize, String)>,
+    /// Positions of the stamps seen, pruned to those a future window can still need.
+    stamps: std::collections::VecDeque<usize>,
+    /// A stamp in progress: its position and whether it has content yet.
+    stamp_open: Option<(usize, bool)>,
     /// Candidates that began inside a stamp that was still open.
     awaiting_stamp: Vec<usize>,
     line_start: bool,
+    #[cfg(test)]
+    texts_held: usize,
+    #[cfg(test)]
+    peak_texts: usize,
 }
 
 impl HistoryScanner {
@@ -360,8 +446,8 @@ impl HistoryScanner {
                     .expect("start state")
             });
         Self {
-            digest: spaced(session),
             existing: session["conversation"].as_str().unwrap_or("").to_string(),
+            known: Known::new(chars(&spaced(session))),
             ids,
             info,
             automaton,
@@ -376,6 +462,10 @@ impl HistoryScanner {
             stamp_open: None,
             awaiting_stamp: Vec::new(),
             line_start: true,
+            #[cfg(test)]
+            texts_held: 0,
+            #[cfg(test)]
+            peak_texts: 0,
         }
     }
 
@@ -405,31 +495,38 @@ impl HistoryScanner {
                 .range(start - base..stop - base)
                 .copied()
                 .collect();
-            let time = self
-                .stamps
-                .iter()
-                .rev()
-                .find(|(p, _)| *p <= start)
-                .map(|(_, s)| s.clone());
-            if self.stamp_open.as_ref().is_some_and(|(p, _)| *p <= start) {
+            let stamp = self.stamps.iter().rev().find(|p| **p <= start).copied();
+            if self.stamp_open.is_some_and(|(p, _)| p <= start) {
                 self.awaiting_stamp.push(start);
             }
-            if stop - start < 500 {
+            let (text, verdict) = if stop - start < 500 {
                 self.open.push(start);
-            }
+                #[cfg(test)]
+                {
+                    self.texts_held += 1;
+                    self.peak_texts = self.peak_texts.max(self.texts_held);
+                }
+                (Some(text), Verdict::Open)
+            } else {
+                (None, judge(&self.existing, &self.known, &text))
+            };
             self.candidates.insert(
                 start,
                 Candidate {
                     text,
                     cps: stop - start,
                     ids: Vec::new(),
-                    time,
+                    stamp,
+                    verdict,
                 },
             );
         }
-        let ids = &mut self.candidates.get_mut(&start).unwrap().ids;
-        if let Err(at) = ids.binary_search(&id) {
-            ids.insert(at, id);
+        let candidate = self.candidates.get_mut(&start).unwrap();
+        if matches!(candidate.verdict, Verdict::Dead) {
+            return;
+        }
+        if let Err(at) = candidate.ids.binary_search(&id) {
+            candidate.ids.insert(at, id);
         }
     }
 
@@ -440,25 +537,25 @@ impl HistoryScanner {
             self.resolve(id, pos, Some(c));
         }
         // Stamps: `(?m)^\[([^\]\n]+)\]`.
-        if let Some((pos, text)) = &mut self.stamp_open {
+        if let Some((pos, content)) = &mut self.stamp_open {
             if c == ']' || c == '\n' {
-                let (pos, text) = (*pos, std::mem::take(text));
+                let (pos, content) = (*pos, *content);
                 self.stamp_open = None;
                 let awaiting = std::mem::take(&mut self.awaiting_stamp);
-                if c == ']' && !text.is_empty() {
+                if c == ']' && content {
                     for start in awaiting {
-                        self.candidates.get_mut(&start).unwrap().time = Some(text.clone());
+                        self.candidates.get_mut(&start).unwrap().stamp = Some(pos);
                     }
-                    self.stamps.push_back((pos, text));
-                    while self.stamps.len() >= 2 && self.stamps[1].0 + self.ring_cap <= self.seen {
+                    self.stamps.push_back(pos);
+                    while self.stamps.len() >= 2 && self.stamps[1] + self.ring_cap <= self.seen {
                         self.stamps.pop_front();
                     }
                 }
             } else {
-                text.push(c);
+                *content = true;
             }
         } else if self.line_start && c == '[' {
-            self.stamp_open = Some((self.seen, String::new()));
+            self.stamp_open = Some((self.seen, false));
         }
         self.line_start = c == '\n';
         if self.ring.len() == self.ring_cap {
@@ -466,11 +563,24 @@ impl HistoryScanner {
         }
         self.ring.push_back(c);
         let candidates = &mut self.candidates;
+        let (existing, known) = (&self.existing, &self.known);
+        #[cfg(test)]
+        let held = &mut self.texts_held;
         self.open.retain(|start| {
             let candidate = candidates.get_mut(start).unwrap();
-            candidate.text.push(c);
+            let text = candidate.text.as_mut().unwrap();
+            text.push(c);
             candidate.cps += 1;
-            candidate.cps < 500
+            if candidate.cps < 500 {
+                return true;
+            }
+            candidate.verdict = judge(existing, known, text);
+            candidate.text = None;
+            #[cfg(test)]
+            {
+                *held -= 1;
+            }
+            false
         });
         self.seen += 1;
         if let Some(automaton) = &self.automaton {
@@ -503,16 +613,17 @@ impl HistoryScanner {
         }
     }
 
-    /// Scores, filters and selects the windows once the whole transcript was pushed.
-    pub fn finish(mut self) -> Vec<Span> {
+    /// Scores and selects the windows once the whole transcript was pushed,
+    /// then recovers the text of the selected ones.
+    pub fn finish(mut self, recover: &mut WindowRecovery<'_>) -> Result<Vec<Span>> {
         for (id, pos) in std::mem::take(&mut self.pending) {
             self.resolve(id, pos, None);
         }
+        for start in std::mem::take(&mut self.open) {
+            let candidate = self.candidates.get_mut(&start).unwrap();
+            candidate.verdict = judge(&self.existing, &self.known, &candidate.text.take().unwrap());
+        }
         let total = self.seen;
-        let digest = chars(&self.digest);
-        let known: HashSet<String> = (0..digest.len().saturating_sub(99))
-            .map(|i| slice(&digest, i, i + 100))
-            .collect();
         // `f64::ln_1p` calls the platform's C library, whose log1p is not
         // correctly rounded: glibc, Apple's libm and MSVC each differ by an
         // ulp on some inputs, which broke byte parity on Windows. The pure
@@ -528,52 +639,40 @@ impl HistoryScanner {
             .collect::<Vec<_>>();
         let mut ranked = Vec::new();
         for (start, candidate) in std::mem::take(&mut self.candidates) {
+            let Verdict::Passed(len) = candidate.verdict else {
+                continue;
+            };
             let score = candidate.ids.iter().fold(0.0, |sum, &id| sum + weights[id]);
-            let end = (start + 500).min(total);
-            let raw = candidate.text.trim_matches(|c| u::contains(u::SPACE, c));
-            let rt = redact(raw);
-            let r = chars(&rt);
-            if self.existing.contains(&rt)
-                || (0..r.len().saturating_sub(99))
-                    .step_by(50)
-                    .any(|i| known.contains(&slice(&r, i, i + 100)))
-            {
+            let score = score * (1.0 + 0.1 * start as f64 / total.max(1) as f64);
+            ranked.push((start, start + candidate.cps, score, len, candidate.stamp));
+        }
+        ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.0.cmp(&a.0)));
+        let mut selected: Vec<(usize, usize, f64, Option<usize>)> = Vec::new();
+        let mut used = 0;
+        for (start, end, score, len, stamp) in ranked {
+            if used + len > 2100 || selected.iter().any(|s| start < s.1 && end > s.0) {
                 continue;
             }
-            let score = score * (1.0 + 0.1 * start as f64 / total.max(1) as f64);
-            ranked.push((
-                Span {
+            used += len;
+            selected.push((start, end, score, stamp));
+        }
+        selected.sort_by_key(|s| s.0);
+        selected
+            .into_iter()
+            .map(|(start, end, score, stamp)| {
+                let (text, time) = recover(start, end, stamp)?;
+                let raw = text.trim_matches(|c| u::contains(u::SPACE, c));
+                Ok(Span {
                     start,
                     end,
                     score,
                     snippet: Snippet {
-                        time: candidate.time,
-                        text: rt,
+                        time,
+                        text: redact(raw),
                     },
-                },
-                raw.chars().count(),
-            ));
-        }
-        ranked.sort_by(|a, b| {
-            b.0.score
-                .total_cmp(&a.0.score)
-                .then(b.0.start.cmp(&a.0.start))
-        });
-        let mut selected: Vec<Span> = Vec::new();
-        let mut used = 0;
-        for (span, len) in ranked {
-            if used + len > 2100
-                || selected
-                    .iter()
-                    .any(|s| span.start < s.end && span.end > s.start)
-            {
-                continue;
-            }
-            used += len;
-            selected.push(span);
-        }
-        selected.sort_by_key(|s| s.start);
-        selected
+                })
+            })
+            .collect()
     }
 }
 
@@ -582,7 +681,19 @@ impl HistoryScanner {
 pub fn retrieve(item: &Value, text: &str, session: &Value) -> Vec<Span> {
     let mut scanner = HistoryScanner::new(item, session);
     scanner.push_str(text);
-    scanner.finish()
+    scanner
+        .finish(&mut |start, end, stamp| {
+            Ok((
+                text.chars().skip(start).take(end - start).collect(),
+                stamp.map(|at| {
+                    text.chars()
+                        .skip(at + 1)
+                        .take_while(|&c| c != ']')
+                        .collect()
+                }),
+            ))
+        })
+        .expect("recovery from the whole text cannot fail")
 }
 #[derive(Debug)]
 pub struct HistoryEvidence {
@@ -837,6 +948,22 @@ impl LineEndings {
     }
 }
 
+/// Counts the code points a pair emits, and keeps a copy of its header.
+struct Meter<'a, S> {
+    sink: &'a mut S,
+    cps: &'a mut u64,
+    tee: Option<&'a mut String>,
+}
+impl<S: TextSink> TextSink for Meter<'_, S> {
+    fn push_str(&mut self, text: &str) {
+        *self.cps += text.chars().count() as u64;
+        if let Some(tee) = &mut self.tee {
+            tee.push_str(text);
+        }
+        self.sink.push_str(text);
+    }
+}
+
 struct PairRender<S> {
     cutoff_ms: i64,
     repo_lower: String,
@@ -845,13 +972,39 @@ struct PairRender<S> {
     seen: HistoryCounts,
     endings: LineEndings,
     sink: S,
+    /// Code points emitted so far.
+    cps: u64,
+    /// The header as emitted.
+    header: String,
+    /// Where each rendered row starts in the emitted text, and its ordinal in
+    /// the second pass: enough to render again the rows around a window.
+    entries: Vec<(u64, usize)>,
 }
 
 impl<S: TextSink> PairRender<S> {
     fn put(&mut self, s: &str) {
-        self.endings.push(s, &mut self.sink);
+        let mut meter = Meter {
+            sink: &mut self.sink,
+            cps: &mut self.cps,
+            tee: None,
+        };
+        self.endings.push(s, &mut meter);
     }
-    fn include(&mut self, row: &RowRender, created_at_ms: i64, changed_ms: i64) -> Result<()> {
+    fn put_header(&mut self, s: &str) {
+        let mut meter = Meter {
+            sink: &mut self.sink,
+            cps: &mut self.cps,
+            tee: Some(&mut self.header),
+        };
+        self.endings.push(s, &mut meter);
+    }
+    fn include(
+        &mut self,
+        row: &RowRender,
+        ordinal: usize,
+        created_at_ms: i64,
+        changed_ms: i64,
+    ) -> Result<()> {
         if created_at_ms > self.cutoff_ms || changed_ms > self.cutoff_ms {
             return Ok(());
         }
@@ -872,12 +1025,127 @@ impl<S: TextSink> PairRender<S> {
             .created
             .as_ref()
             .map_err(|()| anyhow::anyhow!("timestamp out of range"))?;
+        self.entries.push((self.cps, ordinal));
         self.put("[");
         self.put(ts);
         self.put("] ");
         self.put(text);
         Ok(())
     }
+}
+
+/// Collects a range of code points and the stamp that starts at one position.
+struct Slice {
+    from: u64,
+    to: u64,
+    pos: u64,
+    out: String,
+    stamp_at: Option<u64>,
+    /// 0 before the stamp, 1 inside it, 2 after its closing bracket.
+    stamp_state: u8,
+    stamp: String,
+}
+impl Slice {
+    fn done(&self) -> bool {
+        self.pos >= self.to && (self.stamp_at.is_none() || self.stamp_state == 2)
+    }
+}
+impl TextSink for Slice {
+    fn push_str(&mut self, text: &str) {
+        for c in text.chars() {
+            if (self.from..self.to).contains(&self.pos) {
+                self.out.push(c);
+            }
+            if self.stamp_state == 1 {
+                if c == ']' {
+                    self.stamp_state = 2;
+                } else {
+                    self.stamp.push(c);
+                }
+            } else if self.stamp_state == 0 && self.stamp_at == Some(self.pos) {
+                self.stamp_state = 1;
+            }
+            self.pos += 1;
+        }
+    }
+}
+
+/// Gives back stored rows in `(position, stable_id)` order from an ordinal on.
+pub trait RowFetch {
+    /// Calls `visit(ordinal, created_at_ms, last_changed_at_ms, body_json)`
+    /// for each row from `ordinal`, until it returns false.
+    fn rows_from(
+        &mut self,
+        ordinal: usize,
+        visit: &mut dyn FnMut(usize, i64, i64, &str) -> Result<bool>,
+    ) -> Result<()>;
+}
+
+/// Renders again the rows that cover a window and cuts it out, with the text
+/// of its stamp.
+fn recover_window(
+    header: &str,
+    entries: &[(u64, usize)],
+    fetch: &mut dyn RowFetch,
+    start: usize,
+    end: usize,
+    stamp: Option<usize>,
+) -> Result<(String, Option<String>)> {
+    let anchor = stamp.map_or(start, |at| at.min(start)) as u64;
+    let at = entries.partition_point(|e| e.0 <= anchor);
+    let (base, first, with_header) = if at == 0 {
+        (0, 0, true)
+    } else {
+        (entries[at - 1].0, at - 1, false)
+    };
+    let mut slice = Slice {
+        from: start as u64 - base,
+        to: end as u64 - base,
+        pos: 0,
+        out: String::new(),
+        stamp_at: stamp.map(|at| at as u64 - base),
+        stamp_state: 0,
+        stamp: String::new(),
+    };
+    let mut endings = LineEndings::default();
+    if with_header {
+        endings.push(header, &mut slice);
+    }
+    let mut next = first;
+    let mut chunks = 0;
+    if next < entries.len() && !slice.done() {
+        fetch.rows_from(entries[next].1, &mut |ordinal, created, _, body| {
+            if ordinal != entries[next].1 {
+                return Ok(true);
+            }
+            let rendered = render_row(created, &serde_json::from_str::<Value>(body)?);
+            let text = rendered
+                .text
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("history row {ordinal} no longer renders"))?;
+            let ts = rendered
+                .created
+                .as_ref()
+                .map_err(|()| anyhow::anyhow!("timestamp out of range"))?;
+            if chunks > 0 {
+                endings.push("\n\n", &mut slice);
+            }
+            for piece in ["[", ts, "] ", text] {
+                endings.push(piece, &mut slice);
+            }
+            chunks += 1;
+            next += 1;
+            Ok(next < entries.len() && !slice.done())
+        })?;
+    }
+    if next == entries.len() && !slice.done() {
+        endings.push("\n", &mut slice);
+    }
+    anyhow::ensure!(
+        slice.pos >= slice.to && (slice.stamp_at.is_none() || slice.stamp_state == 2),
+        "history rows changed between reading them and recovering a window"
+    );
+    Ok((slice.out, stamp.map(|_| slice.stamp)))
 }
 
 /// One item's transcript view of a session: its cutoff, the item it is about,
@@ -894,14 +1162,16 @@ pub struct HistoryPairSpec<S> {
 /// `row` over them in `(position, stable_id)` order renders each exactly once
 /// and hands it to every pair that includes it. The rendered text is
 /// byte-identical to the whole-string rendering of the frozen format; it is
-/// never held whole.
+/// never held whole. `complete` then renders again only the few rows around
+/// the windows the sinks ask for.
 pub struct SessionHistory<S> {
     session_id: String,
     pairs: Vec<PairRender<S>>,
     started: bool,
+    ordinal: usize,
 }
 
-impl<S: TextSink> SessionHistory<S> {
+impl<S: HistorySink> SessionHistory<S> {
     pub fn new(session_id: &str, pairs: Vec<HistoryPairSpec<S>>) -> Self {
         Self {
             session_id: session_id.to_string(),
@@ -915,10 +1185,20 @@ impl<S: TextSink> SessionHistory<S> {
                     seen: HistoryCounts::default(),
                     endings: LineEndings::default(),
                     sink: p.sink,
+                    cps: 0,
+                    header: String::new(),
+                    entries: Vec::new(),
                 })
                 .collect(),
             started: false,
+            ordinal: 0,
         }
+    }
+
+    /// The latest cutoff of any pair. A row created or changed after it is
+    /// withheld from every pair, so it only needs counting.
+    pub fn max_cutoff_ms(&self) -> Option<i64> {
+        self.pairs.iter().map(|p| p.cutoff_ms).max()
     }
 
     /// First pass.
@@ -961,13 +1241,14 @@ impl<S: TextSink> SessionHistory<S> {
                 c.later,
                 c.notices
             );
-            pair.put(&header);
+            pair.put_header(&header);
         }
         self.started = true;
         Ok(())
     }
 
-    /// Second pass. Rows nobody includes are not decoded.
+    /// Second pass. Rows nobody includes are not decoded. Every row must be
+    /// passed, in order: its ordinal is how `complete` finds it again.
     pub fn row(
         &mut self,
         created_at_ms: i64,
@@ -975,6 +1256,8 @@ impl<S: TextSink> SessionHistory<S> {
         body_json: &str,
     ) -> Result<()> {
         anyhow::ensure!(self.started, "history rows rendered before the headers");
+        let ordinal = self.ordinal;
+        self.ordinal += 1;
         if !self
             .pairs
             .iter()
@@ -986,15 +1269,16 @@ impl<S: TextSink> SessionHistory<S> {
         let rendered = render_row(created_at_ms, &body);
         drop(body);
         for pair in &mut self.pairs {
-            pair.include(&rendered, created_at_ms, last_changed_at_ms)?;
+            pair.include(&rendered, ordinal, created_at_ms, last_changed_at_ms)?;
         }
         Ok(())
     }
 
-    /// Ends every transcript and returns the sinks. Fails when the second
+    /// Ends every transcript and returns what each sink makes of it, with
+    /// `fetch` reading the same rows as the passes did. Fails when the second
     /// pass disagrees with the counts in the headers, which means the rows
     /// changed between the passes or the counting query drifted from the renderer.
-    pub fn finish(self) -> Result<Vec<S>> {
+    pub fn complete(self, fetch: &mut dyn RowFetch) -> Result<Vec<S::Output>> {
         self.pairs
             .into_iter()
             .map(|mut pair| {
@@ -1006,7 +1290,10 @@ impl<S: TextSink> SessionHistory<S> {
                     pair.seen
                 );
                 pair.put("\n");
-                Ok(pair.sink)
+                let (header, entries) = (pair.header, pair.entries);
+                pair.sink.complete(&mut |start, end, stamp| {
+                    recover_window(&header, &entries, fetch, start, end, stamp)
+                })
             })
             .collect()
     }
@@ -1050,6 +1337,10 @@ pub fn student_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    fn slice(s: &[char], a: usize, b: usize) -> String {
+        s[a..b].iter().collect()
+    }
     // The implementation that streaming replaced, kept only as the oracle for
     // the differential test: whole-text retrieval over `Vec<char>` and the
     // whole-string renderer.
@@ -1264,21 +1555,44 @@ mod tests {
 
     /// Runs both passes of the streaming renderer over rows held in memory,
     /// the way the store feeds them, into the given sinks.
-    fn stream_pairs<S: TextSink>(
+    struct MemoryRows(Vec<(i64, i64, String)>);
+    impl RowFetch for MemoryRows {
+        fn rows_from(
+            &mut self,
+            ordinal: usize,
+            visit: &mut dyn FnMut(usize, i64, i64, &str) -> Result<bool>,
+        ) -> Result<()> {
+            for (n, (created, changed, body)) in self.0.iter().enumerate().skip(ordinal) {
+                if !visit(n, *created, *changed, body)? {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+    fn stream_pairs<S: HistorySink>(
         session_id: &str,
         rows: &[HistoryRow],
         pairs: Vec<HistoryPairSpec<S>>,
-    ) -> Vec<S> {
+    ) -> Vec<S::Output> {
         let mut ordered = rows.iter().collect::<Vec<_>>();
         ordered.sort_by(|a, b| {
             a.position
                 .cmp(&b.position)
                 .then(a.stable_id.cmp(&b.stable_id))
         });
-        let bodies = ordered
-            .iter()
-            .map(|r| serde_json::to_string(&r.body).unwrap())
-            .collect::<Vec<_>>();
+        let mut memory = MemoryRows(
+            ordered
+                .iter()
+                .map(|r| {
+                    (
+                        r.created_at_ms,
+                        r.last_changed_at_ms,
+                        serde_json::to_string(&r.body).unwrap(),
+                    )
+                })
+                .collect(),
+        );
         let mut history = SessionHistory::new(session_id, pairs);
         for row in &ordered {
             let b = &row.body;
@@ -1293,12 +1607,10 @@ mod tests {
             });
         }
         history.begin().unwrap();
-        for (row, body) in ordered.iter().zip(&bodies) {
-            history
-                .row(row.created_at_ms, row.last_changed_at_ms, body)
-                .unwrap();
+        for (created, changed, body) in &memory.0 {
+            history.row(*created, *changed, body).unwrap();
         }
-        history.finish().unwrap()
+        history.complete(&mut memory).unwrap()
     }
     fn stream_render(
         session_id: &str,
@@ -1453,6 +1765,75 @@ mod tests {
             .join("\n")
     }
 
+    fn finish_whole(scanner: HistoryScanner, text: &str) -> Vec<Span> {
+        scanner
+            .finish(&mut |start, end, stamp| {
+                Ok((
+                    text.chars().skip(start).take(end - start).collect(),
+                    stamp.map(|at| {
+                        text.chars()
+                            .skip(at + 1)
+                            .take_while(|&c| c != ']')
+                            .collect()
+                    }),
+                ))
+            })
+            .unwrap()
+    }
+
+    // An identifier in every window of a long transcript, with a megabyte-long
+    // bracketed line that opens a stamp under hundreds of windows, must not make
+    // the scanner keep a string per window.
+    #[test]
+    fn scanner_holds_a_constant_number_of_window_strings() {
+        let item: Value =
+            serde_json::from_value(json!({"title": "t", "body": "src/zz_marker.rs"})).unwrap();
+        let session: Value = serde_json::from_value(json!({"conversation": ""})).unwrap();
+        let mut text = String::from("[2024-01-01T00:00:00.000Z] USER\n");
+        for _ in 0..4000 {
+            text.push_str("src/zz_marker.rs lorem ipsum dolor sit amet ééé 😀 consectetur\n");
+        }
+        text.push_str("\n[");
+        for _ in 0..40_000 {
+            text.push_str("src/zz_marker.rs padding padding padding ");
+        }
+        text.push_str("]\n");
+        for _ in 0..4000 {
+            text.push_str("lorem src/zz_marker.rs ipsum dolor sit amet\n");
+        }
+        assert!(text.len() > 1_000_000);
+        let mut scanner = HistoryScanner::new(&item, &session);
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            let mut cut = 4096.min(rest.len());
+            while !rest.is_char_boundary(cut) {
+                cut += 1;
+            }
+            scanner.push_str(&rest[..cut]);
+            rest = &rest[cut..];
+        }
+        assert!(
+            scanner.candidates.len() > 8000,
+            "{}",
+            scanner.candidates.len()
+        );
+        assert!(scanner.peak_texts <= 3, "peak {}", scanner.peak_texts);
+        assert!(
+            scanner
+                .candidates
+                .values()
+                .filter(|c| c.text.is_some())
+                .count()
+                <= 3
+        );
+        let expected = retrieve_reference(&item, &text, &session);
+        assert!(!expected.is_empty());
+        assert_eq!(
+            spans_json(&finish_whole(scanner, &text)),
+            spans_json(&expected)
+        );
+    }
+
     // Streaming must reproduce the whole-text implementation exactly: header
     // counts, line-ending replacement, notices, rows that changed after the
     // cutoff, multi-byte text, identifiers across the window grid and the row
@@ -1484,13 +1865,13 @@ mod tests {
                     sink: HistoryScanner::new(&item, &session),
                 })
                 .collect();
-            let scanners = stream_pairs("session-é", &rows, specs);
-            for (scanner, &(cutoff, repo, number)) in scanners.into_iter().zip(&pairs) {
+            let outputs = stream_pairs("session-é", &rows, specs);
+            for (spans, &(cutoff, repo, number)) in outputs.into_iter().zip(&pairs) {
                 let text = render_reference("session-é", &rows, cutoff, repo, number).unwrap();
                 let expected = retrieve_reference(&item, &text, &session);
                 retrieved += expected.len();
                 assert_eq!(
-                    spans_json(&scanner.finish()),
+                    spans_json(&spans),
                     spans_json(&expected),
                     "round {round} pair {cutoff} {number}"
                 );
@@ -1511,7 +1892,7 @@ mod tests {
                     rest = &rest[cut..];
                 }
                 assert_eq!(
-                    spans_json(&scanner.finish()),
+                    spans_json(&finish_whole(scanner, &text)),
                     spans_json(&expected),
                     "round {round} pieces"
                 );
