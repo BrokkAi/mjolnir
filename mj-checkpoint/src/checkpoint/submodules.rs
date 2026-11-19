@@ -169,6 +169,17 @@ fn inspect_checkout(
         };
         let submodule = checkout.join(&gitlink);
         if !submodule.join(".git").exists() {
+            if let Some(snapshot) = snapshot.as_deref_mut() {
+                let name = std::str::from_utf8(config_key)?
+                    .strip_prefix("submodule.")
+                    .and_then(|key| key.strip_suffix(".path"))
+                    .context("invalid submodule path key")?;
+                let admin =
+                    crate::snapshot::git_path(runner, checkout, &format!("modules/{name}"))?;
+                if admin.is_dir() {
+                    inspect_cached_local_work(runner, &admin, &named, snapshot)?;
+                }
+            }
             if snapshot.is_some()
                 && !uninitialized_gitlink_available(runner, checkout, &gitlink, config_key)?
             {
@@ -287,6 +298,7 @@ fn inspect_checkout(
                 &submodule,
                 &named,
                 &evidence.objects,
+                false,
             )?);
         }
         let status = if snapshot.is_some() {
@@ -353,11 +365,76 @@ fn inspect_checkout(
     Ok(())
 }
 
+struct CachedModuleGit<'a> {
+    inner: &'a dyn GitCommandRunner,
+    admin: &'a Path,
+}
+impl GitCommandRunner for CachedModuleGit<'_> {
+    fn run(&self, repository: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
+        let mut command = command.clone();
+        // core.worktree can name a directory removed by deinit. These commands
+        // inspect metadata and fetch objects; none reads or writes working files.
+        command.env.extend([
+            ("GIT_DIR".into(), self.admin.as_os_str().to_owned()),
+            ("GIT_WORK_TREE".into(), self.admin.as_os_str().to_owned()),
+        ]);
+        self.inner.run(repository, &command)
+    }
+}
+
+/// Cached repositories are inspected only to avoid discarding their local
+/// work. Their origins never authorize an uninitialized gitlink.
+fn inspect_cached_local_work(
+    runner: &dyn GitCommandRunner,
+    admin: &Path,
+    named: &Path,
+    snapshot: &mut SnapshotSubmoduleInspection,
+) -> Result<()> {
+    let cached = CachedModuleGit {
+        inner: runner,
+        admin,
+    };
+    let tracking = crate::snapshot::origin_tracking_objects(&cached, admin)?;
+    let evidence = crate::snapshot::remote_objects(&cached, admin, "origin", &tracking.objects)?;
+    snapshot.local_work.extend(unpublished_local_work(
+        &cached,
+        admin,
+        named,
+        &evidence.objects,
+        true,
+    )?);
+    // Deinitializing a parent also hides cached repositories for its children.
+    let mut pending = vec![(admin.join("modules"), named.to_path_buf())];
+    while let Some((directory, named)) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("inspect cached submodule repositories"),
+        };
+        let mut children = entries.collect::<std::io::Result<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            if !child.file_type()?.is_dir() {
+                continue;
+            }
+            let path = child.path();
+            let name = named.join(child.file_name());
+            if path.join("config").is_file() && path.join("objects").is_dir() {
+                inspect_cached_local_work(runner, &path, &name, snapshot)?;
+            } else {
+                pending.push((path, name));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn unpublished_local_work(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     named: &Path,
     witnesses: &[String],
+    include_active: bool,
 ) -> Result<Vec<String>> {
     let listed = submodule_git(
         runner,
@@ -382,14 +459,61 @@ fn unpublished_local_work(
         let name = fields.next().context("missing submodule ref name")?;
         let kind = fields.next().context("missing submodule ref type")?;
         // The active branch's position is already checked by the gitlink guard.
-        if name != active {
+        if include_active || name != active {
             refs.push((oid.to_owned(), name.to_owned(), kind.to_owned()));
         }
     }
-    let stashes = submodule_git(runner, repository, &["stash", "list", "--format=%H%x00%gd"])?;
-    for line in std::str::from_utf8(&stashes)?.lines() {
-        let (oid, name) = line.split_once('\0').context("malformed submodule stash")?;
-        refs.push((oid.to_owned(), name.to_owned(), "commit".to_owned()));
+    if include_active {
+        let head = runner.run(
+            repository,
+            &git_command(&["rev-parse", "--verify", "--quiet", "HEAD"]),
+        )?;
+        ensure!(
+            matches!(head.status, 0 | 1),
+            "could not inspect cached submodule HEAD"
+        );
+        if head.status == 0 {
+            let oid = std::str::from_utf8(&head.stdout)?.trim();
+            if !refs.iter().any(|(existing, _, _)| existing == oid) {
+                refs.push((oid.to_owned(), "HEAD".to_owned(), "commit".to_owned()));
+            }
+        }
+    }
+    let stash_ref = runner.run(
+        repository,
+        &git_command(&["rev-parse", "--verify", "--quiet", "refs/stash"]),
+    )?;
+    ensure!(
+        matches!(stash_ref.status, 0 | 1),
+        "could not inspect submodule stash: {}",
+        String::from_utf8_lossy(&stash_ref.stderr)
+    );
+    if stash_ref.status == 0 {
+        // reflog show also works inside a deinitialized module's admin dir;
+        // stash list requires a working tree even though it only reads the reflog.
+        let stashes = submodule_git(
+            runner,
+            repository,
+            &["reflog", "show", "--format=%H%x00%gd", "refs/stash"],
+        )?;
+        let current = std::str::from_utf8(&stash_ref.stdout)?
+            .split_whitespace()
+            .next()
+            .context("missing submodule stash object")?;
+        let mut listed_current = false;
+        for line in std::str::from_utf8(&stashes)?.lines() {
+            let (oid, name) = line.split_once('\0').context("malformed submodule stash")?;
+            listed_current |= oid == current;
+            refs.push((oid.to_owned(), name.to_owned(), "commit".to_owned()));
+        }
+        if !listed_current {
+            // Reflog expiration can empty the list while refs/stash still keeps work.
+            refs.push((
+                current.to_owned(),
+                "refs/stash".to_owned(),
+                "commit".to_owned(),
+            ));
+        }
     }
     let mut lost = Vec::new();
     for (oid, name, kind) in refs {
@@ -490,7 +614,16 @@ fn uninitialized_gitlink_available(
     }
     let mut url = std::str::from_utf8(&url.stdout)?.trim().to_owned();
     url = crate::snapshot::resolve_submodule_url(runner, checkout, &url)?;
-    let advertised = runner.run(checkout, &git_command(&["ls-remote", &url]))?;
+    // Match the clone used by submodule update: host config applies, but the
+    // parent's repository-local rewrite rules must not reroute this probe.
+    let neutral = tempfile::tempdir().context("create neutral submodule probe directory")?;
+    let mut probe = git_command(&["ls-remote", &url]);
+    // TMPDIR itself may be inside a checkout; do not discover any parent repo.
+    probe.env.push((
+        "GIT_CEILING_DIRECTORIES".into(),
+        neutral.path().as_os_str().to_owned(),
+    ));
+    let advertised = runner.run(neutral.path(), &probe)?;
     let exact_tip = advertised.status == 0
         && std::str::from_utf8(&advertised.stdout)?
             .lines()
