@@ -18,8 +18,7 @@ def match_facts(primary, replication):
     right = [set(fact["sites"]) for fact in replication]
 
     def category_misses(a, b):
-        first, second = categories(a), categories(b)
-        return sum(first[key] != second[key] for key in first)
+        return sum(not agree for _, agree in category_comparisons(a, b))
 
     # A containment pair outweighs every possible category difference in a matching, so exact
     # pairs still come first; category agreement only breaks ties between equal site costs.
@@ -86,18 +85,28 @@ def unique_facts(sets):
 
 def categories(fact):
     rql = fact["rql"] or {}
-    rql_class = rql.get("class")
     return {
-        "rql.class": rql_class,
-        "rql.row_role": rql.get("row_role") if rql_class in ("documented", "missing") else None,
+        "rql.class": rql.get("class"),
+        "rql.locator_present": (rql["locator_query"] is not None) if fact["in_diff"] is False else None,
         "kind": fact["kind"],
         "anchors_on_touched": (fact["anchoring"] or {}).get("anchors_on_touched"),
     }
 
 
+def category_comparisons(a, b):
+    second = categories(b)
+    for category, value in categories(a).items():
+        other = second[category]
+        if value is None and other is None:
+            continue
+        if category == "rql.locator_present" and (value is None or other is None):
+            continue
+        yield category, value == other
+
+
 def comparison(pairs):
     categories_by_fact = {category: {"agree": 0, "n": 0}
-                          for category in ("rql.class", "rql.row_role", "kind", "anchors_on_touched")}
+                          for category in ("rql.class", "rql.locator_present", "kind", "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
     defects = {"both_confirmed": 0, "both_not_confirmed": 0, "split": 0}
     for first, second in pairs:
@@ -111,13 +120,10 @@ def comparison(pairs):
         aligned = match_facts(unique_facts(left), unique_facts(right))
         matched += len(aligned)
         for a, b in aligned:
-            values = categories(b)
-            for category, value in categories(a).items():
-                other = values[category]
-                if value is not None or other is not None:
-                    stats = categories_by_fact[category]
-                    stats["n"] += 1
-                    stats["agree"] += value == other
+            for category, agree in category_comparisons(a, b):
+                stats = categories_by_fact[category]
+                stats["n"] += 1
+                stats["agree"] += agree
     paired = len(pairs)
     return {
         "relation_bug": {"agree": relation if paired else None, "n": paired},
@@ -174,6 +180,8 @@ def main():
     exclude_families(cohorts, args.check_clones)
     report = {
         "field_descriptions": {
+            "rql.locator_present": "Agreement on whether a locator query was supplied, "
+                                   "among matched facts both labellers marked outside the diff.",
             "decisive_set_site_overlap": "Facts match by their cited sites. This measures whether "
                                          "labellers point at the same code. Comparing claim text "
                                          "would require a judge.",

@@ -38,11 +38,11 @@ The RQL reference is `rql-documented-steps.md`, next to this file. It lists ever
      - `value_flow`: where a value comes from or goes (assignments, defaults, fields, arguments, returns).
      - `shape`: a type, field, variant or signature fact about one declaration outside the diff.
      - `other`: describe it.
-   - `rql.row_role`, for `documented` and `missing`: `states` when the query's decisive row itself carries the fact, for example a `field-write-value` row giving the value written, or a `call-input` row giving the argument. Use `locates` when the row only points at the site where the fact lives and a reader must open that code, for example a `callees` row whose body shows the behavior. Use null for `not_expressible`.
    - `rql.class`: exactly one of:
-     - `documented`: a query built only from forms in the reference returns a row that states this fact or locates the site where it lives; `rql.row_role` records which. A row that locates the site counts, as long as the fact can be read at that site. Write the query in `rql.query` in RQL form: a start form (a structural pattern or a source such as `occurrences`) followed by the steps in order. Use only forms the reference documents, and make each step's input match the rows the form inside it produces. Count a step as documented even when the reference doesn't establish its Rust support; whether today's Bifrost answers is measured separately.
-     - `missing`: no documented query returns a row that states or locates the fact, but one new step would. Give `rql.missing_step` as `{name, input, output, semantics}`, where semantics says what the step starts from, which constructs it crosses (calls, assignments, fields, returns, control flow), and to what depth. Also write the query you'd use with that step added.
-     - `not_expressible`: no single query step could supply it. Set `rql.reason` to `intent` (a product rule, requirement or convention), `external` (how a third-party library, OS, protocol or service behaves) or `other` (describe it).
+     - `documented`: a query built only from forms in the reference returns a row whose fields state this fact: for example a `field-write-value` row giving the value written, a `call-input` row giving the argument passed, or a `callers` row when the fact is who calls a symbol. A row that only points at code a reader must open to learn the fact doesn't state it. Write the query in `rql.query` in RQL form: a start form (a structural pattern or a source such as `occurrences`) followed by the steps in order. Use only forms the reference documents, and make each step's input match the rows the form inside it produces. Count a step as documented even when the reference doesn't establish its Rust support; whether today's Bifrost answers is measured separately.
+     - `missing`: no documented query returns a row that states the fact, but one new step would. Give `rql.missing_step` as `{name, input, output, semantics}`, where semantics says what the step starts from, which constructs it crosses (calls, assignments, fields, returns, control flow), and to what depth, and what its rows state. Also write, in `rql.query`, the query you'd use with that step added.
+     - `not_expressible`: no single query step could state it. Set `rql.reason` to `intent` (a product rule, requirement or convention), `external` (how a third-party library, OS, protocol or service behaves) or `other` (describe it).
+   - `rql.locator_query`: a query built only from documented forms whose rows point at the code site where a reader could read this fact, for example `callees` of a touched function, or `enclosing-decl` of a call. Give it for every fact with `in_diff: false` when one exists, whatever the class, and null otherwise. It records what documented RQL can point a reader at, even when it can't state the fact.
 
 5. **Anchoring, for each `documented` or `missing` query.**
    - `anchors_on_touched`: true when the query starts from a touched symbol: one whose definition the diff changes, or one referenced in a changed line.
@@ -66,7 +66,7 @@ Write one JSON object per bug to the output file named in your batch, one per li
    {"facts": [
      {"claim": "...", "sites": ["src/a.rs:120", "src/b.rs:44"], "in_diff": false, "relation": true,
       "kind": "value_flow",
-      "rql": {"class": "documented", "query": "...", "missing_step": null, "reason": null, "row_role": "locates"},
+      "rql": {"class": "documented", "query": "...", "missing_step": null, "reason": null, "locator_query": "..."},
       "anchoring": {"anchors_on_touched": true, "anchor": "Config::timeout", "hops": 2}}
    ]}
  ],

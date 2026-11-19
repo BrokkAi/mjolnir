@@ -444,17 +444,25 @@ def validate_fact(fact, split, where, errors, query_checks, allowed):
         return
     if kind not in ("callers", "path", "value_flow", "shape", "other"):
         errors.append(f"{where}: invalid kind")
-    if not fields(rql, "class query missing_step reason row_role", f"{where} rql", errors):
+    rql_keys = "class query missing_step reason locator_query"
+    if not fields(rql, rql_keys, f"{where} rql", errors):
         return
-    cls, query, step, reason, row_role = (
-        rql[key] for key in ("class", "query", "missing_step", "reason", "row_role"))
+    if extra := sorted(rql.keys() - rql_keys.split()):
+        errors.append(f"{where} rql: unexpected {', '.join(extra)}")
+    cls, query, step, reason, locator = (rql[key] for key in rql_keys.split())
+    if locator is not None:
+        if not string(locator):
+            errors.append(f"{where}: locator_query must be a nonempty string or null")
+        else:
+            problems, status = check_query(locator, allowed)
+            errors.extend(f"{where} locator_query: {problem}" for problem in problems)
+            if not problems:
+                query_checks.append({"fact": where, "field": "locator_query", "status": status})
     if cls == "not_expressible":
         if reason not in ("intent", "external", "other") or any(
-                value is not None for value in (query, step, anchoring, row_role)):
-            errors.append(f"{where}: not_expressible needs a reason and null query, missing_step, row_role and anchoring")
+                value is not None for value in (query, step, anchoring)):
+            errors.append(f"{where}: not_expressible needs a reason and null query, missing_step and anchoring")
         return
-    if row_role not in ("states", "locates"):
-        errors.append(f"{where}: {cls} needs row_role states or locates")
     if cls not in ("documented", "missing"):
         errors.append(f"{where}: invalid rql.class")
         return
