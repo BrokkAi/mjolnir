@@ -67,6 +67,7 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub index_gitlinks: Vec<crate::snapshot::SnapshotGitlink>,
     pub untracked: Vec<PathBuf>,
     pub hidden_tracked_edits: Vec<PathBuf>,
+    pub intent_to_add: Vec<(PathBuf, PathBuf)>,
     pub remote_refs_stale: bool,
     pub local_work: Vec<String>,
     inspected_admins: BTreeSet<PathBuf>,
@@ -131,6 +132,7 @@ fn inspect_checkout(
             &[
                 "diff",
                 "--cached",
+                "--ignore-submodules=none",
                 "--raw",
                 "--no-renames",
                 "--no-ext-diff",
@@ -189,6 +191,11 @@ fn inspect_checkout(
             snapshot
                 .inspected_admins
                 .insert(std::fs::canonicalize(admin)?);
+            snapshot.intent_to_add.extend(
+                crate::snapshot::intent_to_add_paths(runner, &submodule)?
+                    .into_iter()
+                    .map(|path| (named.clone(), path)),
+            );
             snapshot.hidden_tracked_edits.extend(
                 crate::archive::hidden_tracked_paths(runner, &submodule)?
                     .into_iter()
@@ -337,20 +344,10 @@ fn inspect_checkout(
             commits.sort();
             commits.dedup();
             for commit in commits {
-                let mut available = false;
                 let evidence = origin_evidence
                     .as_ref()
                     .context("missing submodule origin query")?;
-                for witness in &evidence.objects {
-                    let output = runner.run(
-                        &submodule,
-                        &git_command(&["merge-base", "--is-ancestor", &commit, witness]),
-                    )?;
-                    if output.status == 0 {
-                        available = true;
-                        break;
-                    }
-                }
+                let available = commit_published(runner, &submodule, &commit, &evidence.objects)?;
                 if !available {
                     dirty = true;
                     break;
@@ -415,7 +412,79 @@ fn inspect_cached_local_work(
             true,
         )?);
     }
+    inspect_cached_worktree_heads(runner, admin, named, snapshot)?;
     inspect_cached_children(runner, &admin.join("modules"), named, snapshot)
+}
+
+fn commit_published(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    commit: &str,
+    witnesses: &[String],
+) -> Result<bool> {
+    for witness in witnesses {
+        if commit == witness
+            || runner
+                .run(
+                    repository,
+                    &git_command(&["merge-base", "--is-ancestor", commit, witness]),
+                )?
+                .status
+                == 0
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn inspect_cached_worktree_heads(
+    runner: &dyn GitCommandRunner,
+    admin: &Path,
+    named: &Path,
+    snapshot: &mut SnapshotSubmoduleInspection,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(admin.join("worktrees")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect cached module linked worktrees"),
+    };
+    let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let worktree = entry.path();
+        let context = CachedModuleGit {
+            inner: runner,
+            admin: &worktree,
+        };
+        let head = context.run(
+            &worktree,
+            &git_command(&["rev-parse", "--verify", "--quiet", "HEAD"]),
+        )?;
+        ensure!(
+            matches!(head.status, 0 | 1),
+            "could not inspect cached linked-worktree HEAD"
+        );
+        if head.status == 0 {
+            let commit = std::str::from_utf8(&head.stdout)?.trim();
+            let tracking = crate::snapshot::origin_tracking_objects(&context, &worktree)?;
+            let evidence =
+                crate::snapshot::remote_objects(&context, &worktree, "origin", &tracking.objects)?;
+            if !commit_published(&context, &worktree, commit, &evidence.objects)? {
+                snapshot.local_work.push(format!(
+                    "submodule {} linked-worktree {} HEAD ({commit})",
+                    named.display(),
+                    entry.file_name().to_string_lossy()
+                ));
+            }
+        }
+        // A module's linked checkout can retain its own nested module stores.
+        inspect_cached_children(runner, &worktree.join("modules"), named, snapshot)?;
+    }
+    Ok(())
 }
 
 fn inspect_cached_children(
@@ -540,18 +609,7 @@ fn unpublished_local_work(
     for (oid, name, kind) in refs {
         let mut published = witnesses.contains(&oid);
         if kind == "commit" {
-            for witness in witnesses {
-                if published {
-                    break;
-                }
-                published = runner
-                    .run(
-                        repository,
-                        &git_command(&["merge-base", "--is-ancestor", &oid, witness]),
-                    )?
-                    .status
-                    == 0;
-            }
+            published = commit_published(runner, repository, &oid, witnesses)?;
         } else if !published && !witnesses.is_empty() {
             let mut arguments = vec![
                 "rev-list".into(),
