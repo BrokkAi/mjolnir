@@ -500,7 +500,7 @@ fn pool_bar(
     now: u64,
     accent: Color,
     refreshing: &std::collections::BTreeSet<String>,
-) -> (Vec<Span<'static>>, Vec<String>) {
+) -> Vec<Span<'static>> {
     let gaps = pool
         .members
         .len()
@@ -508,7 +508,6 @@ fn pool_bar(
         .min(width.saturating_sub(pool.members.len().min(width)));
     let widths = segment_widths(&pool.members, width.saturating_sub(gaps));
     let mut spans = Vec::new();
-    let mut omitted = Vec::new();
     for (index, (member, cells)) in pool.members.iter().zip(widths).enumerate() {
         if index > 0 && index <= gaps {
             spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
@@ -539,34 +538,17 @@ fn pool_bar(
             .banked
             .filter(|banked| *banked > 0)
             .map(|banked| format!("{}{banked}", if theme::ascii() { "B" } else { "⟲" }));
-        let mut omitted_banked = None;
-        if let Some(banked) = banked {
-            if text.chars().count() + 1 + banked.chars().count() <= cells {
-                text.push_str(&format!(" {banked}"));
-            } else {
-                omitted_banked = Some(banked);
-            }
+        if let Some(banked) = banked
+            && text.chars().count() + 1 + banked.chars().count() <= cells
+        {
+            text.push_str(&format!(" {banked}"));
         }
+        // A label that does not fit is left out; the expanded pool's lanes
+        // show every member's reading, so a collapsed pool never lists some
+        // members by name and not others.
         let text: Vec<_> = text.chars().collect();
         if cells >= 6 && text.len() <= cells {
             label[cells - text.len()..].copy_from_slice(&text);
-            if let Some(banked) = omitted_banked {
-                omitted.push(format!("{} {banked} banked", member.id));
-            }
-        } else {
-            omitted.push(format!(
-                "{} {} {}{}",
-                member.id,
-                if member.awaiting_reading {
-                    "?".to_string()
-                } else {
-                    format!("{}%", member.remaining)
-                },
-                text.into_iter().collect::<String>(),
-                omitted_banked
-                    .map(|banked| format!(" {banked} banked"))
-                    .unwrap_or_default()
-            ));
         }
         for (cell, ch) in label.into_iter().enumerate() {
             let background = if cell < filled {
@@ -611,7 +593,7 @@ fn pool_bar(
             ));
         }
     }
-    (spans, omitted)
+    spans
 }
 
 fn lane(
@@ -839,8 +821,7 @@ fn quota_lines(
                     Style::default()
                 },
             )];
-            let (bar, omitted) =
-                pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
+            let bar = pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
             spans.extend(bar);
             spans.push(Span::styled(
                 percentage,
@@ -850,12 +831,6 @@ fn quota_lines(
                 profile_rows.push((pool.members[0].id.clone(), lines.len()));
             }
             lines.push(Line::from(spans));
-            for text in wrap_note(&omitted.join(" · "), width.saturating_sub(2))
-                .into_iter()
-                .filter(|_| !omitted.is_empty())
-            {
-                lines.push(Line::styled(format!("  {text}"), theme::muted()));
-            }
             if pool.missing > 0 {
                 lines.push(Line::styled(
                     format!(
@@ -1097,7 +1072,7 @@ mod tests {
                 pool.members[0].awaiting_reading = false;
                 let accent = theme::palette().muted;
                 assert!(!matches!(accent, Color::Rgb(..)));
-                let (spans, _) = pool_bar(&pool, 10, now, accent, &Default::default());
+                let spans = pool_bar(&pool, 10, now, accent, &Default::default());
                 let style_at = |cell: usize| spans[cell].style;
                 assert_ne!(
                     (style_at(0).bg, style_at(0).add_modifier),

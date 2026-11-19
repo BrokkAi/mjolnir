@@ -50,8 +50,6 @@ background runs (x..end, colour):
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 │
 │>+   4h33m      20h33m    1d0h   1d14h  4d13h   6d0h  11%*│
-│  claude2 ⟲1 banked · claude5 60% 18h33m ⟲1 banked ·      │
-│  claude6 ⟲1 banked · claude7 ⟲1 banked                   │
 │  1 profile not reporting                                 │
 │  claude-aws: pay-per-use                                 │
 │  claude-login: login required                            │
@@ -70,10 +68,12 @@ background runs (x..end, colour):
 │  dsh: pay-per-use                                        │
 │META                                                      │
 │ + Rolling    30m     1h  1h30m                   avg 58%*│
-│  muse4 70% 2h · muse5 70% 2h30m · muse6 70% 3h           │
 │  1 profile not reporting                                 │
 │  muse2 70% · Cached usage; next refresh pending          │
 │  muse: login expired · Cached login notice               │
+│                                                          │
+│                                                          │
+│                                                          │
 │                                                          │
 │                                                          │
 ╰──────────────────────────────────────────────────────────╯
@@ -84,23 +84,23 @@ background runs (x..end, colour):
 3: 0..60 Rgb(49, 51, 53) NONE
 4: 0..60 Rgb(49, 51, 53) NONE
 5: 0..60 Rgb(49, 51, 53) NONE
-6: 0..60 Rgb(49, 51, 53) NONE
-7: 0..60 Rgb(49, 51, 53) NONE
-8: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-9: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-10: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-11: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-12: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-13: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-14: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
-15: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-16: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
-17: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+6: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+7: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+8: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+9: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+10: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+11: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+12: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
+13: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+14: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
+15: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+16: 0..60 Rgb(49, 51, 53) NONE
+17: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
 18: 0..60 Rgb(49, 51, 53) NONE
-19: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
-20: 0..60 Rgb(49, 51, 53) NONE
-21: 0..1 Rgb(49, 51, 53) NONE, 1..5 Rgb(49, 51, 53) BOLD, 5..60 Rgb(49, 51, 53) NONE
-22: 0..12 Rgb(49, 51, 53) NONE, 12..18 Rgb(34, 62, 89) NONE, 18..19 Rgb(49, 51, 53) NONE, 19..23 Rgb(0, 129, 251) NONE, 23..25 Rgb(34, 62, 89) NONE, 25..26 Rgb(49, 51, 53) NONE, 26..30 Rgb(0, 129, 251) NONE, 30..32 Rgb(34, 62, 89) NONE, 32..33 Rgb(49, 51, 53) NONE, 33..37 Rgb(0, 129, 251) NONE, 37..38 Rgb(34, 62, 89) NONE, 38..39 Rgb(49, 51, 53) NONE, 39..43 Rgb(0, 129, 251) NONE, 43..44 Rgb(34, 62, 89) NONE, 44..45 Rgb(49, 51, 53) NONE, 45..49 Rgb(0, 129, 251) NONE, 49..50 Rgb(34, 62, 89) NONE, 50..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+19: 0..1 Rgb(49, 51, 53) NONE, 1..5 Rgb(49, 51, 53) BOLD, 5..60 Rgb(49, 51, 53) NONE
+20: 0..12 Rgb(49, 51, 53) NONE, 12..18 Rgb(34, 62, 89) NONE, 18..19 Rgb(49, 51, 53) NONE, 19..23 Rgb(0, 129, 251) NONE, 23..25 Rgb(34, 62, 89) NONE, 25..26 Rgb(49, 51, 53) NONE, 26..30 Rgb(0, 129, 251) NONE, 30..32 Rgb(34, 62, 89) NONE, 32..33 Rgb(49, 51, 53) NONE, 33..37 Rgb(0, 129, 251) NONE, 37..38 Rgb(34, 62, 89) NONE, 38..39 Rgb(49, 51, 53) NONE, 39..43 Rgb(0, 129, 251) NONE, 43..44 Rgb(34, 62, 89) NONE, 44..45 Rgb(49, 51, 53) NONE, 45..49 Rgb(0, 129, 251) NONE, 49..50 Rgb(34, 62, 89) NONE, 50..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+21: 0..60 Rgb(49, 51, 53) NONE
+22: 0..60 Rgb(49, 51, 53) NONE
 23: 0..60 Rgb(49, 51, 53) NONE
 24: 0..60 Rgb(49, 51, 53) NONE
 25: 0..60 Rgb(49, 51, 53) NONE
@@ -236,10 +236,8 @@ background runs (x..end, colour):
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 ▐
 │>-   4h33m      20h33m    1d0h   1d14h  4d13h   6d0h  11%*▐
-│  claude2 ⟲1 banked · claude5 60% 18h33m ⟲1 banked ·      ▐
-│  claude6 ⟲1 banked · claude7 ⟲1 banked                   │
-│  1 profile not reporting                                 │
-│          12:26 00:26                                     │
+│  1 profile not reporting                                 ▐
+│          12:26 00:26                                     ▐
 │  claude2 ··W                                             │
 │    week back Wed 16:59 (4h33m) · ⟲1 banked               │
 │  claude5   5      W                                      │
@@ -247,6 +245,8 @@ background runs (x..end, colour):
 │    Fable 91% · ⟲1 banked                                 │
 │  claude6 ··········W                                     │
 │    week back Thu 08:59 (20h33m) · ⟲1 banked              │
+│  claude3 ············  week back Thu 12:59 (1d0h)        │
+│  claude  ············  week back Fri 02:59 (1d14h)       │
 ╰──────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(49, 51, 53) NONE, 1..30 Rgb(49, 51, 53) BOLD, 30..60 Rgb(49, 51, 53) NONE
@@ -254,22 +254,20 @@ background runs (x..end, colour):
 2: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(39, 55, 78) BOLD, 4..11 Rgb(81, 60, 53) NONE, 11..12 Rgb(49, 51, 53) NONE, 12..14 Rgb(217, 119, 87) NONE, 14..15 Rgb(81, 60, 53) NONE, 15..16 Rgb(49, 51, 53) NONE, 16..23 Rgb(81, 60, 53) NONE, 23..24 Rgb(49, 51, 53) NONE, 24..31 Rgb(81, 60, 53) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..39 Rgb(81, 60, 53) NONE, 39..40 Rgb(49, 51, 53) NONE, 40..46 Rgb(81, 60, 53) NONE, 46..47 Rgb(49, 51, 53) NONE, 47..49 Rgb(217, 119, 87) NONE, 49..53 Rgb(81, 60, 53) NONE, 53..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
 3: 0..60 Rgb(49, 51, 53) NONE
 4: 0..60 Rgb(49, 51, 53) NONE
-5: 0..60 Rgb(49, 51, 53) NONE
+5: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 6: 0..60 Rgb(49, 51, 53) NONE
-7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 8: 0..60 Rgb(49, 51, 53) NONE
-9: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-10: 0..60 Rgb(49, 51, 53) NONE
+9: 0..60 Rgb(49, 51, 53) NONE
+10: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 11: 0..60 Rgb(49, 51, 53) NONE
-12: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-13: 0..60 Rgb(49, 51, 53) NONE
+12: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
+13: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
 14: 0..60 Rgb(49, 51, 53) NONE
 === Unicode narrow expanded full Anthropic (60x40) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 ▐
 │>-   4h33m      20h33m    1d0h   1d14h  4d13h   6d0h  11%*▐
-│  claude2 ⟲1 banked · claude5 60% 18h33m ⟲1 banked ·      ▐
-│  claude6 ⟲1 banked · claude7 ⟲1 banked                   ▐
 │  1 profile not reporting                                 ▐
 │          12:26 00:26                                     ▐
 │  claude2 ··W                                             ▐
@@ -298,12 +296,14 @@ background runs (x..end, colour):
 │  gemini  5                                               ▐
 │    week 91%, resets in 6d6h · 5H 97%, resets in 58m      ▐
 │ + Claude & GPT              6d5h             6d6h avg 49%▐
-│XAI                                                       │
-│ + Period                                    5d10h avg 96%│
-│MOONSHOT                                                  │
-│ + Month                                         2d6h  40%│
+│XAI                                                       ▐
+│ + Period                                    5d10h avg 96%▐
+│MOONSHOT                                                  ▐
+│ + Month                                         2d6h  40%▐
 │  kimi 40% · Booster balance: 123 credits                 │
 │DEEPSEEK                                                  │
+│  dsh: pay-per-use                                        │
+│META                                                      │
 ╰──────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(49, 51, 53) NONE, 1..30 Rgb(49, 51, 53) BOLD, 30..60 Rgb(49, 51, 53) NONE
@@ -311,40 +311,40 @@ background runs (x..end, colour):
 2: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(39, 55, 78) BOLD, 4..11 Rgb(81, 60, 53) NONE, 11..12 Rgb(49, 51, 53) NONE, 12..14 Rgb(217, 119, 87) NONE, 14..15 Rgb(81, 60, 53) NONE, 15..16 Rgb(49, 51, 53) NONE, 16..23 Rgb(81, 60, 53) NONE, 23..24 Rgb(49, 51, 53) NONE, 24..31 Rgb(81, 60, 53) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..39 Rgb(81, 60, 53) NONE, 39..40 Rgb(49, 51, 53) NONE, 40..46 Rgb(81, 60, 53) NONE, 46..47 Rgb(49, 51, 53) NONE, 47..49 Rgb(217, 119, 87) NONE, 49..53 Rgb(81, 60, 53) NONE, 53..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
 3: 0..60 Rgb(49, 51, 53) NONE
 4: 0..60 Rgb(49, 51, 53) NONE
-5: 0..60 Rgb(49, 51, 53) NONE
+5: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 6: 0..60 Rgb(49, 51, 53) NONE
-7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 8: 0..60 Rgb(49, 51, 53) NONE
-9: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-10: 0..60 Rgb(49, 51, 53) NONE
+9: 0..60 Rgb(49, 51, 53) NONE
+10: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 11: 0..60 Rgb(49, 51, 53) NONE
-12: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-13: 0..60 Rgb(49, 51, 53) NONE
+12: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
+13: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
 14: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
-15: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
-16: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
-17: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+15: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+16: 0..60 Rgb(49, 51, 53) NONE
+17: 0..60 Rgb(49, 51, 53) NONE
 18: 0..60 Rgb(49, 51, 53) NONE
 19: 0..60 Rgb(49, 51, 53) NONE
-20: 0..60 Rgb(49, 51, 53) NONE
-21: 0..60 Rgb(49, 51, 53) NONE
-22: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-23: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-24: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-25: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-26: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+20: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+21: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+22: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+23: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+24: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+25: 0..60 Rgb(49, 51, 53) NONE
+26: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(66, 133, 244) NONE, 14..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
 27: 0..60 Rgb(49, 51, 53) NONE
-28: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(66, 133, 244) NONE, 14..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
+28: 0..11 Rgb(49, 51, 53) NONE, 11..12 Rgb(65, 131, 239) NONE, 12..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
 29: 0..60 Rgb(49, 51, 53) NONE
-30: 0..11 Rgb(49, 51, 53) NONE, 11..12 Rgb(65, 131, 239) NONE, 12..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
-31: 0..60 Rgb(49, 51, 53) NONE
-32: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-33: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
-34: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-35: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
-36: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+30: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+31: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
+32: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+33: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
+34: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+35: 0..60 Rgb(49, 51, 53) NONE
+36: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
 37: 0..60 Rgb(49, 51, 53) NONE
-38: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
+38: 0..1 Rgb(49, 51, 53) NONE, 1..5 Rgb(49, 51, 53) BOLD, 5..60 Rgb(49, 51, 53) NONE
 39: 0..60 Rgb(49, 51, 53) NONE
 === Unicode all periods and status labels (132x68) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -501,14 +501,14 @@ background runs (x..end, colour):
 │>+ 5H   4h43m  4h43m avg 50%│
 │GOOGLE                      ▐
 │ + Gemini            avg 90%│
-│  gemini2 89% 6d5h · gemini │
+│ + Claude & GPT      avg 49%│
 ╰────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(49, 51, 53) NONE, 1..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
 1: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(39, 55, 78) BOLD, 7..14 Rgb(16, 163, 127) NONE, 14..15 Rgb(49, 51, 53) NONE, 15..21 Rgb(37, 69, 61) NONE, 21..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
 2: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..30 Rgb(49, 51, 53) NONE
 3: 0..11 Rgb(49, 51, 53) NONE, 11..15 Rgb(66, 133, 244) NONE, 15..16 Rgb(48, 63, 87) NONE, 16..17 Rgb(49, 51, 53) NONE, 17..20 Rgb(66, 133, 244) NONE, 20..21 Rgb(48, 63, 87) NONE, 21..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
-4: 0..30 Rgb(49, 51, 53) NONE
+4: 0..17 Rgb(49, 51, 53) NONE, 17..18 Rgb(66, 133, 244) NONE, 18..19 Rgb(48, 63, 87) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..21 Rgb(48, 63, 87) NONE, 21..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
 5: 0..30 Rgb(49, 51, 53) NONE
 === Ascii collapsed (132x23) ===
 + Profiles (refreshed 16s ago)-----------------------------------------------------------------------------------------------------+
@@ -562,8 +562,6 @@ background runs (x..end, colour):
 + Profiles (refreshed 16s ago)-----------------------------+
 |ANTHROPIC                                                 |
 |>+ ..4h33m|##.|.20h33m|...1d0h|..1d14h|.4d13h|##6d0h  11%*|
-|  claude2 B1 banked - claude5 60% 18h33m B1 banked -      |
-|  claude6 B1 banked - claude7 B1 banked                   |
 |  1 profile not reporting                                 |
 |  claude-aws: pay-per-use                                 |
 |  claude-login: login required                            |
@@ -582,10 +580,12 @@ background runs (x..end, colour):
 |  dsh: pay-per-use                                        |
 |META                                                      |
 | + Rolling ...30m|####1h|#1h30m|####.|####.|####. avg 58%*|
-|  muse4 70% 2h - muse5 70% 2h30m - muse6 70% 3h           |
 |  1 profile not reporting                                 |
 |  muse2 70% - Cached usage; next refresh pending          |
 |  muse: login expired - Cached login notice               |
+|                                                          |
+|                                                          |
+|                                                          |
 |                                                          |
 |                                                          |
 +----------------------------------------------------------+
@@ -596,23 +596,23 @@ background runs (x..end, colour):
 3: 0..60 Rgb(49, 51, 53) NONE
 4: 0..60 Rgb(49, 51, 53) NONE
 5: 0..60 Rgb(49, 51, 53) NONE
-6: 0..60 Rgb(49, 51, 53) NONE
-7: 0..60 Rgb(49, 51, 53) NONE
-8: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-9: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) REVERSED, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-10: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) REVERSED, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-11: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-12: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) REVERSED, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) REVERSED, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-13: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) REVERSED, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) REVERSED, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-14: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
-15: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) REVERSED, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-16: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
-17: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) REVERSED, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+6: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+7: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) REVERSED, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+8: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) REVERSED, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+9: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+10: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) REVERSED, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) REVERSED, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+11: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) REVERSED, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) REVERSED, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+12: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
+13: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) REVERSED, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+14: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
+15: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) REVERSED, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+16: 0..60 Rgb(49, 51, 53) NONE
+17: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
 18: 0..60 Rgb(49, 51, 53) NONE
-19: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
-20: 0..60 Rgb(49, 51, 53) NONE
-21: 0..1 Rgb(49, 51, 53) NONE, 1..5 Rgb(49, 51, 53) BOLD, 5..60 Rgb(49, 51, 53) NONE
-22: 0..12 Rgb(49, 51, 53) NONE, 12..18 Rgb(34, 62, 89) NONE, 18..19 Rgb(49, 51, 53) NONE, 19..23 Rgb(0, 129, 251) REVERSED, 23..25 Rgb(34, 62, 89) NONE, 25..26 Rgb(49, 51, 53) NONE, 26..30 Rgb(0, 129, 251) REVERSED, 30..32 Rgb(34, 62, 89) NONE, 32..33 Rgb(49, 51, 53) NONE, 33..37 Rgb(0, 129, 251) REVERSED, 37..38 Rgb(34, 62, 89) NONE, 38..39 Rgb(49, 51, 53) NONE, 39..43 Rgb(0, 129, 251) REVERSED, 43..44 Rgb(34, 62, 89) NONE, 44..45 Rgb(49, 51, 53) NONE, 45..49 Rgb(0, 129, 251) REVERSED, 49..50 Rgb(34, 62, 89) NONE, 50..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+19: 0..1 Rgb(49, 51, 53) NONE, 1..5 Rgb(49, 51, 53) BOLD, 5..60 Rgb(49, 51, 53) NONE
+20: 0..12 Rgb(49, 51, 53) NONE, 12..18 Rgb(34, 62, 89) NONE, 18..19 Rgb(49, 51, 53) NONE, 19..23 Rgb(0, 129, 251) REVERSED, 23..25 Rgb(34, 62, 89) NONE, 25..26 Rgb(49, 51, 53) NONE, 26..30 Rgb(0, 129, 251) REVERSED, 30..32 Rgb(34, 62, 89) NONE, 32..33 Rgb(49, 51, 53) NONE, 33..37 Rgb(0, 129, 251) REVERSED, 37..38 Rgb(34, 62, 89) NONE, 38..39 Rgb(49, 51, 53) NONE, 39..43 Rgb(0, 129, 251) REVERSED, 43..44 Rgb(34, 62, 89) NONE, 44..45 Rgb(49, 51, 53) NONE, 45..49 Rgb(0, 129, 251) REVERSED, 49..50 Rgb(34, 62, 89) NONE, 50..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+21: 0..60 Rgb(49, 51, 53) NONE
+22: 0..60 Rgb(49, 51, 53) NONE
 23: 0..60 Rgb(49, 51, 53) NONE
 24: 0..60 Rgb(49, 51, 53) NONE
 25: 0..60 Rgb(49, 51, 53) NONE
@@ -748,10 +748,8 @@ background runs (x..end, colour):
 + Profiles (refreshed 16s ago)-----------------------------+
 |ANTHROPIC                                                 #
 |>- ..4h33m|##.|.20h33m|...1d0h|..1d14h|.4d13h|##6d0h  11%*#
-|  claude2 B1 banked - claude5 60% 18h33m B1 banked -      #
-|  claude6 B1 banked - claude7 B1 banked                   |
-|  1 profile not reporting                                 |
-|          12:26 00:26                                     |
+|  1 profile not reporting                                 #
+|          12:26 00:26                                     #
 |  claude2 ..W---------                                    |
 |    week back Wed 16:59 (4h33m) - B1 banked               |
 |  claude5 ==5------W--                                    |
@@ -759,6 +757,8 @@ background runs (x..end, colour):
 |    Fable 91% - B1 banked                                 |
 |  claude6 ..........W-                                    |
 |    week back Thu 08:59 (20h33m) - B1 banked              |
+|  claude3 ............  week back Thu 12:59 (1d0h)        |
+|  claude  ............  week back Fri 02:59 (1d14h)       |
 +----------------------------------------------------------+
 background runs (x..end, colour):
 0: 0..1 Rgb(49, 51, 53) NONE, 1..30 Rgb(49, 51, 53) BOLD, 30..60 Rgb(49, 51, 53) NONE
@@ -766,22 +766,20 @@ background runs (x..end, colour):
 2: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(39, 55, 78) BOLD, 4..11 Rgb(81, 60, 53) NONE, 11..12 Rgb(49, 51, 53) NONE, 12..14 Rgb(217, 119, 87) REVERSED, 14..15 Rgb(81, 60, 53) NONE, 15..16 Rgb(49, 51, 53) NONE, 16..23 Rgb(81, 60, 53) NONE, 23..24 Rgb(49, 51, 53) NONE, 24..31 Rgb(81, 60, 53) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..39 Rgb(81, 60, 53) NONE, 39..40 Rgb(49, 51, 53) NONE, 40..46 Rgb(81, 60, 53) NONE, 46..47 Rgb(49, 51, 53) NONE, 47..49 Rgb(217, 119, 87) REVERSED, 49..53 Rgb(81, 60, 53) NONE, 53..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
 3: 0..60 Rgb(49, 51, 53) NONE
 4: 0..60 Rgb(49, 51, 53) NONE
-5: 0..60 Rgb(49, 51, 53) NONE
+5: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 6: 0..60 Rgb(49, 51, 53) NONE
-7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 8: 0..60 Rgb(49, 51, 53) NONE
-9: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-10: 0..60 Rgb(49, 51, 53) NONE
+9: 0..60 Rgb(49, 51, 53) NONE
+10: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 11: 0..60 Rgb(49, 51, 53) NONE
-12: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-13: 0..60 Rgb(49, 51, 53) NONE
+12: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
+13: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
 14: 0..60 Rgb(49, 51, 53) NONE
 === Ascii narrow expanded full Anthropic (60x40) ===
 + Profiles (refreshed 16s ago)-----------------------------+
 |ANTHROPIC                                                 #
 |>- ..4h33m|##.|.20h33m|...1d0h|..1d14h|.4d13h|##6d0h  11%*#
-|  claude2 B1 banked - claude5 60% 18h33m B1 banked -      #
-|  claude6 B1 banked - claude7 B1 banked                   #
 |  1 profile not reporting                                 #
 |          12:26 00:26                                     #
 |  claude2 ..W---------                                    #
@@ -810,12 +808,14 @@ background runs (x..end, colour):
 |  gemini  5-----------                                    #
 |    week 91%, resets in 6d6h - 5H 97%, resets in 58m      #
 | + Claude & GPT #########....6d5h|########....6d6h avg 49%#
-|XAI                                                       |
-| + Period ###################################5d10h avg 96%|
-|MOONSHOT                                                  |
-| + Month ##################......................2d6h  40%|
+|XAI                                                       #
+| + Period ###################################5d10h avg 96%#
+|MOONSHOT                                                  #
+| + Month ##################......................2d6h  40%#
 |  kimi 40% - Booster balance: 123 credits                 |
 |DEEPSEEK                                                  |
+|  dsh: pay-per-use                                        |
+|META                                                      |
 +----------------------------------------------------------+
 background runs (x..end, colour):
 0: 0..1 Rgb(49, 51, 53) NONE, 1..30 Rgb(49, 51, 53) BOLD, 30..60 Rgb(49, 51, 53) NONE
@@ -823,40 +823,40 @@ background runs (x..end, colour):
 2: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(39, 55, 78) BOLD, 4..11 Rgb(81, 60, 53) NONE, 11..12 Rgb(49, 51, 53) NONE, 12..14 Rgb(217, 119, 87) REVERSED, 14..15 Rgb(81, 60, 53) NONE, 15..16 Rgb(49, 51, 53) NONE, 16..23 Rgb(81, 60, 53) NONE, 23..24 Rgb(49, 51, 53) NONE, 24..31 Rgb(81, 60, 53) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..39 Rgb(81, 60, 53) NONE, 39..40 Rgb(49, 51, 53) NONE, 40..46 Rgb(81, 60, 53) NONE, 46..47 Rgb(49, 51, 53) NONE, 47..49 Rgb(217, 119, 87) REVERSED, 49..53 Rgb(81, 60, 53) NONE, 53..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
 3: 0..60 Rgb(49, 51, 53) NONE
 4: 0..60 Rgb(49, 51, 53) NONE
-5: 0..60 Rgb(49, 51, 53) NONE
+5: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 6: 0..60 Rgb(49, 51, 53) NONE
-7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(43, 43, 43) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+7: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 8: 0..60 Rgb(49, 51, 53) NONE
-9: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(209, 116, 85) NONE, 14..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-10: 0..60 Rgb(49, 51, 53) NONE
+9: 0..60 Rgb(49, 51, 53) NONE
+10: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
 11: 0..60 Rgb(49, 51, 53) NONE
-12: 0..11 Rgb(49, 51, 53) NONE, 11..22 Rgb(43, 43, 43) NONE, 22..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
-13: 0..60 Rgb(49, 51, 53) NONE
+12: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
+13: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
 14: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
-15: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
-16: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(43, 43, 43) NONE, 23..60 Rgb(49, 51, 53) NONE
-17: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+15: 0..11 Rgb(49, 51, 53) NONE, 11..23 Rgb(74, 57, 51) NONE, 23..60 Rgb(49, 51, 53) NONE
+16: 0..60 Rgb(49, 51, 53) NONE
+17: 0..60 Rgb(49, 51, 53) NONE
 18: 0..60 Rgb(49, 51, 53) NONE
 19: 0..60 Rgb(49, 51, 53) NONE
-20: 0..60 Rgb(49, 51, 53) NONE
-21: 0..60 Rgb(49, 51, 53) NONE
-22: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-23: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) REVERSED, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-24: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) REVERSED, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-25: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
-26: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) REVERSED, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) REVERSED, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+20: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+21: 0..9 Rgb(49, 51, 53) NONE, 9..19 Rgb(37, 69, 61) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..30 Rgb(37, 69, 61) NONE, 30..31 Rgb(49, 51, 53) NONE, 31..41 Rgb(37, 69, 61) NONE, 41..42 Rgb(49, 51, 53) NONE, 42..47 Rgb(16, 163, 127) REVERSED, 47..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+22: 0..7 Rgb(49, 51, 53) NONE, 7..29 Rgb(16, 163, 127) REVERSED, 29..30 Rgb(49, 51, 53) NONE, 30..51 Rgb(37, 69, 61) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+23: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..60 Rgb(49, 51, 53) NONE
+24: 0..11 Rgb(49, 51, 53) NONE, 11..29 Rgb(66, 133, 244) REVERSED, 29..31 Rgb(48, 63, 87) NONE, 31..32 Rgb(49, 51, 53) NONE, 32..49 Rgb(66, 133, 244) REVERSED, 49..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+25: 0..60 Rgb(49, 51, 53) NONE
+26: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(66, 133, 244) NONE, 14..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
 27: 0..60 Rgb(49, 51, 53) NONE
-28: 0..11 Rgb(49, 51, 53) NONE, 11..14 Rgb(66, 133, 244) NONE, 14..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
+28: 0..11 Rgb(49, 51, 53) NONE, 11..12 Rgb(65, 131, 239) NONE, 12..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
 29: 0..60 Rgb(49, 51, 53) NONE
-30: 0..11 Rgb(49, 51, 53) NONE, 11..12 Rgb(65, 131, 239) NONE, 12..23 Rgb(47, 59, 79) NONE, 23..60 Rgb(49, 51, 53) NONE
-31: 0..60 Rgb(49, 51, 53) NONE
-32: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) REVERSED, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) REVERSED, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-33: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
-34: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) REVERSED, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
-35: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
-36: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) REVERSED, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+30: 0..17 Rgb(49, 51, 53) NONE, 17..26 Rgb(66, 133, 244) REVERSED, 26..34 Rgb(48, 63, 87) NONE, 34..35 Rgb(49, 51, 53) NONE, 35..43 Rgb(66, 133, 244) REVERSED, 43..51 Rgb(48, 63, 87) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+31: 0..1 Rgb(49, 51, 53) NONE, 1..4 Rgb(49, 51, 53) BOLD, 4..60 Rgb(49, 51, 53) NONE
+32: 0..11 Rgb(49, 51, 53) NONE, 11..49 Rgb(200, 200, 210) REVERSED, 49..51 Rgb(78, 78, 80) NONE, 51..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+33: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
+34: 0..10 Rgb(49, 51, 53) NONE, 10..28 Rgb(150, 110, 230) REVERSED, 28..54 Rgb(67, 58, 84) NONE, 54..59 Rgb(49, 51, 53) BOLD, 59..60 Rgb(49, 51, 53) NONE
+35: 0..60 Rgb(49, 51, 53) NONE
+36: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
 37: 0..60 Rgb(49, 51, 53) NONE
-38: 0..1 Rgb(49, 51, 53) NONE, 1..9 Rgb(49, 51, 53) BOLD, 9..60 Rgb(49, 51, 53) NONE
+38: 0..1 Rgb(49, 51, 53) NONE, 1..5 Rgb(49, 51, 53) BOLD, 5..60 Rgb(49, 51, 53) NONE
 39: 0..60 Rgb(49, 51, 53) NONE
 === Ascii all periods and status labels (132x68) ===
 + Profiles (refreshed 16s ago)-----------------------------------------------------------------------------------------------------+
@@ -1013,14 +1013,14 @@ background runs (x..end, colour):
 |>+ 5H ##4h43m|.4h43m avg 50%|
 |GOOGLE                      #
 | + Gemini ####.|###. avg 90%|
-|  gemini2 89% 6d5h - gemini |
+| + Claude & GPT #.|. avg 49%|
 +----------------------------+
 background runs (x..end, colour):
 0: 0..1 Rgb(49, 51, 53) NONE, 1..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
 1: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(39, 55, 78) BOLD, 7..14 Rgb(16, 163, 127) REVERSED, 14..15 Rgb(49, 51, 53) NONE, 15..21 Rgb(37, 69, 61) NONE, 21..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
 2: 0..1 Rgb(49, 51, 53) NONE, 1..7 Rgb(49, 51, 53) BOLD, 7..30 Rgb(49, 51, 53) NONE
 3: 0..11 Rgb(49, 51, 53) NONE, 11..15 Rgb(66, 133, 244) REVERSED, 15..16 Rgb(48, 63, 87) NONE, 16..17 Rgb(49, 51, 53) NONE, 17..20 Rgb(66, 133, 244) REVERSED, 20..21 Rgb(48, 63, 87) NONE, 21..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
-4: 0..30 Rgb(49, 51, 53) NONE
+4: 0..17 Rgb(49, 51, 53) NONE, 17..18 Rgb(66, 133, 244) REVERSED, 18..19 Rgb(48, 63, 87) NONE, 19..20 Rgb(49, 51, 53) NONE, 20..21 Rgb(48, 63, 87) NONE, 21..29 Rgb(49, 51, 53) BOLD, 29..30 Rgb(49, 51, 53) NONE
 5: 0..30 Rgb(49, 51, 53) NONE
 === monochrome expanded Anthropic (132x30) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -1086,24 +1086,22 @@ background runs (x..end, colour):
 29: 0..132 Reset BOLD
 === monochrome six-cell full and spent segments (30x6) ===
 ╭ Profiles (refreshed 16s ag…╮
-│  codex2 0% 1d4h · codex3 0%│
-│  3d19h · codex4 0% 5d20h · ▐
-│  codex 60% 6d10h ⟲1 banked │
+│  required                  ▐
+│OPENAI                      │
+│ + week ░░░ ░░ ░░ █░ avg 15%│
 │>+ 5H ██4h43m ░4h43m avg 50%│
 ╰────────────────────────────╯
 background runs (x..end, colour):
 0: 0..30 Reset BOLD
 1: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
-2: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
-3: 0..1 Reset BOLD, 1..29 Reset NONE, 29..30 Reset BOLD
+2: 0..7 Reset BOLD, 7..29 Reset NONE, 29..30 Reset BOLD
+3: 0..1 Reset BOLD, 1..19 Reset NONE, 19..20 Reset REVERSED, 20..21 Reset NONE, 21..30 Reset BOLD
 4: 0..1 Reset BOLD, 1..7 Reset BOLD | REVERSED, 7..14 Reset REVERSED, 14..21 Reset NONE, 21..30 Reset BOLD
 5: 0..30 Reset BOLD
 === small balance and long profile at narrow width (60x40) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 ▐
 │>-   4h33m      20h33m    1d0h   1d14h  4d13h   6d0h   5%*▐
-│  claude2 ⟲1 banked · claude5 60% 18h33m ⟲1 banked ·      ▐
-│  claude6 ⟲1 banked · claude7 ⟲1 banked                   ▐
 │  1 profile not reporting                                 ▐
 │                                              12:26 00:26 ▐
 │  claude2                                     ··W         ▐
@@ -1133,11 +1131,13 @@ background runs (x..end, colour):
 │XAI                                                       ▐
 │ + Period                                    5d10h avg 96%▐
 │MOONSHOT                                                  ▐
-│ + Month                                         2d6h  40%│
-│  kimi 40% · Booster balance: 123 credits                 │
-│DEEPSEEK                                                  │
-│  dsh: pay-per-use                                        │
-│META                                                      │
+│ + Month                                         2d6h  40%▐
+│  kimi 40% · Booster balance: 123 credits                 ▐
+│DEEPSEEK                                                  ▐
+│  dsh: pay-per-use                                        ▐
+│META                                                      ▐
+│ + Rolling    30m     1h  1h30m                   avg 58%*│
+│  1 profile not reporting                                 │
 ╰──────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(22, 27, 30) NONE, 1..30 Rgb(22, 27, 30) BOLD, 30..60 Rgb(22, 27, 30) NONE
@@ -1145,40 +1145,40 @@ background runs (x..end, colour):
 2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..11 Rgb(59, 40, 35) NONE, 11..12 Rgb(22, 27, 30) NONE, 12..14 Rgb(217, 119, 87) NONE, 14..15 Rgb(59, 40, 35) NONE, 15..16 Rgb(22, 27, 30) NONE, 16..23 Rgb(59, 40, 35) NONE, 23..24 Rgb(22, 27, 30) NONE, 24..31 Rgb(59, 40, 35) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..39 Rgb(59, 40, 35) NONE, 39..40 Rgb(22, 27, 30) NONE, 40..46 Rgb(59, 40, 35) NONE, 46..47 Rgb(22, 27, 30) NONE, 47..48 Rgb(217, 119, 87) NONE, 48..53 Rgb(59, 40, 35) NONE, 53..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
 3: 0..60 Rgb(22, 27, 30) NONE
 4: 0..60 Rgb(22, 27, 30) NONE
-5: 0..60 Rgb(22, 27, 30) NONE
+5: 0..47 Rgb(22, 27, 30) NONE, 47..50 Rgb(15, 18, 20) NONE, 50..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
 6: 0..60 Rgb(22, 27, 30) NONE
-7: 0..47 Rgb(22, 27, 30) NONE, 47..50 Rgb(15, 18, 20) NONE, 50..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
+7: 0..47 Rgb(22, 27, 30) NONE, 47..50 Rgb(208, 114, 84) NONE, 50..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
 8: 0..60 Rgb(22, 27, 30) NONE
-9: 0..47 Rgb(22, 27, 30) NONE, 47..50 Rgb(208, 114, 84) NONE, 50..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
-10: 0..60 Rgb(22, 27, 30) NONE
+9: 0..60 Rgb(22, 27, 30) NONE
+10: 0..47 Rgb(22, 27, 30) NONE, 47..58 Rgb(15, 18, 20) NONE, 58..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
 11: 0..60 Rgb(22, 27, 30) NONE
-12: 0..47 Rgb(22, 27, 30) NONE, 47..58 Rgb(15, 18, 20) NONE, 58..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
+12: 0..47 Rgb(22, 27, 30) NONE, 47..59 Rgb(15, 18, 20) NONE, 59..60 Rgb(22, 27, 30) NONE
 13: 0..60 Rgb(22, 27, 30) NONE
 14: 0..47 Rgb(22, 27, 30) NONE, 47..59 Rgb(15, 18, 20) NONE, 59..60 Rgb(22, 27, 30) NONE
 15: 0..60 Rgb(22, 27, 30) NONE
 16: 0..47 Rgb(22, 27, 30) NONE, 47..59 Rgb(15, 18, 20) NONE, 59..60 Rgb(22, 27, 30) NONE
 17: 0..60 Rgb(22, 27, 30) NONE
-18: 0..47 Rgb(22, 27, 30) NONE, 47..59 Rgb(15, 18, 20) NONE, 59..60 Rgb(22, 27, 30) NONE
+18: 0..47 Rgb(22, 27, 30) NONE, 47..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
 19: 0..60 Rgb(22, 27, 30) NONE
-20: 0..47 Rgb(22, 27, 30) NONE, 47..59 Rgb(51, 36, 32) NONE, 59..60 Rgb(22, 27, 30) NONE
+20: 0..60 Rgb(22, 27, 30) NONE
 21: 0..60 Rgb(22, 27, 30) NONE
 22: 0..60 Rgb(22, 27, 30) NONE
-23: 0..60 Rgb(22, 27, 30) NONE
-24: 0..60 Rgb(22, 27, 30) NONE
-25: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
-26: 0..9 Rgb(22, 27, 30) NONE, 9..19 Rgb(15, 50, 44) NONE, 19..20 Rgb(22, 27, 30) NONE, 20..30 Rgb(15, 50, 44) NONE, 30..31 Rgb(22, 27, 30) NONE, 31..41 Rgb(15, 50, 44) NONE, 41..42 Rgb(22, 27, 30) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-27: 0..7 Rgb(22, 27, 30) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(22, 27, 30) NONE, 30..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-28: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
-29: 0..11 Rgb(22, 27, 30) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(26, 43, 69) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-30: 0..17 Rgb(22, 27, 30) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(26, 43, 69) NONE, 34..35 Rgb(22, 27, 30) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-31: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(22, 27, 30) BOLD, 4..60 Rgb(22, 27, 30) NONE
-32: 0..11 Rgb(22, 27, 30) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(56, 58, 62) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-33: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
-34: 0..10 Rgb(22, 27, 30) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(45, 38, 66) NONE, 54..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+23: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
+24: 0..9 Rgb(22, 27, 30) NONE, 9..19 Rgb(15, 50, 44) NONE, 19..20 Rgb(22, 27, 30) NONE, 20..30 Rgb(15, 50, 44) NONE, 30..31 Rgb(22, 27, 30) NONE, 31..41 Rgb(15, 50, 44) NONE, 41..42 Rgb(22, 27, 30) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+25: 0..7 Rgb(22, 27, 30) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(22, 27, 30) NONE, 30..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+26: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
+27: 0..11 Rgb(22, 27, 30) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(26, 43, 69) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+28: 0..17 Rgb(22, 27, 30) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(26, 43, 69) NONE, 34..35 Rgb(22, 27, 30) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+29: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(22, 27, 30) BOLD, 4..60 Rgb(22, 27, 30) NONE
+30: 0..11 Rgb(22, 27, 30) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(56, 58, 62) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+31: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
+32: 0..10 Rgb(22, 27, 30) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(45, 38, 66) NONE, 54..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+33: 0..60 Rgb(22, 27, 30) NONE
+34: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
 35: 0..60 Rgb(22, 27, 30) NONE
-36: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
-37: 0..60 Rgb(22, 27, 30) NONE
-38: 0..1 Rgb(22, 27, 30) NONE, 1..5 Rgb(22, 27, 30) BOLD, 5..60 Rgb(22, 27, 30) NONE
+36: 0..1 Rgb(22, 27, 30) NONE, 1..5 Rgb(22, 27, 30) BOLD, 5..60 Rgb(22, 27, 30) NONE
+37: 0..12 Rgb(22, 27, 30) NONE, 12..18 Rgb(12, 42, 71) NONE, 18..19 Rgb(22, 27, 30) NONE, 19..23 Rgb(0, 129, 251) NONE, 23..25 Rgb(12, 42, 71) NONE, 25..26 Rgb(22, 27, 30) NONE, 26..30 Rgb(0, 129, 251) NONE, 30..32 Rgb(12, 42, 71) NONE, 32..33 Rgb(22, 27, 30) NONE, 33..37 Rgb(0, 129, 251) NONE, 37..38 Rgb(12, 42, 71) NONE, 38..39 Rgb(22, 27, 30) NONE, 39..43 Rgb(0, 129, 251) NONE, 43..44 Rgb(12, 42, 71) NONE, 44..45 Rgb(22, 27, 30) NONE, 45..49 Rgb(0, 129, 251) NONE, 49..50 Rgb(12, 42, 71) NONE, 50..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+38: 0..60 Rgb(22, 27, 30) NONE
 39: 0..60 Rgb(22, 27, 30) NONE
 === selected wrapped lane in short viewport (60x6) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
@@ -1507,8 +1507,6 @@ background runs (x..end, colour):
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 ▐
 │>-   4h33m      20h33m    1d0h   1d14h  4d13h   6d0h  11%*▐
-│  claude2 ⟲1 banked · claude5 60% 18h33m ⟲1 banked ·      ▐
-│  claude6 ⟲1 banked · claude7 ⟲1 banked                   ▐
 │  1 profile not reporting                                 ▐
 │          12:26 00:26                                     ▐
 │  claude2 ··W                                             ▐
@@ -1527,14 +1525,16 @@ background runs (x..end, colour):
 │  claude-aws: pay-per-use                                 ▐
 │  claude-login: login required                            ▐
 │OPENAI                                                    ▐
-│ + week       1d4h      3d19h      5d20h  6d10h ⟲1 avg 15%│
-│ + 5H                  4h43m                 4h43m avg 50%│
-│GOOGLE                                                    │
-│ + Gemini                 6d5h                6d6h avg 90%│
+│ + week       1d4h      3d19h      5d20h  6d10h ⟲1 avg 15%▐
+│ + 5H                  4h43m                 4h43m avg 50%▐
+│GOOGLE                                                    ▐
+│ + Gemini                 6d5h                6d6h avg 90%▐
 │ + Claude & GPT              6d5h             6d6h avg 49%│
 │XAI                                                       │
 │ + Period                                    5d10h avg 96%│
 │MOONSHOT                                                  │
+│ + Month                                         2d6h  40%│
+│  kimi 40% · Booster balance: 123 credits                 │
 ╰──────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(22, 27, 30) NONE, 1..30 Rgb(22, 27, 30) BOLD, 30..60 Rgb(22, 27, 30) NONE
@@ -1542,32 +1542,32 @@ background runs (x..end, colour):
 2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..11 Rgb(59, 40, 35) NONE, 11..12 Rgb(22, 27, 30) NONE, 12..14 Rgb(217, 119, 87) NONE, 14..15 Rgb(59, 40, 35) NONE, 15..16 Rgb(22, 27, 30) NONE, 16..23 Rgb(59, 40, 35) NONE, 23..24 Rgb(22, 27, 30) NONE, 24..31 Rgb(59, 40, 35) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..39 Rgb(59, 40, 35) NONE, 39..40 Rgb(22, 27, 30) NONE, 40..46 Rgb(59, 40, 35) NONE, 46..47 Rgb(22, 27, 30) NONE, 47..49 Rgb(217, 119, 87) NONE, 49..53 Rgb(59, 40, 35) NONE, 53..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
 3: 0..60 Rgb(22, 27, 30) NONE
 4: 0..60 Rgb(22, 27, 30) NONE
-5: 0..60 Rgb(22, 27, 30) NONE
+5: 0..11 Rgb(22, 27, 30) NONE, 11..14 Rgb(15, 18, 20) NONE, 14..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 6: 0..60 Rgb(22, 27, 30) NONE
-7: 0..11 Rgb(22, 27, 30) NONE, 11..14 Rgb(15, 18, 20) NONE, 14..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
+7: 0..11 Rgb(22, 27, 30) NONE, 11..21 Rgb(208, 114, 84) NONE, 21..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 8: 0..60 Rgb(22, 27, 30) NONE
-9: 0..11 Rgb(22, 27, 30) NONE, 11..21 Rgb(208, 114, 84) NONE, 21..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
-10: 0..60 Rgb(22, 27, 30) NONE
+9: 0..60 Rgb(22, 27, 30) NONE
+10: 0..11 Rgb(22, 27, 30) NONE, 11..22 Rgb(15, 18, 20) NONE, 22..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 11: 0..60 Rgb(22, 27, 30) NONE
-12: 0..11 Rgb(22, 27, 30) NONE, 11..22 Rgb(15, 18, 20) NONE, 22..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
-13: 0..60 Rgb(22, 27, 30) NONE
+12: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
+13: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
 14: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-15: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-16: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-17: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
+15: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
+16: 0..60 Rgb(22, 27, 30) NONE
+17: 0..60 Rgb(22, 27, 30) NONE
 18: 0..60 Rgb(22, 27, 30) NONE
 19: 0..60 Rgb(22, 27, 30) NONE
-20: 0..60 Rgb(22, 27, 30) NONE
-21: 0..60 Rgb(22, 27, 30) NONE
-22: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
-23: 0..9 Rgb(22, 27, 30) NONE, 9..19 Rgb(15, 50, 44) NONE, 19..20 Rgb(22, 27, 30) NONE, 20..30 Rgb(15, 50, 44) NONE, 30..31 Rgb(22, 27, 30) NONE, 31..41 Rgb(15, 50, 44) NONE, 41..42 Rgb(22, 27, 30) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-24: 0..7 Rgb(22, 27, 30) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(22, 27, 30) NONE, 30..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-25: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
-26: 0..11 Rgb(22, 27, 30) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(26, 43, 69) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-27: 0..17 Rgb(22, 27, 30) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(26, 43, 69) NONE, 34..35 Rgb(22, 27, 30) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-28: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(22, 27, 30) BOLD, 4..60 Rgb(22, 27, 30) NONE
-29: 0..11 Rgb(22, 27, 30) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(56, 58, 62) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
-30: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
+20: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
+21: 0..9 Rgb(22, 27, 30) NONE, 9..19 Rgb(15, 50, 44) NONE, 19..20 Rgb(22, 27, 30) NONE, 20..30 Rgb(15, 50, 44) NONE, 30..31 Rgb(22, 27, 30) NONE, 31..41 Rgb(15, 50, 44) NONE, 41..42 Rgb(22, 27, 30) NONE, 42..47 Rgb(16, 163, 127) NONE, 47..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+22: 0..7 Rgb(22, 27, 30) NONE, 7..29 Rgb(16, 163, 127) NONE, 29..30 Rgb(22, 27, 30) NONE, 30..51 Rgb(15, 50, 44) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+23: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..60 Rgb(22, 27, 30) NONE
+24: 0..11 Rgb(22, 27, 30) NONE, 11..29 Rgb(66, 133, 244) NONE, 29..31 Rgb(26, 43, 69) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..49 Rgb(66, 133, 244) NONE, 49..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+25: 0..17 Rgb(22, 27, 30) NONE, 17..26 Rgb(66, 133, 244) NONE, 26..34 Rgb(26, 43, 69) NONE, 34..35 Rgb(22, 27, 30) NONE, 35..43 Rgb(66, 133, 244) NONE, 43..51 Rgb(26, 43, 69) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+26: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(22, 27, 30) BOLD, 4..60 Rgb(22, 27, 30) NONE
+27: 0..11 Rgb(22, 27, 30) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(56, 58, 62) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+28: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
+29: 0..10 Rgb(22, 27, 30) NONE, 10..28 Rgb(150, 110, 230) NONE, 28..54 Rgb(45, 38, 66) NONE, 54..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
+30: 0..60 Rgb(22, 27, 30) NONE
 31: 0..60 Rgb(22, 27, 30) NONE
 === Unicode month limit blocks week lane; stale five-hour keeps week marker (100x20) ===
 ╭ Profiles (refreshed 1h ago)──────────────────────────────────────────────────────────────────────╮
@@ -1657,8 +1657,6 @@ background runs (x..end, colour):
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 │
 │>-   4h ⟲1      20h33m    1d0h   1d14h   4d13h   6d0h  11%│
-│  claude5 60% 18h33m ⟲1 banked · claude6 ⟲1 banked ·      │
-│  claude7 ⟲1 banked                                       │
 │          12:26 00:26                                     │
 │  claude2 ··W                                             │
 │    week back Wed 16:26 (4h) · ⟲1 banked                  │
@@ -1689,25 +1687,27 @@ background runs (x..end, colour):
 │                                                          │
 │                                                          │
 │                                                          │
+│                                                          │
+│                                                          │
 ╰──────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(22, 27, 30) NONE, 1..30 Rgb(22, 27, 30) BOLD, 30..60 Rgb(22, 27, 30) NONE
 1: 0..1 Rgb(22, 27, 30) NONE, 1..10 Rgb(22, 27, 30) BOLD, 10..60 Rgb(22, 27, 30) NONE
 2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..11 Rgb(59, 40, 35) NONE, 11..12 Rgb(22, 27, 30) NONE, 12..14 Rgb(217, 119, 87) NONE, 14..15 Rgb(59, 40, 35) NONE, 15..16 Rgb(22, 27, 30) NONE, 16..23 Rgb(59, 40, 35) NONE, 23..24 Rgb(22, 27, 30) NONE, 24..31 Rgb(59, 40, 35) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..39 Rgb(59, 40, 35) NONE, 39..40 Rgb(22, 27, 30) NONE, 40..47 Rgb(59, 40, 35) NONE, 47..48 Rgb(22, 27, 30) NONE, 48..50 Rgb(217, 119, 87) NONE, 50..54 Rgb(59, 40, 35) NONE, 54..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
 3: 0..60 Rgb(22, 27, 30) NONE
-4: 0..60 Rgb(22, 27, 30) NONE
+4: 0..11 Rgb(22, 27, 30) NONE, 11..13 Rgb(15, 18, 20) NONE, 13..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 5: 0..60 Rgb(22, 27, 30) NONE
-6: 0..11 Rgb(22, 27, 30) NONE, 11..13 Rgb(15, 18, 20) NONE, 13..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
+6: 0..11 Rgb(22, 27, 30) NONE, 11..12 Rgb(208, 114, 84) NONE, 12..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 7: 0..60 Rgb(22, 27, 30) NONE
-8: 0..11 Rgb(22, 27, 30) NONE, 11..12 Rgb(208, 114, 84) NONE, 12..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
-9: 0..60 Rgb(22, 27, 30) NONE
+8: 0..60 Rgb(22, 27, 30) NONE
+9: 0..11 Rgb(22, 27, 30) NONE, 11..22 Rgb(15, 18, 20) NONE, 22..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 10: 0..60 Rgb(22, 27, 30) NONE
-11: 0..11 Rgb(22, 27, 30) NONE, 11..22 Rgb(15, 18, 20) NONE, 22..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
-12: 0..60 Rgb(22, 27, 30) NONE
+11: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
+12: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
 13: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
 14: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-15: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-16: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
+15: 0..60 Rgb(22, 27, 30) NONE
+16: 0..60 Rgb(22, 27, 30) NONE
 17: 0..60 Rgb(22, 27, 30) NONE
 18: 0..60 Rgb(22, 27, 30) NONE
 19: 0..60 Rgb(22, 27, 30) NONE
@@ -1731,8 +1731,6 @@ background runs (x..end, colour):
 + Profiles (refreshed 16s ago)-----------------------------+
 |ANTHROPIC                                                 |
 |>- ..4h.B1|##.|.20h33m|...1d0h|..1d14h|..4d13h|##6d0h  11%|
-|  claude5 60% 18h33m B1 banked - claude6 B1 banked -      |
-|  claude7 B1 banked                                       |
 |          12:26 00:26                                     |
 |  claude2 ..W---------                                    |
 |    week back Wed 16:26 (4h) - B1 banked                  |
@@ -1763,25 +1761,27 @@ background runs (x..end, colour):
 |                                                          |
 |                                                          |
 |                                                          |
+|                                                          |
+|                                                          |
 +----------------------------------------------------------+
 background runs (x..end, colour):
 0: 0..1 Rgb(22, 27, 30) NONE, 1..30 Rgb(22, 27, 30) BOLD, 30..60 Rgb(22, 27, 30) NONE
 1: 0..1 Rgb(22, 27, 30) NONE, 1..10 Rgb(22, 27, 30) BOLD, 10..60 Rgb(22, 27, 30) NONE
 2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..11 Rgb(59, 40, 35) NONE, 11..12 Rgb(22, 27, 30) NONE, 12..14 Rgb(217, 119, 87) REVERSED, 14..15 Rgb(59, 40, 35) NONE, 15..16 Rgb(22, 27, 30) NONE, 16..23 Rgb(59, 40, 35) NONE, 23..24 Rgb(22, 27, 30) NONE, 24..31 Rgb(59, 40, 35) NONE, 31..32 Rgb(22, 27, 30) NONE, 32..39 Rgb(59, 40, 35) NONE, 39..40 Rgb(22, 27, 30) NONE, 40..47 Rgb(59, 40, 35) NONE, 47..48 Rgb(22, 27, 30) NONE, 48..50 Rgb(217, 119, 87) REVERSED, 50..54 Rgb(59, 40, 35) NONE, 54..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
 3: 0..60 Rgb(22, 27, 30) NONE
-4: 0..60 Rgb(22, 27, 30) NONE
+4: 0..11 Rgb(22, 27, 30) NONE, 11..13 Rgb(15, 18, 20) NONE, 13..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 5: 0..60 Rgb(22, 27, 30) NONE
-6: 0..11 Rgb(22, 27, 30) NONE, 11..13 Rgb(15, 18, 20) NONE, 13..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
+6: 0..11 Rgb(22, 27, 30) NONE, 11..12 Rgb(208, 114, 84) NONE, 12..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 7: 0..60 Rgb(22, 27, 30) NONE
-8: 0..11 Rgb(22, 27, 30) NONE, 11..12 Rgb(208, 114, 84) NONE, 12..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
-9: 0..60 Rgb(22, 27, 30) NONE
+8: 0..60 Rgb(22, 27, 30) NONE
+9: 0..11 Rgb(22, 27, 30) NONE, 11..22 Rgb(15, 18, 20) NONE, 22..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
 10: 0..60 Rgb(22, 27, 30) NONE
-11: 0..11 Rgb(22, 27, 30) NONE, 11..22 Rgb(15, 18, 20) NONE, 22..23 Rgb(51, 36, 32) NONE, 23..60 Rgb(22, 27, 30) NONE
-12: 0..60 Rgb(22, 27, 30) NONE
+11: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
+12: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
 13: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
 14: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-15: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
-16: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..60 Rgb(22, 27, 30) NONE
+15: 0..60 Rgb(22, 27, 30) NONE
+16: 0..60 Rgb(22, 27, 30) NONE
 17: 0..60 Rgb(22, 27, 30) NONE
 18: 0..60 Rgb(22, 27, 30) NONE
 19: 0..60 Rgb(22, 27, 30) NONE
@@ -1805,7 +1805,7 @@ background runs (x..end, colour):
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 │
 │>+ 4h33m ⟲1    20h33m    1d0h   1d14h   4d13h 6d0h ⟲1   7%│
-│  claude5 40% 18h33m ⟲1 banked · claude6 ⟲1 banked        │
+│                                                          │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -1823,24 +1823,24 @@ background runs (x..end, colour):
 ╭ Profiles (re…╮
 │ANTHROPIC     │
 │>+          7%│
-│  claude2 0%  │
-│  4h33m ⟲1    │
-│  banked ·    │
-│  claude5 40% │
-│  18h33m ⟲1   │
-│  banked ·    │
-│  claude6 0%  │
-│  20h33m ⟲1   │
-│  banked ·    │
-│  claude3 0%  │
-│  1d0h ·      │
-│  claude 0%   │
-│  1d14h ·     │
-│  claude4 0%  │
-│  4d13h ·     │
-│  claude7 41% │
-│  6d0h ⟲1     │
-│  banked      │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
+│              │
 │              │
 │              │
 │              │
@@ -1877,37 +1877,37 @@ background runs (x..end, colour):
 ╭ Profiles╮
 │ANTHROPIC│
 │>+     7%│
-│  claude2│
-│  0%     │
-│  4h33m  │
-│  ⟲1     │
-│  banked │
-│  ·      │
-│  claude5│
-│  40%    │
-│  18h33m │
-│  ⟲1     │
-│  banked │
-│  ·      │
-│  claude6│
-│  0%     │
-│  20h33m │
-│  ⟲1     │
-│  banked │
-│  ·      │
-│  claude3│
-│  0% 1d0h│
-│  ·      │
-│  claude │
-│  0%     │
-│  1d14h ·│
-│  claude4│
-│  0%     │
-│  4d13h ·│
-│  claude7│
-│  41%    │
-│  6d0h ⟲1│
-│  banked │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
+│         │
 │         │
 │         │
 │         │
@@ -1967,7 +1967,7 @@ background runs (x..end, colour):
 + Profiles (refreshed 16s ago)-----------------------------+
 |ANTHROPIC                                                 |
 |>+ 4h33m.B1|.|.20h33m|...1d0h|..1d14h|..4d13h|6d0h.B1   7%|
-|  claude5 40% 18h33m B1 banked - claude6 B1 banked        |
+|                                                          |
 |                                                          |
 |                                                          |
 |                                                          |
@@ -1985,24 +1985,24 @@ background runs (x..end, colour):
 + Profiles (r..+
 |ANTHROPIC     |
 |>+ ......   7%|
-|  claude2 0%  |
-|  4h33m B1    |
-|  banked -    |
-|  claude5 40% |
-|  18h33m B1   |
-|  banked -    |
-|  claude6 0%  |
-|  20h33m B1   |
-|  banked -    |
-|  claude3 0%  |
-|  1d0h -      |
-|  claude 0%   |
-|  1d14h -     |
-|  claude4 0%  |
-|  4d13h -     |
-|  claude7 41% |
-|  6d0h B1     |
-|  banked      |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
+|              |
 |              |
 |              |
 |              |
@@ -2039,37 +2039,37 @@ background runs (x..end, colour):
 + Profiles+
 |ANTHROPIC|
 |>+ .   7%|
-|  claude2|
-|  0%     |
-|  4h33m  |
-|  B1     |
-|  banked |
-|  -      |
-|  claude5|
-|  40%    |
-|  18h33m |
-|  B1     |
-|  banked |
-|  -      |
-|  claude6|
-|  0%     |
-|  20h33m |
-|  B1     |
-|  banked |
-|  -      |
-|  claude3|
-|  0% 1d0h|
-|  -      |
-|  claude |
-|  0%     |
-|  1d14h -|
-|  claude4|
-|  0%     |
-|  4d13h -|
-|  claude7|
-|  41%    |
-|  6d0h B1|
-|  banked |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
+|         |
 |         |
 |         |
 |         |
