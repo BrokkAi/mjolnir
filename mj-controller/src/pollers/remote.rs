@@ -18,6 +18,7 @@ pub fn spawn_remote_dashboard_worker_poller(
     alerts_tx
         .send((metadata.alert_high_sequence, Vec::new()))
         .context("initialize alert stream")?;
+    let mut alert_sequence = metadata.alert_high_sequence;
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(metadata.reviews.clone());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(metadata.notices.clone());
     let (ui_requests_tx, ui_requests_rx) =
@@ -76,7 +77,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                     match update {
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             let metadata = &snapshot.metadata;
-                            if alerts_tx.send((metadata.alert_high_sequence, metadata.alert_events.clone())).is_err() { return; }
+                            if publish_alerts(&alerts_tx, &mut alert_sequence, metadata).is_err() { return; }
                             send_if_changed(&config_tx, metadata.installed_config());
                             native.update_snapshot(snapshot.native_agents.clone());
                             health_tx.send_if_modified(|health| {
@@ -132,6 +133,21 @@ pub fn spawn_remote_dashboard_worker_poller(
         config: config_rx,
         health: health_rx,
     })
+}
+
+/// Only a new frontier or a nonempty batch can wake the alert consumer.
+fn publish_alerts(
+    tx: &tokio::sync::mpsc::UnboundedSender<(u64, Vec<mj_client::runtime_feed::AlertEvent>)>,
+    previous: &mut u64,
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+) -> Result<()> {
+    if *previous == metadata.alert_high_sequence && metadata.alert_events.is_empty() {
+        return Ok(());
+    }
+    tx.send((metadata.alert_high_sequence, metadata.alert_events.clone()))
+        .context("publish alert stream")?;
+    *previous = metadata.alert_high_sequence;
+    Ok(())
 }
 
 /// Every send on these watches wakes the dashboard loop, and the daemon
@@ -771,12 +787,13 @@ pub(super) fn queued_prompt_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_runtime_state, remote_submit_failure, send_if_changed};
+    use super::{publish_alerts, publish_runtime_state, remote_submit_failure, send_if_changed};
     use crate::pollers::{Feed, RuntimeStateUpdate};
     use mj_client::daemon::{DaemonRefusal, RuntimeNotice};
 
     /// A republished revision with equal content must not wake the surface,
     /// while changed content must still wake it.
+    // Hard-won: eb348fefb: empty unchanged alert updates woke the dashboard on every stream revision.
     #[test]
     fn a_republished_snapshot_wakes_the_surface_only_for_what_changed() {
         let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
@@ -818,6 +835,45 @@ mod tests {
             state_tx.borrow().revision,
             2,
             "the revision is still current"
+        );
+
+        let (alerts_tx, mut alerts_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut previous = 7;
+        let mut metadata = mj_client::runtime_feed::RuntimeMetadata {
+            alert_high_sequence: 7,
+            ..Default::default()
+        };
+        publish_alerts(&alerts_tx, &mut previous, &metadata).unwrap();
+        assert!(
+            alerts_rx.try_recv().is_err(),
+            "unchanged empty snapshots must not wake alert rendering"
+        );
+        metadata.alert_high_sequence = 8;
+        metadata
+            .alert_events
+            .push(mj_client::runtime_feed::AlertEvent {
+                sequence: 8,
+                destination: "s".into(),
+                session_title: "Session".into(),
+                text: "Question".into(),
+                kind: mj_core::attention::NotificationKind::NeedsInput,
+            });
+        publish_alerts(&alerts_tx, &mut previous, &metadata).unwrap();
+        let (high, events) = alerts_rx.try_recv().unwrap();
+        assert_eq!(high, 8);
+        assert_eq!(events.len(), 1);
+        metadata.alert_events.clear();
+        publish_alerts(&alerts_tx, &mut previous, &metadata).unwrap();
+        assert!(
+            alerts_rx.try_recv().is_err(),
+            "an unchanged frontier with no new events stays quiet"
+        );
+        metadata.alert_high_sequence = 9;
+        publish_alerts(&alerts_tx, &mut previous, &metadata).unwrap();
+        assert_eq!(
+            alerts_rx.try_recv().unwrap(),
+            (9, Vec::new()),
+            "a frontier advance is delivered even if its event was deleted"
         );
 
         let mut renamed = first;

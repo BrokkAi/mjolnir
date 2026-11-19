@@ -479,6 +479,7 @@ mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
 
+    // Hard-won: eb348fefb: deferred observations never resumed after a handoff lapsed without a revision.
     // Hard-won: 6b12ea8ea: transcript-only revisions repeatedly submitted notification writes.
     // Hard-won: eb00602a0: notification observations could queue writes after handoff drained.
     #[tokio::test]
@@ -709,12 +710,44 @@ mod tests {
         observer.await.unwrap().unwrap();
         let mut observer_inputs = crate::web_push::NotificationReconciler::default();
         let mut streaming = state.runtime_publication().unwrap();
-        assert!(
-            observer_inputs
-                .reconcile(streaming.clone())
-                .await
-                .unwrap()
-                .is_some()
+        assert!(matches!(
+            observer_inputs.reconcile(streaming.clone()).await.unwrap(),
+            crate::web_push::NotificationObservation::Observed(_)
+        ));
+        streaming
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("hidden")
+            .unwrap()
+            .entries[0]
+            .completed_ordinal += 1;
+        crate::upgrade::gate().begin_draining();
+        let deferred_observation = observer_inputs.reconcile(streaming.clone()).await.unwrap();
+        assert_eq!(
+            deferred_observation,
+            crate::web_push::NotificationObservation::Deferred
+        );
+        let cancellation = CancellationToken::new();
+        revisions.borrow_and_update();
+        let before_resume = *revisions.borrow();
+        let mut resuming = Box::pin(crate::web_push::wait_for_notification_change(
+            deferred_observation,
+            &mut revisions,
+            &cancellation,
+        ));
+        assert!(futures::poll!(&mut resuming).is_pending());
+        crate::upgrade::gate().expire_drain_for_test();
+        assert!(resuming.await.unwrap());
+        assert_eq!(
+            *revisions.borrow(),
+            before_resume,
+            "gate lapse resumes reconciliation without a runtime revision"
+        );
+        assert_eq!(
+            observer_inputs.reconcile(streaming.clone()).await.unwrap(),
+            crate::web_push::NotificationObservation::Observed(true)
         );
         tokio::task::spawn_blocking(move || _writer.shutdown())
             .await
@@ -731,12 +764,9 @@ mod tests {
                 1024,
             ),
         );
-        assert!(
-            observer_inputs
-                .reconcile(streaming)
-                .await
-                .unwrap()
-                .is_none(),
+        assert_eq!(
+            observer_inputs.reconcile(streaming).await.unwrap(),
+            crate::web_push::NotificationObservation::Unchanged,
             "streaming-only revisions must not submit work to the stopped writer"
         );
         let (before_drain, _) =
@@ -752,7 +782,7 @@ mod tests {
             .get_mut("hidden")
             .unwrap()
             .entries[0]
-            .completed_ordinal += 1;
+            .completed_ordinal += 2;
         crate::upgrade::gate().begin_draining();
         assert!(
             crate::web_push::blocking(move || crate::database::notification_reconcile(deferred))

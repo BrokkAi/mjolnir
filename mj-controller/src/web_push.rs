@@ -340,6 +340,13 @@ impl PushEntry<&str> {
 
 type NotificationInputs = Option<BTreeMap<String, PushEntry<String>>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationObservation {
+    Unchanged,
+    Deferred,
+    Observed(bool),
+}
+
 /// Remembers only notification inputs, never transcript history or delivery state.
 #[derive(Default)]
 pub(crate) struct NotificationReconciler {
@@ -347,7 +354,10 @@ pub(crate) struct NotificationReconciler {
 }
 
 impl NotificationReconciler {
-    pub(crate) async fn reconcile(&mut self, runtime: RuntimeProjection) -> Result<Option<bool>> {
+    pub(crate) async fn reconcile(
+        &mut self,
+        runtime: RuntimeProjection,
+    ) -> Result<NotificationObservation> {
         let inputs = card_entries(&runtime).map(|entries| {
             entries
                 .into_iter()
@@ -355,7 +365,7 @@ impl NotificationReconciler {
                 .collect()
         });
         if self.previous.as_ref() == Some(&inputs) {
-            return Ok(None);
+            return Ok(NotificationObservation::Unchanged);
         }
         let result = blocking(move || {
             let result = db::notification_reconcile(runtime);
@@ -370,10 +380,34 @@ impl NotificationReconciler {
         .await?;
         // Refused observations were not accepted: retain the previous inputs so
         // a lapsed handoff can reobserve them, as a fresh daemon would.
-        if result.is_some() {
-            self.previous = Some(inputs);
+        match result {
+            Some(changed) => {
+                self.previous = Some(inputs);
+                Ok(NotificationObservation::Observed(changed))
+            }
+            None => Ok(NotificationObservation::Deferred),
         }
-        Ok(result)
+    }
+}
+
+/// A refused observation waits on the admission owner, not an unrelated runtime event.
+pub(crate) async fn wait_for_notification_change(
+    observation: NotificationObservation,
+    revisions: &mut tokio::sync::watch::Receiver<u64>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<bool> {
+    if observation == NotificationObservation::Deferred {
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(false),
+            resumed = crate::upgrade::gate().wait_after_draining() => {
+                if resumed { Ok(true) } else { cancellation.cancelled().await; Ok(false) }
+            }
+        }
+    } else {
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(false),
+            changed = revisions.changed() => { changed.context("notification runtime feed closed")?; Ok(true) },
+        }
     }
 }
 
@@ -396,15 +430,14 @@ pub(crate) async fn run_alerts(
             _ = cancellation.cancelled() => return Ok(()),
             result = observer.reconcile(runtime) => result?,
         };
-        if let Some(changed) = changed {
+        if let NotificationObservation::Observed(changed) = changed {
             if changed {
                 state.publish_revision();
             }
             wake();
         }
-        tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
-            changed = revisions.changed() => { changed.context("notification runtime feed closed")?; },
+        if !wait_for_notification_change(changed, &mut revisions, &cancellation).await? {
+            return Ok(());
         }
     }
 }
