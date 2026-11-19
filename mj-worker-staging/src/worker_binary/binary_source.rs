@@ -685,8 +685,8 @@ pub fn worker_binary_prerequisite_for_current(
 }
 
 /// The lookup with the build-stamp check passed in. Startup pinning passes a
-/// check that skips files it already verified; every other caller reads the
-/// file.
+/// check that skips files it already verified; other callers use the
+/// process-local executable memo.
 pub fn worker_binary_prerequisite_with_verifier(
     arch: &str,
     requirement: WorkerBinaryRequirement,
