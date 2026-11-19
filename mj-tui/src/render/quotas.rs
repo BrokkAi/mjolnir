@@ -416,7 +416,7 @@ fn tint(accent: Color, strength: f64) -> Color {
 }
 
 /// Label colour with legible contrast on a provider fill: dark text on light
-/// backgrounds, light text on dark ones. Non-RGB and monochrome keep the theme text.
+/// backgrounds, light text on dark ones. Non-RGB fills and monochrome keep the theme text.
 #[allow(
     clippy::disallowed_methods,
     reason = "Contrast is computed from the fill's own RGB value, not from a theme colour."
@@ -425,7 +425,8 @@ fn readable_on(background: Color) -> Color {
     let Color::Rgb(r, g, b) = background else {
         return theme::palette().text;
     };
-    if theme::current() == theme::UiTheme::Mono || theme::ascii() {
+    // ASCII still paints RGB provider fills, so it needs the same contrast.
+    if theme::current() == theme::UiTheme::Mono {
         return theme::palette().text;
     }
     let linear = |c: u8| {

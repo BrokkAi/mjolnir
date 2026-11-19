@@ -564,7 +564,22 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
     let mut dashboard = populated_dashboard();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     let mut selection = SelectionState::new();
-    draw_with_selection(&mut terminal, &mut dashboard, &mut selection);
+    // Hard-won: quota review: the Profiles rows raced background provider
+    // discovery, so the copied rows sometimes read "CODEX (RESOLVING)".
+    // Each draw polls discovery; redraw until the Codex profile is placed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        draw_with_selection(&mut terminal, &mut dashboard, &mut selection);
+        let screen = format!("{:?}", terminal.backend().buffer());
+        if !screen.contains("RESOLVING") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "quota provider discovery did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let quotas = *dashboard
         .frame_surfaces()
         .surface(SurfaceId::DashboardPane(2))
@@ -603,7 +618,10 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
             surface: SurfaceId::DashboardPane(2),
             range: SelectionRange {
                 start: mj_chat::selection::ContentPos::new(1, 0),
-                end: mj_chat::selection::ContentPos::new(2, quotas.rect.width - 1),
+                end: mj_chat::selection::ContentPos::new(
+                    usize::from(quotas.rect.height - 1),
+                    quotas.rect.width - 1,
+                ),
             },
         }
     );
@@ -613,8 +631,9 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
         vec![
-            "  claude-1  Claude Code  refreshing…",
-            "  codex-1   Codex        refreshing…",
+            "  claude-1: refreshing…",
+            "OPENAI",
+            "  codex-1: refreshing…",
         ]
     );
     // Exactly the two selected pane rows are reversed, border columns and
