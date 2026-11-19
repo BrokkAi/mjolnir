@@ -393,7 +393,6 @@ fn codex_quota_request(
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        antigravity_pools: Vec::new(),
     }
 }
 
@@ -1059,7 +1058,6 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
             opencode_usage_priced: false,
-            antigravity_pools: Vec::new(),
         },
         None,
         None,
@@ -1122,7 +1120,6 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        antigravity_pools: Vec::new(),
     };
     let mut manager = QuotaManager::default();
     manager
@@ -1229,7 +1226,6 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        antigravity_pools: Vec::new(),
     };
     // Lines logged at exactly info that contain `text`.
     let said = |text: &str| {
@@ -1430,7 +1426,6 @@ async fn expired_claude_credentials_report_login_expired() {
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
             opencode_usage_priced: false,
-            antigravity_pools: Vec::new(),
         },
         None,
         None,
@@ -1687,7 +1682,6 @@ while IFS= read -r line; do :; done
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
         opencode_usage_priced: false,
-        antigravity_pools: Vec::new(),
     };
 
     let mut quotas = QuotaManager {

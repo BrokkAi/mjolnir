@@ -608,7 +608,12 @@ pub(super) fn viewer_snapshot_selected(
         let Some(quota) = quotas.get(&profile.id) else {
             continue;
         };
-        let quota = mj_controller::quota::surface_quota_report(quota);
+        let mut quota = mj_controller::quota::surface_quota_report(quota);
+        // The viewer reads stored reports, which keep every pool; show the
+        // pools the profile uses, as the published quota does.
+        if let Ok(config) = controller.config.named_profile(&profile.id) {
+            quota.retain_antigravity_pools(&config.antigravity_pools());
+        }
         let master_weekly = quota.weekly_window();
         let fable_remaining = master_weekly.and_then(|master| {
             master.remaining_percent?;

@@ -422,16 +422,10 @@ impl Policy {
     /// Tell every attached surface what the daemon knows about quota.
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
-        let pools = self
-            .batch
-            .profiles
-            .iter()
-            .chain(&self.batch.grants)
-            .chain(&self.batch.extra)
-            .map(|request| (request.profile_id.as_str(), &request.antigravity_pools))
-            .collect::<BTreeMap<_, _>>();
+        // The installed profile decides which Antigravity pools people see.
+        let surfaced = surface_quota_reports(&reports, &self.state.owner().controller().config);
         self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(&reports, &pools),
+            reports: surfaced,
             probing: self.probing.clone(),
             cycles: self.cycles,
         });
@@ -775,24 +769,19 @@ fn reconcile_quota_publications(
 }
 
 /// What people see of each report. An Antigravity profile shows only the
-/// pools its request names; the stored report keeps every pool for selection
-/// and quota recovery.
+/// pools the installed profile uses; the stored report keeps every pool for
+/// selection and quota recovery.
 fn surface_quota_reports(
     reports: &QuotaReportMap,
-    pools: &BTreeMap<&str, &Vec<mj_core::config::AntigravityQuotaPool>>,
+    config: &mj_core::config::Config,
 ) -> BTreeMap<String, ProfileQuota> {
     reports
         .iter()
         .filter_map(|(id, publication)| {
             publication.effective_report(id).map(|report| {
                 let mut surfaced = mj_controller::quota::surface_quota_report(&report);
-                if surfaced.harness == mj_core::config::HarnessKind::Antigravity
-                    && let Some(pools) = pools.get(id.as_str())
-                {
-                    surfaced.windows.retain(|window| {
-                        mj_client::quota::antigravity_pool_of_window(window)
-                            .is_none_or(|pool| pools.contains(&pool))
-                    });
+                if let Ok(profile) = config.named_profile(id) {
+                    surfaced.retain_antigravity_pools(&profile.antigravity_pools());
                 }
                 (id.clone(), surfaced)
             })
@@ -1251,7 +1240,13 @@ mod tests {
             ("codex".to_owned(), codex.clone()),
             ("gemini".to_owned(), gemini.clone()),
         ]);
-        let gemini_pools = vec![mj_core::config::AntigravityQuotaPool::Gemini];
+        let mut config = mj_core::config::Config::default();
+        let mut gemini_profile = mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Antigravity,
+            "/profiles/gemini",
+        );
+        gemini_profile.third_party_models = false;
+        config.profiles.insert("gemini".into(), gemini_profile);
         let publications = reports
             .iter()
             .map(|(id, report)| {
@@ -1266,10 +1261,7 @@ mod tests {
             })
             .collect::<QuotaReportMap>();
         let snapshot = mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(
-                &publications,
-                &BTreeMap::from([("gemini", &gemini_pools)]),
-            ),
+            reports: surface_quota_reports(&publications, &config),
             ..Default::default()
         };
         let serialized = serde_json::to_vec(&snapshot).expect("serialize published snapshot");

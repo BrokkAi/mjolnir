@@ -131,6 +131,17 @@ pub fn refused_login_message(profile_id: &str) -> String {
 }
 
 impl ProfileQuota {
+    /// What people see of an Antigravity report: only the windows of `pools`,
+    /// the pools the profile uses. The stored report keeps every pool for
+    /// selection and quota recovery. Other harnesses are unchanged.
+    pub fn retain_antigravity_pools(&mut self, pools: &[AntigravityQuotaPool]) {
+        if self.harness == HarnessKind::Antigravity {
+            self.windows.retain(|window| {
+                antigravity_pool_of_window(window).is_none_or(|pool| pools.contains(&pool))
+            });
+        }
+    }
+
     /// A display projection of one pool; the original report retains all scopes
     /// for model selection and quota recovery.
     pub fn for_antigravity_pool(&self, pool: AntigravityQuotaPool) -> Self {

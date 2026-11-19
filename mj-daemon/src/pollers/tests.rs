@@ -416,7 +416,6 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
             },
         ),
         opencode_usage_priced: false,
-        antigravity_pools: Vec::new(),
     }
 }
 
@@ -874,7 +873,6 @@ mv "$CLAUDE_CONFIG_DIR/.credentials.json.new" "$CLAUDE_CONFIG_DIR/.credentials.j
             provider: String::new(),
         },
         opencode_usage_priced: false,
-        antigravity_pools: Vec::new(),
     };
     (request, credentials)
 }
