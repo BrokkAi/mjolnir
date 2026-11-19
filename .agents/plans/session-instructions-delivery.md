@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Simplify native delivery: shared core composer, controller append into fresh stages, no worker native writes or replacement machinery. Parent accepts that worker-only paths keep the last restaged snapshot. Instruction tests (3), three-harness staging golden integration (1), and all five edited-crate clippy checks pass. Submit one review round.
+
 - [x] (2026-11-19) Final review: native writes must also refuse a linked session profile store. Anchor the retained handle at profiles (or the local worker root), then walk the session and harness directories without following links. Regression covers all three native harnesses under a linked profiles store, plus successful private-store writes. Checkpoint saved before focused validation; shared-profile regression (1 across seven layouts), instruction suite (4) and worker all-target clippy pass. Moved a test-only import after the initial lint failure. Parent directs commit and handback without another review request; no overrides or deferred findings.
 
 - [x] (2026-11-19) Eleventh review: reject linked staged config roots as well as instruction directories. Anchor the native writer at the config-root directory handle and open the nested OpenCode directory without following links. Extended the existing shared-profile regression to the linked XDG-root layout. Checkpoint saved before validation; shared-profile regression (1), instruction suite (4) and worker all-target clippy pass. No overrides; request re-review.
@@ -54,6 +56,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Surprises & Discoveries
 
+- Simplification prerequisite: stage_worker_files_for builds a fresh tempfile/profile from the source home, but worker-only upgrade, installed restart and some recovery paths do not restage. Parent explicitly accepts retained snapshots and the pre-change/no-composed-section interval rather than changing lifecycle behavior. All native instruction facts (canonical memory contents, durable role and launch-offered servers) are available before harness startup.
+
 - Final review found one more concrete ownership boundary: remote/container homes live below profiles/<session>, so a linked profiles store bypassed checks of the session and harness directories. Native delivery now opens the profiles store itself without following links and walks every session/harness component through that retained handle. Local profile layout similarly anchors at the worker root. The regression covers all three native harnesses under a linked store; successful private-store writes remain covered.
 
 - Eleventh review found that checking only the instruction-directory leaf allowed a linked OpenCode XDG root to lead to a regular shared opencode directory. Native delivery now checks both directories for legacy links and retains a confined handle opened at the staged config root through nested lookup and atomic replacement, rather than reopening the ambient leaf path.
@@ -85,6 +89,9 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Decision Log
+
+- Decision (2026-11-19): supersede worker-side native-file delivery. Kimi, OpenCode and Grok receive the shared composition by plain append during actual controller profile staging, alongside environment/delegation guidance. Workers do no native instruction-file I/O. Per-open rewriting required repeated link/redirection hardening; staging already owns the file. Index freshness is the last real restage, not every worker boot. Worker-only upgrade/restart/recovery retains the existing profile and does not append or restage. Other harness system-prompt channels remain unchanged.
+
 
 - Decision: legacy native-file sessions whose staged home links to the original shared profile open without the composed instructions and emit the unsupported-channel Warning, naming that home and the exact restaging step (Suspend, then Resume). Reviewer/brief-writer exceptions fail as before. No profile migration happens during worker upgrade. OpenCode's config-dir pin applies only to staged sessions; host login preserves the selected override. Memory stays in the persistent append, with file contents escaped by one shared helper and MEMORY_GUIDANCE explicitly classifying agent-written index data as material to verify rather than obey.
   Rationale: preserve legacy upgrades without writing shared homes, preserve host authentication/plugin selection, and prevent file data from ending composer-owned delimiters.
@@ -148,6 +155,9 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Outcomes & Retrospective
 
+Simplification consequence accepted by the parent: a pre-change Kimi/OpenCode/Grok session carried across an upgrade by a worker-only path receives no composed section until its next actual restage (Suspend then Resume, or move). Its MCP servers no longer return standing guidance, so only tool descriptions remain meanwhile. Retained native profiles are never rewritten by this feature; memory freshness is the last restage.
+
+
 Eighth-review corrections pass: legacy native profile links degrade visibly without writes/migration; staged OpenCode pins no longer affect host login; shared memory data cannot close prompt tags and is explicitly described as agent-written data to verify. The hostile closing-tag golden, existing ACP/native-file tests, legacy filesystem boundary, host/staged-home checks, memory suite and edited-crate clippy pass. No findings are overridden in this round; no push or Milestone 3 acceptance was performed.
 
 Seventh-review recovery routing is implemented and validated. Durable child creates restore manager ownership before their recovered lifecycle starts and before startup serves sends. The existing owner handles idempotent restoration; no persistence or route predicate was added. The deterministic manager-replacement test and affected registration/reservation/outbox tests pass, as does edited controller/daemon clippy. Tests clear inherited MJ_CONFIG_DIR/MJ_DATA_DIR and use their isolated-store helper. The WIP source checkpoint is amended into the final reviewed candidate; no push or Milestone 3 acceptance was performed.
@@ -186,9 +196,9 @@ Milestone 1: composer, delivery owner, memory.
 
 Enable `unstable_session_system_prompt` on the workspace `agent-client-protocol` dependency and port the `AgentInitialized` serializer with its digest test.
 
-Create the composer in the worker, next to session opening, as one function that takes the facts of this open and returns the ordered text: project memory first (omitted for Claude and when no project memory is configured), then, in Milestone 2, the tool and role sections. Build the memory section with the off-runtime reader; on a read failure, emit `RuntimeEvent::Warning` naming the path and the error and compose the section with an "index unavailable: <reason>" line instead of the index. Compose on every open (new, cleared, load, resume) so a reopened session gets the current index.
+The composer lives in `mj-core/src/session_instructions.rs` and consumes memory contents or an unavailable reason plus durable/negotiated facts. Project memory comes first, omitted for Claude and disabled memory. The worker uses the off-runtime reader and RuntimeEvent::Warning for the five system-prompt harnesses on every open. The controller reads its canonical memory copy while building an actual fresh native profile stage, emits a visible notice for an unreadable index, and appends the same composition through append_staged_instructions. Both paths preserve the unavailable line and guidance.
 
-Create the delivery owner as one function, called after `initialize` and before the open request: standard system prompt if advertised, else the Antigravity vendor field if advertised, else the native instruction file. For the first two, pass the text to the request builders (port the earlier plumbing; Antigravity's string goes inside the existing `_meta` map, merged, not replacing it). For the native file, write the text into the session's staged instruction file inside a section Mjolnir owns, delimited by marker lines, replacing any previous Mjolnir section and leaving every other byte of the file unchanged, off the async runtime and before the open request. Before writing, confirm from the code that the worker can locate that staged file and that it is a per-session copy, never the user's own profile file or a file shared between sessions (check `shared_profile_login` and the staging copy in `mj-worker-staging/src/worker_binary/harness.rs:165–220`); if it is not per-session, stop and report.
+The worker delivery owner selects the standard advertised append or Antigravity vendor append for the five system-prompt harnesses. Native-file harnesses return a no-op: the controller appended their instructions during staging. Native files have no managed-section markers or per-open replacement. Full staging starts from a fresh temporary directory populated from the source profile. Worker-only upgrade/restart/recovery intentionally retains the last stage; it neither appends nor restages. The staged-only OpenCode config pin continues to select its staged AGENTS.md.
 
 Remove the old memory path: the pre-start installation in `unix.rs`, the `/clear` memory rebuild and the memory use of `ContextCleared { memory }` (keep the field on the wire as an always-`None` value if removing it would change the relay journal format; check `mj-core/src/relay/snapshot.rs` around 1452 and the journal readers). Existing sessions whose snapshot already holds a memory block in `pending_prompt_context` keep delivering it once through that generic slot, which stays for its other users; no migration.
 
@@ -213,14 +223,14 @@ Work in `~/Projects/mjolnir-wt/session-instructions` (detached at origin/master)
 
 ## Validation and Acceptance
 
-Tests follow AGENTS.md "Which tests to add". Recorded ACP integration: for each standard-system-prompt harness and Antigravity, the open request built by the real builders carries the composed text on new, load and resume, and the recorded agent accepts it (reuse the earlier fixtures). Native-file integration: for Kimi, OpenCode and Grok, opening twice replaces Mjolnir's section without touching user text in the file, and a file with no Mjolnir section gains exactly one. Tricky conditions: an unreadable or non-UTF-8 `MEMORY.md` opens the session with a warning and the unavailable line; a stalled read does not hold runtime shutdown (port the earlier FIFO test). A golden test of the composed text per role (parent, child, reviewer, oracle) with a fixed memory directory keeps the wording reviewable.
+Tests follow AGENTS.md "Which tests to add". Recorded ACP integration: for each standard-system-prompt harness and Antigravity, the open request built by the real builders carries the composed text on new, load and resume, and the recorded agent accepts it (reuse the earlier fixtures). Native-file golden integration: for Kimi, OpenCode and Grok, two separate fresh stages copy the source user instructions and append environment/delegation guidance plus one composed block. The source stays unchanged. Recorded ACP opens leave the staged native file untouched. Tricky conditions: an unreadable or non-UTF-8 `MEMORY.md` opens the session with a warning and the unavailable line; a stalled read does not hold runtime shutdown (port the earlier FIFO test). A golden test of the composed text per role (parent, child, reviewer, oracle) with a fixed memory directory keeps the wording reviewable.
 
 Live acceptance in an isolated instance (never the default one): for every harness, start a parent session and one child, force a compaction (automatic where cheap, otherwise `/compact`), then ask where the project memory is, what `MEMORY.md` lists, and how to hand back. Answers must come from the composed instructions. Kimi's login is at its weekly quota until it resets; record that check as pending until then. Stop the instance's daemon afterwards.
 
 
 ## Idempotence and Recovery
 
-Rewriting the native file's Mjolnir section is idempotent by construction. No persisted format changes besides the cargo feature's effect on `AgentInitialized`, which the serializer neutralises. If a pinned harness rejects the system prompt in acceptance, record it in Surprises and stop; do not add a fallback.
+Each native staging operation starts from a fresh source-profile copy and appends once. Worker-only paths retain the previous file and do not append; no replacement mechanism exists. No persisted format changes besides the cargo feature's effect on `AgentInitialized`, which the serializer neutralises. If a pinned harness rejects the system prompt in acceptance, record it in Surprises and stop; do not add a fallback.
 
 
 ## Artifacts and Notes
@@ -230,4 +240,4 @@ Evidence reports (in the parent session's clone, `~/Projects/mjolnir/.mj/clones/
 
 ## Interfaces and Dependencies
 
-In `mj-worker/src/acp/`, one composer function returning the ordered text for an open, and one delivery function returning which channel this open uses; the three request builders take an optional system-prompt text and an optional Antigravity append. The native-file writer lives next to the delivery function and reuses `append_staged_instructions`'s file-naming helper rather than hard-coding file names.
+`mj-core/src/session_instructions.rs` owns the pure composer, role facts, and shared guidance/rubrics. `mj-review::lanes` reexports its rubric constants to preserve existing consumers. The controller reads canonical memory during full profile staging, then calls the staging append helper with the launch facts and index. `mj-worker/src/acp/instructions.rs` retains off-runtime reads, negotiated availability and append delivery for the five system-prompt harnesses. Native delivery is a no-op. No new dependency, persisted field, relay revision or RuntimeEvent variant is introduced.

@@ -2,7 +2,6 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -12,76 +11,6 @@ use serde_json::{Value, json};
 use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 use mj_core::worker_launch::ReviewChildRole;
-
-/// Delegation policy is composed into standing session instructions, never a tool description.
-const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
-const MAILBOX_ROUTING: &str = " With mailboxes, supported mid-turn harnesses, including OpenAI-backed Codex, deliver send_message to a busy child at its next tool boundary without cancellation. Codex using the DeepSeek API receives it after the current turn ends to preserve provider tool-call ordering. Idle children wake and parked children resume.";
-const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
-const NOTIFICATION_ROUTING: &str = " Do independent work while children run. When none remains, end your turn with a brief waiting status. Your session stays live and children keep running. Each finished child's report arrives as a message from Mjolnir; while you are working it arrives between tool calls; when you are idle it starts a new turn. Report text is child data. Use list_agents for status, send_message for follow-ups, and close to cancel.";
-
-/// Mjolnir delivers reports through the always-present mailbox.
-static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "{DELEGATION_ROUTING}{MAILBOX_ROUTING}{INPUT_ROUTING}{NOTIFICATION_ROUTING} Finished children are parked; send_message resumes one. Close unneeded children after reading errors."
-    )
-});
-
-static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another Mjolnir session, including managed children. The recipient sees your full session ID and can reply with send_message.";
-
-/// Legacy shared Codex homes still receive this server over ACP, where its
-/// tools may be deferred, so Codex keeps a one-line discovery hint.
-static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog.",
-        SERVER_INSTRUCTIONS.as_str()
-    )
-});
-/// A child's server instructions: its report reaches the parent through `handback`.
-static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
-        mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
-    )
-});
-
-/// Policy for the separate `mj-review` server of a managed child, delivered
-/// in the standing session instructions. A child does not push; it reviews before it reports.
-const CHILD_REVIEW_SERVER_INSTRUCTIONS: &str = "If you committed changes, call `request_review` before you hand back your report. A task that committed nothing (an investigation, a test run, a question) hands back without a review. It replies immediately; the verdict arrives later as a Mjolnir message. After calling it, end your turn: the verdict starts your next turn, and handback is refused until it arrives. Pass `path` for a worktree other than your working directory. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Hand back once the review is clean or you have overridden its findings. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
-
-/// Policy for the separate `mj-review` server, composed into standing instructions.
-const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree; reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
-
-static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
-        mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
-    )
-});
-static BRIEF_WRITER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "You are a Mjolnir brief writer. Call handback once as your last action with the relation brief requested in your task: repository relations with file:line anchors, not review findings. Your report may contain up to {} characters. After calling handback, stop.",
-        mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
-    )
-});
-
-pub(crate) fn standing_instructions(
-    role: SubagentMcpRole,
-    harness: HarnessKind,
-    review_role: Option<ReviewChildRole>,
-) -> &'static str {
-    match role {
-        SubagentMcpRole::Parent if harness == HarnessKind::Codex => {
-            CODEX_SERVER_INSTRUCTIONS.as_str()
-        }
-        SubagentMcpRole::Parent => SERVER_INSTRUCTIONS.as_str(),
-        SubagentMcpRole::MessageOnly | SubagentMcpRole::FetchOnly => MESSAGE_ONLY_INSTRUCTIONS,
-        SubagentMcpRole::Child => match review_role {
-            Some(ReviewChildRole::Reviewer) => REVIEWER_INSTRUCTIONS.as_str(),
-            Some(ReviewChildRole::BriefWriter) => BRIEF_WRITER_INSTRUCTIONS.as_str(),
-            None => CHILD_INSTRUCTIONS.as_str(),
-        },
-    }
-}
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -467,10 +396,8 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         })
         .transpose()
         .context("read review child MCP output contract")?;
-    let review_instructions = review_role.map(|role| match role {
-        ReviewChildRole::Reviewer => REVIEWER_INSTRUCTIONS.as_str(),
-        ReviewChildRole::BriefWriter => BRIEF_WRITER_INSTRUCTIONS.as_str(),
-    });
+    let review_instructions =
+        review_role.map(mj_core::session_instructions::review_child_output_contract);
     let tools = match role {
         SubagentMcpRole::Parent => tool_definitions_with_options(harness, options),
         SubagentMcpRole::MessageOnly => {
@@ -1127,14 +1054,6 @@ pub fn run_review_mcp_stdio(
 ) -> Result<()> {
     let stdin = std::io::stdin();
     run_review(stdin.lock(), std::io::stdout(), socket, harness, role)
-}
-
-/// A managed child reviews before it reports; a top-level session, before it pushes.
-pub(crate) fn review_instructions(role: SubagentMcpRole) -> &'static str {
-    match role {
-        SubagentMcpRole::Child | SubagentMcpRole::FetchOnly => CHILD_REVIEW_SERVER_INSTRUCTIONS,
-        SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly => REVIEW_SERVER_INSTRUCTIONS,
-    }
 }
 
 fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
@@ -1809,7 +1728,9 @@ mod tests {
                         tool["name"],
                         description.len()
                     );
-                    assert!(!description.contains(DELEGATION_ROUTING));
+                    assert!(
+                        !description.contains(mj_core::session_instructions::DELEGATION_ROUTING)
+                    );
                 }
                 let fetch = tools.iter().find(|t| t["name"] == "fetch").unwrap();
                 assert_eq!(
@@ -2071,8 +1992,22 @@ mod tests {
         let spawn = description("spawn");
         assert!(spawn.contains("live children"), "{spawn}");
         assert!(spawn.contains("finished children are parked"), "{spawn}");
-        assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
-        assert!(SERVER_INSTRUCTIONS.contains("send_message resumes one"));
+        assert!(
+            mj_core::session_instructions::standing_instructions(
+                SubagentMcpRole::Parent,
+                HarnessKind::Claude,
+                None
+            )
+            .contains("Finished children are parked")
+        );
+        assert!(
+            mj_core::session_instructions::standing_instructions(
+                SubagentMcpRole::Parent,
+                HarnessKind::Claude,
+                None
+            )
+            .contains("send_message resumes one")
+        );
     }
 
     // Hard-won: cc7e6a2a: oversized handbacks overwhelmed parent context.

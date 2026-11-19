@@ -314,3 +314,23 @@ Extended the shared-profile regression to seven layouts, including linked profil
 - `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings`: first failed because Path became test-only after the ambient reopen was removed (`memory-instructions-final-clippy.log`); moved that import into the test module. The same command then passed (`memory-instructions-final-clippy-fixed.log`).
 
 Formatting/diff checks are clean. No still-failing checks. The final verdict had no overridden or deferred findings. By the parent's explicit landing instruction, this corrected commit is handed back without another review request. No default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked.
+
+
+## Staging-only simplification
+
+Parent ruling supersedes native worker rewrites. Actual profile staging uses a fresh temporary directory and copies the source profile. Worker-only upgrade/restart/recovery does not always stage; it deliberately retains the prior file. A pre-change native session therefore has no composed section until its next actual restage (Suspend/Resume or move); its MCP tool descriptions remain available, but server initialization does not restore standing guidance. The index snapshot in the file is from the last restage. No retained profile is written by the new controller path.
+
+The pure composer and all its guidance/role/rubric text now live in mj-core::session_instructions. The existing review constants are reexported by mj-review::lanes; templates moved unchanged into core assets. Worker system-prompt delivery still reads indexes off-runtime, warns on failure, and composes using actual negotiated availability/Claude registration. For Kimi/OpenCode/Grok it performs no instruction-file I/O. The worker's marker parser, replacement writer, leases, link/store checks and native-writer tests are deleted. The staged-only OpenCode config pin and all routing fixes remain unchanged.
+
+During an actual controller profile stage, the controller reads the canonical project-memory index, reports an unavailable-index warning with path and reason, and passes contents or unavailability to the shared composer. The staging helper derives role and offered-server facts from WorkerLaunchConfig, then appends through the existing append_staged_instructions mechanism alongside user/environment/delegation text. No native-harness fact requires post-start negotiation.
+
+Validation ran outside the sandbox on the dev profile with inherited MJ_CONFIG_DIR/MJ_DATA_DIR cleared and existing isolated test directories retained:
+
+- `MJ_UPDATE_GOLDEN=1 cargo test -p brokk-mj-worker-staging golden_session_instructions_are_appended_once_to_each_fresh_native_stage`: 1 passed, generating three golden files (`memory-instructions-staging-golden-update-final.log`). Each harness stages twice from its source, preserving the source bytes, appending the composition once alongside existing guidance, and retaining guidance for an unavailable index.
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 3 passed (`memory-instructions-staging-worker-final-tests.log`): unchanged role goldens, pinned ACP lifecycle (native files untouched), stalled-read shutdown.
+- `cargo test -p brokk-mj-worker-staging golden_session_instructions_are_appended_once_to_each_fresh_native_stage`: 1 passed without golden update (`memory-instructions-staging-golden-check.log`).
+- `cargo clippy -p brokk-mj-core -p brokk-mj-review -p brokk-mj-worker-staging -p brokk-mj-controller -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed (`memory-instructions-staging-clippy.log`).
+
+Mechanical compile fixes during extraction: shared child tool output contract remains independent of optional harness selection; removed an ambiguous fixture Path.into(); updated the old delegation constant reference to its shared location. Corrected failure logs: memory-instructions-staging-golden-update.log, memory-instructions-staging-golden-update-fixed.log, memory-instructions-staging-worker-tests.log. No still-failing checks. Source checkpoints preceded long builds and are amended into one coherent final commit.
+
+No default instance, schema/wire changes, pushes, or Milestone 3 acceptance. Logs remain untracked. Submit one review round; per parent instructions fix only concrete correctness/security defects in this change, override other findings with reasons, and hand back without a second review.

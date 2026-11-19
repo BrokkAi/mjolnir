@@ -9500,7 +9500,11 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
             if native_file
                 && matches!(
                     phase,
-                    "unsupported-adapter" | "unsupported-brief-writer" | "unsupported-reviewer"
+                    "unsupported-adapter"
+                        | "unsupported-brief-writer"
+                        | "unsupported-reviewer"
+                        | "unreadable-load"
+                        | "fifo-load"
                 )
             {
                 continue;
@@ -9648,7 +9652,8 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                             assert!(request["params"]["systemPrompt"].is_null());
                             let file = std::fs::read_to_string(&native_path).unwrap();
                             assert!(file.starts_with("user profile instructions\r\n"));
-                            assert!(file.contains(&expected));
+                            assert_eq!(file, "user profile instructions\r\n");
+                            assert!(expected.is_empty());
                         } else if harness == HarnessKind::Antigravity {
                             assert_eq!(
                                 request["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],

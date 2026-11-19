@@ -40,7 +40,7 @@ pub struct ReviewJob {
 
 // Adapted from Codex commit 1b1835f751, codex-rs/prompts/templates/review/rubric.md;
 // the output contract below is Mjolnir's plain-text handback format.
-pub const CODEX_REVIEW_RUBRIC: &str = include_str!("../templates/review_rubric.md");
+pub use mj_core::session_instructions::CODEX_REVIEW_RUBRIC;
 
 /// The findings the author declined to fix, with the reasons they gave.
 #[must_use]
@@ -178,7 +178,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
     )
 }
 
-pub const BRIEF_WRITER_INSTRUCTIONS: &str = include_str!("../templates/brief_writer.md");
+pub use mj_core::session_instructions::BRIEF_WRITER_INSTRUCTIONS;
 
 /// The prompt of the session that writes the relation brief. It sees the same
 /// diff commands and the same user request as the reviewers, and no findings.

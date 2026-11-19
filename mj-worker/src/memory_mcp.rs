@@ -5,7 +5,6 @@ use std::io;
 use std::path::PathBuf;
 
 mod history;
-pub(crate) use history::GUIDANCE;
 
 /// Serve the history tools over MCP's JSON-lines stdio transport.
 pub fn run_mcp_stdio(history_socket: Option<PathBuf>) -> Result<()> {

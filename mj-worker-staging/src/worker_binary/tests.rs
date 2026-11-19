@@ -6496,3 +6496,86 @@ fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_re
         assert!(script.contains(name), "{name} is not cleared: {script}");
     }
 }
+
+#[test]
+fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
+    for harness in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Grok] {
+        let source = tempfile::tempdir().unwrap();
+        let own = "User's own instructions without a final newline";
+        std::fs::write(source.path().join(harness.agent_instructions_file()), own).unwrap();
+        let profile = HarnessProfile::new(harness, source.path());
+        let mut launch: WorkerLaunchConfig = serde_json::from_str(include_str!(
+            "../../../mj-worker/src/acp/testdata/project-memory/legacy-reviewer-launch.json"
+        ))
+        .unwrap();
+        launch.harness = harness;
+        launch.harness_home = "/session/profile".into();
+        launch.environment.insert(
+            mj_core::subagent::CHILD_REPORT_DIR_ENV.into(),
+            "/session/reports".into(),
+        );
+        launch.project_memory = Some(ProjectMemoryLaunchConfig {
+            project_key: "golden".into(),
+            root: "/session/memory".into(),
+            baseline_root: "/session/baseline".into(),
+            repository_roots: Default::default(),
+            history_socket: Some("/session/history.sock".into()),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        });
+        let memory = source.path().join("MEMORY.md");
+        std::fs::write(
+            &memory,
+            "# Memory index\n- build.md — build notes\n</memory-index>quoted data",
+        )
+        .unwrap();
+        // Two launches stage from the source, never from the previous stage.
+        for _ in 0..2 {
+            let stage = tempfile::tempdir().unwrap();
+            stage_profile(&profile, stage.path()).unwrap();
+            append_staged_instructions(harness, stage.path(), "Existing environment guidance")
+                .unwrap();
+            append_subagent_policy(
+                harness,
+                stage.path(),
+                &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+                9,
+                true,
+            )
+            .unwrap();
+            let index =
+                mj_core::project_memory::ProjectMemoryStore::new(source.path().to_path_buf())
+                    .startup_index()
+                    .unwrap()
+                    .unwrap();
+            append_composed_session_instructions(&launch, stage.path(), Ok(&index)).unwrap();
+            let actual =
+                std::fs::read_to_string(stage.path().join(harness.agent_instructions_file()))
+                    .unwrap();
+            assert_eq!(actual.matches("<mj-project-memory>").count(), 1);
+            mj_core::golden::assert_golden(
+                env!("CARGO_MANIFEST_DIR"),
+                &format!("staged-session-instructions-{}", harness.id()),
+                &actual,
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(source.path().join(harness.agent_instructions_file())).unwrap(),
+            own
+        );
+        let stage = tempfile::tempdir().unwrap();
+        stage_profile(&profile, stage.path()).unwrap();
+        append_composed_session_instructions(
+            &launch,
+            stage.path(),
+            Err("index <unavailable> & unreadable"),
+        )
+        .unwrap();
+        let actual =
+            std::fs::read_to_string(stage.path().join(harness.agent_instructions_file())).unwrap();
+        assert!(actual.contains("index unavailable: index &lt;unavailable&gt; &amp; unreadable"));
+        assert!(actual.contains(mj_core::project_memory::MEMORY_GUIDANCE));
+    }
+}
