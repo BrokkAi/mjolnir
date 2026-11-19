@@ -359,8 +359,12 @@ def phase(binary, root, cache, log):
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
     rec["exit"] = server.stop()
     if cancelled():
-        # Torn down; now stop the batch before any checkout or another index launch.
-        raise Cancelled("cancelled; this phase's server was torn down")
+        # Torn down. Keep what was measured (the peak and OOM result are why an operator stops
+        # a growing index); the caller stops the batch before any checkout or another launch.
+        rec.update(server.sample)
+        rec.update(ready=False, cancelled=True)
+        rec.setdefault("error", "cancelled by the operator; the server was torn down")
+        return rec
     if rec.get("ready") and rec["exit"] != 0:
         # A crash or kill after the ready reply can leave the cache half-persisted: the pair
         # isn't a valid cold/warm measurement.
@@ -379,12 +383,36 @@ def phase(binary, root, cache, log):
     return rec
 
 
+def _end_git_scope(unit, proc, what):
+    """Stop a git call's scope and prove its tree gone (the same check as a server's
+    teardown). Runs on every path out of git(); anything unproven is TeardownUnconfirmed."""
+    try:
+        stopped = run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True, text=True)
+        if proc.poll() is None:
+            # The scope may not exist yet if systemd-run is still registering it: kill the
+            # launcher too. With --scope it execs in place, so this pid is the launcher before
+            # exec and git after it; either way nothing starts later.
+            proc.kill()
+            proc.communicate(timeout=STOP_SECONDS)
+        deadline = time.monotonic() + STOP_SECONDS
+        while True:
+            gone, detail = scope_tree_gone(f"{unit}.scope")
+            if gone:
+                return
+            if time.monotonic() > deadline:
+                raise TeardownUnconfirmed(f"{unit}.scope not confirmed empty after git {what} "
+                                          f"({detail}; stop exit {stopped.returncode})")
+            time.sleep(1)
+    except TeardownUnconfirmed:
+        raise
+    except BaseException as e:  # a timeout or bus error leaves the scope unaccounted for: halt
+        raise TeardownUnconfirmed(f"{unit}.scope: teardown failed after git {what}: {e!r}") from e
+
+
 def git(*args, cwd=None):
-    """Run git, but stop it if the batch is cancelled: a long clone or fetch mustn't delay
-    cancellation, and nothing launches after it (phase() checks the flag first)."""
-    # Its own systemd scope, like a server: cancelling stops git and its transport and
-    # index-pack children, and a git left by a killed driver is reaped (and proven gone) by
-    # the next run before it touches the clone or worktree.
+    """Run git in its own systemd scope, like a server: cancelling stops git and its transport
+    and index-pack children, every exit path proves the scope empty before anything else runs,
+    and a git left by a killed driver is reaped by the next run before it touches files."""
     if cancelled():  # no further git mutation (worktree add, checkout) once cancelled
         raise Cancelled(f"cancelled before git {args[0]}")
     unit = f"rql-git-{os.getpid()}-{time.monotonic_ns()}"
@@ -394,52 +422,24 @@ def git(*args, cwd=None):
                              # No hooks either: a post-checkout hook could leave a job behind.
                              "git", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
                              "-c", "core.hooksPath=/dev/null", *args],
-                            cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            pass_fds=HOST_LOCK_FDS)
-    while True:
-        try:
-            out, err = proc.communicate(timeout=1)
-            break
-        except subprocess.TimeoutExpired:
-            if cancelled():
-                try:
-                    stopped = run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"],
-                                          capture_output=True, text=True)
-                    # The scope may not exist yet if systemd-run is still registering it: kill the
-                    # launcher too. With --scope it execs in place, so this pid is the launcher
-                    # before exec and git after it; either way nothing starts later.
-                    proc.kill()
-                    proc.communicate(timeout=STOP_SECONDS)
-                    deadline = time.monotonic() + STOP_SECONDS
-                    while True:  # the same proof as a server's teardown
-                        gone, detail = scope_tree_gone(f"{unit}.scope")
-                        if gone:
-                            break
-                        if time.monotonic() > deadline:
-                            raise TeardownUnconfirmed(f"{unit}.scope not confirmed stopped ({detail}; stop "
-                                                      f"exit {stopped.returncode})")
-                        time.sleep(1)
-                except TeardownUnconfirmed:
-                    raise
-                except BaseException as e:
-                    raise TeardownUnconfirmed(f"{unit}.scope: git teardown failed: {e!r}") from e
-                raise Cancelled(f"cancelled during git {args[0]}")
-    # git exiting (or its pipes closing) doesn't prove its scope is empty: stop the scope and
-    # prove it gone, with the same check as a server, before anything else runs.
+                            cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", pass_fds=HOST_LOCK_FDS)
+    out = err = ""
+    failure = None
     try:
-        run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
-        deadline = time.monotonic() + STOP_SECONDS
         while True:
-            gone, detail = scope_tree_gone(f"{unit}.scope")
-            if gone:
+            try:
+                out, err = proc.communicate(timeout=1)
                 break
-            if time.monotonic() > deadline:
-                raise TeardownUnconfirmed(f"{unit}.scope not confirmed empty after git {args[0]} ({detail})")
-            time.sleep(1)
-    except TeardownUnconfirmed:
-        raise
-    except BaseException as e:  # a timeout or bus error leaves the scope unaccounted for: halt
-        raise TeardownUnconfirmed(f"{unit}.scope: teardown check failed after git {args[0]}: {e!r}") from e
+            except subprocess.TimeoutExpired:
+                if cancelled():
+                    failure = Cancelled(f"cancelled during git {args[0]}")
+                    break
+    except BaseException as e:  # any failure reading git still tears its scope down first
+        failure = e
+    _end_git_scope(unit, proc, args[0])
+    if failure is not None:
+        raise failure
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
     return out.strip()
@@ -610,12 +610,16 @@ def main():
             shutil.rmtree(cache, ignore_errors=True)
             cache.mkdir(parents=True)
             rec["cold"] = phase(binary, wt, cache, out / f"{repo}.cold.log")
+            if rec["cold"].get("cancelled"):
+                raise Cancelled("cancelled during the cold index")
             if rec["cold"].get("ready"):
                 # The head checkout serves only the warm phase: after a measured cold failure it's
                 # skipped, so a checkout problem can't replace that result with a setup error.
                 git("checkout", "-q", "--detach", head, cwd=wt)
                 rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
                 rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
+                if rec["warm_restart"].get("cancelled"):
+                    raise Cancelled("cancelled during the warm index")
             else:  # a warm restart on a failed cold cache measures nothing usable
                 rec["warm_restart"] = {"ready": False, "skipped": "cold index failed"}
         except Exception as e:
