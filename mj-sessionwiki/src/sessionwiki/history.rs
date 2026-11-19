@@ -61,7 +61,7 @@ fn resolve(
     }
     match rows.len() {
         0 if ownership.is_known_top_level(id) => {
-            bail!("session {id:?} exists but is not indexed yet")
+            bail!("session {id:?} exists but is not in the index")
         }
         0 => bail!("session {id:?} was not found in the index"),
         1 => Ok(rows.remove(0)),
@@ -448,7 +448,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string(),
-            "session \"fresh\" exists but is not indexed yet"
+            "session \"fresh\" exists but is not in the index"
         );
         let evidence = mj_core::history::BlameEvidence {
             repository: "/src/project".into(),

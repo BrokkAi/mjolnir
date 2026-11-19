@@ -25,7 +25,7 @@ struct PreparedFiles {
 pub(super) struct Snapshot {
     child_session_ids: BTreeSet<String>,
     child_native_ids: BTreeSet<String>,
-    /// Top-level sessions Mjolnir records, whether or not they are indexed yet.
+    /// Top-level sessions Mjolnir records, whether or not they are indexed.
     top_level_session_ids: BTreeSet<String>,
 }
 
