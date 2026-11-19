@@ -869,11 +869,15 @@ async fn reconcile_profile_observed(
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
     };
-    if let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync)
-        && profile.refresh(runtime, target, log.cause.is_some()).await
-        && log.targeted
-    {
-        profile.send(PassEvent::Pulled(target.profile_id.clone()));
+    // The reading this pass took, which an authentication failure's session
+    // is delivered and judged against (see `SessionCanonical::pinned`).
+    let mut own_login = None;
+    if let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync) {
+        let (changed, published) = profile.refresh(runtime, target, log.cause.is_some()).await;
+        own_login = published.filter(|_| log.cause.is_some());
+        if changed && log.targeted {
+            profile.send(PassEvent::Pulled(target.profile_id.clone()));
+        }
     }
     for target in targets
         .iter()
@@ -949,6 +953,7 @@ async fn reconcile_profile_observed(
         login: &login,
         profile,
         triggered_by,
+        own_login: own_login.as_ref(),
     };
     // Use the profile's one AWS export. A
     // role-scoped session's AWS credentials are installed by its own
@@ -1279,6 +1284,8 @@ struct PassContext<'a> {
     login: &'a PassLogin,
     profile: &'a Arc<ProfileLogin>,
     triggered_by: Option<&'a str>,
+    /// The login this pass read, set only for an authentication-triggered pass.
+    own_login: Option<&'a Arc<CanonicalLogin>>,
 }
 
 /// What reconciling one session in one pass found.
@@ -1359,6 +1366,7 @@ async fn reconcile_target(
         login,
         profile,
         triggered_by,
+        own_login,
     } = context;
     // Keep the delivery result ordered with the next attempt on this session;
     // the actor itself releases the AWS/relay turn before handing us its result.
@@ -1389,6 +1397,11 @@ async fn reconcile_target(
             HostLogins {
                 slopcop: slopcop_login,
                 harness: login,
+                // The session whose failure asked for this pass is delivered,
+                // and judged against, the reading the pass took.
+                pinned: own_login
+                    .filter(|_| *triggered_by == Some(target.session_id.as_str()))
+                    .cloned(),
             },
             JobHold::new(None, runtime.cloned()),
         )
@@ -2347,6 +2360,8 @@ impl LoginAccess {
 pub(super) struct HostLogins<'a> {
     pub(super) slopcop: &'a HostSlopcopLogin,
     pub(super) harness: &'a PassLogin,
+    /// See [`SessionCanonical::pinned`].
+    pub(super) pinned: Option<Arc<CanonicalLogin>>,
 }
 
 /// Where a pass finds the profile's login. Decided once per pass, from
@@ -2419,53 +2434,26 @@ impl ProfileLogin {
         }
     }
 
+    /// Read the profile's login and publish it. Returns whether it changed,
+    /// and the reading this call published, so the pass that took it can keep
+    /// using that very reading however many other passes publish after it.
     pub(super) async fn refresh(
         &self,
         runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
         under_lock: bool,
-    ) -> bool {
+    ) -> (bool, Option<Arc<CanonicalLogin>>) {
         let _decision = self.decide.lock().await;
         let before = self.for_target(target).ok();
         let login = self.read(target, under_lock).await;
         if runtime.is_some_and(|runtime| !runtime.credential_profile_source_is_current(target)) {
-            return false;
+            return (false, None);
         }
         let changed = before.as_ref().map(|before| &before.credential)
             != login.as_ref().ok().map(|after| &after.credential);
-        self.publish(login);
-        changed && before.is_some()
-    }
-
-    /// Publish a new reading as the profile's login. Reading the same bytes
-    /// again without the native lock adds nothing to what a locked reading
-    /// showed (this exact login was current at a moment after the failure),
-    /// so it keeps that evidence; different bytes replace the reading, flag
-    /// included. Callers hold `decide`, so readings are published in the order
-    /// they were taken and an older login never replaces a newer one here.
-    fn publish(&self, login: Result<Arc<CanonicalLogin>, String>) {
-        self.current.send_modify(|current| {
-            let login = match (login, current.take()) {
-                (Ok(new), Some(Ok(old)))
-                    if old.read_under_lock && !new.read_under_lock && old.bytes == new.bytes =>
-                {
-                    let mut kept = Arc::unwrap_or_clone(new);
-                    kept.read_under_lock = true;
-                    Ok(Arc::new(kept))
-                }
-                (login, _) => login,
-            };
-            *current = Some(login);
-        });
-    }
-
-    /// Whether the snapshot the next job will use was read under the native
-    /// lock. `None` when there is no snapshot for the target.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(super) fn snapshot_read_under_lock(&self, target: &CredentialSyncTarget) -> Option<bool> {
-        self.for_target(target)
-            .ok()
-            .map(|login| login.read_under_lock)
+        let published = login.as_ref().ok().cloned();
+        self.current.send_replace(Some(login));
+        (changed && before.is_some(), published)
     }
 
     /// The profile's login for this pass, read once: the pass delivers it and
@@ -2587,8 +2575,8 @@ impl ProfileLogin {
         if installed.installed || installed.snapshot != login.credential {
             // A pull and the host's own concurrent renewal both invalidate the
             // deliveries selected against the previous generation.
-            let login = self.read(target, false).await;
-            self.publish(login);
+            self.current
+                .send_replace(Some(self.read(target, false).await));
             self.send(PassEvent::Pulled(target.profile_id.clone()));
         }
         Ok(installed)
@@ -2642,6 +2630,11 @@ fn read_canonical_login(
 pub(super) struct SessionCanonical {
     profile: Option<Arc<ProfileLogin>>,
     pub(super) login: Result<Arc<CanonicalLogin>, String>,
+    /// The reading an authentication-triggered pass took at its start. The
+    /// session that failed is delivered it, and its failure is judged against
+    /// it, instead of whatever another pass has published since: the evidence
+    /// that it was read under the native lock belongs to this failure only.
+    pub(super) pinned: Option<Arc<CanonicalLogin>>,
     pub(super) skills: Arc<CanonicalSkills>,
     pub(super) github: GithubSync,
     pub(super) aws: AwsSync,
@@ -2662,6 +2655,7 @@ impl SessionCanonical {
             } else {
                 read_canonical_login(target, login).map_err(|error| format!("{error:#}"))
             },
+            pinned: None,
             profile: match login {
                 PassLogin::Shared(owner) => Some(owner.clone()),
                 _ => None,
@@ -2699,6 +2693,7 @@ pub(super) async fn reconcile_session(
 ) -> Result<Option<SessionSync>> {
     let mut canonical =
         SessionCanonical::read(target, skills.clone(), github.clone(), host.harness);
+    canonical.pinned = host.pinned.clone();
     canonical.aws = aws.clone();
     canonical.slopcop_login = host.slopcop.clone();
     run_on_session(relays, target, SyncWork::Full(Box::new(canonical)), hold).await
@@ -2832,22 +2827,30 @@ pub(super) async fn reconcile_on(
     // Profiles without a harness login file already receive credentials
     // through their environment or target credential chain.
     if !target.skips_login_file_sync {
-        let fresh = canonical.profile.as_ref().map(|owner| {
-            owner
-                .for_target(target)
-                .map_err(|error| format!("{error:#}"))
-        });
+        let fresh = match &canonical.pinned {
+            Some(pinned) => Some(Ok(pinned.clone())),
+            None => canonical.profile.as_ref().map(|owner| {
+                owner
+                    .for_target(target)
+                    .map_err(|error| format!("{error:#}"))
+            }),
+        };
         match fresh.as_ref().unwrap_or(&canonical.login) {
             Ok(login) => {
-                // Only a Claude login read under the native lock can say
-                // whether a rejected token was the profile's current one: a
-                // renewal in progress would otherwise make the old login look
-                // refused. The evidence travels with the snapshot delivered
-                // here, never with whatever another pass published since.
-                *current_access_token = (target.harness != mj_core::config::HarnessKind::Claude
-                    || login.read_under_lock)
-                    .then(|| mj_core::credentials::claude_access_token_fingerprint(&login.bytes))
-                    .flatten();
+                // Only a Claude login that this failure's own pass read under
+                // the native lock can say whether the rejected token was the
+                // profile's current one: a renewal in progress would
+                // otherwise make the old login look refused. The reading is
+                // the pass's own (`pinned`), so another pass's unlocked
+                // reading cannot erase the evidence and an earlier failure's
+                // locked reading cannot stand in for a timed-out one.
+                *current_access_token = canonical
+                    .pinned
+                    .as_ref()
+                    .filter(|pinned| pinned.read_under_lock)
+                    .and_then(|pinned| {
+                        mj_core::credentials::claude_access_token_fingerprint(&pinned.bytes)
+                    });
                 match reconcile_credentials(
                     client,
                     target,

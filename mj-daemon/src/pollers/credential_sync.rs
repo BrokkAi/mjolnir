@@ -169,10 +169,10 @@ impl CredentialSyncNotices {
     pub fn notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        harness: Option<mj_core::config::HarnessKind>,
+        _harness: Option<mj_core::config::HarnessKind>,
         state: &State,
     ) -> Option<String> {
-        self.leveled_notice(result, state, harness, None)
+        self.leveled_notice(result, state, None)
             .map(|notice| notice.text)
     }
 
@@ -183,7 +183,6 @@ impl CredentialSyncNotices {
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
         state: &State,
-        harness: Option<mj_core::config::HarnessKind>,
         login_verdict: Option<&LoginFailureVerdict>,
     ) -> Option<CredentialNotice> {
         let warning = |text: String| CredentialNotice {
@@ -205,16 +204,8 @@ impl CredentialSyncNotices {
                 let profile = &result.profile_id;
                 // The person hears what nothing else will resolve: a refused
                 // login, a reconciliation that failed, or a cause that stays
-                // unknown while no new login reached the session. A stale
-                // login that was or will be replaced by the renewed one needs
-                // nothing from them, and neither does an unknown cause once a
-                // new login was pushed to a worker that retries the turn by
-                // itself. Only a Claude worker that recorded the failed
-                // turn's login does (`authentication_retry_intent` in
-                // mj-worker); any other session needs the person to retry.
-                let worker_retries = harness == Some(mj_core::config::HarnessKind::Claude)
-                    && trigger.login_fingerprint.is_some()
-                    && result.pushed_to(session_id);
+                // unknown. A stale login that was or will be replaced by the
+                // renewed one needs nothing from them.
                 let conclusion = match login_verdict {
                     Some(LoginFailureVerdict::Refused) => format!(
                         "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`."
@@ -235,14 +226,6 @@ impl CredentialSyncNotices {
                             profile_id = %profile,
                             session_id = %session_id,
                             "the session failed on a stale login. The profile's login has since been renewed."
-                        );
-                        return None;
-                    }
-                    Some(LoginFailureVerdict::Unrefused { reason }) if worker_retries => {
-                        tracing::info!(
-                            profile_id = %profile,
-                            session_id = %session_id,
-                            "a refusal of the profile's current login was not established: {reason}."
                         );
                         return None;
                     }
@@ -268,7 +251,20 @@ impl CredentialSyncNotices {
             {
                 return None;
             }
-            return Some(warning(if result.pushed_to(session_id) {
+            // Either kind of replaced credentials is worth a retry.
+            let replaced = result.outcomes.iter().any(|outcome| {
+                outcome.session_id == *session_id
+                    && outcome.outcome.as_ref().is_ok_and(|actions| {
+                        actions.iter().any(|action| {
+                            matches!(
+                            action,
+                            mj_core::credentials::CredentialSyncAction::Pushed
+                                | mj_core::credentials::CredentialSyncAction::AwsCredentialsPushed
+                        )
+                        })
+                    })
+            });
+            return Some(warning(if replaced {
                 format!(
                     "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
                     session, result.profile_id

@@ -633,7 +633,6 @@ impl Policy {
             let notice = self.notices.leveled_notice(
                 &result,
                 &self.state.owner().controller().state,
-                profile.as_ref().map(|profile| profile.kind),
                 verdict.as_ref(),
             );
             if let Some(notice) = notice {

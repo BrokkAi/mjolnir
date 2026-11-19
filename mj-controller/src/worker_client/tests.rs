@@ -1368,6 +1368,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             credential_sync::HostLogins {
                 slopcop: &credential_sync::HostSlopcopLogin::Unknown,
                 harness: &credential_sync::PassLogin::PerSession,
+                pinned: None,
             },
             credential_sync::JobHold::new(None, None),
         )
@@ -2269,6 +2270,7 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                 credential_sync::HostLogins {
                     slopcop: &credential_sync::HostSlopcopLogin::Unknown,
                     harness: &credential_sync::PassLogin::PerSession,
+                    pinned: None,
                 },
                 credential_sync::JobHold::new(None, None),
             )
@@ -2803,6 +2805,7 @@ async fn mac_sync_pass(
         credential_sync::HostLogins {
             slopcop: &credential_sync::HostSlopcopLogin::Unknown,
             harness: &pass,
+            pinned: None,
         },
         credential_sync::JobHold::new(None, None),
     )
@@ -5368,43 +5371,87 @@ async fn a_renewed_login_reaches_a_session_whatever_background_work_holds_it() {
     channels.shutdown.shutdown().await.unwrap();
 }
 
-// Hard-won: #1600: an unlocked reading of the same login erased the native-lock evidence
-// macOS keeps a Claude login in the Keychain, not in the profile home.
+/// Reconcile one Claude session against the profile's shared login, the way
+/// the triggering session of an authentication-failure pass is: `pinned` is
+/// the reading that pass took.
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn judged_token(
+    profile: &Arc<credential_sync::ProfileLogin>,
+    target: &CredentialSyncTarget,
+    pinned: Option<Arc<credential_sync::CanonicalLogin>>,
+) -> Option<String> {
+    let skills = Arc::new(CanonicalSkills::collect(target));
+    let pass = credential_sync::PassLogin::Shared(profile.clone());
+    reconcile_session(
+        &SessionRelays::Direct,
+        target,
+        &skills,
+        &credential_sync::GithubSync::Known(None),
+        &credential_sync::AwsSync::Unmanaged,
+        credential_sync::HostLogins {
+            slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+            harness: &pass,
+            pinned,
+        },
+        credential_sync::JobHold::new(None, None),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .current_access_token
+}
+
+/// A Claude profile whose host login is on disk and whose session holds an
+/// older copy.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn claude_profile_and_target(
+    scratch: &std::path::Path,
+) -> (
+    Arc<credential_sync::ProfileLogin>,
+    CredentialSyncTarget,
+    String,
+) {
+    let host = claude_login(5_000_000_000_000, "access-host", Some("refresh-host"));
+    std::fs::write(scratch.join(".credentials.json"), &host).unwrap();
+    let session = claude_login(1_000, "access-old", None);
+    let target = claude_sync_target(scratch, SESSION_ID, &session, &scratch.join("received"));
+    let fingerprint = mj_core::credentials::claude_access_token_fingerprint(&host).unwrap();
+    (
+        Arc::new(credential_sync::ProfileLogin::new(None, Default::default())),
+        target,
+        fingerprint,
+    )
+}
+
+// Hard-won: #1600: lock evidence from an earlier failure was reused for a later one
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unlocked_reading_of_the_same_login_keeps_the_native_lock_evidence() {
-    let home = tempfile::tempdir().unwrap();
-    let login = |token: &str| {
-        format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"refresh","expiresAt":4000000000000}}}}"#
-        )
-    };
-    let credentials = home.path().join(".credentials.json");
-    std::fs::write(&credentials, login("first")).unwrap();
-    let mut target = codex_sync_target(
-        home.path(),
-        SESSION_ID,
-        "2026-09-25T20:00:00Z",
-        &home.path().join("received"),
-    );
-    target.harness = mj_core::config::HarnessKind::Claude;
-    let profile = credential_sync::ProfileLogin::new(None, Default::default());
+async fn an_earlier_failures_lock_evidence_never_judges_a_later_failure() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (profile, target, _) = claude_profile_and_target(scratch.path());
+    // An earlier failure's pass read the login under the lock.
+    let (_, earlier) = profile.refresh(None, &target, true).await;
+    assert!(earlier.is_some());
+    // A later failure's locked read timed out, so its pass fell back to a
+    // plain reading of the same login: it is unknown, whatever the earlier
+    // pass found.
+    let (_, later) = profile.refresh(None, &target, false).await;
+    assert_eq!(judged_token(&profile, &target, later).await, None);
+}
 
-    // An authentication-triggered pass reads under the lock; a routine pass
-    // then reads the same bytes without it.
-    profile.refresh(None, &target, true).await;
-    assert_eq!(profile.snapshot_read_under_lock(&target), Some(true));
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failures_verdict_uses_its_own_locked_reading_not_a_later_unlocked_one() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (profile, target, fingerprint) = claude_profile_and_target(scratch.path());
+    let (_, own) = profile.refresh(None, &target, true).await;
+    // Another pass publishes an unlocked reading of the same login first.
     profile.refresh(None, &target, false).await;
     assert_eq!(
-        profile.snapshot_read_under_lock(&target),
-        Some(true),
-        "the unlocked reading erased the evidence"
+        judged_token(&profile, &target, own).await,
+        Some(fingerprint),
+        "another pass's reading erased the pass's own lock evidence"
     );
-
-    // A different login replaces the reading, flag included.
-    std::fs::write(&credentials, login("second")).unwrap();
-    profile.refresh(None, &target, false).await;
-    assert_eq!(profile.snapshot_read_under_lock(&target), Some(false));
 }
 
 // Hard-won: #1581: a slow credential RPC delayed delivery to all later sessions.

@@ -2278,7 +2278,7 @@ fn github_tokens_sync_to_every_session_target() {
 }
 
 #[test]
-fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
+fn a_stale_login_stays_quiet_and_every_other_auth_failure_reaches_the_person() {
     use mj_core::config::{HarnessKind, HarnessProfile};
     use mj_core::credentials::{
         CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, RejectedLogins,
@@ -2310,7 +2310,7 @@ fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
         registry.accept(&result.profile_id, result.trigger.as_ref().unwrap());
         let verdict = registry.conclude(result, Some(&profile));
         CredentialSyncNotices::default()
-            .leveled_notice(result, &State::default(), Some(harness), verdict.as_ref())
+            .leveled_notice(result, &State::default(), verdict.as_ref())
             .map(|notice| notice.text)
     };
     let claude = notice(&result, HarnessKind::Claude).unwrap();
@@ -2331,41 +2331,21 @@ fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
     stale.outcomes[0].current_access_token = Some("renewed-token".into());
     assert_eq!(notice(&stale, HarnessKind::Claude), None);
 
-    // The host login could not be read under the native lock, so the failed
-    // login stays unidentified and no new login reached the session: the
-    // worker has nothing to retry with, so the person hears of it.
+    // A cause that stays unknown always reaches the person, whatever was
+    // pushed (nothing, the login, or only AWS credentials): no refusal was
+    // established, and nothing here knows the worker will retry.
     let mut unidentified = result.clone();
     unidentified.outcomes[0].current_access_token = None;
-    let unknown = notice(&unidentified, HarnessKind::Claude).unwrap();
-    assert!(unknown.contains("was not established"), "{unknown}");
-    assert!(!unknown.contains("mj login"), "{unknown}");
-
-    // The same unknown cause after a new login was pushed resolves itself:
-    // the worker retries the turn with the new login.
-    let mut delivered = unidentified.clone();
-    delivered.outcomes[0].outcome = Ok(vec![mj_core::credentials::CredentialSyncAction::Pushed]);
-    assert_eq!(notice(&delivered, HarnessKind::Claude), None);
-
-    // Only AWS credentials were pushed: the worker still holds the rejected
-    // login and has nothing to retry with.
-    let mut aws_only = unidentified.clone();
-    aws_only.outcomes[0].outcome = Ok(vec![
-        mj_core::credentials::CredentialSyncAction::AwsCredentialsPushed,
-    ]);
-    let aws_only = notice(&aws_only, HarnessKind::Claude).unwrap();
-    assert!(aws_only.contains("was not established"), "{aws_only}");
-
-    // A worker that cannot retry by itself still needs the person: Codex has
-    // no authentication retry, and a Claude turn that recorded no login
-    // fingerprint gives the worker nothing to compare the new login with.
-    let codex_delivered = notice(&delivered, HarnessKind::Codex).unwrap();
-    assert!(
-        codex_delivered.contains("was not established"),
-        "{codex_delivered}"
-    );
-    let mut unfingerprinted = delivered.clone();
-    unfingerprinted.trigger.as_mut().unwrap().login_fingerprint = None;
-    assert!(notice(&unfingerprinted, HarnessKind::Claude).is_some());
+    for pushed in [
+        Vec::new(),
+        vec![mj_core::credentials::CredentialSyncAction::Pushed],
+        vec![mj_core::credentials::CredentialSyncAction::AwsCredentialsPushed],
+    ] {
+        unidentified.outcomes[0].outcome = Ok(pushed);
+        let unknown = notice(&unidentified, HarnessKind::Claude).unwrap();
+        assert!(unknown.contains("was not established"), "{unknown}");
+        assert!(!unknown.contains("mj login"), "{unknown}");
+    }
 
     // A failed check cannot establish that signing in again will help.
     let failed = CredentialSyncResult {
@@ -2411,6 +2391,17 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
     assert!(notice.contains("returned no response"), "{notice}");
     assert!(notice.contains("were pushed"), "{notice}");
     assert!(!notice.contains("Auth failure"), "{notice}");
+
+    // Replacing only AWS credentials is also worth a retry.
+    let mut aws_only = result.clone();
+    aws_only.outcomes[0].outcome = Ok(vec![CredentialSyncAction::AwsCredentialsPushed]);
+    let notice = CredentialSyncNotices::default()
+        .notice(&aws_only, None, &State::default())
+        .unwrap();
+    assert!(
+        notice.contains("were pushed") && notice.contains("Retry the prompt"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -2430,7 +2421,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         partial: false,
     };
     let leveled = CredentialSyncNotices::default()
-        .leveled_notice(&result, &State::default(), None, None)
+        .leveled_notice(&result, &State::default(), None)
         .unwrap();
     assert!(!leveled.routine, "a failed sync stays a warning");
     let notice = leveled.text;
@@ -3207,7 +3198,6 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             .leveled_notice(
                 result,
                 &state,
-                Some(mj_core::config::HarnessKind::Claude),
                 Some(&mj_core::credentials::LoginFailureVerdict::Refused),
             )
             .unwrap()
