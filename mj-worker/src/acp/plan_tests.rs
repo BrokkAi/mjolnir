@@ -696,6 +696,7 @@ impl PlanProbe {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -714,7 +715,6 @@ impl PlanProbe {
             harness,
             execution_policy: policy,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -1511,10 +1511,8 @@ async fn unconstrained_tool_permissions_are_auto_approved_for_every_harness() {
             assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
             assert_eq!(answer["result"]["outcome"]["optionId"], expected);
         }
-        assert!(
-            probe.answer("tool-permission-1").await.is_err(),
-            "auto-approval must not leave a pending form"
-        );
+        // Published form events below reveal any accidental pending approval;
+        // answering an invented ID would only prove that ID is absent.
         probe.close().await;
         while let Ok(event) = probe.events.try_recv() {
             assert!(
@@ -1552,7 +1550,6 @@ async fn unconstrained_permission_without_allow_reports_error_without_waiting() 
                 .unwrap()
                 .contains("without offering an allow response")
         );
-        assert!(probe.answer("tool-permission-1").await.is_err());
         probe.close().await;
         let mut warned = false;
         while let Ok(event) = probe.events.try_recv() {
@@ -1766,12 +1763,129 @@ async fn a_non_plan_permission_request_is_answered_by_the_user() {
     probe.close().await;
 }
 
+// Hard-won: ebb2e9611: a late old bridge resolution cancelled a reused permission ID.
+#[tokio::test]
+async fn permission_ids_survive_bridge_restart_without_consuming_the_new_question() {
+    use mj_core::relay::{RelayCommand, RelayObservation};
+    let root = tempfile::tempdir().unwrap();
+    let mut relay =
+        crate::relay::DurableRelay::open(root.path(), "permission-restart", "test").unwrap();
+    relay
+        .append_relay_event(
+            Some("original-permission-turn"),
+            RelayObservation::CommandQueued {
+                command_id: "original-permission-turn".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("run tests")],
+                },
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandStarted {
+            command_id: "original-permission-turn".into(),
+            started_at_ms: 2,
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    let ask = async |probe: &mut PlanProbe| {
+        probe
+            .send(json!({
+                "jsonrpc":"2.0", "id":"permission-ask", "method":"session/request_permission",
+                "params": {"sessionId":"plan-session", "toolCall": {
+                    "toolCallId":"execute-test", "kind":"execute", "title":"cargo test"
+                }, "options":[{"optionId":"allow", "name":"Allow", "kind":"allow_once"},
+                    {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]}
+            }))
+            .await;
+        loop {
+            if let RuntimeEvent::ElicitationRequested { request } = probe.event().await {
+                break request;
+            }
+        }
+    };
+    let mut first = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    let old = ask(&mut first).await;
+    relay
+        .record_observation(RelayObservation::ElicitationRequested {
+            request: old.clone(),
+        })
+        .unwrap();
+    first.driver.abort();
+    assert!((&mut first.driver).await.unwrap_err().is_cancelled());
+    drop(first);
+    relay
+        .record_command_interrupted(
+            "original-permission-turn",
+            mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+            "bridge died",
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    let continued = relay.claim_pending_commands(true).unwrap()[0]
+        .command_id
+        .clone();
+
+    let mut second = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    let new = ask(&mut second).await;
+    assert_ne!(
+        old.id, new.id,
+        "each bridge's first permission is a different journal identity"
+    );
+    relay
+        .record_observation(RelayObservation::ElicitationRequested {
+            request: new.clone(),
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationResolved {
+            elicitation_id: old.id.clone(),
+            action: "cancel".into(),
+            reply: None,
+        })
+        .unwrap();
+    assert_eq!(relay.operational_state().cancelling_prompt_id, None);
+    assert!(
+        second
+            .answer_with(&old.id, ElicitationResponse::Cancel)
+            .await
+            .is_err()
+    );
+    // The old response did not consume the new durable question either.
+    relay
+        .record_observation(RelayObservation::ElicitationResolved {
+            elicitation_id: new.id.clone(),
+            action: "cancel".into(),
+            reply: None,
+        })
+        .unwrap();
+    assert_eq!(
+        relay.operational_state().cancelling_prompt_id.as_deref(),
+        Some(continued.as_str())
+    );
+    second
+        .answer_with(&new.id, ElicitationResponse::Decline)
+        .await
+        .unwrap();
+    assert_eq!(second.message().await["id"], "permission-ask");
+    second.close().await;
+}
+
 /// ACP keeps `cancelled` for a cancelled turn. Skip rejects the tool call
 /// alone: it selects the first one-time rejection, here codex-acp's "No,
 /// continue without running it", and the turn keeps running. A request with
 /// no one-time rejection offers no Skip. Cancel stops the turn, so the agent
 /// receives `session/cancel` before its request is answered `cancelled`.
 // Hard-won: #1313: Skip and Cancel on a permission form both told the agent its turn was cancelled.
+// Hard-won: 00050db89: user permission Cancel and bridge withdrawal need distinct durable actions.
 #[tokio::test]
 async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     let mut probe = PlanProbe::with_harness(
@@ -1866,6 +1980,26 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     assert_eq!(answer["id"], "network-ask");
     assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
 
+    // A harness withdrawal is not a user stop and must not poison restart recovery.
+    let withdrawn = ask(&mut probe, "withdraw-ask", &codex_options).await;
+    probe.send(json!({"jsonrpc":"2.0", "method":"$/cancel_request", "params":{"requestId":"withdraw-ask"}})).await;
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "withdraw-ask");
+    assert_eq!(answer["result"]["outcome"], json!({"outcome":"cancelled"}));
+    loop {
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            ..
+        } = probe.event().await
+            && elicitation_id == withdrawn.id
+        {
+            assert_eq!(action, "closed");
+            break;
+        }
+    }
+    probe.no_finish().await;
+
     let form = ask(&mut probe, "cancel-ask", &codex_options).await;
     probe
         .answer_with(&form.id, ElicitationResponse::Cancel)
@@ -1876,6 +2010,19 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     let answer = probe.message().await;
     assert_eq!(answer["id"], "cancel-ask");
     assert_eq!(answer["result"]["outcome"], json!({"outcome": "cancelled"}));
+    loop {
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            reply,
+        } = probe.event().await
+            && elicitation_id == form.id
+        {
+            assert_eq!(action, "cancel");
+            assert!(reply.is_none());
+            break;
+        }
+    }
     probe
         .result(&prompt, json!({"stopReason": "cancelled"}))
         .await;

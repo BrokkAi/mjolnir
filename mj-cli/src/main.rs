@@ -6,6 +6,7 @@
 //! feeds both of them read, and [`import`] session adoption.
 
 // glibc retained tens of GiB of freed heap across the daemon's session tasks.
+// jemalloc also replaces `malloc` for C code (see the Cargo.toml feature).
 #[cfg(target_os = "linux")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -15,9 +16,9 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 // arena, so freed memory sat in partly used slabs across ~260 arenas (measured
 // 2026-11-12: 380 MB of slab fragmentation and 198 MB of metadata against
 // 1.6 GB live). The daemon averages under one core, so a few arenas do not
-// contend. `_RJEM_MALLOC_CONF` still overrides this per process.
+// contend. `MALLOC_CONF` still overrides this per process.
 #[cfg(target_os = "linux")]
-#[unsafe(export_name = "_rjem_malloc_conf")]
+#[unsafe(export_name = "malloc_conf")]
 static JEMALLOC_CONF: Option<&'static std::ffi::c_char> = Some(unsafe { &*c"narenas:8".as_ptr() });
 
 mod acp;
@@ -30,7 +31,6 @@ mod go;
 mod hints;
 mod import;
 mod logging;
-mod observe;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -118,8 +118,6 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
-    /// Inspect or export Mjolnir sessions for Brokk Observe.
-    Observe(observe::ObserveArgs),
     /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
     Ec2(ec2::Ec2Args),
     /// Rerun agent and repository discovery, preserving existing configuration.
@@ -894,7 +892,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
-        Some(Command::Observe(_)) => "observe",
         Some(Command::Ec2(_)) => "ec2",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
@@ -1089,7 +1086,6 @@ async fn run_command(
             }
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
-        Some(Command::Observe(args)) => observe::run(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => {
             if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
                 return Ok(DashboardExit::Normal);

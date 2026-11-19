@@ -944,7 +944,7 @@ fn current_parent_projection(
     archived: Option<&CanonicalSessionSnapshot>,
 ) -> Result<CanonicalSessionSnapshot> {
     crate::database::load_materialized_session(session_id)?
-        .map(|materialized| mj_transcript::projection::canonical_session_from_materialized(&materialized))
+        .map(mj_transcript::projection::canonical_session_from_materialized_owned)
         .transpose()?.or_else(|| archived.cloned())
         .context("No durable parent relay state or recovery copy is available; files and children were kept. Supply a recovery copy and retry Resume.")
 }

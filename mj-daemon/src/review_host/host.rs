@@ -40,9 +40,10 @@ impl TurnReviewHost {
         runtime: super::environment::SharedReviewerRuntime,
     ) -> Self {
         Self::spawn_in_notifying(
-            control,
+            control.clone(),
             config,
             Arc::new(ControllerEnvironment {
+                manager: Some(control),
                 runtime,
                 background,
             }),

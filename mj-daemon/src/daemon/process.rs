@@ -423,7 +423,6 @@ pub(super) async fn run_daemon_runtime(
     // Before the web viewer starts: it shows this service's readings.
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
-    let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
     let notification_pruning = tokio::spawn(super::attention::prune_read_notifications(
         state.clone(),
         cancellation.clone(),
@@ -676,6 +675,11 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     ));
 
+    let mut alert_task = tokio::spawn(crate::daemon::push_delivery::run_alerts(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut alert_outcome = None;
     let mut cache_outcome = None;
     let mut mailbox_outcome = None;
     let mut github_watch_outcome = None;
@@ -708,6 +712,10 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut alert_task, &mut alert_outcome, &cancellation, "notification service") => {
                     result?;
                     break;
                 }
@@ -922,6 +930,17 @@ pub(super) async fn run_daemon_runtime(
                 .and_then(|result| result),
         },
     );
+    epilogue.record(
+        &mut outcome,
+        "join notification service",
+        match alert_outcome {
+            Some(result) => result,
+            None => alert_task
+                .await
+                .context("notification service failed")
+                .and_then(|result| result),
+        },
+    );
     // Recovery copies and worker upgrades do not hold up a handoff, so some
     // may still be running. Stop them first: the next daemon starts them again.
     // The coordinators share one gate, and dropping either cancels both.
@@ -1013,14 +1032,6 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join capacity service",
         capacity_service.await.map_err(anyhow::Error::new),
-    );
-    epilogue.record(
-        &mut outcome,
-        "join Brokk Observe delivery",
-        observe_delivery
-            .await
-            .context("Brokk Observe delivery task panicked")
-            .and_then(std::convert::identity),
     );
     epilogue.record(
         &mut outcome,

@@ -1,5 +1,9 @@
 use super::*;
 
+use mj_core::continuation::is_restart_continuation;
+#[cfg(test)]
+pub(super) use mj_core::continuation::restart_continuation_id;
+
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     if value.len() < 8
         || value.len() > 128
@@ -311,7 +315,7 @@ impl DurableRelay {
                 None,
             )));
         }
-        if validate_identifier(command_id, "command ID").is_err() {
+        if !mj_core::continuation::valid_command_id(command_id) {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidRequest,
                 "invalid command ID",
@@ -368,7 +372,7 @@ impl DurableRelay {
             // A journal append can succeed before snapshot persistence reports
             // an error. Retrying the durable command must resume any remaining
             // relay-local transition instead of merely echoing its first ACK.
-            if command.is_relay_local() {
+            if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
                 self.finish_relay_local_command(command_id)?;
             }
             return Ok(Ok(RelayResponsePayload::Accepted {
@@ -637,7 +641,8 @@ impl DurableRelay {
         // Stop is also accepted while Claude Code works on its own after a
         // background task: the cancel interrupts the running cycle, and that
         // cycle's result ends the turn (`claude_turn_result`). A Codex turn of
-        // this kind is a native goal, which has its own controls.
+        // this kind is a native goal, which has its own controls. An in-flight
+        // native resume is also a cancellable request, even without a prompt.
         let claude_harness_turn = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
             && self.snapshot.harness_turn.is_some();
         if let RelayCommand::Cancel = command
@@ -648,6 +653,15 @@ impl DurableRelay {
                 .as_ref()
                 .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
+            && !self.snapshot.dispatches.values().any(|dispatch| {
+                dispatch.state == RelayDispatchState::InFlight
+                    && matches!(
+                        dispatch.command,
+                        RelayCommand::GoalControl {
+                            action: mj_core::goal::GoalControlAction::Resume,
+                        }
+                    )
+            })
             && !claude_harness_turn
             && self
                 .snapshot
@@ -898,7 +912,7 @@ impl DurableRelay {
             },
         )?;
 
-        if command.is_relay_local() {
+        if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
             self.finish_relay_local_command(command_id)?;
         }
         self.promote_next_queued_command()?;
@@ -945,6 +959,22 @@ impl DurableRelay {
         Ok(None)
     }
 
+    // The durable target survives until the control completes, including
+    // a restart after the queued prompt was already terminalized.
+    pub(super) fn is_queued_recovery_cancel(&self, command_id: &str) -> bool {
+        self.snapshot.active_prompt.is_none()
+            && self
+                .snapshot
+                .cancelling_prompt_id
+                .as_deref()
+                .is_some_and(is_restart_continuation)
+            && self
+                .snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| matches!(dispatch.command, RelayCommand::CancelTurn))
+    }
+
     /// Finish a relay-local command from its durable dispatch record. This is
     /// deliberately restartable: every intermediate mutation is an event, so
     /// reopening the relay can resume after any append without duplicating or
@@ -961,6 +991,33 @@ impl DurableRelay {
             {
                 self.garbage_collect_relay_history()?;
             }
+            return Ok(());
+        }
+        if self.is_queued_recovery_cancel(command_id) {
+            let target = self
+                .snapshot
+                .cancelling_prompt_id
+                .clone()
+                .expect("cancel target exists");
+            if self.snapshot.handled_commands[&target]
+                .terminal_ordinal
+                .is_none()
+            {
+                self.record_command_interrupted(
+                    &target,
+                    mj_core::event_outcome::OutcomeReason::RequestedCancellation,
+                    "User cancelled queued restart recovery",
+                )?;
+            }
+            self.append_relay_event(
+                Some(command_id),
+                RelayObservation::CommandCompleted {
+                    command_id: command_id.to_owned(),
+                    command: Some(RelayCommandKind::CancelTurn),
+                    barrier_command_id: None,
+                    outcome: RelayCommandOutcome::Cancelled,
+                },
+            )?;
             return Ok(());
         }
         let dispatch = self
@@ -1215,7 +1272,11 @@ impl DurableRelay {
                 .dispatches
                 .get(command_id)
                 .is_some_and(|dispatch| mailbox_prompt_eligible(&dispatch.command))
-        }) && !self.snapshot.pending_mailbox_events.is_empty()
+        }) && !self
+            .snapshot
+            .mailbox_prompt_contexts
+            .contains_key(command_id)
+            && !self.snapshot.pending_mailbox_events.is_empty()
         {
             let event_keys = self
                 .snapshot
@@ -1925,17 +1986,71 @@ impl DurableRelay {
         reason: mj_core::event_outcome::OutcomeReason,
         message: impl Into<String>,
     ) -> Result<u64> {
+        // Terminal payloads have already been compacted out of dispatches.
+        // Repeated restart recovery must not create another event or wake.
+        if reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted
+            && let Some(terminal) = self
+                .snapshot
+                .handled_commands
+                .get(command_id)
+                .and_then(|handled| handled.terminal_ordinal)
+        {
+            return Ok(terminal);
+        }
         self.require_dispatch(command_id)?;
         let command = self.snapshot.dispatches[command_id].command.kind();
-        let ordinal = self.append_relay_event(
-            Some(command_id),
-            RelayObservation::CommandInterrupted {
-                reason: Some(reason),
-                command_id: command_id.to_owned(),
-                command,
-                message: message.into(),
-            },
-        )?;
+        let continuation_id = (reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted)
+            .then(|| self.restart_continuation_for(command_id))
+            .flatten();
+        let observation = RelayObservation::CommandInterrupted {
+            continuation_id,
+            reason: Some(reason),
+            command_id: command_id.to_owned(),
+            command,
+            message: message.into(),
+        };
+        let ordinal = match self.append_relay_event(Some(command_id), observation.clone()) {
+            Ok(ordinal) => ordinal,
+            Err(error)
+                if error.downcast_ref::<RelayBudgetExceeded>().is_some()
+                    && self.snapshot.dispatches.contains_key(command_id)
+                    && matches!(
+                        &observation,
+                        RelayObservation::CommandInterrupted {
+                            continuation_id: Some(_),
+                            ..
+                        }
+                    ) =>
+            {
+                // Staging rejected the larger receipt before any journal
+                // write. Terminalizing the original releases its payload.
+                let RelayObservation::CommandInterrupted {
+                    continuation_id: _,
+                    reason,
+                    command_id: interrupted,
+                    command,
+                    message,
+                } = observation
+                else {
+                    unreachable!()
+                };
+                let ordinal = self.append_relay_event(
+                    Some(command_id),
+                    RelayObservation::CommandInterrupted {
+                        continuation_id: None,
+                        reason,
+                        command_id: interrupted,
+                        command,
+                        message,
+                    },
+                )?;
+                self.record_observation(RelayObservation::Warning {
+                        message: "The turn could not be resumed automatically because the session's queue is full. Remove queued input or continue the task manually.".to_owned(),
+                    })?;
+                ordinal
+            }
+            Err(error) => return Err(error),
+        };
         self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
@@ -1943,8 +2058,22 @@ impl DurableRelay {
             self.promote_held_claude_turn()?;
         }
         self.settle_held_writes()?;
-        self.promote_next_queued_command()?;
+        if reason != mj_core::event_outcome::OutcomeReason::WorkerRestarted || self.is_acp_ready() {
+            self.promote_next_queued_command()?;
+        }
         Ok(ordinal)
+    }
+
+    /// The interruption event transfers this payload to recovery atomically.
+    fn restart_continuation_for(&self, command_id: &str) -> Option<String> {
+        let dispatch = &self.snapshot.dispatches[command_id];
+        if dispatch.command.kind() != RelayCommandKind::Prompt
+            || dispatch.state != RelayDispatchState::InFlight
+            || self.snapshot.cancelling_prompt_id.as_deref() == Some(command_id)
+        {
+            return None;
+        }
+        Some(self.snapshot.restart_continuation_id(command_id))
     }
 
     pub fn record_checkpoint_ready(&mut self, command_id: &str) -> Result<u64> {
@@ -1999,6 +2128,7 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandInterrupted {
+                continuation_id: None,
                 reason: Some(mj_core::event_outcome::OutcomeReason::ControllerDisconnected),
                 command_id: command_id.to_owned(),
                 command: RelayCommandKind::BeginCheckpoint,
@@ -2079,35 +2209,47 @@ impl DurableRelay {
     }
 
     /// Start the head of the durable command queue once the relay is idle.
-    /// Entries run strictly one at a time, in the order they were accepted.
+    /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
+        let recovery = self
+            .snapshot
+            .queued_prompts
+            .iter()
+            .find(|queued| is_restart_continuation(&queued.command_id))
+            .cloned();
         // Keep turn-starting entries and configuration queue entries in this
         // durable FIFO during a live turn. Claude's adapter queues mid-cycle
         // prompts internally and cancel may discard them; ACP rejects
         // configuration changes while its prompt loop is running.
         if self.checkpoint_only
+            || (recovery.is_some() && !self.is_acp_ready())
             || self.turn_in_progress()
             // A cancel can outlive its prompt result. Drain it before a
             // replacement turn starts, so it cannot reach the newer turn.
             || self.turn_cancellation_pending()
-            || self
+            // Uncertain steering still holds its input, but must not block
+            // recovery of the interrupted turn. We never redeliver that input.
+            || (recovery.is_none() && self
                 .snapshot
                 .steering
                 .as_ref()
-                .is_some_and(|s| s.holds_queue())
+                .is_some_and(|s| s.holds_queue()))
             || self.promoted_config_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
             || matches!(
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed
             )
-            || self.pending_checkpoint_barrier()
+            || (recovery.is_none() && self.pending_checkpoint_barrier())
             || self.close_requested()
         {
             return Ok(None);
         }
         self.expire_mailbox_hook_lease_at(epoch_millis())?;
-        let Some(queued) = self.snapshot.queued_prompts.first().cloned() else {
+        // Interruption atomically transfers the payload to the recovery
+        // queue entry, preserving priority across process restarts.
+        let Some(queued) = recovery.or_else(|| self.snapshot.queued_prompts.first().cloned())
+        else {
             if self.mailbox_wake_is_allowed() {
                 self.enqueue_mailbox_wake()?;
                 return self.promote_next_queued_command();

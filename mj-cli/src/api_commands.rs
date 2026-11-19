@@ -194,6 +194,10 @@ pub(crate) struct NewArgs {
     /// Withhold GitHub credentials from this session and its children.
     #[arg(long)]
     no_github_credentials: bool,
+    /// Deliver notifications for this session. Without this flag a session
+    /// started from the command line ignores notifications.
+    #[arg(long)]
+    with_notifications: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -782,6 +786,13 @@ pub(crate) struct SessionsArgs {
     /// Include sub-agents as well as top-level sessions.
     #[arg(long)]
     all: bool,
+    /// List only sessions on this target, as `mj hosts` names its targets.
+    /// A fleet's instances are selected this way.
+    #[arg(long, conflicts_with = "session")]
+    target: Option<String>,
+    /// List only sessions on this machine, as `mj hosts` names its hosts.
+    #[arg(long, conflicts_with = "session")]
+    host: Option<String>,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -1281,6 +1292,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
         no_github_credentials: args.no_github_credentials,
+        notifications_ignored: !args.with_notifications,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -1951,7 +1963,23 @@ pub(crate) async fn sessions(
         Some(name) => Some(crate::resolve_store_workspace(Some(&name)).await?),
         None => None,
     };
-    let list = client.sessions_in_workspace(workspace, args.all).await?;
+    let mut list = client.sessions_in_workspace(workspace, args.all).await?;
+    // The daemon's host table is the one place that says which machine a
+    // target runs on. Unfiltered JSON does not use it.
+    let rows = if args.json && args.target.is_none() && args.host.is_none() {
+        Vec::new()
+    } else {
+        crate::daemon::connect_or_start()
+            .await?
+            .host_capacity()
+            .await?
+    };
+    list.sessions = select_sessions(
+        std::mem::take(&mut list.sessions),
+        &rows,
+        args.target.as_deref(),
+        args.host.as_deref(),
+    )?;
     if args.json {
         return print_json(&list);
     }
@@ -1977,6 +2005,12 @@ pub(crate) async fn sessions(
             listed_state(session),
             sanitize_terminal_text(&session.title)
         );
+        println!(
+            "  target {}  host {}  profile {}",
+            sanitize_terminal_text(&session.target_id),
+            sanitize_terminal_text(host_of_target(&rows, &session.target_id).unwrap_or("-")),
+            sanitize_terminal_text(&session.profile_id)
+        );
         if let Some(error) = &session.profile_login_error {
             println!(
                 "  profile {}: {}",
@@ -1992,6 +2026,60 @@ pub(crate) async fn sessions(
         }
     }
     Ok(())
+}
+
+/// The host `mj hosts` lists `target_id` under; a fleet's own name for its
+/// instances.
+fn host_of_target<'a>(
+    rows: &'a [mj_core::targets::HostCapacityRow],
+    target_id: &str,
+) -> Option<&'a str> {
+    rows.iter()
+        .find(|row| row.target_ids.iter().any(|id| id == target_id))
+        .map(|row| row.host.as_str())
+}
+
+/// Keep the sessions on `target` and `host`. A name `mj hosts` does not know
+/// is an error that lists the names it does, not an empty list.
+fn select_sessions(
+    sessions: Vec<ApiSession>,
+    rows: &[mj_core::targets::HostCapacityRow],
+    target: Option<&str>,
+    host: Option<&str>,
+) -> Result<Vec<ApiSession>> {
+    let known = |names: Vec<&str>| {
+        let names: std::collections::BTreeSet<_> = names.into_iter().collect();
+        let joined = names.into_iter().collect::<Vec<_>>().join(", ");
+        sanitize_terminal_text(&joined)
+    };
+    if let Some(target) = target
+        && !rows
+            .iter()
+            .any(|row| row.target_ids.iter().any(|id| id == target))
+    {
+        let names = rows
+            .iter()
+            .flat_map(|row| row.target_ids.iter().map(String::as_str));
+        bail!(
+            "no session matched: no target {target:?}; known targets: {}",
+            known(names.collect())
+        );
+    }
+    if let Some(host) = host
+        && !rows.iter().any(|row| row.host == host)
+    {
+        bail!(
+            "no session matched: no host {host:?}; known hosts: {}",
+            known(rows.iter().map(|row| row.host.as_str()).collect())
+        );
+    }
+    Ok(sessions
+        .into_iter()
+        .filter(|session| target.is_none_or(|target| session.target_id == target))
+        .filter(|session| {
+            host.is_none_or(|host| host_of_target(rows, &session.target_id) == Some(host))
+        })
+        .collect())
 }
 
 /// The STATE column: the session's state, and "disk full" when its target

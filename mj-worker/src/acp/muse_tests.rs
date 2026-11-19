@@ -29,6 +29,7 @@ pub(crate) async fn native_muse_turn(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -47,7 +48,6 @@ pub(crate) async fn native_muse_turn(
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -143,6 +143,7 @@ struct Opened {
     warnings: Vec<String>,
     /// The MCP server names each `session/new` carried.
     received: Vec<Vec<String>>,
+    standing: String,
 }
 
 /// Open a session through a fake muse-acp whose host grants session MCP,
@@ -165,8 +166,10 @@ for line in sys.stdin:
     if method == 'initialize':
         # muse-acp advertises HTTP MCP exactly when its host granted sessionMcp.
         reply = {'result': {'protocolVersion': 1, 'agentCapabilities': {
-            'mcpCapabilities': {'http': host == 'granted'}}}}
+            'mcpCapabilities': {'http': host == 'granted'}, 'sessionCapabilities': {'systemPrompt': {}}}}}
     elif method == 'session/new':
+        with open(log + '.prompt', 'w') as prompt:
+            prompt.write(json.dumps(params.get('systemPrompt')))
         with open(log, 'a') as out:
             out.write(json.dumps([s['name'] for s in params.get('mcpServers', [])]) + '\n')
         if host == 'failed':
@@ -191,7 +194,15 @@ for line in sys.stdin:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
-        subagent_mcp_socket: None,
+        instruction_role: None,
+        subagent_mcp_socket: Some(SubagentMcpSocket {
+            path: root.path().join("subagents.sock"),
+            role: mj_core::subagent::SubagentMcpRole::MessageOnly,
+            agent_mailboxes_enabled: true,
+            subtle_subagents: false,
+            review_tools: false,
+            profile_registration: false,
+        }),
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -211,7 +222,7 @@ for line in sys.stdin:
         cwd: root.path().to_path_buf(),
         additional_directories: Vec::new(),
         project_memory: Some(ProjectMemoryLaunchConfig {
-            history_socket: None,
+            history_socket: Some(root.path().join("history.sock")),
             project_key: "abc".into(),
             root: root.path().join("memory"),
             baseline_root: root.path().join(".hel-memory-baseline"),
@@ -226,7 +237,6 @@ for line in sys.stdin:
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
-        observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -267,24 +277,42 @@ for line in sys.stdin:
         configured,
         warnings,
         received,
+        standing: std::fs::read_to_string(format!("{}.prompt", log.display())).unwrap_or_default(),
     }
 }
 
 // Hard-won: c5deb2a: Older Muse containers stopped working after upgrades when their adapter withheld MCP servers.
+// Hard-won: 46a1cb7a5: standing guidance advertised tools withheld by the adapter.
 #[tokio::test]
 async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them() {
     let opened = open_muse("granted").await;
     opened.outcome.unwrap();
     assert!(opened.configured);
     assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
-    assert_eq!(opened.received, [["mj-memory"]]);
+    assert!(
+        opened.received[0].contains(&"mj-memory".into())
+            && opened.received[0].contains(&"mj-agents".into())
+    );
+    assert!(
+        opened.standing.contains("search_sessions") && opened.standing.contains("send_message"),
+        "{}",
+        opened.standing
+    );
 
     // A container keeps the adapter it was created with. Its session keeps
     // working without the tools, and the person is told why.
     let opened = open_muse("withheld").await;
     opened.outcome.unwrap();
     assert!(opened.configured);
-    assert_eq!(opened.received, [["mj-memory"]]);
+    assert!(
+        opened.received[0].contains(&"mj-memory".into())
+            && opened.received[0].contains(&"mj-agents".into())
+    );
+    assert!(
+        !opened.standing.contains("search_sessions") && !opened.standing.contains("send_message"),
+        "{}",
+        opened.standing
+    );
     assert!(
         opened
             .warnings
@@ -349,6 +377,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -367,7 +396,6 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             harness: HarnessKind::Muse,
             execution_policy: policy,
             claude_permission_mode: Default::default(),
-            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),

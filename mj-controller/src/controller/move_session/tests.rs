@@ -577,7 +577,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "[subagents.straightforward]",
+            "[subagents.yolo.straightforward]",
         ),
     ];
 
@@ -796,6 +796,33 @@ fn queued_prompt(command_id: &str) -> MaterializedQueuedPrompt {
 fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetadata {
     let archive_path = directory.join("move-queue.hel.zip");
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));
+    // Recover a real in-flight source command before archiving its queued ID.
+    let source_root = directory.join("interrupted-source");
+    let mut source = DurableRelay::open(&source_root, session_id, "test").unwrap();
+    let response = source.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "queue-source".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "interrupted-source-turn".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("finish interrupted work")],
+            },
+        },
+    });
+    assert!(matches!(
+        response.body,
+        mj_core::relay::RelayResponseBody::Ok { .. }
+    ));
+    assert_eq!(source.claim_pending_commands(true).unwrap().len(), 1);
+    drop(source);
+    let source = DurableRelay::open(&source_root, session_id, "test").unwrap();
+    let recovered_id = source.operational_state().queued_prompts[0]
+        .command_id
+        .clone();
+    assert_eq!(
+        recovered_id,
+        mj_core::continuation::restart_continuation_id("interrupted-source-turn")
+    );
     let canonical = CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
@@ -810,6 +837,12 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
         },
         transcript: Vec::new(),
         queued_prompts: vec![
+            CanonicalQueuedPrompt {
+                command_id: recovered_id,
+                kind: CanonicalQueuedCommandKind::Prompt,
+                content: vec![serde_json::json!({"type":"text", "text":"finish interrupted work"})],
+                queued_at_ms: 0,
+            },
             CanonicalQueuedPrompt {
                 command_id: "queued-image".into(),
                 kind: CanonicalQueuedCommandKind::Prompt,
@@ -872,6 +905,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
 
 #[cfg(unix)]
 // Hard-won: #1498: quota-stopped active goals blocked automatic in-place Move.
+// Hard-won: ebb2e9611: Move refused its own archived restart continuation.
 #[test]
 fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store() {
     let short = "move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store";
@@ -1032,7 +1066,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         image_bytes > 64 * 1024,
         "large image crossed the relay protocol"
     );
-    let reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+    let mut reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
     let operational = reopened.operational_state();
     // Hard-won: a turn starting after preparation must still block source replacement.
     assert!(!operational.safe_to_move(
@@ -1064,7 +1098,11 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
                 .iter()
                 .map(|queued| queued.command_id.as_str())
                 .collect::<Vec<_>>(),
-            ["queued-image", "queued-config"]
+            [
+                mj_core::continuation::restart_continuation_id("interrupted-source-turn").as_str(),
+                "queued-image",
+                "queued-config"
+            ]
         );
     }
     assert_eq!(
@@ -1114,6 +1152,33 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     assert!(journal.contains("because the weekly quota is exhausted"));
     assert!(journal.contains("Continuing the interrupted work"));
     assert!(!journal.contains("The interrupted prompt was not replayed"));
+
+    if std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("0") {
+        reopened
+            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        let active = reopened.claim_pending_commands(true).unwrap();
+        assert_eq!(active[0].command_id, retry_id);
+        reopened
+            .record_command_completed(
+                &retry_id,
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                    work_facts: None,
+                    diagnostic: None,
+                },
+            )
+            .unwrap();
+        let recovered = reopened.claim_pending_commands(true).unwrap();
+        assert_eq!(
+            recovered[0].command_id,
+            mj_core::continuation::restart_continuation_id("interrupted-source-turn")
+        );
+        assert!(recovered[0].command.prompt_blocks().unwrap().iter().any(|block| matches!(block, ContentBlock::Text(text) if text.text == "finish interrupted work")));
+    }
 
     let replacement_target = TargetLocator::LocalBare {
         worker_root: replacement_root,

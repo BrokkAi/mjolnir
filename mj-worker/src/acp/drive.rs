@@ -98,6 +98,12 @@ where
         .pending_for_bridge_with_source(spec.verdict.clone(), Some(spec.turn_context.clone()));
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
+    // A bridge-local counter alone repeats after reload (and worker restart).
+    // Use the same unique identity source as sessions, keeping the namespace.
+    let permission_id_prefix = format!(
+        "{TOOL_PERMISSION_ID_PREFIX}{}-",
+        mj_core::state::new_session_id()?
+    );
     let permission_review_ids = Arc::new(AtomicU64::new(1));
     let ext_review_ids = Arc::new(AtomicU64::new(1));
     let session_elicitations = pending_elicitations.clone();
@@ -106,8 +112,6 @@ where
     let permission_policy = spec.execution_policy;
     let permission_enforcement = session_enforcement(&spec);
     let permission_harness = spec.harness;
-    let permission_observe = spec.observe_policy.clone();
-    let permission_cwd = spec.cwd.clone();
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
@@ -345,10 +349,9 @@ where
                 let permission_implementation_slot = permission_implementation_slot.clone();
                 let permission_elicitations = permission_elicitations.clone();
                 let permission_review_ids = permission_review_ids.clone();
+                let permission_id_prefix = permission_id_prefix.clone();
                 let permission_owned_mcp = permission_owned_mcp.clone();
                 let permission_tool_content = permission_tool_content.clone();
-                let permission_observe = permission_observe.clone();
-                let permission_cwd = permission_cwd.clone();
                 cx.spawn(async move {
                     permission_activity.mark();
                     if !permission_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
@@ -358,155 +361,11 @@ where
                     permission_step_clock.begin_client_work();
                     let plan_permission = is_plan_permission(&request);
                     let claude_plan_approval = is_claude_plan_approval(&request, permission_harness);
-                    let tool_input =
-                        permission_tool_input(&request.tool_call, &permission_tool_content);
-                    let policy_tool_kind = request
-                        .tool_call
-                        .fields
-                        .kind
-                        .and_then(|kind| serde_json::to_value(kind).ok())
-                        .and_then(|value| value.as_str().map(str::to_owned));
-                    let mut observe_ask_reason = None;
-                    let mut observe_ask_acknowledgement = None;
-                    let mut observe_failure_allows = false;
-                    if !plan_permission
-                        && !claude_plan_approval
-                        && let Some(observe) = &permission_observe
-                    {
-                        let title = request
-                            .tool_call
-                            .fields
-                            .title
-                            .as_deref()
-                            .unwrap_or("tool");
-                        let native_session_id = request.session_id.to_string();
-                        let policy_tool_call_id = request.tool_call.tool_call_id.to_string();
-                        let policy_cwd = permission_cwd.to_string_lossy().into_owned();
-                        let check = observe.check(
-                            observe
-                                .evaluate(crate::observe::PolicyTool {
-                                    native_session_id: &native_session_id,
-                                    harness: permission_harness,
-                                    tool_call_id: &policy_tool_call_id,
-                                    tool_title: title,
-                                    tool_kind: policy_tool_kind.as_deref(),
-                                    tool_input: tool_input.as_ref(),
-                                    cwd: &policy_cwd,
-                                })
-                                .await,
-                            &native_session_id,
-                            &policy_tool_call_id,
-                        );
-                        let mut acknowledgement = check.acknowledgement;
-                        match check.disposition {
-                            crate::observe::PolicyDisposition::Continue => {}
-                            crate::observe::PolicyDisposition::Deny(reason) => {
-                                let Some(response) = reject_permission_response(&request) else {
-                                    let message = format!(
-                                        "Brokk Observe denied tool {} but the harness offered no one-time rejection (session {}, tool {}).",
-                                        title, request.session_id, request.tool_call.tool_call_id,
-                                    );
-                                    permission_events
-                                        .send(RuntimeEvent::Warning {
-                                            message: message.clone(),
-                                        })
-                                        .await
-                                        .map_err(|_| relay_event_channel_error())?;
-                                    return responder.respond_with_error(
-                                        agent_client_protocol::Error::invalid_params()
-                                            .data(serde_json::Value::String(message)),
-                                    );
-                                };
-                                permission_events
-                                    .send(RuntimeEvent::Warning {
-                                        message: format!("Brokk Observe denied {title}: {reason}"),
-                                    })
-                                    .await
-                                    .map_err(|_| relay_event_channel_error())?;
-                                let result = responder.respond(response);
-                                if result.is_ok() {
-                                    observe.acknowledge_applied(
-                                        acknowledgement.take(),
-                                        policy_tool_call_id,
-                                    );
-                                }
-                                return result;
-                            }
-                            crate::observe::PolicyDisposition::Ask(reason) => {
-                                observe_ask_reason = Some(reason);
-                                observe_ask_acknowledgement = acknowledgement.take();
-                            }
-                            crate::observe::PolicyDisposition::Warn(reason) => {
-                                permission_events
-                                    .send(RuntimeEvent::Warning {
-                                        message: reason,
-                                    })
-                                    .await
-                                    .map_err(|_| relay_event_channel_error())?;
-                                observe.acknowledge_applied(
-                                    acknowledgement.take(),
-                                    policy_tool_call_id,
-                                );
-                            }
-                            crate::observe::PolicyDisposition::Unavailable { reason, deny } if deny => {
-                                let reason = format!(
-                                    "Brokk Observe policy unavailable and fail-closed is enabled: {reason}"
-                                );
-                                let Some(response) = reject_permission_response(&request) else {
-                                    return responder.respond_with_error(
-                                        agent_client_protocol::Error::invalid_params().data(
-                                            serde_json::Value::String(reason),
-                                        ),
-                                    );
-                                };
-                                permission_events
-                                    .send(RuntimeEvent::Warning {
-                                        message: reason,
-                                    })
-                                    .await
-                                    .map_err(|_| relay_event_channel_error())?;
-                                return responder.respond(response);
-                            }
-                            crate::observe::PolicyDisposition::Unavailable { reason, .. } => {
-                                permission_events
-                                    .send(RuntimeEvent::Warning {
-                                        message: format!(
-                                            "Brokk Observe policy unavailable; allowing the call because fail-closed is disabled: {reason}"
-                                        ),
-                                    })
-                                    .await
-                                    .map_err(|_| relay_event_channel_error())?;
-                                observe_failure_allows = true;
-                            }
-                        }
-                    }
-                    if observe_failure_allows {
-                        let Some(response) = allow_permission_response(&request) else {
-                            let message = format!(
-                                "Brokk Observe failed open, but {} offered no one-time allow response (session {}, tool {}).",
-                                permission_harness.display_name(),
-                                request.session_id,
-                                request.tool_call.tool_call_id,
-                            );
-                            permission_events
-                                .send(RuntimeEvent::Warning {
-                                    message: message.clone(),
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
-                            return responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params()
-                                    .data(serde_json::Value::String(message)),
-                            );
-                        };
-                        return responder.respond(response);
-                    }
                     // The worker's policy owns tool approval, including provider
                     // asks that survive full-access mode. Plans still need consent.
                     if permission_policy.is_unconstrained()
                         && !plan_permission
                         && !claude_plan_approval
-                        && observe_ask_reason.is_none()
                     {
                         let Some(response) = allow_permission_response(&request) else {
                             let message = format!(
@@ -532,37 +391,35 @@ where
                         );
                         return responder.respond(response);
                     }
-                    if observe_ask_reason.is_none() {
-                        if let Some(response) = permission_owned_mcp.response(&request) {
-                            tracing::debug!(
-                                harness = %permission_harness.display_name(),
-                                session_id = %request.session_id,
-                                tool_call_id = %request.tool_call.tool_call_id,
-                                selected_option = ?response.outcome,
-                                "automatically approved a Mjolnir-owned MCP tool"
-                            );
-                            return responder.respond(response);
-                        }
-                        if !plan_permission
-                            && !claude_plan_approval
-                            && let Some(response) = gh_permission_response(
-                                &request,
-                                permission_tool_input(
-                                    &request.tool_call,
-                                    &permission_tool_content,
-                                )
-                                .as_ref(),
+                    if let Some(response) = permission_owned_mcp.response(&request) {
+                        tracing::debug!(
+                            harness = %permission_harness.display_name(),
+                            session_id = %request.session_id,
+                            tool_call_id = %request.tool_call.tool_call_id,
+                            selected_option = ?response.outcome,
+                            "automatically approved a Mjolnir-owned MCP tool"
+                        );
+                        return responder.respond(response);
+                    }
+                    if !plan_permission
+                        && !claude_plan_approval
+                        && let Some(response) = gh_permission_response(
+                            &request,
+                            permission_tool_input(
+                                &request.tool_call,
+                                &permission_tool_content,
                             )
-                        {
-                            tracing::debug!(
-                                harness = %permission_harness.display_name(),
-                                session_id = %request.session_id,
-                                tool_call_id = %request.tool_call.tool_call_id,
-                                selected_option = ?response.outcome,
-                                "automatically approved a gh invocation"
-                            );
-                            return responder.respond(response);
-                        }
+                            .as_ref(),
+                        )
+                    {
+                        tracing::debug!(
+                            harness = %permission_harness.display_name(),
+                            session_id = %request.session_id,
+                            tool_call_id = %request.tool_call.tool_call_id,
+                            selected_option = ?response.outcome,
+                            "automatically approved a gh invocation"
+                        );
+                        return responder.respond(response);
                     }
                     // Preserve Muse's Guardian forms; YOLO plans use plan review.
                     let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
@@ -686,7 +543,7 @@ where
                             "permission request not classified as a plan review and could not be serialized"
                         ),
                     }
-                    let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                    let id = format!("{permission_id_prefix}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                     // The worker alone decides which answers this form offers, and
                     // accepts only those (see `permission_choices`).
                     let PermissionAnswers { choices, skip } =
@@ -716,9 +573,6 @@ where
                     if permission_native_agents.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
                         message = format!("Native agent {}: {message}", request.session_id);
                     }
-                    if let Some(reason) = &observe_ask_reason {
-                        message = format!("Brokk Observe requires approval.\n{reason}\n\n{message}");
-                    }
                     let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                         "mode": "form", "sessionId": request.session_id.to_string(),
                         "message": format!(
@@ -738,9 +592,6 @@ where
                     let answer_rx = permission_elicitations.register(form.clone(), if native_child { request.session_id.to_string() } else { String::new() }, identity);
                     let pending = permission_elicitations.clone();
                     let events = permission_events.clone();
-                    let observe = permission_observe.clone();
-                    let mut observe_acknowledgement = observe_ask_acknowledgement;
-                    let policy_tool_call_id = request.tool_call.tool_call_id.to_string();
                     let cancellation = responder.cancellation();
                     tokio::spawn(async move {
                         let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
@@ -770,26 +621,16 @@ where
                         let answer = if matches!(response, Some(PendingAnswer::OperatorAway)) && (plan_permission || claude_plan_approval) {
                             permission_plan_response(&request, ElicitationResponse::Decline)
                         } else { RequestPermissionResponse::new(outcome) };
-                        let permission_outcome = permission_response_outcome(&request, &answer);
                         let result = responder.respond(answer);
-                        if result.is_ok()
-                            && let Some(observe) = observe
-                        {
-                            if let Some(acknowledgement) = &mut observe_acknowledgement {
-                                acknowledgement.record_outcome(permission_outcome);
-                            }
-                            observe.acknowledge_applied(
-                                observe_acknowledgement,
-                                policy_tool_call_id,
-                            );
-                        }
                         if let Err(error) = result {
                             tracing::debug!(%error, "harness permission responder closed");
                         }
                         if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                             elicitation_id: id,
-                            action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
-                            reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
+                            action: response.as_ref().map_or("closed", PendingAnswer::action_name).into(),
+                            reply: response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel)
+                                .map(|response| form.reply_text(response)),
                         }).await {
                             tracing::debug!(%error, "harness permission result receiver closed");
                         }
@@ -1352,7 +1193,7 @@ pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
 }
 
 /// The id prefix of a permission request shown as a form.
-pub(super) const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+pub(super) use mj_core::elicitation::TOOL_PERMISSION_ID_PREFIX;
 
 /// Describe a failed ACP connection. The hint about stray bridge output only
 /// helps when the connection itself broke or could not parse what the bridge

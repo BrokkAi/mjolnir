@@ -312,7 +312,7 @@ impl DashboardState {
                 self.targets_scroll.set(view.targets_scroll);
                 self.quota_scroll.set(view.quota_scroll);
                 self.capacity_index = view.capacity_index;
-                self.quota_index = view.quota_index;
+                self.quota_selection = view.quota_selection;
                 self.restore_workspace_pane_sizes(view.pane_sizes);
                 self.restore_conversation_layout(&view.conversation_layout);
                 *self.collapsed_project_keys = view.collapsed_project_keys;
@@ -323,7 +323,7 @@ impl DashboardState {
                 self.quota_scroll.set(0);
                 self.sessions_wheel_scrolled_from.take();
                 self.capacity_index = 0;
-                self.quota_index = 0;
+                self.quota_selection = None;
                 self.restore_workspace_pane_sizes(PaneSizes::default());
                 self.reset_conversation_layout();
                 if let Some(session) = self
@@ -342,7 +342,7 @@ impl DashboardState {
             self.quota_scroll.set(0);
             self.sessions_wheel_scrolled_from.take();
             self.capacity_index = 0;
-            self.quota_index = 0;
+            self.quota_selection = None;
             self.restore_workspace_pane_sizes(PaneSizes::default());
             self.reset_conversation_layout();
             self.collapsed_project_keys.clear();
@@ -417,7 +417,7 @@ impl DashboardState {
                 targets_scroll: 0,
                 quota_scroll: 0,
                 capacity_index: 0,
-                quota_index: 0,
+                quota_selection: None,
                 pane_sizes: sizes,
                 conversation_layout: mj_core::workspace::ConversationLayout::default(),
                 collapsed_project_keys: BTreeSet::new(),

@@ -683,6 +683,9 @@ pub struct CreateSessionRequest {
     /// Withhold GitHub credentials; inherited by children.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_credentials: bool,
+    /// Start with notifications ignored; see `SessionRecord::notifications_ignored`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_ignored: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -3791,8 +3794,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unchunked.
 /// The first protocol with notification cards and completion-bound transcript reads.
 pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
+/// The first protocol with daemon-owned notify-once alert events.
+pub const ALERT_EVENTS_PROTOCOL: u32 = 108;
 // Version 107: explicit SessionWiki sync generations and progress watches.
-pub const PROTOCOL_VERSION: u32 = 107;
+pub const PROTOCOL_VERSION: u32 = ALERT_EVENTS_PROTOCOL;
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;

@@ -83,72 +83,6 @@ Doctor checks configuration compatibility, harness authentication, worker binari
 
 `--json` emits a machine-readable array. `--smoke` adds real disposable pull/run probes where a target supports them; run it after resolving ordinary fixable checks because it can download an image and provision short-lived resources.
 
-## Publish sessions to Brokk Observe
-
-```text
-mj observe status [--json]
-mj observe export --session <id> [--output <path>]
-```
-
-Mjolnir publishes sessions itself; neither the Claude Code nor the Codex
-Observe plugin is required. Set `OBSERVE_URL` and `OBSERVE_TOKEN`, or put the
-same two values in `~/.config/brokk-observe/config`. Environment variables win
-one at a time, so managed environment settings can override either value.
-`OBSERVE_CONFIG` selects a different configuration file. Start or restart the
-daemon after the values are in place.
-
-Each session is written as a Mjolnir orchestrator session with the selected
-harness, native session id, worker, target, profile, model, git context, parent
-session, prompts, tool calls and results, turn boundaries, usage, and session
-end. Events first enter a durable local spool. Delivery is ordered and retried
-in the background, so an unavailable Observe server never blocks or cancels a
-session. Existing Claude Code or Codex plugin events are correlated by native
-session id and do not create a second top-level session.
-
-On the first configured daemon start, SessionWiki supplies the ids of earlier
-Mjolnir sessions. Mjolnir reads their full canonical transcripts from its own
-checkpoint store, marks them as historical, and publishes them through the same
-idempotent path. Historical events retain their original timestamps and are
-marked imported; they do not raise live alerts or start an automatic audit.
-SessionWiki is the discovery index; it is not used as the raw event source
-because its tool projection is summarized.
-
-`status` reports the active configuration, automatic delivery mode, spool, and
-the last success or failure. `export` is a diagnostic path: it reads a session
-through the daemon and writes the same newline-delimited envelopes to standard
-output or `--output` without uploading them. Re-running an export produces the
-same event identities.
-
-The canonical transcript does not retain a separate native compaction
-boundary or every permission prompt. Those gaps are visible rather than
-invented. Observe records a policy decision and permission outcome when
-Mjolnir enforcement is active. If Mjolnir's full checkpoint has already been
-removed by its archive-retention job, SessionWiki can still find the session
-but its summarized history is not presented as a full audit record. Token
-usage is included when the durable usage rows remain available; a
-checkpoint-only reconstruction does not invent missing usage.
-
-Set `OBSERVE_ENFORCE=true` on the Mjolnir daemon with `OBSERVE_URL` and
-`OBSERVE_TOKEN`, or put all three values in the Observe config file, to enable
-central guardrails. Enforcement currently supports
-DSH only because dsh-acp asks Mjolnir before every command, write, and MCP call.
-Other harnesses may auto-approve tools internally, so Mjolnir refuses their
-sessions rather than claiming protection it cannot provide.
-
-`OBSERVE_TIMEOUT` is the whole-number policy deadline in seconds and defaults
-to 3. A server or network failure selects the harness's one-time allow by
-default; set `OBSERVE_FAIL_CLOSED=true` to select its one-time rejection
-instead. `deny` rejects one call without cancelling the turn, `ask` opens
-Mjolnir's normal permission form, and `warn` is shown in Mjolnir's notices
-before the existing approval behavior continues.
-
-Observe records a runtime decision as enforced only after Mjolnir confirms
-that the permission response was delivered. If that acknowledgement is lost,
-the decision remains visible as a policy match that was not known to have been
-applied. The acknowledgement also records the resulting permission outcome:
-approved, rejected, warned, or cancelled. The Observe token is kept in the
-worker launch configuration and is not added to the harness environment.
-
 ## Authenticate a profile
 
 ```text
@@ -383,6 +317,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--oracle enabled|disabled]
        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
        [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
+       [--with-notifications]
        [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -395,7 +330,7 @@ mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle] [--branch <name>]
            [--out <path>] [--json]
 mj fetch --session <id> --path <path> [--stdout | --ls] [--json]
-mj sessions [--session <id>] [--all] [--workspace <name>] [--json]
+mj sessions [--session <id>] [--all] [--workspace <name>] [--target <id>] [--host <name>] [--json]
 mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
 mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
@@ -420,6 +355,8 @@ mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [-
 mj ui show <session-id> [--right | --below] [--json]
 mj ui settings <path>=<value>... [--json]
 ```
+
+`mj sessions` prints each session's ID, STATE and TITLE, then an indented line with its target, host and profile. The host is the machine the session's target points at now. `--target <id>` lists only sessions on that target, and `--host <name>` only sessions on that machine; both use the names `mj hosts` shows. A fleet of EC2 instances appears as one host, so select a fleet's sessions with `--target`. A name that `mj hosts` does not list fails with the known names instead of printing an empty list.
 
 `mj new --at <sha>` starts the workspace checked out at that full commit ID in
 the bundle's primary repository, before the first prompt. It requires
@@ -453,6 +390,8 @@ mj new --workspace eval --bundle product --target builder \
   what the dashboard's next new-session form preselects. Only interactive
   launches (the dashboard, `mj go`, `mj simple`, and the web or phone form)
   do.
+- `mj new` suppresses session notifications by default. Pass
+  `--with-notifications` to include notifications for that session.
 - `mj new --model <name>` chooses the enabled, usable profile offering that
   exact model with the strongest quota headroom relative to its reset times,
   then starts the session on it. It conflicts with

@@ -2,28 +2,28 @@
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
 │hel ───────                                                                                                           │
 │› ■ ACP pre                                                                                                           │
 │  Stopped    ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
 │  │ No mess  │These checkouts have uncommitted changes:                                                │              │
 │  │          │/work/repo — 1 tracked change · 2 untracked paths                                        │              │
 │             │                                                                                         │              │
-│             │These scratch repositories are in temporary directories and stay outside the import:     │              │
-│             │/tmp/mj-golden-scratch                                                                   │  ────────────╯
-│             │                                                                                         │  ────────────╮
+│             │These scratch repositories are in temporary directories and stay outside the import:     │  ────────────╯
+│             │/tmp/mj-golden-scratch                                                                   │  ────────────╮
+│             │                                                                                         │              │
 │             │Checked creates a clean, separate checkout. Unchecked uses the original directory with   │              │
-│             │its current files.                                                                       │              │
-│             │Project root on daemon host:                                                             │  ────────────╯
-│             │/work/repo                                                                               │  ───── ▁   ▄ ╮
-│             │☒ Create isolated checkout                                                               │              │
-│             │                                                                                         │  ────────────╯
-│             │  Cancel     Continue                                                                    │  ───── ▁   ▄ ╮
+│             │its current files.                                                                       │  ────────────╯
+│             │Project root on daemon host:                                                             │  ───── ▁   ▄ ╮
+│             │/work/repo                                                                               │              │
+│             │☒ Create isolated checkout                                                               │  ────────────╯
+│             │                                                                                         │  ───── ▁   ▄ ╮
+│             │  Cancel     Continue                                                                    │              │
 │             ╰─────────────────────────────────────────────────────────────────────────────────────────╯              │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -34,28 +34,28 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
-│hel ──────────────────────────────────││                                                                              │
-│› ■ ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                  Select a session to open its conversation.                  │
+│› ■ ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Stopped                                                                                                             │
 │  │ No mess                                                                                                           │
 │  │          ╭ × Importing session · progress 1/? ─────────────────────────────────────────────────────╮              │
 │             │Imported session                                                                         │              │
-│             │                                                                                         │              │
-│             │Registering on the daemon — cannot be cancelled.                                         │  ────────────╯
-│             │The dashboard remains responsive while the import runs.                                  │  ────────────╮
-│             │                                                                                         │              │
+│             │                                                                                         │  ────────────╯
+│             │Registering on the daemon — cannot be cancelled.                                         │  ────────────╮
+│             │The dashboard remains responsive while the import runs.                                  │              │
 │             │                                                                                         │              │
 │             │                                                                                         │  ────────────╯
 │             │                                                                                         │  ───── ▁   ▄ ╮
-│             │                                         Cancel                                          │              │
-│             ╰─────────────────────────────────────────────────────────────────────────────────────────╯  ────────────╯
-│                                                                                                          ───── ▁   ▄ ╮
+│             │                                                                                         │              │
+│             │                                         Cancel                                          │  ────────────╯
+│             ╰─────────────────────────────────────────────────────────────────────────────────────────╯  ───── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │

@@ -17,16 +17,16 @@
 │       │                                                                                  │  ─────╮
 │       │                                                                                  │       │
 │       │                                                                                  │  d    │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │   Cancel     Create                                                              │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │                                                                                  │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+╰─────  │   Cancel     Create                                                              │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: ValidateProjectDirectory { target_template_id: "local", directory: "/work/project" }
@@ -49,16 +49,16 @@ action: ValidateProjectDirectory { target_template_id: "local", directory: "/wor
 │       │                                                                                  │  ─────╮
 │       │                                                                                  │       │
 │       │                                                                                  │  d    │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │   Cancel                                                                         │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │                                                                                  │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+╰─────  │   Cancel                                                                         │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateSession with managed worktree enabled
@@ -140,8 +140,8 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │ Delegation Native ▾                                                              │                 │
-│                 │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │  ───────────────╯
+│                 │ subagents on all targets")                                                       │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
@@ -176,15 +176,15 @@ action: PreflightResumeRepositories
 │       │                                                                                  │  ─────╮
 │       │                                                                                  │       │
 │       │                                                                                  │  .    │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │   Cancel                                                                         │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │                                                                                  │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+╰─────  │   Cancel                                                                         │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette

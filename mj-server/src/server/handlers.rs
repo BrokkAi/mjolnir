@@ -163,190 +163,118 @@ pub(super) async fn session_row(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NotificationMessageQuery {
-    holder: Option<String>,
     message_id: Option<String>,
-    #[serde(default)]
-    requests: String,
-    #[serde(default)]
-    question: String,
-    /// An `!` card's ReadThrough completed ordinal: the newest agent message
-    /// at or before it is the card's message.
     through: Option<u64>,
+    holder: Option<String>,
+    request_id: Option<String>,
+    raised_at_ms: Option<i64>,
 }
 
-/// Resolve the first source of the shared rule to text. A question read that
-/// finds nothing is "not available", not a reason to show another message.
-pub(super) fn notification_message_text(
-    kind: mj_core::notification_message::NotificationKind,
-    facts: &mj_core::notification_message::NotificationMessageFacts<'_>,
-    question_item: impl FnOnce(&str) -> anyhow::Result<Option<String>>,
-    last_agent_message: impl FnOnce() -> anyhow::Result<Option<String>>,
-) -> anyhow::Result<Option<String>> {
-    use mj_core::notification_message::{NotificationMessageSource, notification_message_sources};
-    match notification_message_sources(kind, facts).into_iter().next() {
-        None => Ok(None),
-        Some(
-            NotificationMessageSource::PendingRequest(text)
-            | NotificationMessageSource::ReviewActivity(text),
-        ) => Ok(Some(text.to_owned())),
-        Some(NotificationMessageSource::QuestionMessage(target)) => question_item(target),
-        Some(NotificationMessageSource::LastAgentMessage) => last_agent_message(),
-    }
-}
-
-/// The full message a notification card shows for one session. Which message
-/// that is comes from `mj_core::notification_message`, the rule the terminal
-/// pane uses too. A parent promoted by a child's pending form reads the child's
-/// request, and `session_id` names the session the card opens. `text` is
-/// `null` when the located message is no longer stored.
+/// Read only the item explicitly selected from the current published card.
 pub(super) async fn notification_message(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
     Query(expected): Query<NotificationMessageQuery>,
 ) -> Result<Response<Body>, ApiError> {
-    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
+    use mj_core::attention::EntryMessage;
     validate_public_id(&session_id)?;
-    if expected.message_id.is_some() && expected.through.is_some() {
-        return Err(ApiError::bad_request(
-            "select a notification by message id or completion",
-        ));
+    enum Selector {
+        Message(String),
+        Completion(u64),
+        Form {
+            holder: String,
+            request_id: String,
+            raised_at_ms: i64,
+        },
     }
-    if expected.message_id.is_some() || (expected.through.is_some() && expected.holder.is_none()) {
-        use mj_core::attention::EntryMessage;
-        {
+    let selector = match (
+        expected.message_id,
+        expected.through,
+        expected.holder,
+        expected.request_id,
+        expected.raised_at_ms,
+    ) {
+        (Some(id), None, None, None, None) => Selector::Message(id),
+        (None, Some(through), None, None, None) => Selector::Completion(through),
+        (None, None, Some(holder), Some(request_id), Some(raised_at_ms)) => Selector::Form {
+            holder,
+            request_id,
+            raised_at_ms,
+        },
+        _ => {
+            return Err(ApiError::bad_request(
+                "select a notification entry with message_id or through, or a live form with holder, request_id and raised_at_ms",
+            ));
+        }
+    };
+    match selector {
+        Selector::Form {
+            holder,
+            request_id,
+            raised_at_ms,
+        } => {
             let snapshot = state.snapshot_rx.borrow();
             let session = require_session_record(&snapshot, &session_id)?;
-            let current = session.notification_card.as_ref().is_some_and(|card| {
-                card.entries.iter().any(|entry| match &entry.message {
-                    EntryMessage::Found(id) => expected.message_id.as_ref() == Some(id),
-                    EntryMessage::Locating | EntryMessage::None => {
-                        expected.through == Some(entry.completed_ordinal)
-                    }
-                })
-            });
-            if !current {
-                return Err(ApiError::not_found("notification entry not found"));
-            }
-        }
-        return read_notification_message(session_id, move |id| {
-            match (expected.message_id, expected.through) {
-                (Some(target), _) => read_notification_item(id, &target),
-                (_, Some(through)) => {
-                    let item =
-                        mj_controller::database::load_materialized_agent_item_through(id, through)?;
-                    Ok(item.and_then(|item| {
-                        mj_core::transcript::materialized_agent_message_text(
-                            std::iter::once(&item),
-                            &item.stable_id,
-                        )
-                    }))
-                }
-                _ => unreachable!("entry selector is present"),
-            }
-        })
-        .await;
-    }
-    // Copy what the snapshot holds, then release it before any database read.
-    let (
-        holder,
-        kind,
-        pending_request,
-        review_activity,
-        question_message,
-        supports_open_request,
-        through,
-    ) = {
-        let snapshot = state.snapshot_rx.borrow();
-        let session = require_session_record(&snapshot, &session_id)?;
-        let holder = session
-            .form_holder
-            .as_deref()
-            .filter(|holder| snapshot.sessions.get(holder).is_some())
-            .unwrap_or(&session_id)
-            .to_owned();
-        let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
-        let requests = holder_session
-            .pending_elicitations
-            .iter()
-            .map(|request| request.id.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        // An `!` card's boundary is its ReadThrough ordinal, checked here and
-        // then used as the bound of the read, so no newer reply can answer.
-        let through = match (&session.notification_dismissal, expected.through) {
-            (Some(mj_core::attention::NotificationDismissal::ReadThrough(held)), Some(asked))
-                if *held == asked =>
-            {
-                Some(asked)
-            }
-            (Some(mj_core::attention::NotificationDismissal::ReadThrough(_)), _) | (_, Some(_)) => {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "the notification changed; its message will be read again",
-                )
-                .with_code(Some("notification_changed")));
-            }
-            _ => None,
-        };
-        if expected.holder.as_ref().is_some_and(|expected_holder| {
-            &holder != expected_holder
-                || requests != expected.requests
-                || holder_session.question_message.as_deref().unwrap_or("") != expected.question
-        }) {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "the notification changed; its message will be read again",
-            )
-            .with_code(Some("notification_changed")));
-        }
-        (
-            holder.clone(),
-            if session.attention == mj_core::attention::SessionAttention::NeedsInput {
-                NotificationKind::NeedsInput
-            } else {
-                NotificationKind::Important
-            },
-            holder_session
-                .pending_elicitations
-                .last()
-                .map(|request| request.message.clone()),
-            holder_session
-                .turn_review
+            let card = session
+                .notification_card
                 .as_ref()
-                .map(|review| review.status.clone()),
-            holder_session.question_message.clone(),
-            holder_session.supports_open_request,
-            through,
+                .ok_or_else(|| ApiError::not_found("notification card not found"))?;
+            let form = card
+                .form
+                .as_ref()
+                .filter(|form| {
+                    card.item_destination(&session_id, card.entries.len()) == holder
+                        && form.request_id == request_id
+                        && form.raised_at_ms == raised_at_ms
+                })
+                .ok_or_else(|| ApiError::not_found("notification form not found"))?;
+            Ok(
+                Json(serde_json::json!({"session_id": holder, "text": form.message}))
+                    .into_response(),
+            )
+        }
+        selector => {
+            let entry = {
+                let snapshot = state.snapshot_rx.borrow();
+                let session = require_session_record(&snapshot, &session_id)?;
+                session
+                    .notification_card
+                    .as_ref()
+                    .and_then(|card| {
+                        card.entries
+                            .iter()
+                            .find(|entry| match (&selector, &entry.message) {
+                                (Selector::Message(expected), EntryMessage::Found(id)) => {
+                                    expected == id
+                                }
+                                (
+                                    Selector::Completion(expected),
+                                    EntryMessage::Locating | EntryMessage::None,
+                                ) => *expected == entry.completed_ordinal,
+                                _ => false,
+                            })
+                    })
+                    .cloned()
+                    .ok_or_else(|| ApiError::not_found("notification entry not found"))?
+            };
+            read_notification_message(session_id, move |id| match entry.message {
+                EntryMessage::Found(target) => read_notification_item(id, &target),
+                EntryMessage::None => read_notification_completion(id, entry.completed_ordinal),
+                EntryMessage::Locating => Ok(None),
+            })
+            .await
+        }
+    }
+}
+
+fn read_notification_completion(session_id: &str, through: u64) -> anyhow::Result<Option<String>> {
+    let item = mj_controller::database::load_materialized_agent_item_through(session_id, through)?;
+    Ok(item.and_then(|item| {
+        mj_core::transcript::materialized_agent_message_text(
+            std::iter::once(&item),
+            &item.stable_id,
         )
-    };
-    read_notification_message(holder, move |reader| {
-        let facts = NotificationMessageFacts {
-            pending_request: pending_request.as_deref(),
-            review_activity: review_activity.as_deref(),
-            question_message: question_message.as_deref(),
-            supports_open_request,
-        };
-        notification_message_text(
-            kind,
-            &facts,
-            |target| read_notification_item(reader, target),
-            || match (kind, through) {
-                (NotificationKind::Important, Some(through)) => {
-                    mj_controller::database::load_materialized_agent_message_through(
-                        reader, through,
-                    )
-                }
-                // An important card with no boundary has no message to name.
-                (NotificationKind::Important, None) => Ok(None),
-                // A legacy worker's question is the agent's latest reply.
-                (NotificationKind::NeedsInput, _) => Ok(
-                    mj_controller::database::load_materialized_session_summary(reader)?
-                        .and_then(|summary| summary.last_agent_message),
-                ),
-            },
-        )
-    })
-    .await
+    }))
 }
 
 fn read_notification_item(session_id: &str, target: &str) -> anyhow::Result<Option<String>> {
@@ -1410,6 +1338,7 @@ pub fn validate_new_preflight(
         no_project_memory: false,
         no_github_events: false,
         no_github_credentials: false,
+        notifications_ignored: false,
         create_managed_worktree: None,
         at: None,
         branch: None,

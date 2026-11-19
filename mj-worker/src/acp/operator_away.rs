@@ -402,6 +402,19 @@ pub(super) struct PendingElicitation {
     answer: oneshot::Sender<PendingAnswer>,
 }
 
+impl PendingElicitation {
+    /// Preserve explicit user intent instead of conflating it with a dropped bridge.
+    pub(super) fn cancel(self) {
+        if self
+            .answer
+            .send(PendingAnswer::Human(ElicitationResponse::Cancel))
+            .is_err()
+        {
+            tracing::debug!(elicitation_id = %self.question.id, "permission responder closed before cancellation was answered");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum PendingAnswer {
     Human(ElicitationResponse),

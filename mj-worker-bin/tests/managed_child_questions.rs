@@ -18,36 +18,63 @@ use timeouts::IO_TIMEOUT;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
-/// Answer a form through the worker's control socket, as the daemon does
-/// for a person. False until the worker holds a form with this id.
-fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bool {
-    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(root.join("control.sock")) else {
-        return false;
-    };
+/// Query/answer through the running worker's control socket, like a daemon.
+fn control_request(root: &std::path::Path, request: RelayRequest) -> Option<RelayResponseEnvelope> {
+    let mut stream = std::os::unix::net::UnixStream::connect(root.join("control.sock")).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     let request = RelayRequestEnvelope {
-        request_id: format!("answer-{elicitation_id}"),
+        request_id: "permission-control".into(),
         protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::RespondElicitation {
+        request,
+    };
+    serde_json::to_writer(&mut stream, &request).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(stream).read_line(&mut line).ok()?;
+    serde_json::from_str(&line).ok()
+}
+
+fn pending_permission(root: &std::path::Path) -> Option<String> {
+    let response = control_request(
+        root,
+        RelayRequest::Attach {
+            after_ordinal: 0,
+            after_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
+        },
+    )?;
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::Attached { events, .. },
+    } = response.body
+    else {
+        return None;
+    };
+    events
+        .into_iter()
+        .rev()
+        .find_map(|event| match event.observation {
+            mj_core::relay::RelayObservation::ElicitationRequested { request }
+                if request.tool_permission.is_some() =>
+            {
+                Some(request.id)
+            }
+            _ => None,
+        })
+}
+
+fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bool {
+    control_request(
+        root,
+        RelayRequest::RespondElicitation {
             elicitation_id: elicitation_id.into(),
             response: ElicitationResponse::Accept {
                 content: [("choice".into(), ElicitationValue::String(choice.into()))].into(),
             },
         },
-    };
-    serde_json::to_writer(&mut stream, &request).unwrap();
-    stream.write_all(b"\n").unwrap();
-    let mut line = String::new();
-    if std::io::BufReader::new(stream)
-        .read_line(&mut line)
-        .is_err()
-    {
-        return false;
-    }
-    serde_json::from_str::<RelayResponseEnvelope>(&line)
-        .is_ok_and(|response| matches!(response.body, RelayResponseBody::Ok { .. }))
+    )
+    .is_some_and(|response| matches!(response.body, RelayResponseBody::Ok { .. }))
 }
 
 /// A real worker process reads the launch file as a daemon writes it. The
@@ -56,6 +83,7 @@ fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bo
 /// cancelled at once, which only a worker that knows it is a managed child
 /// does. The permission waits, and only a person's answer selects "allow".
 // Hard-won: #1451: the worker dropped the managed-child marker before building the ACP launch, and the parent could not grant a child's permission.
+// Hard-won: a3a103608: guessing the old permission ID left the real worker waiting forever.
 #[test]
 fn a_managed_child_sends_questions_to_its_parent_and_keeps_approvals_for_a_person() {
     let temp = tempfile::tempdir().unwrap();
@@ -187,8 +215,11 @@ for line in sys.stdin:
             // Answer only after the question's cancellation reached the
             // bridge, so the permission cannot have been answered by anyone
             // but this simulated person.
-            if seen.len() == 1 && !answered {
-                answered = answer_form(&root, "tool-permission-1", "allow");
+            if seen.len() == 1
+                && !answered
+                && let Some(id) = pending_permission(&root)
+            {
+                answered = answer_form(&root, &id, "allow");
             }
             anyhow::ensure!(
                 !worker.is_finished(),
