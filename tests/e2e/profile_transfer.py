@@ -111,11 +111,9 @@ def main():
     sessions = []
 
     def mj(*argv, check=True):
-        env = {key: value for key, value in lab.environment().items() if not key.startswith("OBSERVE_")}
-        env["OBSERVE_CONFIG"] = str(root / "observe-unconfigured")
         return subprocess.run(
             [lab.hel, "--instance", "send-only-missing", *argv],
-            env=env, text=True, capture_output=True, timeout=180, check=check,
+            env=lab.environment(), text=True, capture_output=True, timeout=180, check=check,
         )
 
     try:
