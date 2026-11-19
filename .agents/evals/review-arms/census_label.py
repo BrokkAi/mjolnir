@@ -745,13 +745,17 @@ def run_turn(sid, prompt, phase, title):
     while True:
         # mj wait exits nonzero with a structured "timeout" outcome when its poll expires, and
         # driver.mj raises on any nonzero exit, so decode the JSON here before deciding.
-        result = subprocess.run([str(driver.MJX), "wait", "--session", sid, "--turn", str(response["turn_id"]),
-                                 "--return-on-input", "--timeout", "1200", "--json"],
-                                capture_output=True, timeout=1230)
         try:
+            result = subprocess.run([str(driver.MJX), "wait", "--session", sid, "--turn", str(response["turn_id"]),
+                                     "--return-on-input", "--timeout", "1200", "--json"],
+                                    capture_output=True, timeout=1230)
             waited = json.loads(result.stdout)
-        except ValueError:
-            raise RuntimeError(f"{title}: mj wait: {result.stderr.decode(errors='replace')[-1500:]}") from None
+        except (subprocess.TimeoutExpired, ValueError) as error:
+            # The turn was accepted, so an unknown outcome (a stuck wait, a daemon restart) is not
+            # a failure of the turn: keep reading the same turn, backing off between attempts.
+            print(f"{title}: mj wait gave no outcome ({str(error)[:200]}); waiting again", file=sys.stderr)
+            time.sleep(60)
+            continue
         if waited.get("outcome") == "timeout":
             continue
         if result.returncode:
