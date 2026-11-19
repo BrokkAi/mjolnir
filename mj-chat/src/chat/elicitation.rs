@@ -310,15 +310,13 @@ impl ElicitationDialog {
         let focus = self.focus.get();
         std::mem::swap(&mut self.view, &mut self.other_view);
         self.surface = surface;
+        // A view still on the current page keeps the registration it last
+        // rendered: that is what is on screen, so it is what clicks must hit.
+        // Redeclaring with the logical option count would drop the rendered
+        // row map of a list whose options wrap or carry descriptions.
         if self.view.page != Some((self.current_question, self.confirming_unanswered)) {
             self.view = ElicitationView::new();
             self.reset_controls();
-        }
-        if let Some(display) = self.display_fields.get(self.current_question).copied() {
-            self.view.form.borrow_mut().declare(
-                ElicitationControl::Field(self.current_question),
-                display_control_kind(&self.request, &self.values, &self.option_cursors, display),
-            );
         }
         if let Some(focus) = focus {
             self.view.form.borrow_mut().focus(focus);

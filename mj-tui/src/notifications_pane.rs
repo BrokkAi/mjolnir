@@ -1414,7 +1414,9 @@ pub(crate) fn render(
     }
     if form_requested && !inline_form {
         if let Some(error) = dashboard.notifications.form_errors.get(&session_id) {
-            text = format!("Could not load form: {error}\n{text}");
+            text = format!(
+                "Could not load form: {error}. Use Go to Session to answer it there.\n{text}"
+            );
         } else if chat.is_none() && dashboard.session_failed(&session_id) {
             // No attach will run for a failed session, so no attach error
             // will arrive either; say why instead of loading forever.

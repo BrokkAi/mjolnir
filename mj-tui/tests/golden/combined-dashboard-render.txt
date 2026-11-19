@@ -1648,9 +1648,9 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
-│                                      ││ Could not load form: Worker unavailable                                      │
+│                                      ││ Could not load form: Worker unavailable. Use Go to Session to answer it      │
+│                                      ││ there.                                                                       │
 │                                      ││ Choose a path                                                                │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -1661,7 +1661,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 === compact form attachment status (120x8) ===
 ╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
-│ Could not load form: Worker unavailable                                                                              │
+│ Could not load form: Worker unavailable. Use Go to Session to answer it there.                                       │
 │ Choose a path                                                                                                        │
 │                                                                                                                      │
 │                                                                                                                      │
