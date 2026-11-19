@@ -715,13 +715,8 @@ impl ActiveChat {
     /// replacement. A reviewer form can be deferred while the sidecar stream
     /// catches up, so it lives alongside the currently visible form.
     pub fn elicitation_drafts(&self) -> Vec<ChatElicitationDraft> {
-        let mut drafts = self
-            .state
-            .elicitation_draft()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut drafts = self.state.elicitation_drafts();
         drafts.extend(self.deferred_elicitation_drafts.iter().cloned());
-        drafts.extend(self.state.deferred_form_result_drafts());
         drafts
     }
 
@@ -737,6 +732,12 @@ impl ActiveChat {
     /// Restore a draft only when the newly attached projection is already
     /// showing the exact same pending request.
     pub fn restore_elicitation_draft(&mut self, draft: ChatElicitationDraft) -> bool {
+        if draft.reviewer && !self.state.review_projection_known {
+            self.deferred_elicitation_drafts
+                .retain(|saved| saved.identity() != draft.identity());
+            self.deferred_elicitation_drafts.push(draft);
+            return true;
+        }
         if draft.reviewer && !self.state.pending_reviewer_matches(&draft) {
             return false;
         }

@@ -257,6 +257,18 @@ impl DashboardState {
 
     /// Removes a session's standby composer and returns its draft, for the
     /// chat open that adopts it as the composer's starting input.
+    pub fn standby_question_drafts(
+        &mut self,
+        session_id: &str,
+    ) -> Vec<mj_chat::chat::ChatElicitationDraft> {
+        self.standby_prompts
+            .get_mut(session_id)
+            .map_or_else(Vec::new, |composer| {
+                composer.drain_composer();
+                composer.elicitation_drafts()
+            })
+    }
+
     pub fn take_standby_prompt_draft(&mut self, session_id: &str) -> Option<String> {
         self.standby_prompts
             .remove(session_id)

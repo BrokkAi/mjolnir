@@ -1625,6 +1625,28 @@ mod tests {
             &mut chat,
             "Answer was not sent: late rejection"
         ));
+        // Hard-won: 57e492d: identical request payloads from two harnesses shared a primary error.
+        chat.elicitation = None;
+        chat.show_review_role_elicitation(Some("reviewer".into()), new.clone());
+        chat.pending_elicitations = vec![new.clone()];
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::RespondElicitation {
+                request: new,
+                desired_plan_active: None,
+                answered: false,
+                result: Err("primary-only failure".into()),
+            },
+        );
+        assert!(
+            !serde_json::to_string(&chat.elicitation_draft())
+                .unwrap()
+                .contains("primary-only failure")
+        );
+        // The following independent scenario has no reviewer surface.
+        chat.elicitation = None;
+        chat.elicitation_is_reviewers = false;
+        chat.elicitation_role = None;
         // Hard-won: 5dc2084: a parked primary rejection revived a request removed by the refreshed projection.
         let config: mj_core::config::Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
         let mut parked = ChatState::standby(

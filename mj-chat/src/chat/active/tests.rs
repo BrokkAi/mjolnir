@@ -815,7 +815,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
             role: "reviewer-b".into(),
             request: question_b.clone(),
         });
-    chat.apply_review_view(Some(review_b));
+    chat.apply_review_view(Some(review_b.clone()));
     assert_eq!(
         chat.state.elicitation.as_ref().unwrap().request(),
         &question_b
@@ -832,8 +832,9 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     // Hard-won: 5dc2084: upgrade snapshots omitted a rejected draft waiting behind another form.
     let saved = serde_json::to_value(chat.elicitation_drafts()).unwrap();
     let mut upgraded = clipboard_test_chat();
-    upgraded.apply_review_view(Some(review_a.clone()));
+    // Hard-won: 57e492d: ChatOpened restores snapshots before installing the review projection.
     upgraded.restore_elicitation_drafts(serde_json::from_value(saved).unwrap());
+    upgraded.apply_review_view(Some(review_b));
     terminal
         .draw(|frame| {
             upgraded.draw_elicitation_in(frame, frame.area(), true);
@@ -883,6 +884,10 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     });
     standby.drain_composer();
     assert_eq!(standby.deferred_form_results.len(), 1);
+    // Hard-won: 57e492d: parked composer failures were omitted from upgrade snapshots.
+    let parked_saved = serde_json::to_string(&standby.elicitation_drafts()).unwrap();
+    assert!(parked_saved.contains("parked reviewer failure"));
+    assert!(parked_saved.contains("kept reviewer answer"));
     assert!(standby.elicitation.is_none());
     let mut replacement = clipboard_test_chat();
     replacement.adopt_live_composer(standby.take_live_composer().unwrap());

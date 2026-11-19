@@ -1311,6 +1311,13 @@ impl ChatState {
     /// Take a process-local snapshot before this chat is replaced by another
     /// session. The snapshot carries reviewer routing metadata as well as the
     /// form values, because those answers do not all go to the primary agent.
+    /// Form recovery snapshots owned by this composer, including parked results.
+    pub fn elicitation_drafts(&self) -> Vec<ChatElicitationDraft> {
+        let mut drafts = self.elicitation_draft().into_iter().collect::<Vec<_>>();
+        drafts.extend(self.deferred_form_result_drafts());
+        drafts
+    }
+
     pub(super) fn elicitation_draft(&self) -> Option<ChatElicitationDraft> {
         let dialog = self.elicitation.as_ref()?;
         Some(ChatElicitationDraft {
@@ -1378,7 +1385,8 @@ impl ChatState {
             return;
         }
         self.restore_elicitation(request.clone());
-        if let Some(dialog) = self.elicitation.as_mut()
+        if self.elicitation_source() == (false, None)
+            && let Some(dialog) = self.elicitation.as_mut()
             && dialog.request() == &request
         {
             dialog.set_response_error(error);

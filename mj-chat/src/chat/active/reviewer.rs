@@ -86,13 +86,16 @@ impl ActiveChat {
                 continue;
             }
             if self.state.reviewer_elicitation_open() {
+                self.apply_deferred_elicitation_draft();
                 self.state.apply_deferred_form_results();
                 return;
             }
             if !self.state.show_review_role_elicitation(role, request) {
+                self.apply_deferred_elicitation_draft();
                 self.state.apply_deferred_form_results();
                 return;
             }
+            self.apply_deferred_elicitation_draft();
         }
         self.apply_deferred_elicitation_draft();
         self.state.apply_deferred_form_results();

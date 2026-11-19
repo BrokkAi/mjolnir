@@ -1422,17 +1422,7 @@ pub(crate) fn render(
             .saturating_sub(if form_requested { 2 } else { 6 }),
     );
     if inline_form {
-        let pane = &mut dashboard.notifications;
-        let form_text = chat
-            .as_ref()
-            .unwrap()
-            .elicitation_message_text()
-            .map(|text| (text, body.width));
-        if pane.form_text != form_text {
-            pane.text_generation = pane.text_generation.wrapping_add(1);
-            pane.form_text = form_text;
-        }
-        pane.text_rows = None;
+        dashboard.notifications.text_rows = None;
         if !dashboard.chat_input_available(&session_id) {
             chat.as_mut().unwrap().cancel_component_pointer();
         }
@@ -1441,6 +1431,21 @@ pub(crate) fn render(
             body,
             focused && !dashboard.modal_open(),
         );
+        let form_text = chat
+            .as_ref()
+            .unwrap()
+            .elicitation_message_text()
+            .map(|text| {
+                let width = surfaces
+                    .surface(mj_chat::selection::SurfaceId::ElicitationMessage)
+                    .map_or(0, |surface| surface.rect.width);
+                (text, width)
+            });
+        if dashboard.notifications.form_text != form_text {
+            dashboard.notifications.text_generation =
+                dashboard.notifications.text_generation.wrapping_add(1);
+            dashboard.notifications.form_text = form_text;
+        }
         dashboard.notifications.form_area = (dashboard.chat_input_available(&session_id)
             && chat
                 .as_ref()
@@ -3325,7 +3330,7 @@ pub(crate) mod tests {
         dashboard.focus = Focus::Notifications;
         let mut chats = std::collections::BTreeMap::new();
         let mut previous_generation = None;
-        for stage in 0..3 {
+        for stage in 0..5 {
             terminal
                 .draw(|frame| {
                     crate::combined::render_combined_for_test(
@@ -3347,7 +3352,7 @@ pub(crate) mod tests {
                 selection.active_surface().is_none(),
                 "new content invalidates the old row space"
             );
-            if stage == 2 {
+            if stage == 4 {
                 break;
             }
             let surface = dashboard
@@ -3365,6 +3370,18 @@ pub(crate) mod tests {
             if stage == 0 {
                 let (chat, _) = form_chat("session-1", request.clone());
                 chats.insert("session-1".into(), chat);
+            } else if stage >= 2 {
+                // Hard-won: 57e492d: height-only compact rewrap kept the old selection generation.
+                terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                    120,
+                    if stage == 2 { 20 } else { 44 },
+                ))
+                .unwrap();
+                dashboard.notifications.size = if stage == 2 {
+                    PaneSize::Standard
+                } else {
+                    PaneSize::Maximized
+                };
             } else {
                 dashboard
                     .handle_notification_form_event(
