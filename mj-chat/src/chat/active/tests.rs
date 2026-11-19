@@ -4131,6 +4131,87 @@ async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
     assert_eq!(chat.state.input, "sent from the web");
 }
 
+// Hard-won: standby adoption dropped the session-history read
+#[tokio::test]
+async fn standby_and_parked_composers_keep_one_session_history_read() {
+    use mj_core::storage::PromptHistoryEntry;
+    let fixture = mj_client::session::replacement_session_test_fixture("standby-history", 1);
+    fixture
+        .replacement_view
+        .send_replace(managed_view(MaterializedSession::empty("standby-history")));
+    let delegate = fixture.control.session("standby-history").await.unwrap();
+    let (replies, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let (history, mut listings) = tokio::sync::mpsc::unbounded_channel();
+    let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+        delegate,
+        replies,
+        submitted_ids: None,
+        history: Some(history),
+    });
+    let mut standby = ChatState::standby(
+        "standby-history",
+        &Config::default(),
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    let prepare = |session: mj_client::session::SessionHandle| {
+        ActiveChat::prepare_with_persistence(
+            session,
+            "bundle-1",
+            None,
+            fixture.control.clone(),
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+            None,
+        )
+    };
+    let mut chat = ActiveChat::prepare_with_persistence(
+        session.clone(),
+        "bundle-1",
+        None,
+        fixture.control.clone(),
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+        None,
+    )
+    .open_with_composer(standby.take_live_composer().unwrap());
+
+    let reply = tokio::time::timeout(Duration::from_secs(2), listings.recv())
+        .await
+        .expect("adopted composer requests history")
+        .unwrap();
+    // A lifecycle transition parks the composer and hands it back while
+    // its read is still in flight; that read must survive.
+    let parked = chat.take_live_composer().unwrap();
+    chat.adopt_live_composer(parked);
+    // A warm reattach hands it to the replacement chat; same rule.
+    let warm = chat.take_live_composer().unwrap();
+    let mut chat = prepare(session).open_with_composer(warm);
+    reply
+        .send(Ok(vec![PromptHistoryEntry {
+            id: 1,
+            session_id: "standby-history".into(),
+            text: "stored prompt".into(),
+        }]))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            chat.drain().await;
+            if !chat.state.session_history.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("history result arrives");
+    assert!(listings.try_recv().is_err(), "the chat reads history once");
+    chat.handle_event_result(Event::Key(key(KeyCode::Up)));
+    assert_eq!(chat.state.input, "stored prompt");
+}
+
 // Hard-won: #1480: transferred submissions miss an already applied delivery snapshot.
 #[tokio::test]
 async fn delivered_submission_disappears_when_composer_arrives_after_snapshot() {

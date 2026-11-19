@@ -3555,6 +3555,115 @@ fn golden_dashboard_session_render() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     append_dashboard_golden(&mut output, "expanded session row", 120, 44, &mut dashboard);
+    *dashboard.sessions_filter = Some(crate::SessionsFilter {
+        query: mj_chat::text_input::TextInput::from_value("quokka"),
+        state: None,
+        editing: true,
+    });
+    dashboard.next_sessions_text_search();
+    let episode = dashboard.wiki_sync_episode(false).unwrap();
+    dashboard.apply_wiki_sync(
+        false,
+        episode,
+        Ok(mj_client::daemon::WikiSyncStatus {
+            target: Some(1),
+            requested: 1,
+            started: 1,
+            running: Some(mj_client::daemon::WikiSyncProgress {
+                phase: "Native".into(),
+                tool: "Codex".into(),
+                adapter: 2,
+                adapters: 3,
+                done: 50,
+                total: Some(100),
+            }),
+            ..Default::default()
+        }),
+    );
+    append_dashboard_golden(
+        &mut output,
+        "Sessions filter sync progress",
+        120,
+        44,
+        &mut dashboard,
+    );
+    let mut queued = dashboard
+        .sessions_text
+        .sync
+        .as_ref()
+        .unwrap()
+        .status
+        .clone()
+        .unwrap()
+        .unwrap();
+    queued.target = Some(2);
+    queued.requested = 2;
+    queued.started = 1;
+    // Hard-won: 18753da4d: earlier-pass counts were displayed for a queued successor.
+    dashboard.apply_wiki_sync(false, episode, Ok(queued.clone()));
+    append_dashboard_golden(
+        &mut output,
+        "Queued Sessions filter sync",
+        120,
+        44,
+        &mut dashboard,
+    );
+    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+    append_dashboard_golden(
+        &mut output,
+        "Minimized queued Sessions filter sync",
+        120,
+        44,
+        &mut dashboard,
+    );
+    queued.started = 2;
+    dashboard.apply_wiki_sync(false, episode, Ok(queued));
+    // Hard-won: 538a5336e: minimized Sessions clipped the bar, counts and error cause.
+    append_dashboard_golden(
+        &mut output,
+        "Minimized Sessions filter sync progress",
+        120,
+        44,
+        &mut dashboard,
+    );
+    dashboard.apply_wiki_sync(false, episode, Err("database is locked".into()));
+    append_dashboard_golden(
+        &mut output,
+        "Minimized Sessions filter sync failure",
+        120,
+        44,
+        &mut dashboard,
+    );
+
+    dashboard.apply_wiki_sync(
+        false,
+        episode,
+        Ok(mj_client::daemon::WikiSyncStatus {
+            epoch: "fixture".into(),
+            target: Some(2),
+            requested: 2,
+            started: 2,
+            finished: 2,
+            successful: 2,
+            ..Default::default()
+        }),
+    );
+    let (refresh, _) = dashboard.refresh_sessions_text_search().unwrap();
+    append_dashboard_golden(
+        &mut output,
+        "Minimized Sessions filter final read",
+        120,
+        44,
+        &mut dashboard,
+    );
+    dashboard.apply_sessions_text(refresh, Err("final index read failed".into()));
+    append_dashboard_golden(
+        &mut output,
+        "Minimized Sessions filter final read failure",
+        120,
+        44,
+        &mut dashboard,
+    );
 
     let mut dashboard = minimized_sessions_dashboard(3, 2);
     append_dashboard_golden(

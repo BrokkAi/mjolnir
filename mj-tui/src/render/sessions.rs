@@ -1561,11 +1561,13 @@ pub(crate) fn render_sessions(
         content.width,
         content.height.min(SESSION_ACTIONS_HEIGHT),
     );
+    let sync_line = dashboard.sessions_sync_line(content.width);
+    let header_height = SESSION_ACTIONS_HEIGHT + u16::from(sync_line.is_some());
     let rows_area = Rect::new(
         content.x,
-        content.y.saturating_add(SESSION_ACTIONS_HEIGHT),
+        content.y.saturating_add(header_height),
         content.width,
-        content.height.saturating_sub(SESSION_ACTIONS_HEIGHT),
+        content.height.saturating_sub(header_height),
     );
     debug_assert_eq!(
         layout.width, content.width,
@@ -1621,6 +1623,17 @@ pub(crate) fn render_sessions(
         );
     }
     crate::surface_controls::render_session_buttons(frame, actions_area, dashboard);
+    if let Some(line) = sync_line {
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(
+                content.x,
+                content.y + SESSION_ACTIONS_HEIGHT,
+                content.width,
+                content.height.saturating_sub(SESSION_ACTIONS_HEIGHT).min(1),
+            ),
+        );
+    }
     let selected = dashboard
         .selected_visible_index()
         .filter(|index| *index < row_heights.len());

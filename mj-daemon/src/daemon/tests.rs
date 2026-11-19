@@ -16236,3 +16236,125 @@ async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
     );
     assert!(state.owner().lifecycle.is_empty());
 }
+
+// Hard-won: 48811463b: a completed sync flag could label pre-sync rows as final.
+#[cfg(unix)]
+#[tokio::test]
+async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
+    const TEST: &str = "wiki_search_generations_cover_commits_and_running_requests_coalesce";
+    const CHILD: &str = "MJ_TEST_WIKI_GENERATIONS";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let hooks = root.path().join("hooks");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&hooks).unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .isolated_store(root.path())
+        .env(CHILD, "1")
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            root.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("MJ_CHAOS_ISOLATED", "1")
+        .env("MJ_TEST_HOOK", "sessionwiki_sync_pass")
+        .env("MJ_TEST_HOOK_DIR", &hooks)
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let id = "0123456789abcdef0123456789abcdef";
+    let session = runtime_test_session(
+        id,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    mj_controller::database::save_session(&session).unwrap();
+    let mut conversation = mj_core::state::MaterializedSession::empty(id);
+    conversation.applied_event_ordinal = 1;
+    conversation.applied_event_digest = format!("{:064x}", 1);
+    conversation.last_activity_at_ms = Some(1_700_000_000_001);
+    conversation
+        .transcript
+        .push(Arc::new(mj_core::transcript::TranscriptItem {
+            stable_id: "prompt".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_700_000_000_001,
+            last_changed_at_ms: 1_700_000_000_001,
+            body: mj_core::transcript::TranscriptBody::User {
+                content: vec![
+                    serde_json::json!({"type":"text", "text":"swsyncquokka fresh conversation"}),
+                ],
+            },
+        }));
+    mj_controller::database::save_materialized_session(&conversation).unwrap();
+    sessionwiki::index::open().unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let waiting_state = Arc::clone(&state);
+    let waiting = tokio::spawn(async move { waiting_state.wiki().sync_now(false).await });
+    let hooks = PathBuf::from(std::env::var_os("MJ_TEST_HOOK_DIR").unwrap());
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !hooks.join("sessionwiki_sync_pass.reached").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sync reaches barrier");
+    let first = state.wiki().state().started;
+    let pending = state.wiki_search("swsyncquokka".into(), 10).await.unwrap();
+    assert!(pending.rows.is_empty());
+    let live_pending = state
+        .session_text_search("swsyncquokka".into())
+        .await
+        .unwrap();
+    assert!(live_pending.matches.is_empty());
+    let next = state.wiki().request_sync(false);
+    assert_eq!(next, first + 1);
+    for full in [false, true, false, true] {
+        assert_eq!(state.wiki().request_sync(full), next);
+    }
+    let mut changes = state.wiki().watch();
+    std::fs::write(hooks.join("sessionwiki_sync_pass.continue"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if changes.borrow_and_update().finished >= next {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("both passes finish");
+    waiting.await.unwrap().unwrap();
+    let synced = state.wiki().state();
+    assert_eq!(
+        synced.started, next,
+        "bursts coalesce into exactly one successor"
+    );
+    assert_eq!(synced.successful, next, "{:?}", synced.outcome);
+    let page = state.wiki_search("swsyncquokka".into(), 10).await.unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        [id]
+    );
+    let live = state
+        .session_text_search("swsyncquokka".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        live.matches
+            .iter()
+            .map(|hit| hit.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [id]
+    );
+}

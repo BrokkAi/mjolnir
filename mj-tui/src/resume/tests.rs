@@ -624,6 +624,24 @@ fn lost_and_destroyed_rows_are_marked_and_refuse_to_resume() {
         focus_resume_control(&mut dashboard, ResumeFocus::Destroy);
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+
+        // Sync completion must refresh the dialog even while its destroy
+        // confirmation temporarily covers it.
+        let mut completed = sync_progress_status();
+        completed.finished = 1;
+        completed.successful = 1;
+        completed.outcome = Some(mj_client::daemon::WikiSyncOutcome::Succeeded);
+        assert!(dashboard.apply_wiki_sync(true, 1, Ok(completed)));
+        let (refresh, _) = dashboard
+            .refresh_wiki_search()
+            .expect("refresh under confirmation");
+        dashboard.apply_wiki_search(refresh, ready_page(vec![wiki_row("late-result", true)]));
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        dashboard.handle_key(key(KeyCode::Esc));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("dialog reopened");
+        };
+        assert_eq!(dialog.wiki[0].id, "late-result");
     }
 }
 
@@ -772,7 +790,6 @@ fn ready_page(rows: Vec<WikiRow>) -> WikiSearchPage {
         rows,
         status: WikiStatus {
             state: WikiIndexState::Ready,
-            topping_up: false,
         },
     }
 }
@@ -1398,6 +1415,94 @@ fn golden_resume_dialog_table() {
     dashboard.apply_resume_text_search_result(request, Ok(Vec::new()));
     append_resume_golden(&mut output, "Live search result", 120, 40, &mut dashboard);
 
+    let mut progress = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    open_resume_dialog(&mut progress, 900, Vec::new());
+    progress.apply_wiki_sync(true, 900, Ok(sync_progress_status()));
+    append_resume_golden(
+        &mut output,
+        "session index sync progress",
+        140,
+        34,
+        &mut progress,
+    );
+    // Hard-won: 177f95677: an80-column dialog clipped progress behind its verbose title.
+    append_resume_golden(
+        &mut output,
+        "narrow session index sync progress",
+        80,
+        34,
+        &mut progress,
+    );
+    progress.apply_wiki_sync(true, 900, Err("database is locked".into()));
+    append_resume_golden(
+        &mut output,
+        "session index sync failure",
+        140,
+        34,
+        &mut progress,
+    );
+    append_resume_golden(
+        &mut output,
+        "narrow session index sync failure",
+        80,
+        34,
+        &mut progress,
+    );
+
+    // Hard-won: 7d06e3b: history loading/error returned before the independent sync status.
+    for tab in [ResumeTab::Hel, ResumeTab::Import] {
+        switch_to_tab(&mut progress, tab);
+        resume_dialog_mut(&mut progress.mode).unwrap().history = HistoryLoad::Loading;
+        progress.apply_wiki_sync(true, 900, Ok(sync_progress_status()));
+        append_resume_golden(
+            &mut output,
+            &format!("{tab:?} history loading with sync progress"),
+            140,
+            34,
+            &mut progress,
+        );
+        resume_dialog_mut(&mut progress.mode).unwrap().history =
+            HistoryLoad::Failed("history lookup failed".into());
+        progress.apply_wiki_sync(true, 900, Err("index unavailable".into()));
+        append_resume_golden(
+            &mut output,
+            &format!("{tab:?} history failure with sync failure"),
+            140,
+            34,
+            &mut progress,
+        );
+        // Hard-won: 9bbc497: compact sync titles discarded the independent history failure.
+        append_resume_golden(
+            &mut output,
+            &format!("{tab:?} compact history and sync failures"),
+            80,
+            34,
+            &mut progress,
+        );
+        // Hard-won: aee3f79: final Searching returned before the independent history notice.
+        let mut completed = sync_progress_status();
+        completed.finished = 1;
+        completed.successful = 1;
+        progress.apply_wiki_sync(true, 900, Ok(completed));
+        progress.refresh_wiki_search().unwrap();
+        resume_dialog_mut(&mut progress.mode).unwrap().history = HistoryLoad::Loading;
+        append_resume_golden(
+            &mut output,
+            &format!("{tab:?} history loading during final search"),
+            80,
+            34,
+            &mut progress,
+        );
+        resume_dialog_mut(&mut progress.mode).unwrap().history =
+            HistoryLoad::Failed("history lookup failed".into());
+        append_resume_golden(
+            &mut output,
+            &format!("{tab:?} history failure during final search"),
+            80,
+            34,
+            &mut progress,
+        );
+    }
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "resume-dialog-table", &output);
 }
 
@@ -2104,6 +2209,54 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
     );
 }
 
+// Hard-won: e81c95d9a: a background refresh cleared the selected row before its replacement arrived.
+#[test]
+fn a_sync_refresh_preserves_results_and_selection_until_both_answers_arrive() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
+    dashboard.switch_resume_tab(ResumeTab::Archive);
+    apply_ready_rows(
+        &mut dashboard,
+        vec![wiki_row("first", true), wiki_row("selected", true)],
+    );
+    dashboard.select_resume_row(1);
+    let before = dashboard.selected_resume_row().unwrap().key;
+    let mut completed = sync_progress_status();
+    completed.finished = 1;
+    completed.successful = 1;
+    assert!(dashboard.apply_wiki_sync(true, 1, Ok(completed)));
+    let (refresh, _) = dashboard.refresh_wiki_search().unwrap();
+    assert_eq!(dashboard.selected_resume_row().unwrap().key, before);
+    assert_eq!(rows(&dashboard).len(), 2);
+    assert!(
+        drawn(&mut dashboard, 80, 34)
+            .join("\n")
+            .contains("Searching")
+    );
+    dashboard.apply_resume_text_search_result(refresh, Ok(Vec::new()));
+    assert_eq!(dashboard.selected_resume_row().unwrap().key, before);
+    assert!(
+        drawn(&mut dashboard, 80, 34)
+            .join("\n")
+            .contains("Searching")
+    );
+    dashboard.apply_wiki_search(
+        refresh,
+        ready_page(vec![
+            wiki_row("new", true),
+            wiki_row("first", true),
+            wiki_row("selected", true),
+        ]),
+    );
+    assert_eq!(dashboard.selected_resume_row().unwrap().key, before);
+    assert!(
+        !drawn(&mut dashboard, 80, 34)
+            .join("\n")
+            .contains("Searching")
+    );
+}
+
+// Hard-won: eb0fbd898: keystroke answers must not clear the ongoing sync status.
 #[test]
 fn an_empty_tab_keeps_its_answer_while_the_index_syncs() {
     let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
@@ -2114,6 +2267,7 @@ fn an_empty_tab_keeps_its_answer_while_the_index_syncs() {
     let render = drawn(&mut dashboard, 120, 34).join("\n");
     assert!(render.contains("Searching…"), "{render}");
     assert!(!render.contains("index building"), "{render}");
+    dashboard.apply_wiki_sync(true, 1, Ok(sync_progress_status()));
     for _ in 0..3 {
         dashboard.apply_wiki_search(
             request_id,
@@ -2121,21 +2275,32 @@ fn an_empty_tab_keeps_its_answer_while_the_index_syncs() {
                 rows: Vec::new(),
                 status: WikiStatus {
                     state: WikiIndexState::Ready,
-                    topping_up: true,
                 },
             },
         );
         let render = drawn(&mut dashboard, 120, 34).join("\n");
         assert!(
-            render.contains("index syncing, more may arrive"),
+            render.contains("Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090"),
             "{render}"
         );
         assert!(!render.contains("Searching…"), "{render}");
         assert!(!dashboard.needs_fast_tick());
     }
+    let mut completed = sync_progress_status();
+    // The watch skipped the covering success and saw a later failed pass.
+    completed.finished = 2;
+    completed.successful = 1;
+    completed.outcome = Some(mj_client::daemon::WikiSyncOutcome::Failed(
+        "later pass failed".into(),
+    ));
+    assert!(
+        dashboard.apply_wiki_sync(true, 1, Ok(completed)),
+        "a covering success refreshes despite a later failed pass"
+    );
     dashboard.apply_wiki_search(request_id, ready_page(Vec::new()));
     let render = drawn(&mut dashboard, 120, 34).join("\n");
-    assert!(!render.contains("index syncing"), "{render}");
+    assert!(!render.contains("Syncing Claude Code"), "{render}");
+    assert!(!render.contains("Index sync failed"), "{render}");
     assert!(!render.contains("Searching…"), "{render}");
 }
 
@@ -2163,6 +2328,34 @@ fn search_errors_obey_query_identity_and_end_the_pending_state() {
         "{render}"
     );
     assert!(!render.contains("Searching…"), "{render}");
+    let mut completed = sync_progress_status();
+    completed.finished = 1;
+    completed.successful = 1;
+    assert!(dashboard.apply_wiki_sync(true, 1, Ok(completed)));
+    let (refresh, _) = dashboard.refresh_wiki_search().unwrap();
+    dashboard.apply_wiki_search(refresh, ready_page(Vec::new()));
+    dashboard.apply_resume_text_search_result(refresh, Ok(Vec::new()));
+    // Hard-won: 7d06e3b: a later typed query's failure stuck as a sync failure.
+    let (typed, _) = dashboard.next_wiki_search().unwrap();
+    dashboard.apply_wiki_search_result(typed, Err("ordinary search failed".into()));
+    dashboard
+        .apply_resume_text_search_result(typed, Err("ordinary conversation search failed".into()));
+    assert!(
+        resume_dialog(&dashboard.mode)
+            .unwrap()
+            .sync
+            .label()
+            .is_none()
+    );
+    dashboard.apply_wiki_search(typed, ready_page(Vec::new()));
+    dashboard.apply_resume_text_search_result(typed, Ok(Vec::new()));
+    let (refresh, _) = dashboard.refresh_wiki_search().unwrap();
+    assert!(dashboard.apply_wiki_search_result(refresh, Err("final read failed".into())));
+    let render = drawn(&mut dashboard, 120, 34).join("\n");
+    assert!(
+        render.contains("Index sync failed: final read failed"),
+        "{render}"
+    );
 }
 
 #[test]
@@ -2458,6 +2651,19 @@ fn search_reply_clears_pending_for_matching_request_only() {
         BTreeMap::new(),
     );
     open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
+    dashboard.apply_wiki_sync(
+        true,
+        1,
+        Ok(mj_client::daemon::WikiSyncStatus {
+            target: Some(1),
+            started: 1,
+            requested: 1,
+            finished: 1,
+            successful: 1,
+            outcome: Some(mj_client::daemon::WikiSyncOutcome::Succeeded),
+            ..Default::default()
+        }),
+    );
     replace_search(&mut dashboard, "the phrase");
     let (request_id, _) = dashboard.next_wiki_search().expect("a search is asked for");
     let pending = |dashboard: &DashboardState| match &dashboard.mode {
@@ -2651,7 +2857,6 @@ fn a_search_answer_updates_the_open_dialog() {
         Ok(WikiSearchPage {
             status: WikiStatus {
                 state: WikiIndexState::Ready,
-                topping_up: false
             },
             rows: vec![wiki_row("answered-under-help", true)],
         })
@@ -2676,4 +2881,22 @@ fn a_search_answer_updates_the_open_dialog() {
     );
     assert!(dialog.preview_pending.is_none());
     assert!(matches!(dialog.wiki_search, WikiSearchState::Answered(_)));
+}
+
+fn sync_progress_status() -> mj_client::daemon::WikiSyncStatus {
+    mj_client::daemon::WikiSyncStatus {
+        epoch: "fixture".into(),
+        target: Some(1),
+        requested: 1,
+        started: 1,
+        running: Some(mj_client::daemon::WikiSyncProgress {
+            phase: "Native".into(),
+            tool: "Claude Code".into(),
+            adapter: 2,
+            adapters: 7,
+            done: 1204,
+            total: Some(3090),
+        }),
+        ..Default::default()
+    }
 }
