@@ -951,13 +951,17 @@ fn saved_head(
                     let path = git_path(runner, checkout, dir)?.join("head-name");
                     if path.try_exists()? {
                         let name = fs::read_to_string(path)?.trim().to_owned();
-                        if name.starts_with("refs/heads/") {
-                            let commit = git_text(runner, checkout, ["rev-parse", &name])?;
-                            return Ok(SnapshotHead::Branch { name, commit });
-                        }
+                        // A forced sibling can advance the shared branch ref
+                        // while this checkout is rebasing. The operation owns
+                        // its saved position, regardless of that live ref.
                         let oid =
                             fs::read_to_string(git_path(runner, checkout, dir)?.join("orig-head"))?;
-                        return Ok(SnapshotHead::Detached(oid.trim().to_owned()));
+                        let commit = oid.trim().to_owned();
+                        return Ok(if name.starts_with("refs/heads/") {
+                            SnapshotHead::Branch { name, commit }
+                        } else {
+                            SnapshotHead::Detached(commit)
+                        });
                     }
                 }
             }
@@ -8465,6 +8469,69 @@ mod tests {
             );
             assert!(!restored.join("extra").exists());
         }
+    }
+
+    // Hard-won: 82cc09103: an attached rebase read a shared branch moved by its forced sibling.
+    #[test]
+    fn raw_attached_rebase_keeps_orig_head_when_forced_sibling_moves_branch() {
+        let root = Repo::new();
+        root.conflict();
+        let original = git(&root.checkout, &["rev-parse", "HEAD"]);
+        let nested = root.checkout.join("sibling");
+        git(
+            &root.checkout,
+            &[
+                "worktree",
+                "add",
+                "--force",
+                nested.to_str().unwrap(),
+                "main",
+            ],
+        );
+        root.start_conflict("rebase");
+        let conflict = fs::read(root.checkout.join("file")).unwrap();
+        fs::write(nested.join("extra"), "sibling branch advance\n").unwrap();
+        git(&nested, &["add", "extra"]);
+        git(&nested, &["commit", "-m", "sibling branch advance"]);
+        let advanced = git(&nested, &["rev-parse", "HEAD"]);
+        assert_ne!(advanced, original);
+        let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+        assert_eq!(snapshot.head.commit(), original);
+        assert_eq!(snapshot.refs["refs/heads/main"], original);
+        assert_eq!(
+            snapshot.worktrees[0].head,
+            SnapshotHead::Detached(advanced.clone())
+        );
+        assert!(
+            snapshot
+                .notices
+                .iter()
+                .any(|notice| notice.contains("sibling")
+                    && notice.contains("refs/heads/main")
+                    && notice.contains(&original)
+                    && notice.contains(&advanced))
+        );
+        assert!(operation(&FileGit, &root.checkout).unwrap().is_some());
+        assert_eq!(fs::read(root.checkout.join("file")).unwrap(), conflict);
+        assert_eq!(
+            git(&root.checkout, &["rev-parse", "refs/heads/main"]),
+            advanced
+        );
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(git(&restored, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+        assert_eq!(git(&restored, &["rev-parse", "HEAD"]), original);
+        assert_eq!(
+            git(&restored.join("sibling"), &["rev-parse", "HEAD"]),
+            advanced
+        );
+        assert!(matches!(
+            read_head(&FileGit, &restored.join("sibling")).unwrap(),
+            SnapshotHead::Detached(_)
+        ));
+        assert_eq!(
+            fs::read_to_string(restored.join("sibling/extra")).unwrap(),
+            "sibling branch advance\n"
+        );
     }
 
     // Hard-won: daa70eca2: no-origin relative module evidence ignored the restore origin override.
