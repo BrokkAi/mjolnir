@@ -1293,6 +1293,7 @@ background runs (x..end, colour):
 │ANTHROPIC                                                                                         ▐
 │>-                                                                                             ?%*▐
 │  1 profile not reporting                                                                         ▐
+│  claude2 reset due, awaiting reading                                                             ▐
 │          12:26  16:26  20:26  00:26  04:26  08:26                                                ▐
 │  claude2 ··········································  week reset due, awaiting reading · ⟲1 banked▐
 │XAI                                                                                               ▐
@@ -1303,11 +1304,10 @@ background runs (x..end, colour):
 │MOONSHOT                                                                                          ▐
 │ - week                                                                                   ↻3h  25%▐
 │  kimi 25% · Booster balance: 123 credits                                                         ▐
-│       12:26 00:26                                                                                ▐
+│       12:26 00:26                                                                                │
 │  kimi  *                                                                                         │
 │    week 25%, resets in 3h · 5H 100%, resets in 2h50m · Booster balance: 123 credits · *=W+5 (both│
 │    resets)                                                                                       │
-│ - Month                                                                                ↻2d6h  40%│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
 0: 0..1 Rgb(22, 27, 30) NONE, 1..29 Rgb(22, 27, 30) BOLD, 29..100 Rgb(22, 27, 30) NONE
@@ -1315,20 +1315,20 @@ background runs (x..end, colour):
 2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..93 Rgb(22, 27, 30) NONE, 93..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
 3: 0..100 Rgb(22, 27, 30) NONE
 4: 0..100 Rgb(22, 27, 30) NONE
-5: 0..11 Rgb(22, 27, 30) NONE, 11..53 Rgb(15, 18, 20) NONE, 53..100 Rgb(22, 27, 30) NONE
-6: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(22, 27, 30) BOLD, 4..100 Rgb(22, 27, 30) NONE
-7: 0..11 Rgb(22, 27, 30) NONE, 11..88 Rgb(200, 200, 210) NONE, 88..91 Rgb(59, 62, 66) NONE, 91..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
-8: 0..100 Rgb(22, 27, 30) NONE
+5: 0..100 Rgb(22, 27, 30) NONE
+6: 0..11 Rgb(22, 27, 30) NONE, 11..53 Rgb(15, 18, 20) NONE, 53..100 Rgb(22, 27, 30) NONE
+7: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(22, 27, 30) BOLD, 4..100 Rgb(22, 27, 30) NONE
+8: 0..11 Rgb(22, 27, 30) NONE, 11..88 Rgb(200, 200, 210) NONE, 88..91 Rgb(59, 62, 66) NONE, 91..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
 9: 0..100 Rgb(22, 27, 30) NONE
-10: 0..8 Rgb(22, 27, 30) NONE, 8..56 Rgb(48, 51, 54) NONE, 56..100 Rgb(22, 27, 30) NONE
-11: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..100 Rgb(22, 27, 30) NONE
-12: 0..9 Rgb(22, 27, 30) NONE, 9..30 Rgb(150, 110, 230) NONE, 30..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
-13: 0..100 Rgb(22, 27, 30) NONE
+10: 0..100 Rgb(22, 27, 30) NONE
+11: 0..8 Rgb(22, 27, 30) NONE, 8..56 Rgb(48, 51, 54) NONE, 56..100 Rgb(22, 27, 30) NONE
+12: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..100 Rgb(22, 27, 30) NONE
+13: 0..9 Rgb(22, 27, 30) NONE, 9..30 Rgb(150, 110, 230) NONE, 30..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
 14: 0..100 Rgb(22, 27, 30) NONE
-15: 0..8 Rgb(22, 27, 30) NONE, 8..10 Rgb(150, 110, 230) NONE, 10..20 Rgb(39, 35, 58) NONE, 20..100 Rgb(22, 27, 30) NONE
-16: 0..100 Rgb(22, 27, 30) NONE
+15: 0..100 Rgb(22, 27, 30) NONE
+16: 0..8 Rgb(22, 27, 30) NONE, 8..10 Rgb(150, 110, 230) NONE, 10..20 Rgb(39, 35, 58) NONE, 20..100 Rgb(22, 27, 30) NONE
 17: 0..100 Rgb(22, 27, 30) NONE
-18: 0..10 Rgb(22, 27, 30) NONE, 10..44 Rgb(150, 110, 230) NONE, 44..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+18: 0..100 Rgb(22, 27, 30) NONE
 19: 0..100 Rgb(22, 27, 30) NONE
 minimized partial totals: ─ Profiles ── OpenAI 5H avg 100%*, codex-short-spent refreshing…
 === Unicode unreadable week and exhausted overlapping windows (132x34) ===

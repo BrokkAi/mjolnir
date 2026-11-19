@@ -503,7 +503,13 @@ fn pool_bar(
 ) -> (Vec<Span<'static>>, Vec<String>) {
     let weight = pool.reported_weight();
     if weight == 0.0 {
-        return (vec![Span::raw(" ".repeat(width))], Vec::new());
+        let overdue = pool
+            .members
+            .iter()
+            .filter(|member| member.awaiting_reading)
+            .map(|member| format!("{} reset due, awaiting reading", member.id))
+            .collect();
+        return (vec![Span::raw(" ".repeat(width))], overdue);
     }
     let refills: Vec<_> = pool
         .reported_members()
@@ -581,7 +587,7 @@ fn pool_bar(
             let mut entry = member.id.clone();
             if capacity > 0.0 {
                 let share = capacity / weight;
-                let amount = if share < 0.5 {
+                let amount = if share < 1.0 {
                     "<1".to_string()
                 } else {
                     format!("{share:.0}")
@@ -611,6 +617,24 @@ fn pool_bar(
             Style::default().fg(readable_on(background)).bg(background),
         ));
         alternate = !alternate;
+    }
+    // A profile whose reset passed without a new reading adds nothing to the
+    // bar; name it so the pane says which profile is waiting.
+    for member in pool.members.iter().filter(|member| member.awaiting_reading) {
+        fallback.push(format!("{} reset due, awaiting reading", member.id));
+    }
+    // A full profile has no refill chunk, but its banked resets still matter.
+    for member in pool
+        .reported_members()
+        .filter(|member| member.remaining >= 100 && !refreshing.contains(&member.id))
+    {
+        if let Some(count) = member.banked.filter(|&count| count > 0) {
+            fallback.push(format!(
+                "{} {}{count} banked",
+                member.id,
+                if ascii { "B" } else { "⟲" }
+            ));
+        }
     }
     (spans, fallback)
 }
