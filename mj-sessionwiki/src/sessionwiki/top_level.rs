@@ -25,6 +25,8 @@ struct PreparedFiles {
 pub(super) struct Snapshot {
     child_session_ids: BTreeSet<String>,
     child_native_ids: BTreeSet<String>,
+    /// Top-level sessions Mjolnir records, whether or not they are indexed yet.
+    top_level_session_ids: BTreeSet<String>,
 }
 
 impl Snapshot {
@@ -45,9 +47,16 @@ impl Snapshot {
             .filter_map(|id| state.sessions.get(id)?.native_session_id.as_deref())
             .map(str::to_ascii_lowercase)
             .collect();
+        let top_level_session_ids = state
+            .sessions
+            .keys()
+            .filter(|id| !child_session_ids.contains(*id))
+            .cloned()
+            .collect();
         Self {
             child_session_ids,
             child_native_ids,
+            top_level_session_ids,
         }
     }
 
@@ -74,11 +83,23 @@ impl Snapshot {
         self.child_session_ids.contains(session_id)
     }
 
+    pub(super) fn is_known_top_level(&self, session_id: &str) -> bool {
+        self.top_level_session_ids.contains(session_id)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn for_test_top_level(session_id: &str) -> Self {
+        Self {
+            top_level_session_ids: BTreeSet::from([session_id.to_owned()]),
+            ..Self::default()
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn for_test(child_session_ids: BTreeSet<String>) -> Self {
         Self {
             child_session_ids,
-            child_native_ids: BTreeSet::new(),
+            ..Self::default()
         }
     }
 }
@@ -659,7 +680,7 @@ mod tests {
         let children = BTreeSet::from(["owned-child".to_owned()]);
         let ownership = Snapshot {
             child_session_ids: children,
-            child_native_ids: BTreeSet::new(),
+            ..Snapshot::default()
         };
         assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 4);
         assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 0);
