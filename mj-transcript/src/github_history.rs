@@ -637,10 +637,13 @@ impl HistoryScanner {
             self.too_long = true;
             return;
         }
-        let pending = std::mem::take(&mut self.pending);
-        for (id, pos) in pending {
+        // `resolve` never touches `pending`; hand the buffer back so it keeps
+        // its allocation across code points.
+        let mut pending = std::mem::take(&mut self.pending);
+        for (id, pos) in pending.drain(..) {
             self.resolve(id, pos, Some(c));
         }
+        self.pending = pending;
         // Stamps: `(?m)^\[([^\]\n]+)\]`.
         if let Some((pos, content)) = &mut self.stamp_open {
             if c == ']' || c == '\n' {
