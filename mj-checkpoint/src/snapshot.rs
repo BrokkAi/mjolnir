@@ -213,6 +213,13 @@ pub struct CaptureConsent {
     pub untracked: UntrackedConsent,
     pub operations: OperationConsent,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnrepresentedWorktree {
+    pub root_repository: bool,
+    pub git_dir: PathBuf,
+    pub path: PathBuf,
+}
+
 #[derive(Debug)]
 pub enum SnapshotRefused {
     Untracked(Vec<UntrackedItem>),
@@ -220,6 +227,8 @@ pub enum SnapshotRefused {
     DirtySubmodule(Scoped<PathBuf>),
     UnpublishedSubmoduleWork(Vec<Scoped<String>>),
     SubmoduleOperations(Vec<Scoped<GitOperationKind>>),
+    ShallowHistory(Vec<String>),
+    UnrepresentedWorktrees(Vec<Scoped<UnrepresentedWorktree>>),
     HiddenTrackedEdits(Vec<Scoped<PathBuf>>),
     IntentToAdd(Vec<Scoped<PathBuf>>),
     TrackedKeepFiles {
@@ -257,6 +266,13 @@ impl std::fmt::Display for SnapshotRefused {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::UnrepresentedWorktrees(items) => write!(f, "{}", items.iter().map(|item| {
+                let repo = mj_core::targets::posix_quote(&item.value.git_dir.to_string_lossy());
+                let path = mj_core::targets::posix_quote(&item.value.path.to_string_lossy());
+                let alternative = if item.value.root_repository { " or move it inside the clone" } else { "" };
+                format!("unrepresented worktree {} depends on the Git directory removed by suspend; run `git --git-dir {repo} --work-tree {repo} worktree remove {path}`{alternative}, then suspend again", item.value.path.display())
+            }).collect::<Vec<_>>().join("; ")),
+            Self::ShallowHistory(items) => write!(f, "{}; fetch the missing history from a remote that has it with `git fetch --unshallow` or `git fetch --deepen=<n>`, then suspend again", items.join("; ")),
             Self::SubmoduleOperations(items) => write!(f, "{}", items.iter().map(|item| {
                 let [command, argument] = abort_operation_arguments(item.value);
                 let path = mj_core::targets::posix_quote(&item.checkout.checkout_path.to_string_lossy());
@@ -369,6 +385,7 @@ pub struct WorkspaceInventory {
     pub dirty_submodules: Vec<Scoped<PathBuf>>,
     pub submodule_local_work: Vec<Scoped<String>>,
     pub submodule_operations: Vec<Scoped<GitOperationKind>>,
+    pub unrepresented_worktrees: Vec<Scoped<UnrepresentedWorktree>>,
     pub hidden_tracked_edits: Vec<Scoped<PathBuf>>,
     pub intent_to_add: Vec<Scoped<PathBuf>>,
     pub initialized_submodules: Vec<Scoped<SnapshotSubmodule>>,
@@ -693,6 +710,7 @@ pub(crate) fn operation(
         ("REVERT_HEAD", GitOperationKind::Revert),
         ("sequencer", GitOperationKind::CherryPick),
         ("BISECT_LOG", GitOperationKind::Bisect),
+        ("BISECT_START", GitOperationKind::Bisect),
     ] {
         let path = git_path(runner, checkout, name)?;
         if path.try_exists()? {
@@ -1367,11 +1385,49 @@ pub(crate) fn worktree_remote_notice(
         Ok(None)
     }
 }
+fn clear_direct_url_rules(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    worktree: bool,
+) -> Result<()> {
+    let scope = if worktree { "--worktree" } else { "--local" };
+    // Included rules are destination-owned, like the host's global configuration.
+    let names = run_git(
+        runner,
+        checkout,
+        [
+            "config",
+            scope,
+            "--no-includes",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^url\.",
+        ],
+        &[],
+    )?;
+    ensure!(
+        matches!(names.status, 0 | 1),
+        "{}",
+        git_failure("list direct URL rules", &names)
+    );
+    let names = names
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| std::str::from_utf8(name))
+        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
+    for name in names {
+        git_text(runner, checkout, ["config", scope, "--unset-all", name])?;
+    }
+    Ok(())
+}
 fn restore_url_rules(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     rules: &[SnapshotConfigEntry],
 ) -> Result<()> {
+    clear_direct_url_rules(runner, checkout, false)?;
     for rule in rules {
         git_text(
             runner,
@@ -1581,6 +1637,7 @@ fn check_consent(inventory: &WorkspaceInventory, consent: &CaptureConsent) -> Re
     let mut dirty_submodules = Vec::new();
     let mut local_work = Vec::new();
     let mut submodule_operations = Vec::new();
+    let mut unrepresented_worktrees = Vec::new();
     let mut tracked_keep = Vec::new();
     let mut collect =
         |inventory: &WorkspaceInventory| {
@@ -1611,6 +1668,7 @@ fn check_consent(inventory: &WorkspaceInventory, consent: &CaptureConsent) -> Re
             dirty_submodules.extend(inventory.dirty_submodules.clone());
             local_work.extend(inventory.submodule_local_work.clone());
             submodule_operations.extend(inventory.submodule_operations.clone());
+            unrepresented_worktrees.extend(inventory.unrepresented_worktrees.clone());
             if let Some(operation) = &inventory.operation {
                 operations.push(operation.clone());
             }
@@ -1642,6 +1700,9 @@ fn check_consent(inventory: &WorkspaceInventory, consent: &CaptureConsent) -> Re
     }
     if let Some(path) = dirty_submodules.into_iter().next() {
         return Err(SnapshotRefused::DirtySubmodule(path).into());
+    }
+    if !inventory.raw && !unrepresented_worktrees.is_empty() {
+        return Err(SnapshotRefused::UnrepresentedWorktrees(unrepresented_worktrees).into());
     }
     untracked.retain(|entry| !untracked_covered(&consent.untracked, entry));
     ensure!(untracked.is_empty(), SnapshotRefused::Untracked(untracked));
@@ -1996,6 +2057,44 @@ fn selected_refs(
         refs.insert((*name).to_owned(), (*commit).to_owned());
     }
     Ok(SelectedRefs { refs, complete })
+}
+fn shallow_history_gaps(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    tips: &[String],
+    origin_tips: &[String],
+) -> Result<Vec<String>> {
+    let shallow = match fs::read(git_path(runner, checkout, "shallow")?) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("read shallow boundaries"),
+    };
+    let mut gaps = Vec::new();
+    for boundary in std::str::from_utf8(&shallow)?
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        if !crate::checkpoint::commit_published(runner, checkout, boundary, tips)?
+            || crate::checkpoint::commit_published(runner, checkout, boundary, origin_tips)?
+        {
+            continue;
+        }
+        let commit = git_bytes(
+            runner,
+            checkout,
+            ["cat-file", "commit", boundary],
+            &[],
+            "read shallow boundary",
+        )?;
+        let parents = commit
+            .split(|byte| *byte == b'\n')
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| line.strip_prefix(b"parent "))
+            .map(std::str::from_utf8)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        gaps.push(format!("shallow boundary {boundary} with parents {} is not covered by origin; its parents are omitted from the pack", parents.join(", ")));
+    }
+    Ok(gaps)
 }
 fn write_snapshot_pack(
     runner: &dyn GitCommandRunner,
@@ -2691,6 +2790,16 @@ fn capture_prepared_workspace(
                 .into());
             }
         }
+        let gaps = shallow_history_gaps(runner, checkout, &tips, &exclusions.objects)?;
+        if !gaps.is_empty() {
+            if matches!(ownership, CheckoutOwnership::Managed) {
+                return Err(SnapshotRefused::ShallowHistory(gaps).into());
+            }
+            notices.push(format!(
+                "{}; this raw snapshot cannot be restored elsewhere; the source checkout is kept",
+                gaps.join("; ")
+            ));
+        }
         let pack = write_snapshot_pack(runner, checkout, &tips, &exclusions.objects, pack_path)?;
         check_repository_consent(
             repository,
@@ -2971,7 +3080,7 @@ fn workspace_inventory_scoped(
             submodules.notices.push(notice);
         }
         if raw && !submodules.local_work.is_empty() {
-            submodules.notices.push(format!("{}; submodule local refs, stashes and staged index state do not travel with this snapshot; the raw checkout is kept", submodules.local_work.join(", ")));
+            submodules.notices.push(format!("{}; submodule local refs, stashes, staged index and operation state do not travel with this snapshot; the raw checkout is kept", submodules.local_work.join(", ")));
         }
         if raw {
             submodules.notices.extend(submodules.operations.iter().map(|(path, kind)|
@@ -3067,6 +3176,11 @@ fn workspace_inventory_scoped(
                 .into_iter()
                 .map(|value| scoped(key, value))
                 .collect(),
+            unrepresented_worktrees: submodules
+                .unrepresented_worktrees
+                .into_iter()
+                .map(|value| scoped(key, value))
+                .collect(),
             submodule_operations: submodules
                 .operations
                 .into_iter()
@@ -3150,6 +3264,7 @@ fn same_checkout_cut(left: &WorkspaceInventory, right: &WorkspaceInventory) -> b
         && left.initialized_submodules == right.initialized_submodules
         && left.submodule_local_work == right.submodule_local_work
         && left.submodule_operations == right.submodule_operations
+        && left.unrepresented_worktrees == right.unrepresented_worktrees
         && left.intent_to_add == right.intent_to_add
         && left.worktrees.len() == right.worktrees.len()
         && left.worktrees.iter().zip(&right.worktrees).all(
@@ -3681,19 +3796,7 @@ fn restore_worktree_rules(
     // `worktree add` copies config.worktree from the primary checkout. Replace
     // those inherited URL rules so each restored checkout keeps its own scope.
     if worktree_config_enabled(runner, checkout)? {
-        for entry in read_config_entries(runner, checkout, true, r"^url\.")? {
-            let output = run_git(
-                runner,
-                checkout,
-                ["config", "--worktree", "--unset-all", &entry.name],
-                &[],
-            )?;
-            ensure!(
-                output.status == 0 || output.status == 5,
-                "{}",
-                git_failure("clear inherited worktree URL rule", &output)
-            );
-        }
+        clear_direct_url_rules(runner, checkout, true)?;
     }
     if !rules.is_empty() {
         git_text(
@@ -4795,6 +4898,26 @@ mod tests {
             &CheckoutOwnership::Managed,
         )
         .unwrap();
+        let dependency = capture_workspace_snapshot(
+            &FileGit,
+            &r.checkout,
+            &CheckoutOwnership::Managed,
+            &r.temp.path().join("outside-root.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                dependency.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::UnrepresentedWorktrees(_))
+            ),
+            "{dependency:#}"
+        );
+        assert!(dependency.to_string().contains("move it inside the clone"));
         let nested = r.checkout.join("lanes/nested\nline");
         git(
             &r.checkout,
@@ -4812,6 +4935,10 @@ mod tests {
         assert!(
             legacy.to_string().contains("newline worktree paths"),
             "{legacy:#}"
+        );
+        git(
+            &r.checkout,
+            &["worktree", "remove", outside.to_str().unwrap()],
         );
         let encoded = serde_json::to_value(r.capture(&CheckoutOwnership::Managed)).unwrap();
         assert_eq!(
@@ -7310,7 +7437,52 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains(&private), "{error:#}");
         git(&outside, &["checkout", "--detach", "origin/main"]);
+        fs::write(outside.join("file"), "external staged state\n").unwrap();
+        git(&outside, &["add", "file"]);
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("external-index.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("index"), "{error:#}");
+        git(&outside, &["reset", "--hard", "origin/main"]);
         fs::write(outside.join("file"), "unrelated external edits\n").unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("outside-dependency.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::UnrepresentedWorktrees(_))
+            ),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("worktree remove")
+                && error.to_string().contains("outside-module-lane"),
+            "{error:#}"
+        );
+        root.capture(&CheckoutOwnership::Raw { launch: None });
+        git(
+            &source,
+            &["worktree", "remove", "--force", outside.to_str().unwrap()],
+        );
         root.capture(&CheckoutOwnership::Managed);
         let inside = source.join("local-lane");
         git(
@@ -8627,6 +8799,461 @@ mod tests {
             fs::read_to_string(restored.join("sibling/extra")).unwrap(),
             "sibling branch advance\n"
         );
+    }
+
+    // Hard-won: 4dba9ad05: ignored module-linked directories hid untracked files from consent.
+    #[test]
+    fn module_linked_untracked_files_are_inventoried_and_unrepresented_checkouts_refuse_managed() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let source = root.checkout.join("sub");
+        let linked = source.join("local-lane");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fs::write(
+            git_path(&FileGit, &source, "info/exclude").unwrap(),
+            "local-lane/\n",
+        )
+        .unwrap();
+        fs::write(linked.join("notes.txt"), "untracked linked notes\n").unwrap();
+        let inventory =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        assert!(
+            inventory
+                .untracked
+                .iter()
+                .any(|entry| entry.path == Path::new("sub/local-lane/notes.txt"))
+        );
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("unrepresented.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::UnrepresentedWorktrees(_))
+            ),
+            "{error:#}"
+        );
+        assert!(!error.to_string().contains("move it inside"), "{error:#}");
+        assert_eq!(
+            fs::read_to_string(linked.join("notes.txt")).unwrap(),
+            "untracked linked notes\n"
+        );
+    }
+
+    // Hard-won: 4dba9ad05: cache-first traversal resolved a live child's relative origin from its admin.
+    #[cfg(unix)]
+    #[test]
+    fn initialized_nested_module_resolves_relative_origin_before_cached_loss_scan() {
+        let root = Repo::new();
+        let parent = Repo::new();
+        let child = Repo::new();
+        add_submodule(&parent, &child);
+        add_submodule(&root, &parent);
+        git(
+            &root.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+            ],
+        );
+        let live = root.checkout.join("sub/sub");
+        child.commit("new published child position\n");
+        git(&child.checkout, &["push", "origin", "main"]);
+        git(&live, &["fetch", "origin", "main"]);
+        let commit = git(&child.checkout, &["rev-parse", "HEAD"]);
+        git(&live, &["checkout", "--detach", &commit]);
+        git(&live, &["update-ref", "-d", "refs/remotes/origin/main"]);
+        std::os::unix::fs::symlink(&child.origin, live.join("publisher.git")).unwrap();
+        git(&live, &["remote", "set-url", "origin", "publisher.git"]);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        assert_eq!(
+            snapshot
+                .initialized_submodules
+                .iter()
+                .find(|entry| entry.path == Path::new("sub/sub"))
+                .unwrap()
+                .commit,
+            commit
+        );
+    }
+
+    // Hard-won: 4dba9ad05: provisioned direct URL rules won equal-prefix ties and accumulated on retry.
+    #[test]
+    fn provisioned_url_rules_replace_direct_scopes_and_preserve_destination_includes() {
+        let root = Repo::new();
+        let good = root.temp.path().join("good.git");
+        let bad = root.temp.path().join("bad.git");
+        for path in [&good, &bad] {
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    root.origin.to_str().unwrap(),
+                    path.to_str().unwrap(),
+                ],
+            );
+        }
+        let local = format!("url.{}.pushInsteadOf", good.display());
+        let scoped = format!("url.{}.insteadOf", good.display());
+        git(&root.checkout, &["config", &local, "publish:"]);
+        git(&root.checkout, &["remote", "set-url", "origin", "publish:"]);
+        git(
+            &root.checkout,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", root.origin.display()),
+                "publish:",
+            ],
+        );
+        assert_eq!(
+            git(&root.checkout, &["remote", "get-url", "--push", "origin"]),
+            good.to_str().unwrap()
+        );
+        git(
+            &root.checkout,
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        git(
+            &root.checkout,
+            &["config", "--worktree", &scoped, "scoped:"],
+        );
+        root.commit("snapshot rule destination\n");
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let destination = root.temp.path().join("provisioned");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                root.origin.to_str().unwrap(),
+                destination.to_str().unwrap(),
+            ],
+        );
+        git(
+            &destination,
+            &[
+                "config",
+                &format!("url.{}.pushInsteadOf", bad.display()),
+                "publish:",
+            ],
+        );
+        git(
+            &destination,
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        git(
+            &destination,
+            &[
+                "config",
+                "--worktree",
+                &format!("url.{}.insteadOf", bad.display()),
+                "scoped:",
+            ],
+        );
+        let include = root.temp.path().join("destination.config");
+        git(
+            root.temp.path(),
+            &[
+                "config",
+                "--file",
+                include.to_str().unwrap(),
+                &format!("url.{}.insteadOf", bad.display()),
+                "destination-owned:",
+            ],
+        );
+        let before = fs::read(&include).unwrap();
+        git(
+            &destination,
+            &["config", "include.path", include.to_str().unwrap()],
+        );
+        for _ in 0..2 {
+            restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: false,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            config_values(&FileGit, &destination, &local).unwrap(),
+            vec!["publish:"]
+        );
+        assert_eq!(
+            config_values(&FileGit, &destination, &scoped).unwrap(),
+            vec!["scoped:"]
+        );
+        assert_eq!(fs::read(include).unwrap(), before);
+        assert_eq!(
+            git(&destination, &["config", "--get", "include.path"]),
+            root.temp
+                .path()
+                .join("destination.config")
+                .to_str()
+                .unwrap()
+        );
+        git(&destination, &["push", "origin", "main"]);
+        assert_eq!(git(&good, &["rev-parse", "main"]), snapshot.head.commit());
+        assert_ne!(git(&bad, &["rev-parse", "main"]), snapshot.head.commit());
+    }
+
+    // Hard-won: 4dba9ad05: fork shallow boundaries omitted ancestry even with parents in alternates.
+    #[test]
+    fn shallow_fork_boundaries_require_origin_coverage_even_with_local_parents() {
+        let upstream = Repo::new();
+        let fork = Repo::new();
+        fork.commit("fork parent\n");
+        let parent = git(&fork.checkout, &["rev-parse", "HEAD"]);
+        fork.commit("fork boundary\n");
+        git(&fork.checkout, &["push", "origin", "main"]);
+        let boundary = git(&fork.checkout, &["rev-parse", "HEAD"]);
+        let checkout = upstream.temp.path().join("shallow");
+        let url = url::Url::from_directory_path(&fork.origin)
+            .unwrap()
+            .to_string();
+        git(
+            upstream.temp.path(),
+            &["clone", "--depth=1", &url, checkout.to_str().unwrap()],
+        );
+        git(
+            &checkout,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                upstream.origin.to_str().unwrap(),
+            ],
+        );
+        let capture = |ownership| {
+            capture_workspace_snapshot(
+                &FileGit,
+                &checkout,
+                ownership,
+                &upstream.temp.path().join("shallow.pack"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::Any,
+                },
+                None,
+            )
+        };
+        for alternate in [false, true] {
+            if alternate {
+                fs::write(
+                    checkout.join(".git/objects/info/alternates"),
+                    format!("{}\n", fork.origin.join("objects").display()),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                run_git(&FileGit, &checkout, ["cat-file", "-e", &parent], &[])
+                    .unwrap()
+                    .status
+                    == 0,
+                alternate
+            );
+            let error = capture(&CheckoutOwnership::Managed).unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<SnapshotRefused>(),
+                    Some(SnapshotRefused::ShallowHistory(_))
+                ),
+                "{error:#}"
+            );
+            assert!(
+                error.to_string().contains(&boundary)
+                    && error.to_string().contains(&parent)
+                    && error.to_string().contains("fetch --unshallow"),
+                "{error:#}"
+            );
+        }
+        let raw = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();
+        assert!(
+            raw.notices
+                .iter()
+                .any(|notice| notice.contains("cannot be restored elsewhere")
+                    && notice.contains(&boundary))
+        );
+        git(
+            &checkout,
+            &["remote", "set-url", "origin", fork.origin.to_str().unwrap()],
+        );
+        let snapshot = capture(&CheckoutOwnership::Managed).unwrap();
+        let destination = upstream.temp.path().join("restored-full");
+        restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &clone_base(&snapshot, None),
+        )
+        .unwrap();
+        assert_eq!(
+            git(&destination, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+        git(&destination, &["cat-file", "-e", &parent]);
+    }
+
+    // Hard-won: 35bdaa417: equal saved positions stay attached while a third forced rebase detaches.
+    #[test]
+    fn three_shared_branch_worktrees_restore_two_agreeing_attached_and_one_rebasing_detached() {
+        let root = Repo::new();
+        root.conflict();
+        let original = git(&root.checkout, &["rev-parse", "HEAD"]);
+        git(&root.checkout, &["switch", "-c", "primary"]);
+        let owner = root.checkout.join("a-owner");
+        let agree = root.checkout.join("b-agree");
+        let rebase = root.checkout.join("z-rebase");
+        for path in [&owner, &agree, &rebase] {
+            git(
+                &root.checkout,
+                &["worktree", "add", "--force", path.to_str().unwrap(), "main"],
+            );
+        }
+        assert_ne!(
+            run_git(&FileGit, &rebase, ["rebase", "side"], &[])
+                .unwrap()
+                .status,
+            0
+        );
+        fs::write(owner.join("extra"), "owner branch advance\n").unwrap();
+        git(&owner, &["add", "extra"]);
+        git(&owner, &["commit", "-m", "owner advance"]);
+        let current = git(&owner, &["rev-parse", "HEAD"]);
+        let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+        assert_eq!(snapshot.refs["refs/heads/main"], current);
+        let restored = root.restore(&snapshot, None);
+        for path in ["a-owner", "b-agree"] {
+            assert_eq!(
+                git(&restored.join(path), &["symbolic-ref", "HEAD"]),
+                "refs/heads/main"
+            );
+            assert_eq!(git(&restored.join(path), &["rev-parse", "HEAD"]), current);
+        }
+        assert_eq!(
+            read_head(&FileGit, &restored.join("z-rebase")).unwrap(),
+            SnapshotHead::Detached(original.clone())
+        );
+        assert!(
+            snapshot
+                .notices
+                .iter()
+                .any(|notice| notice.contains("z-rebase")
+                    && notice.contains("a-owner")
+                    && notice.contains(&current)
+                    && notice.contains(&original))
+        );
+    }
+
+    // Hard-won: 4f875368d: clean abandoned rebase metadata held an otherwise unreachable autostash.
+    #[test]
+    fn abandoned_module_rebase_operation_protects_clean_edit_step_and_autostash() {
+        let root = Repo::new();
+        let module = Repo::new();
+        module.commit("published middle\n");
+        let middle = git(&module.checkout, &["rev-parse", "HEAD"]);
+        module.commit("published tip\n");
+        let tip = git(&module.checkout, &["rev-parse", "HEAD"]);
+        git(&module.checkout, &["push", "origin", "main"]);
+        add_submodule(&root, &module);
+        let source = root.checkout.join("sub");
+        let abandoned = root.temp.path().join("abandoned-edit");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                abandoned.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fs::write(abandoned.join("file"), "private autostashed working edit\n").unwrap();
+        let editor = format!("sequence.editor=printf 'edit {middle}\npick {tip}\n' >");
+        git(
+            &abandoned,
+            &[
+                "-c",
+                &editor,
+                "rebase",
+                "--interactive",
+                "--autostash",
+                "HEAD~2",
+            ],
+        );
+        assert_eq!(git(&abandoned, &["rev-parse", "HEAD"]), middle);
+        assert_eq!(git(&abandoned, &["diff", "--cached", "--name-only"]), "");
+        assert_eq!(git(&abandoned, &["status", "--porcelain"]), "");
+        let marker = git_path(&FileGit, &abandoned, "rebase-merge/autostash").unwrap();
+        let stash = fs::read(&marker).unwrap();
+        assert!(!stash.is_empty());
+        git(
+            &abandoned,
+            &[
+                "cat-file",
+                "-e",
+                std::str::from_utf8(&stash).unwrap().trim(),
+            ],
+        );
+        fs::remove_dir_all(&abandoned).unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("cached-operation.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::UnpublishedSubmoduleWork(_))
+            ),
+            "{error:#}"
+        );
+        for text in ["abandoned-edit", "Rebase", "operation state"] {
+            assert!(error.to_string().contains(text), "{error:#}");
+        }
+        assert_eq!(fs::read(&marker).unwrap(), stash);
+        let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(
+            snapshot
+                .notices
+                .iter()
+                .any(|notice| notice.contains("Rebase")
+                    && notice.contains("operation state")
+                    && notice.contains("do not travel"))
+        );
+        assert_eq!(fs::read(marker).unwrap(), stash);
     }
 
     // Hard-won: d7e66a63a: abandoned module indexes can hold the only staged unpublished blobs.

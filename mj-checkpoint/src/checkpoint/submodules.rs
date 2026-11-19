@@ -80,6 +80,8 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub operations: Vec<(PathBuf, crate::snapshot::GitOperationKind)>,
     inspected_admins: BTreeSet<PathBuf>,
     loss_root: PathBuf,
+    admin_root: PathBuf,
+    pub unrepresented_worktrees: Vec<crate::snapshot::UnrepresentedWorktree>,
 }
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
@@ -89,6 +91,9 @@ pub(crate) fn inspect_snapshot_submodules(
     let mut inspection = SubmoduleInspection::default();
     let mut snapshot = SnapshotSubmoduleInspection {
         loss_root: std::fs::canonicalize(repository)?,
+        admin_root: std::fs::canonicalize(
+            crate::archive::git::git_directories(runner, repository)?.0,
+        )?,
         ..Default::default()
     };
     inspect_checkout(
@@ -118,6 +123,17 @@ pub(crate) fn inspect_snapshot_submodules(
                 entries.sort_by_key(|entry| entry.file_name());
                 for entry in entries {
                     if entry.file_type()?.is_dir() {
+                        if let Some(path) = registered_worktree_directory(&entry.path())?
+                            && !path.starts_with(&snapshot.loss_root)
+                        {
+                            snapshot.unrepresented_worktrees.push(
+                                crate::snapshot::UnrepresentedWorktree {
+                                    root_repository: true,
+                                    git_dir: common.clone(),
+                                    path,
+                                },
+                            );
+                        }
                         inspect_cached_children(
                             runner,
                             &entry.path().join("modules"),
@@ -237,13 +253,13 @@ fn inspect_checkout(
             continue;
         }
         let mut origin_evidence = None;
+        let mut initialized_admin = None;
         if let Some(snapshot) = snapshot.as_deref_mut() {
             let (admin, _) = crate::archive::git::git_directories(runner, &submodule)?;
             snapshot
                 .inspected_admins
                 .insert(std::fs::canonicalize(&admin)?);
-            inspect_cached_worktree_heads(runner, &admin, &named, snapshot)?;
-            inspect_cached_children(runner, &admin.join("modules"), &named, snapshot)?;
+            initialized_admin = Some(admin);
             if let Some(operation) = crate::snapshot::operation(runner, &submodule)? {
                 snapshot.operations.push((named.clone(), operation));
             }
@@ -421,6 +437,12 @@ fn inspect_checkout(
             snapshot.as_deref_mut(),
             None,
         )?;
+        // Live children resolve their relative origins from their checkouts.
+        // Mark them inspected before walking retained administrative stores.
+        if let (Some(snapshot), Some(admin)) = (snapshot.as_deref_mut(), initialized_admin) {
+            inspect_cached_worktree_heads(runner, &admin, &named, snapshot)?;
+            inspect_cached_children(runner, &admin.join("modules"), &named, snapshot)?;
+        }
     }
     Ok(())
 }
@@ -468,6 +490,12 @@ fn inspect_cached_local_work(
             &evidence.objects,
             true,
         )?);
+        inspect_cached_operation(
+            &cached,
+            admin,
+            &format!("submodule {}", named.display()),
+            snapshot,
+        )?;
         inspect_cached_index(
             &cached,
             admin,
@@ -479,7 +507,7 @@ fn inspect_cached_local_work(
     inspect_cached_children(runner, &admin.join("modules"), named, snapshot)
 }
 
-fn commit_published(
+pub(crate) fn commit_published(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     commit: &str,
@@ -499,6 +527,19 @@ fn commit_published(
         }
     }
     Ok(false)
+}
+
+fn inspect_cached_operation(
+    runner: &dyn GitCommandRunner,
+    admin: &Path,
+    description: &str,
+    snapshot: &mut SnapshotSubmoduleInspection,
+) -> Result<()> {
+    if let Some(kind) = crate::snapshot::operation(runner, admin)? {
+        snapshot.local_work.push(format!("{description} admin {} has {kind:?} operation state; restore its working checkout and finish or abort the operation before suspending",
+            admin.display()));
+    }
+    Ok(())
 }
 
 fn inspect_cached_index(
@@ -536,6 +577,30 @@ fn inspect_cached_index(
     Ok(())
 }
 
+fn registered_worktree_directory(admin: &Path) -> Result<Option<PathBuf>> {
+    let back_link = match std::fs::read(admin.join("gitdir")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read module worktree registration"),
+    };
+    let back_link = back_link.strip_suffix(b"\n").unwrap_or(&back_link);
+    let back_link = mj_core::path_input::from_git_bytes(back_link)?;
+    let back_link = if back_link.is_absolute() {
+        back_link
+    } else {
+        admin.join(back_link)
+    };
+    match std::fs::canonicalize(
+        back_link
+            .parent()
+            .context("worktree registration has no checkout")?,
+    ) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("resolve module worktree checkout"),
+    }
+}
+
 fn inspect_cached_worktree_heads(
     runner: &dyn GitCommandRunner,
     admin: &Path,
@@ -558,6 +623,16 @@ fn inspect_cached_worktree_heads(
             inner: runner,
             admin: &worktree,
         };
+        inspect_cached_operation(
+            &context,
+            &worktree,
+            &format!(
+                "submodule {} linked-worktree {}",
+                named.display(),
+                entry.file_name().to_string_lossy()
+            ),
+            snapshot,
+        )?;
         inspect_cached_index(
             &context,
             &worktree,
@@ -591,40 +666,51 @@ fn inspect_cached_worktree_heads(
         }
         // A published HEAD does not cover tracked edits in a linked checkout.
         // Only directories inside the selected teardown can lose those files.
-        let back_link = std::fs::read(worktree.join("gitdir"))?;
-        let back_link = back_link.strip_suffix(b"\n").unwrap_or(&back_link);
-        let back_link = mj_core::path_input::from_git_bytes(back_link)?;
-        let back_link = if back_link.is_absolute() {
-            back_link
-        } else {
-            worktree.join(back_link)
-        };
-        if let Some(directory) = back_link.parent() {
-            match std::fs::canonicalize(directory) {
-                Ok(directory) if directory.starts_with(&snapshot.loss_root) => {
-                    let tracked = submodule_git(
-                        runner,
-                        &directory,
-                        &[
-                            "status",
-                            "--porcelain",
-                            "--untracked-files=no",
-                            "--ignore-submodules=none",
-                        ],
-                    )?;
-                    let hidden = crate::archive::git::hidden_tracked_paths(runner, &directory)?;
-                    if !tracked.is_empty() || !hidden.is_empty() {
-                        snapshot.local_work.push(format!(
-                            "submodule {} linked-worktree {} has tracked edits ({})",
-                            named.display(),
-                            entry.file_name().to_string_lossy(),
-                            directory.display()
-                        ));
-                    }
+        if let Some(directory) = registered_worktree_directory(&worktree)? {
+            let removed = std::fs::canonicalize(admin)?;
+            if removed.starts_with(&snapshot.loss_root) || removed.starts_with(&snapshot.admin_root)
+            {
+                snapshot
+                    .unrepresented_worktrees
+                    .push(crate::snapshot::UnrepresentedWorktree {
+                        git_dir: removed,
+                        path: directory.clone(),
+                        root_repository: false,
+                    });
+            }
+            if directory.starts_with(&snapshot.loss_root) {
+                let prefix = directory.strip_prefix(&snapshot.loss_root)?;
+                for path in submodule_git(
+                    runner,
+                    &directory,
+                    &["ls-files", "--others", "--exclude-standard", "-z"],
+                )?
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                {
+                    snapshot
+                        .untracked
+                        .push(prefix.join(mj_core::path_input::from_git_bytes(path)?));
                 }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).context("inspect module linked checkout"),
+                let tracked = submodule_git(
+                    runner,
+                    &directory,
+                    &[
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=no",
+                        "--ignore-submodules=none",
+                    ],
+                )?;
+                let hidden = crate::archive::git::hidden_tracked_paths(runner, &directory)?;
+                if !tracked.is_empty() || !hidden.is_empty() {
+                    snapshot.local_work.push(format!(
+                        "submodule {} linked-worktree {} has tracked edits ({})",
+                        named.display(),
+                        entry.file_name().to_string_lossy(),
+                        directory.display()
+                    ));
+                }
             }
         }
         // A module's linked checkout can retain its own nested module stores.
