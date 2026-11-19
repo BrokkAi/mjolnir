@@ -40,6 +40,10 @@ REQUEST_SECONDS = 600
 STOP_SECONDS = 120
 
 
+class TeardownUnconfirmed(RuntimeError):
+    """A server tree may still be alive. The batch must halt without touching its files."""
+
+
 class Server:
     def __init__(self, binary, root, cache, log):
         env = dict(os.environ, **ENV, BIFROST_CACHE_ROOT=str(cache))
@@ -154,6 +158,14 @@ class Server:
 
     def stop(self):
         try:
+            return self._stop()
+        except TeardownUnconfirmed:
+            raise
+        except BaseException as e:  # any failure before the proof leaves the tree unaccounted for
+            raise TeardownUnconfirmed(f"{self.unit}.scope: teardown failed before confirmation: {e!r}") from e
+
+    def _stop(self):
+        try:
             self.proc.stdin.close()
         except OSError:
             pass
@@ -170,7 +182,10 @@ class Server:
                 rc = self.proc.wait(timeout=STOP_SECONDS)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-                rc = self.proc.wait(timeout=STOP_SECONDS)
+                try:
+                    rc = self.proc.wait(timeout=STOP_SECONDS)
+                except subprocess.TimeoutExpired as e:
+                    raise TeardownUnconfirmed(f"{scope}: server survived SIGKILL") from e
         # Proof the tree is gone: systemd reports the scope inactive or failed (a bus error gives
         # neither), and its cgroup holds no process. Anything else stops the batch for this repo.
         deadline = time.monotonic() + STOP_SECONDS
@@ -192,7 +207,7 @@ class Server:
                     capture_output=True, text=True).stdout.strip()
                 break
             if time.monotonic() > deadline:
-                raise RuntimeError(f"{scope} not confirmed stopped (state={state!r}, procs={procs[:80]!r}, "
+                raise TeardownUnconfirmed(f"{scope} not confirmed stopped (state={state!r}, procs={procs[:80]!r}, "
                                    f"stop exit {stopped.returncode}: {stopped.stderr.strip()[-200:]}); "
                                    "refusing to touch its worktree")
             time.sleep(1)
@@ -228,6 +243,11 @@ def phase(binary, root, cache, log):
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
     except Exception as e:
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
+    except BaseException:
+        # Interrupted (Ctrl-C, or SIGTERM from stopping the driver unit, which doesn't reach the
+        # server's separate scope): tear the tree down before propagating.
+        server.stop()
+        raise
     rec["exit"] = server.stop()
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
     if rec.get("scope_result") == "oom-kill" or rec.get("oom_kill"):
@@ -283,7 +303,14 @@ def reap_leftover_scopes():
         while True:
             state = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"],
                                    capture_output=True, text=True).stdout.strip()
-            if state in ("inactive", "failed"):
+            cg = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ControlGroup", "--value"],
+                                capture_output=True, text=True).stdout.strip()
+            try:
+                procs = open(f"/sys/fs/cgroup{cg}/cgroup.procs").read().strip() if cg else ""
+            except FileNotFoundError:
+                procs = ""
+            # "failed" can follow a stop timeout with a process still alive: require an empty cgroup.
+            if state in ("inactive", "failed") and not procs:
                 subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True)
                 break
             if time.monotonic() > deadline:
@@ -292,6 +319,8 @@ def reap_leftover_scopes():
 
 
 def main():
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     require_ec2()
     # One driver per host: a second invocation would reap the first's live scopes and race on
     # its worktrees. The lock is held for the process lifetime.
@@ -370,12 +399,13 @@ def main():
             import traceback
             rec["error"] = repr(e)[:1000]
             rec["traceback"] = traceback.format_exc()[-2000:]
+            rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
         with open(results, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
-        if "not confirmed stopped" in (rec.get("error") or ""):
+        if rec.get("teardown_unconfirmed"):
             # A server tree may still be alive: stop the batch here, leaving its worktree and
             # cache untouched. The next run's reap_leftover_scopes() must prove it gone first.
             sys.exit(f"{repo}: server scope not confirmed stopped; batch halted")
