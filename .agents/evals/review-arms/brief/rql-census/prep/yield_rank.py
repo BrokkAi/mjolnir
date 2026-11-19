@@ -134,6 +134,11 @@ def main():
     failed = sorted(set(root_err) - root_ok)
     if failed:
         sys.exit(f"root commits unavailable for {failed[:5]}: {root_err[failed[0]]}")
+    # Every candidate repo needs its roots: a missing row would let two forks with disjoint
+    # sampled fixes rank as independent repositories.
+    missing_roots = sorted({c["repo"] for c in cands} - root_ok)
+    if missing_roots:
+        sys.exit(f"no root-commit record for {len(missing_roots)} repos, e.g. {missing_roots[:3]}; rerun scan.py")
     for repos in by_hash.values():
         repos = sorted(repos)
         for other in repos[1:]:

@@ -359,26 +359,23 @@ def phase(binary, root, cache, log):
 def git(*args, cwd=None):
     """Run git, but stop it if the batch is cancelled: a long clone or fetch mustn't delay
     cancellation, and nothing launches after it (phase() checks the flag first)."""
-    # Its own process group, so cancelling stops transport and index-pack children too.
-    proc = subprocess.Popen(["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            start_new_session=True)
+    # Its own systemd scope, like a server: cancelling stops git and its transport and
+    # index-pack children, and a git left by a killed driver is reaped (and proven gone) by
+    # the next run before it touches the clone or worktree.
+    unit = f"rql-git-{os.getpid()}-{time.monotonic_ns()}"
+    proc = subprocess.Popen(["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
+                             "git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     while True:
         try:
             out, err = proc.communicate(timeout=1)
             break
         except subprocess.TimeoutExpired:
             if cancelled():
-                import signal
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    try:
-                        os.killpg(proc.pid, sig)
-                    except ProcessLookupError:
-                        break
-                    try:
-                        proc.communicate(timeout=STOP_SECONDS)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
+                run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
+                try:
+                    proc.communicate(timeout=STOP_SECONDS)
+                except subprocess.TimeoutExpired as e:
+                    raise TeardownUnconfirmed(f"{unit}.scope: git survived its scope stop") from e
                 raise Cancelled(f"cancelled during git {args[0]}")
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
@@ -413,12 +410,13 @@ def require_ec2():
 
 def reap_leftover_scopes():
     """Before any cleanup, stop every scope a previous run left behind and prove it's gone.
-    The driver runs one server at a time, so any live rql-bifrost scope at startup belongs to an
+    The driver runs one server or git at a time, so any live rql-bifrost or rql-git scope at
+    startup belongs to an
     earlier invocation whose stop couldn't be confirmed. If one survives, exit without touching
     any worktree or cache."""
     units = run_bounded(["systemctl", "--user", "list-units", "--all", "--type=scope", "--no-legend", "--plain"],
                            capture_output=True, text=True, check=True).stdout.split("\n")
-    for unit in [u.split()[0] for u in units if u.strip().startswith("rql-bifrost-")]:
+    for unit in [u.split()[0] for u in units if u.strip().startswith(("rql-bifrost-", "rql-git-"))]:
         run_bounded(["systemctl", "--user", "stop", unit], capture_output=True)
         deadline = time.monotonic() + STOP_SECONDS
         while True:
