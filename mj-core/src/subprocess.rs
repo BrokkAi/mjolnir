@@ -114,17 +114,25 @@ impl ExitWatch {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-            // SAFETY: one valid pollfd for the duration of the call.
-            let ready = unsafe { libc::poll(&mut poll, 1, millis) };
-            if ready < 0 {
-                // A failed poll (interrupted, or refused by a syscall filter)
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let millis = remaining.as_millis().min(i32::MAX as u128) as libc::c_int;
+                // SAFETY: one valid pollfd for the duration of the call.
+                let ready = unsafe { libc::poll(&mut poll, 1, millis) };
+                if ready >= 0 {
+                    return ready != 0;
+                }
+                if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                    // A handled signal: keep waiting for the rest of the time.
+                    continue;
+                }
+                // A poll refused outright (for example by a syscall filter)
                 // keeps the plain pace and reports a possible exit, so the
                 // caller reaps instead of spinning on a descriptor it cannot use.
-                std::thread::sleep(timeout);
+                std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
                 return true;
             }
-            return ready != 0;
         }
         if !timeout.is_zero() {
             std::thread::sleep(timeout);
