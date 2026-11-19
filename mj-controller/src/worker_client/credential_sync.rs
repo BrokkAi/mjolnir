@@ -1364,7 +1364,7 @@ async fn reconcile_target(
     // the actor itself releases the AWS/relay turn before handing us its result.
     let _delivery = profile.deliveries.enter(&target.session_id).await;
     let requested = profile.fingerprint(target);
-    let mut result = async {
+    let result = async {
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
         let github = if target.sync_github_token {
@@ -1395,21 +1395,6 @@ async fn reconcile_target(
         .await
     }
     .await;
-    // The session whose authentication failure asked for this sync learns
-    // whether its rejected token is the profile's current one only from a
-    // login read under the native lock, which the pass also delivered: a
-    // renewal in progress would otherwise make the old login look refused.
-    // Without that reading the verdict is unknown.
-    if *triggered_by == Some(target.session_id.as_str())
-        && target.harness == mj_core::config::HarnessKind::Claude
-        && !target.skips_login_file_sync
-        && let Ok(Some(sync)) = &mut result
-        && !profile
-            .for_target(target)
-            .is_ok_and(|login| login.read_under_lock)
-    {
-        sync.current_access_token = None;
-    }
     let deferred = matches!(&result, Err(error) if RelayJobDeferred::marks(error));
     let awaits_worker_observation = runtime.is_some()
         && matches!(&result, Ok(Some(sync)) if sync.reports_held_login
@@ -2835,8 +2820,15 @@ pub(super) async fn reconcile_on(
         });
         match fresh.as_ref().unwrap_or(&canonical.login) {
             Ok(login) => {
-                *current_access_token =
-                    mj_core::credentials::claude_access_token_fingerprint(&login.bytes);
+                // Only a Claude login read under the native lock can say
+                // whether a rejected token was the profile's current one: a
+                // renewal in progress would otherwise make the old login look
+                // refused. The evidence travels with the snapshot delivered
+                // here, never with whatever another pass published since.
+                *current_access_token = (target.harness != mj_core::config::HarnessKind::Claude
+                    || login.read_under_lock)
+                    .then(|| mj_core::credentials::claude_access_token_fingerprint(&login.bytes))
+                    .flatten();
                 match reconcile_credentials(
                     client,
                     target,
