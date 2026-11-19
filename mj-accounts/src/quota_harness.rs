@@ -142,12 +142,24 @@ pub async fn prepare_managed(
         return Vec::new();
     }
     let mut failures = Vec::new();
-    let mut groups: BTreeMap<(HarnessKind, PathBuf), Vec<HashMap<String, String>>> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<(HarnessKind, PathBuf), Vec<Candidate>> = BTreeMap::new();
     for request in requests {
         let environment: HashMap<String, String> =
             request.environment.clone().into_iter().collect();
-        let search = search_environment(&environment);
+        // The environment each check resolves its program under, so the cache
+        // root is the one the check's own installation uses.
+        let candidate = if request.harness == HarnessKind::Antigravity {
+            Candidate::Antigravity(crate::antigravity_usage::runtime_environment(
+                &request.source_home,
+                &environment,
+            ))
+        } else {
+            Candidate::Quota(environment)
+        };
+        let search = match &candidate {
+            Candidate::Quota(environment) => search_environment(environment),
+            Candidate::Antigravity(environment) => environment.clone(),
+        };
         match mj_core::harness_runtime::managed_harness_cache_root(
             search.get("XDG_CACHE_HOME").map(std::ffi::OsStr::new),
             search.get("HOME").map(std::ffi::OsStr::new),
@@ -155,44 +167,67 @@ pub async fn prepare_managed(
             Ok(root) => groups
                 .entry((request.harness, root))
                 .or_default()
-                .push(environment),
+                .push(candidate),
             Err(error) => failures.push((request.harness, error)),
         }
     }
     let cancellation = mj_core::subprocess::preparation_cancellation();
-    let results = futures::future::join_all(groups.into_iter().map(
-        |((harness, _), environments)| {
+    let results =
+        futures::future::join_all(groups.into_iter().map(|((harness, _), candidates)| {
             let cancellation = cancellation.clone();
             async move {
-            let mut failures = Vec::new();
-            for environment in environments {
-                // The PATH lookup is blocking filesystem reads that a stalled
-                // mount can hang, and shutdown must not wait for them. It only
-                // reads, so abandoning it on cancellation is safe. Racing here
-                // leaves the quota check's own `locate` unchanged.
-                let host = tokio::select! {
-                    () = cancellation.cancelled() => {
-                        failures.push((harness, mj_core::subprocess::PreparationCancelled.into()));
-                        break;
-                    }
-                    host = host_program(harness, &environment) => host,
-                };
-                match host {
-                    Ok(Some(_)) => continue,
-                    Ok(None) => match managed_installation(harness, &environment).await {
-                        Ok(_lease) => break,
+                let mut failures = Vec::new();
+                for candidate in candidates {
+                    let prepared = match candidate {
+                        Candidate::Antigravity(environment) => {
+                            crate::antigravity_usage::managed_runtime(&environment)
+                                .await
+                                .map(drop)
+                        }
+                        Candidate::Quota(environment) => {
+                            // The PATH lookup is blocking filesystem reads that
+                            // a stalled mount can hang, and shutdown must not
+                            // wait for them. It only reads, so abandoning it
+                            // on cancellation is safe. Racing here leaves the
+                            // quota check's own `locate` unchanged.
+                            let host = tokio::select! {
+                                () = cancellation.cancelled() => {
+                                    failures.push((
+                                        harness,
+                                        mj_core::subprocess::PreparationCancelled.into(),
+                                    ));
+                                    break;
+                                }
+                                host = host_program(harness, &environment) => host,
+                            };
+                            match host {
+                                Ok(Some(_)) => continue,
+                                Ok(None) => {
+                                    managed_installation(harness, &environment).await.map(drop)
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                    };
+                    match prepared {
+                        Ok(()) => break,
                         Err(error) => failures.push((harness, error)),
-                    },
-                    Err(error) => failures.push((harness, error)),
+                    }
                 }
+                failures
             }
-            failures
-            }
-        },
-    ))
-    .await;
+        }))
+        .await;
     failures.extend(results.into_iter().flatten());
     failures
+}
+
+/// One profile's way to the managed harness: through the shared quota
+/// resolution (host CLI first), or Antigravity's, which has no host step.
+#[cfg(unix)]
+enum Candidate {
+    Quota(HashMap<String, String>),
+    Antigravity(BTreeMap<String, String>),
 }
 
 pub(crate) async fn locate(

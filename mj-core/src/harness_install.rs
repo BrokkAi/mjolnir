@@ -1763,6 +1763,37 @@ fn prepend_path(environment: &mut BTreeMap<String, String>, bin: &Path) -> Resul
     Ok(())
 }
 
+/// Test-only synchronization with the Node.js extractor: a test registers a
+/// callback for a directory, and the extractor calls it before each entry it
+/// unpacks under that directory.
+#[cfg(test)]
+mod extraction_hooks {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn(usize) + Send + Sync>;
+    static HOOKS: Mutex<Vec<(PathBuf, Hook)>> = Mutex::new(Vec::new());
+
+    pub(super) fn register(root: &Path, hook: impl Fn(usize) + Send + Sync + 'static) {
+        HOOKS
+            .lock()
+            .unwrap()
+            .push((root.to_path_buf(), Arc::new(hook)));
+    }
+
+    pub(super) fn entry_reached(destination: &Path, index: usize) {
+        let hook = HOOKS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(root, _)| destination.starts_with(root))
+            .map(|(_, hook)| hook.clone());
+        if let Some(hook) = hook {
+            hook(index);
+        }
+    }
+}
+
 /// Unpacks entry by entry (what `Archive::unpack` does) so cancellation can
 /// stop it between entries; see [`extract_archive_file`].
 fn extract_node_archive(
@@ -1777,7 +1808,15 @@ fn extract_node_archive(
     let mut archive = tar::Archive::new(decoder);
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
-    for entry in archive.entries().context("read Node.js archive")? {
+    for (index, entry) in archive
+        .entries()
+        .context("read Node.js archive")?
+        .enumerate()
+    {
+        #[cfg(test)]
+        extraction_hooks::entry_reached(destination, index);
+        #[cfg(not(test))]
+        let _ = index;
         if cancellation.is_cancelled() {
             return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
                 .context("while extracting"));
@@ -3273,6 +3312,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
+        // The extractor stops at entry 100, with 29,900 entries still to
+        // unpack, until the test has cancelled: cancellation then lands
+        // mid-extraction however the threads are scheduled.
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+        let resume_rx = std::sync::Mutex::new(resume_rx);
+        // The hook pauses the first extraction under `root` only: the later
+        // install that proves the cache is repaired must run unhindered. The
+        // wait is bounded so a broken test fails instead of hanging.
+        let paused = std::sync::atomic::AtomicBool::new(false);
+        extraction_hooks::register(&root, move |index| {
+            if index == 100 && !paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                reached_tx.send(()).unwrap();
+                resume_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("the test never resumed the paused extractor");
+            }
+        });
         let mut cancelled_environment = environment.clone();
         let error = run_async(async {
             let token = tokio_util::sync::CancellationToken::new();
@@ -3281,16 +3340,17 @@ mod tests {
                 install_managed_node(&root, &mut cancelled_environment, &metadata),
             );
             tokio::pin!(install);
-            while !staged(&root)
-                .iter()
-                .any(|staging| staging.join(&folder).is_dir())
-            {
+            loop {
                 tokio::select! {
-                    result = &mut install => panic!("install ended before extraction began: {:?}", result.err()),
+                    result = &mut install => panic!("install ended before extraction paused: {:?}", result.err()),
                     () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+                if reached_rx.try_recv().is_ok() {
+                    break;
                 }
             }
             token.cancel();
+            resume_tx.send(()).unwrap();
             match install.await {
                 Err(error) => error,
                 Ok(_) => panic!("a cancelled install must fail"),

@@ -20,7 +20,9 @@ pub fn enabled_quota_profiles(
 ) -> Vec<(String, mj_core::config::HarnessProfile)> {
     config
         .enabled_profiles()
-        .filter(|(_, profile)| mj_controller::quota::kind_may_run_host_harness(profile.kind))
+        .filter(|(_, profile)| {
+            mj_controller::quota::kind_may_need_managed_quota_harness(profile.kind)
+        })
         .map(|(id, profile)| (id.to_owned(), profile.clone()))
         .collect()
 }

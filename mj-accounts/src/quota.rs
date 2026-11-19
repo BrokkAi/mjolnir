@@ -58,15 +58,15 @@ pub struct QuotaRefreshRequest {
     pub opencode_usage_priced: bool,
 }
 
-/// Whether a quota check for this harness can run a host harness program at
-/// all, decided from the kind alone, before reading any profile file. Whether
+/// Whether a quota check for this harness can call the managed installer at
+/// all (a host harness or the pinned Antigravity), decided from the kind alone, before reading any profile file. Whether
 /// one profile does ([`QuotaRefreshRequest::runs_host_harness`]) also depends
 /// on its login and provider.
 #[cfg(unix)]
-pub fn kind_may_run_host_harness(kind: HarnessKind) -> bool {
+pub fn kind_may_need_managed_quota_harness(kind: HarnessKind) -> bool {
     matches!(
         kind,
-        HarnessKind::Codex | HarnessKind::Grok | HarnessKind::Claude
+        HarnessKind::Codex | HarnessKind::Grok | HarnessKind::Claude | HarnessKind::Antigravity
     )
 }
 
@@ -169,13 +169,15 @@ impl QuotaRefreshRequest {
     /// before reading any login, so the kind and Codex's ChatGPT source decide.
     #[cfg(unix)]
     pub fn runs_host_harness(&self) -> bool {
-        kind_may_run_host_harness(self.harness)
+        kind_may_need_managed_quota_harness(self.harness)
             && match self.harness {
                 HarnessKind::Claude => {
                     self.auth_scheme != AuthScheme::AwsCredentialChain
                         && claude_usage::runs_cli(&self.source_home)
                 }
                 HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
+                // Grok and Antigravity resolve their program before reading
+                // any login.
                 _ => true,
             }
     }
