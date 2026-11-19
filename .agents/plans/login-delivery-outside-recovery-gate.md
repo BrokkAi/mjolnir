@@ -107,6 +107,8 @@ To see it working after installation, wait for a Claude renewal (the daemon log 
   Date/Author: 2026-11-19, implementer.
 - Decision (Milestone 4): `leveled_notice` keeps its `harness` parameter as `_harness`, because its caller is in `delegation/policy.rs` (Milestone 2's file). Drop the parameter after Milestone 2 merges. `setup_token_advice` is deleted. The test that pinned the setup-token advice (marked Hard-won c94c68c0) is renamed `only_a_refused_login_or_a_failed_reconciliation_reaches_the_person` and no longer carries that marker, because it now pins the opposite behaviour. The notice-naming test uses a `Refused` verdict, since the stale verdicts no longer produce a notice.
   Date/Author: 2026-11-19, implementer.
+- Decision (review fixes): `read_login_under_native_lock` and `rejected_login_is_current` are async, not blocking as the plan said. Taking the locks queues blocking work, so waiting for them from a `spawn_blocking` thread could starve the pool; the locked read itself runs on the pool with the lock held. A new session actor starts owing a credential sync, so a sync the coordinator asked for before the actor existed is not lost (the retry timer is gone). `leveled_notice` reports a reconciliation failure before the renewed-login cases. Declined: a lock timeout leaves a failed turn unknown and is not rechecked (no daemon retry state for an unobserved case).
+  Date/Author: 2026-11-19, implementer.
 
 ## Outcomes & Retrospective
 

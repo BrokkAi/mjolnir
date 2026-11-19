@@ -2412,16 +2412,13 @@ async fn claude_access_token_under_lock(
 ) -> Option<String> {
     let kind = mj_core::config::HarnessKind::Claude;
     let access = LoginAccess::bounded(store.clone());
-    let (_, bytes) = tokio::task::spawn_blocking(move || {
-        mj_core::credentials::read_login_under_native_lock(
-            kind,
-            &store,
-            mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT,
-            || access.read(kind),
-        )
-    })
-    .await
-    .ok()??
+    let (_, bytes) = mj_core::credentials::read_login_under_native_lock(
+        kind,
+        &store,
+        mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT,
+        move || access.read(kind),
+    )
+    .await?
     .ok()?;
     mj_core::credentials::claude_access_token_fingerprint(&bytes)
 }

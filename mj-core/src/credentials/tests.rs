@@ -1299,17 +1299,12 @@ async fn a_rejected_login_is_judged_against_the_login_the_renewer_writes() {
         .unwrap();
     // While the lock is held, the answer is unknown, not "refused".
     assert_eq!(
-        tokio::task::spawn_blocking({
-            let (profile, rejected) = (profile.clone(), rejected.clone());
-            move || rejected_login_is_current(&profile, &rejected, Duration::from_millis(200))
-        })
-        .await
-        .unwrap(),
+        rejected_login_is_current(&profile, &rejected, Duration::from_millis(200)).await,
         None
     );
-    let decision = tokio::task::spawn_blocking({
+    let decision = tokio::spawn({
         let rejected = rejected.clone();
-        move || rejected_login_is_current(&profile, &rejected, Duration::from_secs(10))
+        async move { rejected_login_is_current(&profile, &rejected, Duration::from_secs(10)).await }
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::fs::write(&marker, claude_login_with_token("new")).unwrap();

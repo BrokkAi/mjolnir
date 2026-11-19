@@ -107,8 +107,9 @@ pub(super) async fn run_session_actor(
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
     // The session is owed a credential sync: a job was refused while the
-    // connection was leased or reconnecting.
-    let mut credentials_owed = false;
+    // connection was leased or reconnecting. A new actor owes one too: the
+    // coordinator may have asked for its session before the actor existed.
+    let mut credentials_owed = true;
     let mut failures = 0_u32;
     let mut unreachable = false;
     let mut harness_readiness = HarnessStartupWatch::default();

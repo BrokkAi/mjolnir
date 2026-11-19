@@ -213,6 +213,9 @@ impl CredentialSyncNotices {
                     Some(LoginFailureVerdict::Refused) => format!(
                         "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`."
                     ),
+                    _ if let Some(detail) = sync_failure => {
+                        format!("credential reconciliation failed: {detail}.")
+                    }
                     Some(LoginFailureVerdict::Renewed) if result.pushed_to(session_id) => {
                         tracing::info!(
                             profile_id = %profile,
@@ -228,9 +231,6 @@ impl CredentialSyncNotices {
                             "the session failed on a stale login. The profile's login has since been renewed."
                         );
                         return None;
-                    }
-                    _ if let Some(detail) = sync_failure => {
-                        format!("credential reconciliation failed: {detail}.")
                     }
                     Some(LoginFailureVerdict::Unrefused { reason }) => {
                         tracing::info!(

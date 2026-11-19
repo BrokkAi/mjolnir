@@ -698,19 +698,20 @@ impl CredentialSyncCause {
     }
 }
 
-/// Blocking. Runs `read` while holding the native lock every writer of the
-/// profile's login takes (the renewer holds it for its whole exchange with the
+/// Runs `read` while holding the native lock every writer of the profile's
+/// login takes (the renewer holds it for its whole exchange with the
 /// provider), so a renewal in progress finishes first and `read` sees the login
 /// it wrote. `None` when the lock could not be taken within `lock_wait`: the
 /// answer is unknown, never a reading of a login that is about to change.
 ///
-/// Needs a Tokio runtime to be running, as the locks do. Call it from
-/// `tokio::task::spawn_blocking` or another thread that is not an event loop.
-pub fn read_login_under_native_lock<T>(
+/// Async, because taking the locks itself queues blocking work: waiting for
+/// them from a blocking-pool thread could starve the pool. `read` runs on the
+/// blocking pool with the lock held.
+pub async fn read_login_under_native_lock<T: Send + 'static>(
     kind: HarnessKind,
     store: &crate::config::HarnessLoginStore,
     lock_wait: Duration,
-    read: impl FnOnce() -> T,
+    read: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
     let marker = match store.lock_marker() {
         Ok(marker) => marker,
@@ -719,15 +720,15 @@ pub fn read_login_under_native_lock<T>(
             return None;
         }
     };
-    let acquired = tokio::runtime::Handle::current().block_on(
-        CredentialWriteGuard::acquire_within(kind, &marker, lock_wait),
-    );
-    match acquired {
-        Ok(guard) => {
+    match CredentialWriteGuard::acquire_within(kind, &marker, lock_wait).await {
+        Ok(guard) => tokio::task::spawn_blocking(move || {
             let value = read();
             drop(guard);
-            Some(value)
-        }
+            value
+        })
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "the locked login read stopped"))
+        .ok(),
         Err(error) => {
             tracing::info!(%error, "could not take the login lock; the login's identity is unknown");
             None
@@ -735,15 +736,15 @@ pub fn read_login_under_native_lock<T>(
     }
 }
 
-/// Blocking. Whether the token the provider rejected is the host login's
-/// current one, read under the native login lock (see
-/// [`read_login_under_native_lock`]). `Some(true)`: it is, so the provider
-/// refused the profile's current login. `Some(false)`: it is an older login,
-/// renewed since. `None`: unknown (the lock or the login could not be read).
+/// Whether the token the provider rejected is the host login's current one,
+/// read under the native login lock (see [`read_login_under_native_lock`]).
+/// `Some(true)`: it is, so the provider refused the profile's current login.
+/// `Some(false)`: it is an older login, renewed since. `None`: unknown (the
+/// lock or the login could not be read).
 ///
 /// Reads the login from its file. A macOS Keychain login is read by callers
 /// that can run `security`, through [`read_login_under_native_lock`].
-pub fn rejected_login_is_current(
+pub async fn rejected_login_is_current(
     profile: &HarnessProfile,
     rejected_fingerprint: &str,
     lock_wait: Duration,
@@ -751,32 +752,27 @@ pub fn rejected_login_is_current(
     if profile.kind != HarnessKind::Claude || !profile.auth_scheme().uses_native_login_file() {
         return None;
     }
-    let store = profile
+    let crate::config::HarnessLoginStore::File { marker } = profile
         .kind
-        .login_store(crate::config::HarnessHost::current(), &profile.home);
-    file_login_is_rejected_token(profile.kind, &store, rejected_fingerprint, lock_wait)
-}
-
-fn file_login_is_rejected_token(
-    kind: HarnessKind,
-    store: &crate::config::HarnessLoginStore,
-    rejected_fingerprint: &str,
-    lock_wait: Duration,
-) -> Option<bool> {
-    let crate::config::HarnessLoginStore::File { marker } = store else {
+        .login_store(crate::config::HarnessHost::current(), &profile.home)
+    else {
         return None;
     };
+    let store = crate::config::HarnessLoginStore::File {
+        marker: marker.clone(),
+    };
+    let kind = profile.kind;
+    let rejected = rejected_fingerprint.to_owned();
     read_login_under_native_lock(
         kind,
-        store,
+        &store,
         lock_wait,
-        || match LoginFingerprint::read_file(kind, marker) {
-            Ok(Some(LoginFingerprint::AccessToken(current))) => {
-                Some(current == rejected_fingerprint)
-            }
+        move || match LoginFingerprint::read_file(kind, &marker) {
+            Ok(Some(LoginFingerprint::AccessToken(current))) => Some(current == rejected),
             _ => None,
         },
     )
+    .await
     .flatten()
 }
 
