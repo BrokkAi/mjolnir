@@ -27,6 +27,8 @@ fn upgrade_storage() -> common::DaemonStorage {
 /// its own work in flight answers `UpgradePending` and starts draining, so a
 /// client asks again until the daemon has closed admission. Panics, naming
 /// what the daemon was waiting for, when that does not happen.
+// Its callers are the login terminal tests, which need a Unix PTY.
+#[cfg(unix)]
 async fn prepare_upgrade(metadata: &mj_client::daemon::DaemonMetadata) {
     use mj_client::daemon::{DaemonAction, DaemonClient, DaemonReply};
     let request = |action| async {

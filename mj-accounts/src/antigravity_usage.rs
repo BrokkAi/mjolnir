@@ -48,6 +48,8 @@ pub(crate) async fn managed_runtime(
 }
 
 pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result<Vec<QuotaWindow>> {
+    // Only the managed runtime, which is Unix's, adds to the environment.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut environment = runtime_environment(home, environment);
     #[cfg(unix)]
     let located = managed_runtime(&environment).await?;
