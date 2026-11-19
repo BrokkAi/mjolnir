@@ -1810,6 +1810,7 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
     use crate::relay::commands::restart_continuation_id;
     use mj_core::event_outcome::OutcomeReason;
 
+    let original_id = "a".repeat(128);
     for cut in 0..=2 {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -1823,14 +1824,14 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
         ];
         submit_relay(
             &mut relay,
-            "interrupted-turn",
+            &original_id,
             RelayCommand::Prompt {
                 prompt: original_blocks.clone(),
             },
         );
         relay.claim_pending_commands(true).unwrap();
         submit_relay(&mut relay, "later-user-input", prompt("next task"));
-        let recovery_id = restart_continuation_id("interrupted-turn");
+        let recovery_id = restart_continuation_id(&original_id);
         // The caller cannot occupy worker recovery IDs, even before recovery.
         let ordinal = relay.latest_ordinal();
         let refused = relay
@@ -1848,7 +1849,7 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
         if cut == 1 {
             relay
                 .record_command_interrupted(
-                    "interrupted-turn",
+                    &original_id,
                     OutcomeReason::WorkerRestarted,
                     "worker restarted",
                 )
@@ -1858,10 +1859,10 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
             // The one durable event exists, but cleanup/promotion did not run.
             relay
                 .append_relay_event(
-                    Some("interrupted-turn"),
+                    Some(&original_id),
                     RelayObservation::CommandInterrupted {
                         continuation_id: Some(recovery_id.clone()),
-                        command_id: "interrupted-turn".into(),
+                        command_id: original_id.clone(),
                         command: RelayCommandKind::Prompt,
                         reason: Some(OutcomeReason::WorkerRestarted),
                         message: "worker restarted".into(),
@@ -1875,7 +1876,7 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
             let before = relay.latest_ordinal();
             relay
                 .record_command_interrupted(
-                    "interrupted-turn",
+                    &original_id,
                     OutcomeReason::WorkerRestarted,
                     "repeated recovery",
                 )
@@ -2443,7 +2444,24 @@ fn restart_continuation_reports_queue_exhaustion_without_wedging_open() {
 fn restart_continuation_reports_operational_queue_exhaustion() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
-    submit_relay(&mut relay, "original-turn", prompt("finish task"));
+    relay
+        .append_relay_event(
+            Some("original-turn"),
+            RelayObservation::CommandQueued {
+                command_id: "original-turn".into(),
+                command: prompt("finish task"),
+                created_at_ms: epoch_millis(),
+            },
+        )
+        .unwrap();
+    // A compact start timestamp keeps the new queue envelope larger than
+    // the active entry even with the shorter generation/root recovery ID.
+    relay
+        .record_observation(RelayObservation::CommandStarted {
+            command_id: "original-turn".into(),
+            started_at_ms: 0,
+        })
+        .unwrap();
     relay.claim_pending_commands(true).unwrap();
     relay.clear_acp_readiness();
     for index in 0.. {

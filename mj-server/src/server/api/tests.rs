@@ -4711,6 +4711,7 @@ async fn a_turn_the_harness_starts_itself_holds_only_the_session_wait() {
 /// the worker armed for some other turn does not hold turn 10.
 // Hard-won: #1304: a wait on a turn answered while the worker's retry of that turn was still running.
 // Hard-won: 70b45ac58: waits treated a worker's restart continuation as a final interrupted turn.
+// Hard-won: 7c195cfd8: steering hid the continuation from the wait policy.
 #[test]
 fn a_wait_on_a_turn_follows_the_workers_retry_of_it() {
     use mj_core::activity::ActivityState;
@@ -4779,10 +4780,24 @@ fn a_wait_on_a_turn_follows_the_workers_retry_of_it() {
             last_activity_at_ms: Some(2_500),
         };
         assert_eq!(
-            resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
+            resolve_wait(
+                &live_observation(running.clone(), worker_state(turn.clone())),
+                &on_turn_10
+            ),
             None,
             "the retry is running"
         );
+
+        if restarting {
+            let active = running.active_turn.as_mut().unwrap();
+            active.command_id = "other-running-turn".into();
+            active.steered_into = Some(mj_core::continuation::restart_continuation_id(&retry_id));
+            assert_eq!(
+                resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
+                None,
+                "the continuation steered into another turn still carries the request"
+            );
+        }
 
         let retried = MaterializedTurnOutcome {
             command_id: retry_id,

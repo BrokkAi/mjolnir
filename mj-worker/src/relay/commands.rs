@@ -322,7 +322,7 @@ impl DurableRelay {
                 None,
             )));
         }
-        if validate_identifier(command_id, "command ID").is_err() {
+        if !mj_core::continuation::valid_command_id(command_id) {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidRequest,
                 "invalid command ID",
