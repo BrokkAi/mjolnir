@@ -6,6 +6,7 @@ import fcntl
 from functools import cache
 import hashlib
 import json
+import posixpath
 from pathlib import Path
 import re
 import shutil
@@ -22,6 +23,13 @@ LABELS = CENSUS / "labels"
 RUST = Path("/mnt/optane/tmp/rust10")
 ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
 INPUTS = ("id", "repo", "intro_commit", "base_commit", "fix_commit", "defect", "trigger", "location")
+
+
+def canonical_site(site):
+    """One repository-relative spelling of a path:line citation, so ./src/a.rs:4 and
+    src/a.rs:4 count as the same site."""
+    path, _, line = site.rpartition(":")
+    return f"{posixpath.normpath(path)}:{line}" if path else site
 
 
 def rows(path):
@@ -425,7 +433,7 @@ def validate(label, item, role, repo, allowed):
                     if (not colon or not path or not re.fullmatch(r"[1-9][0-9]{0,19}", line)
                             or int(line) > line_count(repo, item["intro_commit"], path)):
                         errors.append(f"{where}: {site!r} does not exist at intro_commit")
-                if fact["relation"] is True and len(set(sites)) < 2:
+                if fact["relation"] is True and len({canonical_site(site) for site in sites}) < 2:
                     errors.append(f"{where}: relation requires at least two distinct sites")
             if type(fact["relation"]) is not bool or type(fact["in_diff"]) is not bool:
                 errors.append(f"{where}: relation and in_diff must be booleans")

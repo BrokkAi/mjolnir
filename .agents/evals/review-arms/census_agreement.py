@@ -8,23 +8,22 @@ from collections import defaultdict
 import json
 from pathlib import Path
 
-from census_label import LABELS, RUST, exclude_families, item_sets, rows
+from census_label import LABELS, RUST, canonical_site, exclude_families, item_sets, rows
 
 
 def match_facts(primary, replication):
-    """Maximize paired facts, then pairs that cite identical sites, then pairs whose categories
-    agree, so equally good site pairings never depend on the order facts are listed in."""
-    left = [set(fact["sites"]) for fact in primary]
-    right = [set(fact["sites"]) for fact in replication]
-
-    def category_misses(a, b):
-        return sum(not agree for _, agree in category_comparisons(a, b))
-
-    # A containment pair outweighs every possible category difference in a matching, so exact
-    # pairs still come first; category agreement only breaks ties between equal site costs.
-    weight = 1 + 4 * (len(left) + len(right))
+    """Maximize paired facts, then pairs that cite identical sites. Pairing uses site evidence
+    only, never the categories the report scores. Each side is first put in a canonical order
+    (sites, then claim text), so ties between equal site pairings don't depend on the order
+    facts were listed in."""
+    def canonical(facts):
+        return sorted(facts, key=lambda fact: (sorted(canonical_site(s) for s in fact["sites"]),
+                                               fact.get("claim") or ""))
+    primary, replication = canonical(primary), canonical(replication)
+    left = [{canonical_site(s) for s in fact["sites"]} for fact in primary]
+    right = [{canonical_site(s) for s in fact["sites"]} for fact in replication]
     # Vertex indices for the replication side start after the primary side.
-    edges = [(i, j, weight * int(a != b) + category_misses(primary[i], replication[j - len(left)]))
+    edges = [(i, j, int(a != b))
              for i, a in enumerate(left)
              for j, b in enumerate(right, start=len(left))
              if a <= b or b <= a]
@@ -32,7 +31,7 @@ def match_facts(primary, replication):
     vertex_count = len(left) + len(right)
     while True:
         # Find the cheapest augmenting path from any unpaired primary fact.
-        # Containment costs more than any category difference; exact pairs cost least. Reversing
+        # A containment pair costs one and an exact pair costs zero. Reversing
         # an assigned edge refunds its cost, so each augmentation maximizes
         # exact pairs among matchings of the resulting size.
         paired_left = set(assigned.values())
@@ -78,7 +77,7 @@ def unique_facts(sets):
     facts = {}
     for group in sets:
         for fact in group:
-            key = (fact["claim"], tuple(sorted(set(fact["sites"]))))
+            key = (fact["claim"], tuple(sorted({canonical_site(s) for s in fact["sites"]})))
             facts.setdefault(key, fact)
     return list(facts.values())
 
