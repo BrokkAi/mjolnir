@@ -65,8 +65,22 @@ def match_facts(primary, replication):
     return [(primary[i], replication[j - len(left)]) for j, i in sorted(assigned.items())]
 
 
+def distinct_sets(sets):
+    """Drop repeated decisive sets (same facts by claim and canonical sites), so a copied set
+    can't add a vote to the overlap score."""
+    seen, result = set(), []
+    for facts in sets:
+        key = frozenset((fact.get("claim"), tuple(sorted(canonical_site(s) for s in fact["sites"])))
+                        for fact in facts)
+        if key not in seen:
+            seen.add(key)
+            result.append(facts)
+    return result
+
+
 def overlap(primary, replication):
-    """Mean best site-based Jaccard overlap in both directions across alternative sets."""
+    """Mean best site-based Jaccard overlap in both directions across distinct alternative sets."""
+    primary, replication = distinct_sets(primary), distinct_sets(replication)
     scores = []
     for left, right in ((primary, replication), (replication, primary)):
         for facts in left:

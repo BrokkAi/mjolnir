@@ -644,7 +644,9 @@ def log(directory, event, **data):
 def collect(output, expected, role, repo, allowed):
     results = defaultdict(list)
     errors = defaultdict(list)
-    for number, line in enumerate(output.splitlines(), 1):
+    # Split only at line feeds: str.splitlines() also breaks at U+2028 and similar characters
+    # that a valid JSON string may contain.
+    for number, line in enumerate(output.split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -899,6 +901,10 @@ def main():
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=RUST / "bifrost-src")
     args = parser.parse_args()
+    # Git runs these clones from other working directories, so make every clone path absolute.
+    for name in ("check_clones", "mjolnir_clone", "bifrost_clone", "work_dir"):
+        if getattr(args, name, None) is not None:
+            setattr(args, name, getattr(args, name).resolve())
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
     if not args.inspect and (not args.labeller or (not args.split and not args.check_quota)):
