@@ -1895,7 +1895,11 @@ fn render_elicitation_body(
     }
     {
         let mut form = dialog.view.form.borrow_mut();
-        ButtonRow::render(frame, chunks[2], &dialog.actions(), &mut form);
+        // A compact form without an action bar must not leave invisible
+        // buttons in the Tab order; Enter and Esc answer or cancel directly.
+        if buttons_height > 0 {
+            ButtonRow::render(frame, chunks[2], &dialog.actions(), &mut form);
+        }
         form.end_frame(if dialog.confirming_unanswered {
             ElicitationControl::Previous
         } else {

@@ -770,6 +770,12 @@ impl DashboardState {
             return None;
         }
         let chat = chats.get_mut(&session)?;
+        // The live composer owns input, exactly as for the conversation pane:
+        // a parked composer's replacement attach would lose any result started here.
+        if !chat.has_live_composer() {
+            chat.cancel_component_pointer();
+            return None;
+        }
         if !chat.has_elicitation() {
             return None;
         }
