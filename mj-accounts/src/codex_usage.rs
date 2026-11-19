@@ -5,7 +5,9 @@
 //! from the UI so protocol parsing and unavailable states remain testable.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,7 +70,7 @@ impl CodexLauncher {
                 .map(Arc::new),
             #[cfg(any(test, feature = "test-support"))]
             Self::Program(command) => Ok(Arc::new(crate::quota_harness::QuotaProgram {
-                command: command.clone(),
+                command: crate::quota_harness::command_text(command)?,
                 environment: HashMap::new(),
                 _installation: None,
             })),
@@ -513,14 +515,11 @@ pub fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
 /// Start `codex app-server` from `launcher`, with the environment a quota
 /// check gives it.
 async fn spawn_app_server(
-    launcher: &Path,
+    launcher: &str,
     cwd: PathBuf,
     env: HashMap<String, String>,
 ) -> Result<crate::streamed_child::ProxyStdio, QueryError> {
-    let mut spec = mj_core::targets::CommandSpec::new(
-        mj_core::target_path::text(launcher),
-        ["app-server", "--stdio"],
-    );
+    let mut spec = mj_core::targets::CommandSpec::new(launcher, ["app-server", "--stdio"]);
     spec.cwd = Some(cwd);
     spec.env = env.into_iter().collect();
     // This probe reads a ChatGPT login's rate limits and refreshes that
@@ -539,15 +538,11 @@ async fn spawn_app_server(
         Err(error) if crate::streamed_child::is_missing_program(&error) => {
             Err(QueryError::NotInstalled {
                 expected: None,
-                detail: Some(format!(
-                    "launcher {} could not be found",
-                    launcher.display()
-                )),
+                detail: Some(format!("launcher {launcher} could not be found")),
             })
         }
         Err(error) => Err(QueryError::Launch(format!(
-            "could not start Codex launcher {}: {error:#}",
-            launcher.display()
+            "could not start Codex launcher {launcher}: {error:#}"
         ))),
     }
 }

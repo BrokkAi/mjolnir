@@ -761,7 +761,7 @@ done
 #[cfg(unix)]
 // Hard-won: 7f4649508: an ambient CLI's non-UTF-8 directory was replaced before process startup.
 #[tokio::test]
-async fn inherited_native_path_starts_codex_from_a_non_utf8_directory() {
+async fn inherited_native_path_reports_a_non_utf8_quota_harness() {
     use std::os::unix::ffi::OsStringExt as _;
     const CHILD_HOME: &str = "MJ_NATIVE_QUOTA_PATH_HOME";
     if let Some(home) = std::env::var_os(CHILD_HOME) {
@@ -770,10 +770,16 @@ async fn inherited_native_path_starts_codex_from_a_non_utf8_directory() {
             BTreeMap::from([("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into())]),
         );
         let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
-        if let Some(client) = client {
-            client.shutdown().await;
-        }
-        assert_eq!(outcome.report.error, None);
+        assert!(client.is_none());
+        let error = outcome
+            .report
+            .error
+            .expect("native path cannot enter CommandSpec");
+        assert!(
+            error.contains("quota harness path is not UTF-8:"),
+            "{error}"
+        );
+        assert!(error.contains("bin-"), "{error}");
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -802,7 +808,7 @@ IFS= read -r line
     );
     let child = crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
         module_path!(),
-        "inherited_native_path_starts_codex_from_a_non_utf8_directory",
+        "inherited_native_path_reports_a_non_utf8_quota_harness",
     ))
     .env(CHILD_HOME, directory.path())
     .env("PATH", std::env::join_paths([bin]).unwrap())
@@ -912,6 +918,7 @@ IFS= read -r line
 /// until it restarts. The poll replaces it and reads the quota with the new
 /// one, which reads the credential file again.
 #[cfg(unix)]
+// Hard-won: 4de4844fb: cached rotation recovery reused a disappeared CLI instead of preparing its replacement.
 #[tokio::test]
 async fn a_failed_rotation_in_a_cached_app_server_recovers_in_the_same_poll() {
     let directory = tempfile::tempdir().unwrap();
@@ -920,9 +927,7 @@ async fn a_failed_rotation_in_a_cached_app_server_recovers_in_the_same_poll() {
         Duration::from_secs(10 * 3_600),
         Duration::from_secs(3_600),
     );
-    let (environment, log) = fake_codex_app_server(
-        directory.path(),
-        r#"#!/bin/sh
+    let script = r#"#!/bin/sh
 starts="$CODEX_USAGE_TEST_LOG.starts"
 started_before=no
 [ -e "$starts" ] && started_before=yes
@@ -941,18 +946,31 @@ else
     printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":29,"windowDurationMins":10080}}}}'
 fi
 IFS= read -r line
-"#,
+"#;
+    let (mut environment, log) = fake_codex_app_server(directory.path(), script);
+    let replacement_bin = directory.path().join("replacement-bin");
+    std::fs::create_dir(&replacement_bin).unwrap();
+    mj_core::test_hooks::install_fake_command(directory.path(), "codex", script);
+    environment.insert(
+        "PATH".into(),
+        std::env::join_paths([directory.path(), &replacement_bin])
+            .unwrap()
+            .into_string()
+            .unwrap(),
     );
+    environment.insert("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into());
 
     let (first, client) = refresh_profile_with_cache_root(
         codex_quota_request(directory.path(), environment.clone()),
         None,
-        Some(managed_codex_cache_root(directory.path())),
+        None,
     )
     .await;
     assert_eq!(first.report.error, None);
     assert!(client.is_some(), "the first poll caches its app-server");
 
+    std::fs::remove_file(directory.path().join("codex")).unwrap();
+    mj_core::test_hooks::install_fake_command(&replacement_bin, "codex", script);
     write_codex_auth(
         directory.path(),
         Duration::from_secs(600),
@@ -961,7 +979,7 @@ IFS= read -r line
     let (second, client) = refresh_profile_with_cache_root(
         codex_quota_request(directory.path(), environment),
         client,
-        Some(managed_codex_cache_root(directory.path())),
+        None,
     )
     .await;
     if let Some(client) = client {

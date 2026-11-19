@@ -135,7 +135,8 @@ impl ClaudeLauncher {
         match self {
             #[cfg(any(test, feature = "test-support"))]
             Self::Program(command) => Ok(ClaudeProgram {
-                command: command.clone(),
+                command: crate::quota_harness::command_text(command)
+                    .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?,
                 environment: HashMap::new(),
                 _installation: None,
             }),
@@ -703,7 +704,7 @@ async fn run_claude_usage(
     program: ClaudeProgram,
 ) -> Result<CommandOutput, String> {
     let mut command = CommandSpec::new(
-        mj_core::target_path::text(&program.command),
+        program.command.clone(),
         ["-p", "/usage", "--no-session-persistence"],
     )
     .purpose(purpose);
@@ -747,10 +748,7 @@ async fn run_claude_refresh(
         oauth["clientId"].as_str().unwrap_or_default().to_owned(),
     );
     let program = &renewal.program;
-    let mut command = CommandSpec::new(
-        mj_core::target_path::text(&program.command),
-        ["auth", "login"],
-    );
+    let mut command = CommandSpec::new(program.command.clone(), ["auth", "login"]);
     command.env.extend(environment);
     command.env.extend(program.environment.clone());
     source.confine_command(&mut command);

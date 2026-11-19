@@ -103,10 +103,8 @@ impl GrokUsageSession {
         let program = crate::quota_harness::locate(mj_core::config::HarnessKind::Grok, &env)
             .await
             .map_err(|error| GrokUsageError::Launch(format!("{error:#}")))?;
-        let mut spec = mj_core::targets::CommandSpec::new(
-            mj_core::target_path::text(&program.command),
-            ["agent", "stdio"],
-        );
+        let mut spec =
+            mj_core::targets::CommandSpec::new(program.command.clone(), ["agent", "stdio"]);
         spec.cwd = Some(cwd);
         spec.env = env.into_iter().chain(program.environment.clone()).collect();
         let stdio = crate::streamed_child::spawn_proxy(&spec)
@@ -373,5 +371,75 @@ mod tests {
         lease
             .try_lock()
             .expect("lease released after quota child stops");
+    }
+
+    // Hard-won: 4de4844fb: a second PATH search changed the CLI under a different child cwd, and inherited GROK_HOME was ignored.
+    #[tokio::test]
+    async fn quota_cli_selection_survives_child_cwd_and_inherited_home() {
+        const CHILD_ROOT: &str = "MJ_GROK_LOOKUP_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            // This is an isolated child: no other test shares its cwd.
+            std::env::set_current_dir(root.join("daemon")).unwrap();
+            let marker = root.join("selected");
+            let mut env = HashMap::from([
+                (
+                    "QUOTA_PROGRAM_MARKER".into(),
+                    marker.to_string_lossy().into_owned(),
+                ),
+                ("XDG_CACHE_HOME".into(), "relative-cache-is-unusable".into()),
+                (
+                    "PATH".into(),
+                    std::env::join_paths([PathBuf::from("relative"), root.join("selected-bin")])
+                        .unwrap()
+                        .into_string()
+                        .unwrap(),
+                ),
+            ]);
+            assert_eq!(
+                query(root.join("worker"), env.clone()).await.unwrap_err(),
+                GrokUsageError::Closed
+            );
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "selected");
+            env.remove("PATH");
+            assert_eq!(
+                query(root.join("worker"), env).await.unwrap_err(),
+                GrokUsageError::Closed
+            );
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "inherited");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for relative in [
+            "daemon",
+            "worker/relative",
+            "selected-bin",
+            "home/bin",
+            "empty",
+        ] {
+            std::fs::create_dir_all(root.join(relative)).unwrap();
+        }
+        for (bin, selected) in [
+            ("selected-bin", "selected"),
+            ("worker/relative", "wrong"),
+            ("home/bin", "inherited"),
+        ] {
+            fake_grok(
+                &root.join(bin),
+                &format!("#!/bin/sh\nprintf '{selected}' > \"$QUOTA_PROGRAM_MARKER\"\nexit 0\n"),
+            );
+        }
+        let child = crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "quota_cli_selection_survives_child_cwd_and_inherited_home",
+        ))
+        .env(CHILD_ROOT, root)
+        .env("GROK_HOME", root.join("home"))
+        .env("PATH", root.join("empty"))
+        .isolated_store(&root.join("child-instance"));
+        tokio::task::spawn_blocking(move || child.run())
+            .await
+            .unwrap();
     }
 }
