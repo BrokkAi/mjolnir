@@ -8,7 +8,7 @@
 │Create n  │                                                                                                                   │           │
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
-│          │ ╭ Mjolnir sessions · newest first ──────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ───────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
 │          │ │codex-1         localhost/bifrost-fird    Aug 9, 2026     ACP pretty name                                      │ │           │
 │          │ │codex-1         precision-3260/bifrost    Aug 9, 2026     ACP pretty name                                      │ │           │
@@ -43,7 +43,7 @@
 │Create n  │                                                                                                                   │           │
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
-│          │ ╭ Importable sessions · newest first ───────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ ╭ Importable sessions · newest first · ? Syncing session index… ────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
 │          │ │codex-1         local/hel                 just now        Native project                                       │ │           │
 │          │ │                                                                                                               │ │           │
@@ -78,7 +78,7 @@
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         retired-target            Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -114,7 +114,7 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │Create n  │                                                                                                                   │           │
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
-│          │ ╭ Mjolnir sessions · newest first ──────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ───────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
 │          │ │codex-1         podman                    Jun 1, 2026     ? Newest record                                      │ │           │
 │          │ │codex-1         podman                    Jan 1, 2026     ? ACP pretty name                                    │ │           │
@@ -149,7 +149,7 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? Archived record                   │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? Current record                    │ │         │
@@ -185,7 +185,7 @@ native archive metadata: true
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -221,7 +221,7 @@ archive shortcut action: None
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -257,7 +257,7 @@ d key action: None
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -337,7 +337,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │          │                                                                                                                   │           │
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
-│          │ ╭ Archived sessions · newest first ─────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ ╭ Archived sessions · newest first · ? Syncing session index… ──────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            ▐ │           │
 │          │ │codex-2         localhost/project         Sep 1, 2026     archived bare                                        ▐ │           │
 │          │ │codex-2         podman                    Sep 1, 2026     archived container                                   ▐ │           │
@@ -375,7 +375,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -410,7 +410,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         local/hel                 just now        Native                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -445,7 +445,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -480,7 +480,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Mjolnir sessions · newest first · ? Syncing session index… ──────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
@@ -552,7 +552,7 @@ mode after selecting Hel row: "Resume wizard"
 │Create   │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │         │                                                                                                  │         │
-│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ ╭ Importable sessions · newest first · ? Syncing session index… ───────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │         │ │codex-1         local/hel                 just now        Native                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -626,7 +626,7 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │  │      │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │  · Cou  │                                                                                                  │         │
-│  Idle   │ ╭ Running sessions · every workspace · newest first ───────────────────────────────────────────╮ │         │
+│  Idle   │ ╭ Running sessions · every workspace · newest first · ? Syncing session index… ────────────────╮ │         │
 │  │ No   │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
 │  │      │ │Default                   Aug 9, 2026     ? Sweep the hearth                                  │ │         │
 │         │ │Default                   Aug 9, 2026     ? Count the coins                                   │ │         │
@@ -667,7 +667,7 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │  │      │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │  · Cou  │                                                                                                  │         │
-│  Idle   │ ╭ Archived sessions · newest first ────────────────────────────────────────────────────────────╮ │         │
+│  Idle   │ ╭ Archived sessions · newest first · ? Syncing session index… ─────────────────────────────────╮ │         │
 │  │ No   │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
 │  │      │ │No archived sessions                                                                          │ │         │
 │         │ │                                                                                              │ │         │
@@ -713,7 +713,7 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │  │      │                                                                                                  │         │
 │         │ Search: mast                                                                                     │         │
 │  · Cou  │                                                                                                  │         │
-│  Idle   │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
+│  Idle   │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
 │  │ No   │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
 │  │      │ │Other                     Aug 9, 2026     ? Raise the mast                                    │ │         │
 │         │ │                                                                                              │ │         │
@@ -741,3 +741,493 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+=== session index sync progress (140x34) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰────────                                                                                                                                  │
+╭ Session  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│ Create   │                                                                                                                   │           │
+│No sessi  │  Live   Mjolnir   Import   Archived                                                                               │           │
+│Create n  │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Running sessions · every workspace · newest first · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ───────────╮ │           │
+│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
+│          │ │No running sessions                                                                                            │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Open                                                                                                 │  ─────────╯
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────                                                                                                                         ─────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+=== narrow session index sync progress (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ─────────────╮ │      │
+│     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │      │
+│     │ │No running sessions                                          │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Open                                               │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== session index sync failure (140x34) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰────────                                                                                                                                  │
+╭ Session  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│ Create   │                                                                                                                   │           │
+│No sessi  │  Live   Mjolnir   Import   Archived                                                                               │           │
+│Create n  │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Running sessions · every workspace · newest first · Index sync failed: database is locked ────────────────────╮ │           │
+│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
+│          │ │No running sessions                                                                                            │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Open                                                                                                 │  ─────────╯
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────                                                                                                                         ─────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+=== narrow session index sync failure (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ Index sync failed: database is locked ──────────────────────╮ │      │
+│     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │      │
+│     │ │No running sessions                                          │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Open                                               │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Hel history loading with sync progress (140x34) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰────────                                                                                                                                  │
+╭ Session  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│ Create   │                                                                                                                   │           │
+│No sessi  │  Live   Mjolnir   Import   Archived                                                                               │           │
+│Create n  │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ ? Loading suspended sessions… · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ───────────────────────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │No stopped Mjolnir sessions                                                                                    │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Destroy     Resume                                                                                   │  ─────────╯
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────                                                                                                                         ─────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+=== Hel history failure with sync failure (140x34) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰────────                                                                                                                                  │
+╭ Session  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│ Create   │                                                                                                                   │           │
+│No sessi  │  Live   Mjolnir   Import   Archived                                                                               │           │
+│Create n  │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Could not list suspended sessions: history lookup failed · Index sync failed: index unavailable ──────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │No stopped Mjolnir sessions                                                                                    │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Destroy     Resume                                                                                   │  ─────────╯
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────                                                                                                                         ─────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+=== Hel compact history and sync failures (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ History failed · Sync: Index sync failed: index unavailable ╮ │      │
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
+│     │ │No stopped Mjolnir sessions                                  │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Destroy     Resume                                 │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Hel history loading during final search (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ ? Loading suspended sessions… · Searching… ─────────────────╮ │      │
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
+│     │ │No stopped Mjolnir sessions                                  │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Destroy     Resume                                 │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Hel history failure during final search (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ History failed · Sync: Searching… ──────────────────────────╮ │      │
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
+│     │ │No stopped Mjolnir sessions                                  │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Destroy     Resume                                 │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Import history loading with sync progress (140x34) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰────────                                                                                                                                  │
+╭ Session  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│ Create   │                                                                                                                   │           │
+│No sessi  │  Live   Mjolnir   Import   Archived                                                                               │           │
+│Create n  │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ ? Loading suspended sessions… · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ───────────────────────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │No importable sessions                                                                                         │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Import                                                                                               │  ─────────╯
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────                                                                                                                         ─────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+=== Import history failure with sync failure (140x34) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰────────                                                                                                                                  │
+╭ Session  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│ Create   │                                                                                                                   │           │
+│No sessi  │  Live   Mjolnir   Import   Archived                                                                               │           │
+│Create n  │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Could not list suspended sessions: history lookup failed · Index sync failed: index unavailable ──────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │No importable sessions                                                                                         │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Import                                                                                               │  ─────────╯
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────                                                                                                                         ─────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+=== Import compact history and sync failures (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ History failed · Sync: Index sync failed: index unavailable ╮ │      │
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
+│     │ │No importable sessions                                       │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Import                                             │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Import history loading during final search (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ ? Loading suspended sessions… · Searching… ─────────────────╮ │      │
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
+│     │ │No importable sessions                                       │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Import                                             │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Import history failure during final search (80x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ de                                                                           │
+╰───                                                                           │
+╭ Se  ╭ × Sessions ─────────────────────────────────────────────────────╮      │
+│ Cr  │                                                                 │      │
+│No   │  Live   Mjolnir   Import   Archived                             │      │
+│Cre  │                                                                 │      │
+│     │ Search:                                                         │      │
+│     │                                                                 │  ng. │
+│     │ ╭ History failed · Sync: Searching… ──────────────────────────╮ │      │
+│     │ │  PROFILE    TARGET    LAST ACTIVE     SESSION               │ │      │
+│     │ │No importable sessions                                       │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │  ────╯
+│     │ │                                                             │ │  ────╮
+│     │ │                                                             │ │      │
+│     │ │                                                             │ │   or │
+╰───  │ │                                                             │ │  ────╯
+╭ Ta  │ │                                                             │ │    ▄ ╮
+│  H  │ │                                                             │ │      │
+╰───  │ │                                                             │ │  ────╯
+╭ Pr  │ ╰─────────────────────────────────────────────────────────────╯ │    ▄ ╮
+│     │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+│  c  │                                                                 │      │
+╰───  │   Cancel     Import                                             │  ────╯
+╭ No  ╰─────────────────────────────────────────────────────────────────╯    ▄ ╮
+│Not                                                                           │
+╰───                                                                       ────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette

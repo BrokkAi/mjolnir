@@ -241,6 +241,7 @@ impl ResumeRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResumeDialog {
     pub(crate) discovery_id: u64,
+    pub(crate) sync: crate::wiki_sync::SyncEpisode,
     /// Native scan results, one entry per configured profile. Entries appear
     /// immediately as placeholders and fill in as background scans report.
     ///
@@ -336,11 +337,12 @@ impl From<mj_client::daemon::ResumeCandidates> for ResumeHistory {
     }
 }
 
-/// A query stays answered while its task follows an ongoing index sync.
+/// Keep prior rows while visibly refreshing the same query after a sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WikiSearchState {
     Pending,
     Answered(WikiStatus),
+    Refreshing(WikiStatus),
     Failed(String),
 }
 
@@ -348,25 +350,26 @@ pub(crate) enum WikiSearchState {
 pub(crate) enum LiveSearchState {
     Pending,
     Answered(BTreeSet<String>),
+    Refreshing(BTreeSet<String>),
     Failed(String),
 }
 
 impl LiveSearchState {
     fn matches(&self, session_id: &str) -> bool {
-        matches!(self, Self::Answered(matches) if matches.contains(session_id))
+        matches!(self, Self::Answered(matches) | Self::Refreshing(matches) if matches.contains(session_id))
     }
 }
 
 impl WikiSearchState {
     fn status(&self) -> Option<WikiStatus> {
         match self {
-            Self::Answered(status) => Some(*status),
+            Self::Answered(status) | Self::Refreshing(status) => Some(*status),
             Self::Pending | Self::Failed(_) => None,
         }
     }
 }
 
-fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
+pub(crate) fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
     match mode {
         Mode::ResumeDialog(dialog) => Some(dialog),
         Mode::Confirm(ConfirmDialog {
@@ -377,7 +380,7 @@ fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
     }
 }
 
-fn resume_dialog_mut(mode: &mut Mode) -> Option<&mut ResumeDialog> {
+pub(crate) fn resume_dialog_mut(mode: &mut Mode) -> Option<&mut ResumeDialog> {
     match mode {
         Mode::ResumeDialog(dialog) => Some(dialog),
         Mode::Confirm(ConfirmDialog {
@@ -1220,14 +1223,26 @@ impl DashboardState {
             // while that tab is the one on screen.
             Mode::ResumeDialog(dialog) => {
                 (dialog.is_scanning() && dialog.tab == ResumeTab::Import)
-                    || dialog.wiki_search == WikiSearchState::Pending
+                    || dialog.sync.scanning()
+                    || matches!(
+                        dialog.wiki_search,
+                        WikiSearchState::Pending | WikiSearchState::Refreshing(_)
+                    )
                     || (dialog.tab == ResumeTab::Live
-                        && dialog.live_search == LiveSearchState::Pending)
+                        && matches!(
+                            dialog.live_search,
+                            LiveSearchState::Pending | LiveSearchState::Refreshing(_)
+                        ))
                     || dialog.history == HistoryLoad::Loading
             }
             _ => false,
         };
         dialog_animates
+            || self
+                .sessions_text
+                .sync
+                .as_ref()
+                .is_some_and(crate::wiki_sync::SyncEpisode::scanning)
             || self.opening_session.is_some()
             || self.ordered_sessions().iter().any(|session| {
                 self.session_operations.contains_key(&session.id)
@@ -1258,6 +1273,10 @@ impl DashboardState {
         self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
         self.mode = Mode::ResumeDialog(ResumeDialog {
             discovery_id,
+            sync: crate::wiki_sync::SyncEpisode {
+                id: discovery_id,
+                status: None,
+            },
             profiles: Arc::new(profiles),
             // The sessions a person is most likely looking for are the ones
             // running now, so that is the tab the dialog opens on.
@@ -1456,6 +1475,11 @@ impl DashboardState {
         if dialog.wiki_request_id != request_id {
             return false;
         }
+        if let Err(error) = &result
+            && matches!(dialog.live_search, LiveSearchState::Refreshing(_))
+        {
+            dialog.sync.status = Some(Err(error.clone()));
+        }
         dialog.live_search = match result {
             Ok(matches) => {
                 LiveSearchState::Answered(matches.into_iter().map(|hit| hit.session_id).collect())
@@ -1477,6 +1501,11 @@ impl DashboardState {
         };
         if dialog.wiki_request_id != request_id {
             return false;
+        }
+        if let Err(error) = &result
+            && matches!(dialog.wiki_search, WikiSearchState::Refreshing(_))
+        {
+            dialog.sync.status = Some(Err(error.clone()));
         }
         match result {
             Ok(page) => {
@@ -1634,9 +1663,7 @@ impl DashboardState {
     /// Claim the next search request id for the open dialog, with the query it
     /// should run. `None` when no dialog is open.
     pub fn next_wiki_search(&mut self) -> Option<(u64, String)> {
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
-            return None;
-        };
+        let dialog = resume_dialog_mut(&mut self.mode)?;
         self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
         dialog.wiki_request_id = self.wiki_search_generation;
         dialog.wiki_search = WikiSearchState::Pending;
@@ -1649,6 +1676,23 @@ impl DashboardState {
         let request = (dialog.wiki_request_id, dialog.search.to_string());
         self.rebuild_resume_rows();
         Some(request)
+    }
+
+    /// Refresh the same query without removing the results under the selection.
+    pub fn refresh_wiki_search(&mut self) -> Option<(u64, String)> {
+        let dialog = resume_dialog_mut(&mut self.mode)?;
+        self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
+        dialog.wiki_request_id = self.wiki_search_generation;
+        dialog.wiki_search =
+            WikiSearchState::Refreshing(dialog.wiki_search.status().unwrap_or_default());
+        if let LiveSearchState::Answered(matches) | LiveSearchState::Refreshing(matches) =
+            &dialog.live_search
+        {
+            dialog.live_search = LiveSearchState::Refreshing(matches.clone());
+        } else {
+            dialog.live_search = LiveSearchState::Refreshing(BTreeSet::new());
+        }
+        Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
 
     /// Keeps `row_index` pointed at the selected row after the list changed.
@@ -2389,6 +2433,7 @@ pub(crate) fn render_resume_dialog(
         dashboard,
         dialog,
         list_rows.len(),
+        rows[2].width,
     ));
     let list_area = block.inner(rows[2]);
     // Registered after the dialog body so a drag over the rows selects the
@@ -2656,28 +2701,36 @@ fn resume_list_title(
     dashboard: &DashboardState,
     dialog: &ResumeDialog,
     rows: usize,
+    width: u16,
 ) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
-    if matches!(dialog.tab, ResumeTab::Hel | ResumeTab::Import) {
+    let refreshing = (matches!(dialog.wiki_search, WikiSearchState::Refreshing(_))
+        || matches!(dialog.live_search, LiveSearchState::Refreshing(_)))
+        && !matches!(dialog.wiki_search, WikiSearchState::Failed(_))
+        && !matches!(dialog.live_search, LiveSearchState::Failed(_))
+        && dialog.sync.label().is_none();
+    let history_notice = if matches!(dialog.tab, ResumeTab::Hel | ResumeTab::Import) {
         match &dialog.history {
-            HistoryLoad::Loading => {
-                spans.push(mj_chat::spinner::compact_span(
+            HistoryLoad::Loading => Some(Line::from(vec![
+                mj_chat::spinner::compact_span(
                     dashboard.config.spinner,
                     dialog.opened_at.elapsed().as_millis(),
-                ));
-                spans.push(Span::raw(" Loading suspended sessions…"));
-                return Line::from(spans);
-            }
-            HistoryLoad::Failed(error) => {
-                spans.push(Span::raw(format!(
-                    "Could not list suspended sessions: {error}"
-                )));
-                return Line::from(spans);
-            }
-            HistoryLoad::Loaded(_) => {}
+                ),
+                Span::raw(" Loading suspended sessions…"),
+            ])),
+            HistoryLoad::Failed(error) => Some(Line::from(format!(
+                "Could not list suspended sessions: {error}"
+            ))),
+            HistoryLoad::Loaded(_) => None,
         }
-    }
-    if dialog.search.is_empty() {
+    } else {
+        None
+    };
+    if let Some(notice) = history_notice {
+        spans.extend(notice.spans);
+    } else if refreshing {
+        // The final read's status is appended below, just like sync progress.
+    } else if dialog.search.is_empty() {
         // A state filter replaces "every workspace": the list is still every
         // workspace's, and what it is narrowed to is the news.
         spans.push(match (dialog.tab, dialog.live_state) {
@@ -2695,7 +2748,7 @@ fn resume_list_title(
     } else if dialog.tab == ResumeTab::Live {
         spans.push(Span::raw(match_count(rows)));
         match &dialog.live_search {
-            LiveSearchState::Pending => {
+            LiveSearchState::Pending | LiveSearchState::Refreshing(_) => {
                 spans.push(mj_chat::spinner::compact_span(
                     dashboard.config.spinner,
                     dialog.opened_at.elapsed().as_millis(),
@@ -2709,7 +2762,7 @@ fn resume_list_title(
         }
     } else {
         match &dialog.wiki_search {
-            WikiSearchState::Pending => {
+            WikiSearchState::Pending | WikiSearchState::Refreshing(_) => {
                 spans.push(mj_chat::spinner::compact_span(
                     dashboard.config.spinner,
                     dialog.opened_at.elapsed().as_millis(),
@@ -2728,16 +2781,50 @@ fn resume_list_title(
         WikiSearchState::Failed(error) if dialog.search.is_empty() => {
             spans.push(Span::raw(format!(" · Search failed: {error}")));
         }
-        WikiSearchState::Answered(status) => {
-            if status.state == WikiIndexState::Indexing {
-                spans.push(Span::raw(" · index building, more may arrive"));
-            } else if status.state == WikiIndexState::VersionMismatch {
-                spans.push(Span::raw(" · index from a newer SessionWiki"));
-            } else if status.topping_up {
-                spans.push(Span::raw(" · index syncing, more may arrive"));
-            }
+        WikiSearchState::Answered(status) if status.state == WikiIndexState::VersionMismatch => {
+            spans.push(Span::raw(" · index from a newer SessionWiki"));
         }
         _ => {}
+    }
+    let progress = if refreshing {
+        Some(Line::from("Searching…"))
+    } else {
+        dialog.sync.line(dashboard.config.spinner)
+    };
+    if let Some(progress) = progress {
+        if Line::from(spans.clone()).width() + progress.width() + 4
+            > usize::from(width.saturating_sub(2))
+        {
+            let mut prefix = String::from(" ");
+            if matches!(dialog.tab, ResumeTab::Hel | ResumeTab::Import)
+                && matches!(&dialog.history, HistoryLoad::Failed(_))
+            {
+                prefix.push_str("History failed · Sync: ");
+            } else if matches!(dialog.tab, ResumeTab::Hel | ResumeTab::Import)
+                && matches!(&dialog.history, HistoryLoad::Loading)
+            {
+                prefix.push_str("Loading history · ");
+            }
+            if matches!(&dialog.wiki_search, WikiSearchState::Answered(status) if status.state == WikiIndexState::VersionMismatch)
+            {
+                prefix.push_str("Index mismatch · ");
+            }
+            let room = width.saturating_sub(Span::raw(prefix.as_str()).width() as u16 + 3);
+            let fitted = if refreshing {
+                Some(progress.clone())
+            } else {
+                dialog.sync.line_fitting(dashboard.config.spinner, room)
+            };
+            if let Some(mut fitted) = fitted {
+                fitted.spans.insert(0, Span::raw(prefix));
+                fitted.spans.push(Span::raw(" "));
+                return fitted;
+            }
+        }
+        if spans.len() > 1 {
+            spans.push(Span::raw(" · "));
+        }
+        spans.extend(progress.spans);
     }
     if dialog.tab == ResumeTab::Import && dialog.is_scanning() {
         let (scanned, total) = dialog.scan_progress();

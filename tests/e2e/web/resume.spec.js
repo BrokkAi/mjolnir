@@ -30,11 +30,14 @@ async function mount(page, {
   holdAction = null,
   rejectAction = false,
   holdDetail = null,
+  syncAfterFirstSearch = false,
   // A ready index with nothing in it, which is what most of these tests want:
   // search works, and there is nothing archived. Pass `wiki: null` for a
   // daemon that has no wiki routes at all.
   wiki = { rows: [], restoredId: 'restored' },
 } = {}) {
+  let releaseFirstSearch;
+  const firstSearch = new Promise(resolve => { releaseFirstSearch = resolve; });
   const state = {
     snapshot: {
       revision: 1,
@@ -52,6 +55,8 @@ async function mount(page, {
     rejectAction,
     wiki,
     wikiQueries: [],
+    wikiWatches: [],
+    wikiSyncRequests: 0,
     wikiRestores: [],
     detailRequests: [],
     holdDetail,
@@ -74,6 +79,7 @@ async function mount(page, {
   await page.route('**/*', async route => {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
+    if (pathname === '/auth/session') return json({});
     if (pathname === '/api/snapshot') {
       state.snapshots += 1;
       const wire = viewerWireSnapshot(state.snapshot);
@@ -108,12 +114,50 @@ async function mount(page, {
     }
     if (pathname.startsWith('/api/v1/wiki/')) {
       if (!state.wiki) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'not found' }) });
+      const finished = { epoch: 'fixture', version: 1, requested: 1, started: 1, finished: 1, successful: 1, outcome: 'succeeded', running: null, target: 1 };
+      if (pathname === '/api/v1/wiki/sync') {
+        state.wikiSyncRequests += 1;
+        if (state.wiki.syncUnsupported) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'not found' }) });
+        if (syncAfterFirstSearch) await firstSearch;
+        return json(state.wiki.sync || finished);
+      }
+      if (pathname === '/api/v1/wiki/sync/watch') {
+        state.wikiWatches.push(Object.fromEntries(new URL(route.request().url()).searchParams));
+        if (state.wiki.dropWatch) {
+          state.wiki.dropWatch = false;
+          return route.abort('connectionreset');
+        }
+        if (state.wiki.unavailableWatch) {
+          state.wiki.unavailableWatch = false;
+          return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'the server is shutting down' }) });
+        }
+        if (state.wiki.holdWatch) await state.wiki.holdWatch;
+        if (state.wiki.dropWatchAfterHold) { state.wiki.dropWatchAfterHold = false; return route.abort('connectionreset'); }
+        if (state.wiki.refuseWatchAfterHold) { state.wiki.refuseWatchAfterHold = false; return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'the server is shutting down' }) }); }
+        if (state.wiki.expireWatch) {
+          state.wiki.expireWatch = false;
+          return route.fulfill({ status: 401, body: '' });
+        }
+        return json(state.wiki.sync || finished);
+      }
       if (pathname === '/api/v1/wiki/search') {
         const query = new URL(route.request().url()).searchParams.get('q') || '';
         state.wikiQueries.push(query);
+        if (state.wiki.dropNextSearch) {
+          state.wiki.dropNextSearch = false;
+          return route.abort('connectionreset');
+        }
+        if (state.wiki.searchUnavailable) return route.fulfill({ status: 503, body: '' });
+        if (state.wiki.searchFailure) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'SessionWiki search failed: database disk image is malformed' }) });
         const rows = (state.wiki.rows || []).filter(row =>
           !query || JSON.stringify(row).toLowerCase().includes(query.toLowerCase()));
-        return json({ rows, status: state.wiki.status || { state: 'ready', topping_up: false } });
+        const answer = { rows, status: state.wiki.status || { state: 'ready' } };
+        const hold = state.wiki.holdNextSearch;
+        state.wiki.holdNextSearch = null;
+        if (hold) await hold;
+        const reply = await json(answer);
+        releaseFirstSearch();
+        return reply;
       }
       if (pathname.endsWith('/brief')) return json({ markdown: state.wiki.brief || '' });
       if (pathname.endsWith('/restore')) {
@@ -260,6 +304,7 @@ function wikiRow(id, sessionId, overrides = {}) {
 }
 
 async function captureResumeState(output, page, label, state, extra = null) {
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
   const viewport = page.viewportSize();
   output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
   output.push((await page.locator('#resume-page').isVisible())
@@ -278,12 +323,21 @@ async function captureResumeState(output, page, label, state, extra = null) {
   if (extra !== null) output.push(`state: ${JSON.stringify(extra)}`);
 }
 
+// Hard-won: 4f96c1c: completion and initial reads raced the settled golden frames.
 test('golden_viewer_resume', async ({ context }) => {
   const { assertGolden } = await import('./golden.mjs');
   const output = [];
+  // Establish the initial-answer -> sync -> completion-answer ordering explicitly.
+  // These frames capture settled controls rather than racing background reads.
+  const mountSettled = async (page, options = {}) => {
+    const state = await mount(page, { ...options, syncAfterFirstSearch: true });
+    await expect.poll(() => state.wikiQueries.length).toBe(2);
+    await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+    return state;
+  };
 
   const listPage = await context.newPage();
-  const listState = await mount(listPage, {
+  const listState = await mountSettled(listPage, {
     sessions: [
       session('newest', { title: 'Newest profile work', project_label: 'alpha-project', last_activity_at_ms: 3_000 }),
       session('older', { title: 'A very long session title that must stay inside the phone viewport without horizontal scrolling', project_label: 'older-project', last_activity_at_ms: 2_000 }),
@@ -313,7 +367,7 @@ test('golden_viewer_resume', async ({ context }) => {
   await listPage.close();
 
   const selectedPage = await context.newPage();
-  const selectedState = await mount(selectedPage, { sessions: [session('mutating', { title: 'Mutating session' })] });
+  const selectedState = await mountSettled(selectedPage, { sessions: [session('mutating', { title: 'Mutating session' })] });
   await openSession(selectedPage, 'mutating');
   await captureResumeState(output, selectedPage, 'selected resumable session', selectedState);
   selectedState.snapshot.sessions[0].has_error = true;
@@ -338,7 +392,7 @@ test('golden_viewer_resume', async ({ context }) => {
   await selectedPage.close();
 
   const archivedListPage = await context.newPage();
-  const archivedListState = await mount(archivedListPage, {
+  const archivedListState = await mountSettled(archivedListPage, {
     wiki: {
       rows: [
         { id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work', started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello', archived: true, native_id: null, snippet: null, hel_session_id: null },
@@ -358,7 +412,7 @@ test('golden_viewer_resume', async ({ context }) => {
   await archivedListPage.close();
 
   const restorePage = await context.newPage();
-  const restoreState = await mount(restorePage, {
+  const restoreState = await mountSettled(restorePage, {
     wiki: {
       rows: [{ id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work', started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello', archived: true, native_id: null, snippet: null, hel_session_id: null }],
       brief: '# Previous session\n\nThe single word is hello.',
@@ -451,7 +505,7 @@ test('golden_viewer_resume', async ({ context }) => {
   barePage.on('request', request => {
     if (new URL(request.url()).pathname === '/api/preflight/resume') preflightRequests.push(request.postDataJSON());
   });
-  const bareState = await mount(barePage);
+  const bareState = await mountSettled(barePage);
   await expect.poll(() => bareState.wikiQueries.at(-1)).toBe('');
   await openSession(barePage, 'suspended');
   await barePage.locator('[data-role="resume-target"] select').selectOption('local');
@@ -772,6 +826,7 @@ test('a daemon without the wiki routes still lists sessions and closes the searc
   const state = await mount(page, { wiki: null });
   await expect(page.locator('#resume-archived')).toBeHidden();
   await expect(page.locator('#resume-wiki-note')).toBeHidden();
+  await expect(page.locator('#resume-wiki-progress')).toContainText('Index sync failed:');
   // The rows are Mjolnir's own and are still listed; only searching them is
   // gone, because the index is what searches.
   await expect(page.locator('#resumable [data-session-id]')).toHaveCount(1);
@@ -780,21 +835,243 @@ test('a daemon without the wiki routes still lists sessions and closes the searc
   const asked = state.wikiQueries.length;
   await page.waitForTimeout(600);
   expect(state.wikiQueries.length).toBe(asked);
+
+  // An older backend can support searching without the new sync endpoints.
+  const legacyPage = await page.context().newPage();
+  const legacy = await mount(legacyPage, { wiki: { rows: [], syncUnsupported: true } });
+  await expect(legacyPage.locator('#resume-search')).toBeEnabled();
+  await expect(legacyPage.locator('#resume-wiki-progress')).toContainText('Index sync failed:');
+  await legacyPage.locator('#resume-search').fill('pomegranate');
+  await expect.poll(() => legacy.wikiQueries.at(-1)).toBe('pomegranate');
+  expect(legacy.wikiSyncRequests).toBe(1);
+  await legacyPage.close();
+
 });
 
-test('the search box stays closed while the first index build runs and opens when it ends', async ({ page }) => {
-  const state = await mount(page, {
-    wiki: { rows: [], restoredId: 'restored', status: { state: 'indexing', topping_up: true } },
-  });
+// Hard-won: 8f4dcf3: typing before a mismatch reply stranded a disabled filter on an empty index.
+test('a disabled index search clears its filter and keeps resume rows usable', async ({ page }) => {
+  let release;
+  const holdNextSearch = new Promise(resolve => { release = resolve; });
+  const state = await mount(page, { sessions: [session('one'), session('two')], wiki: {
+    rows: [], holdNextSearch, status: { state: 'version_mismatch' },
+    sync: { epoch: 'fixture', version: 1, target: 1, requested: 1, started: 1,
+      finished: 1, successful: 0, running: null, outcome: { failed: 'newer index schema' } },
+  } });
+  await expect.poll(() => state.wikiQueries.length).toBe(1);
+  await page.locator('#resume-search').fill('missing from index');
+  await expect.poll(() => state.wikiQueries.at(-1)).toBe('missing from index');
   await expect(page.locator('#resume-search')).toBeDisabled();
-  await expect(page.locator('#resume-search')).toHaveAttribute('placeholder', 'Indexing…');
-  // Rows keep working while it builds.
-  await expect(page.locator('#resumable [data-session-id="suspended"]')).toBeVisible();
+  await expect(page.locator('#resume-search')).toHaveValue('');
+  await expect(page.locator('#resume-search')).toHaveAttribute('placeholder', 'SessionWiki index is from a newer version');
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(2);
+  release();
+  await page.locator('#resumable [data-session-id="one"]').click();
+  await expect(page.locator('#resume-detail')).toContainText('one');
+  await page.locator('#resume-detail-back').click();
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(2);
+  await page.evaluate(() => { location.hash = '#workspace/test'; });
+  await expect(page.locator('#resume-page')).toBeHidden();
+  await page.evaluate(() => { location.hash = '#workspace/test/resume'; });
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(2);
+  await expect(page.locator('#resume-search')).toHaveValue('');
+});
 
-  // The page asks again on its own; when the build ends the box opens without
-  // the person reopening the page.
-  const asked = state.wikiQueries.length;
-  state.wiki.status = { state: 'ready', topping_up: false };
-  await expect.poll(() => state.wikiQueries.length, { timeout: 15_000 }).toBeGreaterThan(asked);
+// Hard-won: eb0fbd898: sync completion must refresh the current query without retyping.
+test('index sync shows progress and refreshes the current query without retyping', async ({ page }) => {
+  let release;
+  const holdWatch = new Promise(resolve => { release = resolve; });
+  const state = await mount(page, {
+    wiki: { rows: [], restoredId: 'restored', status: { state: 'indexing' }, holdWatch,
+      sync: { epoch: 'fixture', version: 1, requested: 21, started: 21, finished: 20, successful: 20,
+        target: 21, outcome: null,
+        running: { phase: 'Native', tool: 'Claude Code', adapter: 2, adapters: 7, done: 1204, total: 3090 } },
+    },
+  });
   await expect(page.locator('#resume-search')).toBeEnabled();
+  await expect(page.locator('#resume-wiki-progress')).toHaveText('Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1,204/3,090');
+  await page.locator('#resume-search').fill('pomegranate');
+  await expect.poll(() => state.wikiQueries.at(-1)).toBe('pomegranate');
+  await expect(page.locator('#resumable [data-session-id="suspended"]')).toHaveCount(0);
+  const asked = state.wikiQueries.length;
+  state.wiki.rows = [{ id: 'live-one', tool: 'mjolnir', project: '/tmp/project', title: 'Suspended test',
+    started: '2026-09-17T01:00:00Z', msgs: 5, preview: 'still here', archived: false,
+    native_id: null, snippet: 'a fresh pomegranate sentinel', hel_session_id: 'suspended' }];
+  state.wiki.status = { state: 'ready' };
+  state.wiki.sync = { ...state.wiki.sync, version: 2, finished: 21, successful: 21,
+    outcome: 'succeeded', running: null };
+  release();
+  await expect.poll(() => state.wikiQueries.length).toBeGreaterThan(asked);
+  await expect(page.locator('#resumable [data-session-id="suspended"]')).toBeVisible();
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+  expect(state.wikiSyncRequests).toBe(1);
+  expect(state.wikiWatches).toEqual([{ epoch: 'fixture', after: '1' }]);
+  await expect(page.locator('#resume-search')).toHaveValue('pomegranate');
+
+  // A failed pass stays visible for this visit, including while typing.
+  state.wiki.sync = { ...state.wiki.sync, version: 3, target: 22, requested: 22,
+    started: 22, finished: 22, outcome: { failed: 'database is locked' } };
+  await page.evaluate(() => { location.hash = '#workspace/test'; });
+  await expect(page.locator('#resume-page')).toBeHidden();
+  await page.evaluate(() => { location.hash = '#workspace/test/resume'; });
+  await expect(page.locator('#resume-wiki-progress')).toHaveText('Index sync failed: database is locked');
+  await page.locator('#resume-search').fill('another query');
+  await expect(page.locator('#resume-wiki-progress')).toHaveText('Index sync failed: database is locked');
+  expect(state.wikiSyncRequests).toBe(2);
+});
+
+
+// Hard-won: acd65766f: a delayed pre-completion answer incorrectly requested another sync.
+test('a delayed search answer refreshes the query within the completed sync', async ({ page }) => {
+  let releaseWatch;
+  const holdWatch = new Promise(resolve => { releaseWatch = resolve; });
+  const state = await mount(page, { wiki: { rows: [], holdWatch,
+    sync: { epoch: 'fixture', version: 1, target: 1, requested: 1, started: 1, finished: 0,
+      successful: 0, outcome: null, running: null } } });
+  await expect.poll(() => state.wikiQueries.length).toBeGreaterThan(0);
+  let releaseSearch;
+  state.wiki.holdNextSearch = new Promise(resolve => { releaseSearch = resolve; });
+  await page.locator('#resume-search').fill('pomegranate');
+  await expect.poll(() => state.wikiQueries.at(-1)).toBe('pomegranate');
+  const before = state.wikiQueries.length;
+  state.wiki.rows = [{ id: 'fresh', tool: 'mjolnir', project: '/tmp/project', title: 'pomegranate',
+    started: '2026-09-17T01:00:00Z', msgs: 1, preview: 'pomegranate', archived: false,
+    native_id: null, snippet: 'pomegranate', hel_session_id: 'suspended' }];
+  state.wiki.sync = { ...state.wiki.sync, version: 2, finished: 1, successful: 1, outcome: 'succeeded' };
+  let releaseFinal;
+  state.wiki.holdNextSearch = new Promise(resolve => { releaseFinal = resolve; });
+  releaseWatch();
+  await expect.poll(() => state.wikiQueries.length).toBeGreaterThan(before);
+  await expect(page.locator('#resume-wiki-progress')).toHaveText('Searching…');
+  releaseFinal();
+  releaseSearch();
+  await expect(page.locator('#resumable [data-session-id="suspended"]')).toBeVisible();
+  expect(state.wikiSyncRequests).toBe(1);
+});
+
+// Hard-won: acd65766f: an expired login retained the failed resume sync controller.
+test('signing back in starts a fresh sync on the same resume route', async ({ page }) => {
+  let releaseWatch;
+  const holdWatch = new Promise(resolve => { releaseWatch = resolve; });
+  const state = await mount(page, { wiki: { rows: [], holdWatch, expireWatch: true,
+    sync: { epoch: 'fixture', version: 1, target: 1, requested: 1, started: 1, finished: 0,
+      successful: 0, outcome: null, running: null } } });
+  await expect.poll(() => state.wikiWatches.length).toBe(1);
+  releaseWatch();
+  await expect(page.locator('#login')).toBeVisible();
+  state.wiki.sync = { ...state.wiki.sync, version: 2, finished: 1, successful: 1, outcome: 'succeeded' };
+  await page.locator('#code').fill('123456');
+  await page.locator('#login-form button').click();
+  await expect(page.locator('#resume-page')).toBeVisible();
+  await expect.poll(() => state.wikiSyncRequests).toBe(2);
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+  expect(new URL(page.url()).hash).toBe('#workspace/test/resume');
+});
+
+
+// A failed completion read ends this episode; reopening is the recovery action.
+test('a failed completion search shows an error without retrying', async ({ page }) => {
+  let release;
+  const holdWatch = new Promise(resolve => { release = resolve; });
+  const state = await mount(page, { wiki: { rows: [], holdWatch,
+    sync: { epoch: 'fixture', version: 1, target: 1, requested: 1, started: 1, finished: 0,
+      successful: 0, outcome: null, running: null } } });
+  await page.locator('#resume-search').fill('pomegranate');
+  await expect.poll(() => state.wikiQueries.at(-1)).toBe('pomegranate');
+  const before = state.wikiQueries.length;
+  state.wiki.sync = { ...state.wiki.sync, version: 2, finished: 1, successful: 1, outcome: 'succeeded' };
+  state.wiki.dropNextSearch = true;
+  release();
+  await expect(page.locator('#resume-wiki-progress')).toContainText('Index sync failed:');
+  await page.waitForTimeout(600);
+  expect(state.wikiQueries.length).toBe(before + 1);
+  expect(state.wikiSyncRequests).toBe(1);
+});
+
+// Hard-won: 18753da4d: persistent backend search errors were hidden by the reconnect loop.
+test('persistent index search failures stay visible without retrying', async ({ page }) => {
+  const state = await mount(page);
+  await expect.poll(() => state.wikiQueries.length).toBeGreaterThan(0);
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+  state.wiki.searchFailure = true;
+  await page.locator('#resume-search').fill('broken index');
+  await expect(page.locator('#resume-wiki-note')).toHaveText('SessionWiki search failed: database disk image is malformed');
+  const failedAt = state.wikiQueries.length;
+  await page.waitForTimeout(600);
+  expect(state.wikiQueries.length).toBe(failedAt);
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+  state.wiki.searchFailure = false;
+  await page.locator('#resume-search').fill('recovered index');
+  await expect.poll(() => state.wikiQueries.at(-1)).toBe('recovered index');
+  await expect(page.locator('#resume-wiki-note')).toBeHidden();
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+});
+
+// Hard-won: 18753da4d: an earlier pass's counts were shown for the queued target.
+test('a queued target waits before showing its own progress', async ({ page }) => {
+  let releaseQueued;
+  const queued = new Promise(resolve => { releaseQueued = resolve; });
+  let releaseRunning;
+  const running = new Promise(resolve => { releaseRunning = resolve; });
+  const state = await mount(page, { wiki: { rows: [], holdWatch: queued,
+    sync: { epoch: 'fixture', version: 1, target: 2, requested: 2, started: 1, finished: 0,
+      successful: 0, outcome: null,
+      running: { phase: 'Native', tool: 'Codex', adapter: 2, adapters: 3, done: 100, total: 100 } } } });
+  await expect(page.locator('#resume-wiki-progress')).toHaveText('Waiting for session index sync…');
+  // Hard-won: 4f96c1c: advancing before the watch arrived skipped the queued progress.
+  await expect.poll(() => state.wikiWatches.length).toBe(1);
+  state.wiki.sync = { ...state.wiki.sync, version: 2, started: 2,
+    running: { ...state.wiki.sync.running, done: 20 } };
+  state.wiki.holdWatch = running;
+  releaseQueued();
+  await expect(page.locator('#resume-wiki-progress')).toContainText('20/100');
+  state.wiki.sync = { ...state.wiki.sync, version: 3, finished: 2, successful: 2, outcome: 'succeeded', running: null };
+  releaseRunning();
+  await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+});
+
+for (const failure of ['drop', 'refusal', 'epoch']) {
+  test(`a sync watch ${failure} ends the episode until reopened`, async ({ page }) => {
+    let release;
+    const holdWatch = new Promise(resolve => { release = resolve; });
+    const state = await mount(page, { wiki: { rows: [], holdWatch,
+      sync: { epoch: 'fixture', version: 1, target: 1, requested: 1, started: 1, finished: 0,
+        successful: 0, outcome: null, running: null } } });
+    await expect.poll(() => state.wikiWatches.length).toBe(1);
+    if (failure === 'epoch') state.wiki.sync = { ...state.wiki.sync, epoch: 'replacement', version: 2 };
+    else state.wiki[ failure === 'drop' ? 'dropWatchAfterHold' : 'refuseWatchAfterHold' ] = true;
+    release();
+    await expect(page.locator('#resume-wiki-progress')).toContainText('Index sync failed:');
+    await page.waitForTimeout(600);
+    expect(state.wikiWatches.length).toBe(1);
+    expect(state.wikiSyncRequests).toBe(1);
+    state.wiki.sync = { ...state.wiki.sync, finished: 1, successful: 1, outcome: 'succeeded' };
+    await page.evaluate(() => { location.hash = '#workspace/test'; });
+    await expect(page.locator('#resume-page')).toBeHidden();
+    await page.evaluate(() => { location.hash = '#workspace/test/resume'; });
+    await expect.poll(() => state.wikiSyncRequests).toBe(2);
+    await expect(page.locator('#resume-wiki-progress')).toBeHidden();
+  });
+}
+
+// Hard-won:177f95677: progress publications rebuilt and retired restore controls.
+test('sync progress preserves the open archive restore card', async ({ page }) => {
+  let releaseFirst, releaseLast;
+  const first = new Promise(resolve => { releaseFirst = resolve; });
+  const last = new Promise(resolve => { releaseLast = resolve; });
+  const state = await mount(page, { wiki: { holdWatch: first, brief: 'A retained restore form.',
+    rows: [{ id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived work', started: '2026-09-17T00:23:00Z', msgs: 1, preview: '', archived: true, native_id: null, snippet: null, hel_session_id: null }],
+    sync: { epoch: 'fixture', version: 1, target: 1, requested: 1, started: 1, finished: 0, successful: 0, outcome: null, running: null } } });
+  await page.locator('#resume-archived [data-wiki-id="archived-one"]').click();
+  await expect(page.locator('#resume-detail')).toContainText('A retained restore form.');
+  await page.evaluate(() => { window.retainedRestoreCard = document.querySelector('#resume-detail').firstElementChild; });
+  state.wiki.holdWatch = last;
+  state.wiki.sync = { ...state.wiki.sync, version: 2, running: { phase: 'Native', tool: 'Codex', adapter: 1, adapters: 1, done: 50, total: 100 } };
+  releaseFirst();
+  await expect.poll(() => state.wikiWatches.length).toBe(2);
+  expect(await page.evaluate(() => window.retainedRestoreCard === document.querySelector('#resume-detail').firstElementChild)).toBe(true);
+  const before = state.wikiQueries.length;
+  state.wiki.sync = { ...state.wiki.sync, version: 3, finished: 1, successful: 1, outcome: 'succeeded', running: null };
+  releaseLast();
+  await expect.poll(() => state.wikiQueries.length).toBeGreaterThan(before);
+  expect(await page.evaluate(() => window.retainedRestoreCard === document.querySelector('#resume-detail').firstElementChild)).toBe(true);
 });

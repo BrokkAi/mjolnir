@@ -10,7 +10,7 @@ pub(crate) use spawn::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -274,20 +274,25 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// One SessionWiki search result. The request id is the dialog's; an
     /// answer for an older one is dropped there.
+    WikiSync {
+        dialog: bool,
+        episode: u64,
+        result: std::result::Result<mj_client::daemon::WikiSyncStatus, String>,
+    },
     WikiRows {
         request_id: u64,
         result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
     },
     ResumeTextMatches {
         request_id: u64,
-        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+        result: std::result::Result<mj_client::daemon::SessionTextSearchPage, String>,
     },
     /// The daemon's answer to a Sessions filter search of conversation text.
     /// The request id is the dashboard's; an answer for an older one is
     /// dropped there.
     SessionTextMatches {
         request_id: u64,
-        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+        result: std::result::Result<mj_client::daemon::SessionTextSearchPage, String>,
     },
     /// One archived session's briefing, for the resume dialog's preview.
     WikiBrief {
@@ -1295,6 +1300,19 @@ impl DashboardContext {
                     ),
                 }
             }
+            DashboardIoUpdate::WikiSync { dialog, episode, result } => {
+                if self.shutdown_requested_at.is_none()
+                    && self.dashboard.apply_wiki_sync(dialog, episode, result) {
+                    if dialog {
+                        if let Some((request_id, query)) = self.dashboard.refresh_wiki_search() {
+                            self.wiki_search_task = Some((request_id, spawn_wiki_search(request_id, query,
+                                Duration::ZERO, self.dashboard_io_tx.clone())));
+                        }
+                    } else if let Some((request_id, query)) = self.dashboard.refresh_sessions_text_search() {
+                        self.sessions_text_task = Some(spawn_sessions_text_search(request_id, query, self.dashboard_io_tx.clone()));
+                    }
+                }
+            }
             DashboardIoUpdate::WikiRows { request_id, result } => {
                 if self.dashboard.apply_wiki_search_result(request_id, result) {
                     self.load_resume_preview();
@@ -1303,13 +1321,13 @@ impl DashboardContext {
             DashboardIoUpdate::ResumeTextMatches { request_id, result } => {
                 if self
                     .dashboard
-                    .apply_resume_text_search_result(request_id, result)
+                    .apply_resume_text_search_result(request_id, result.map(|page| page.matches))
                 {
                     self.load_resume_preview();
                 }
             }
             DashboardIoUpdate::SessionTextMatches { request_id, result } => {
-                self.dashboard.apply_sessions_text(request_id, result);
+                self.dashboard.apply_sessions_text(request_id, result.map(|page| page.matches));
             }
             DashboardIoUpdate::WikiBrief { wiki_id, result } => match result {
                 Ok(markdown) => self.dashboard.apply_wiki_brief(wiki_id, markdown),
