@@ -362,6 +362,26 @@ pub struct WorkspaceInventory {
     pub worktrees: Vec<(PathBuf, WorkspaceInventory)>,
 }
 
+/// Disable maintenance at the capture boundary: lazy promisor fetches started
+/// by rev-list/pack-objects inherit these -c settings through Git's child config.
+struct CaptureGit<'a> {
+    inner: &'a dyn GitCommandRunner,
+}
+impl GitCommandRunner for CaptureGit<'_> {
+    fn run(&self, repository: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
+        let mut command = command.clone();
+        let mut arguments = vec![
+            "-c".into(),
+            "gc.auto=0".into(),
+            "-c".into(),
+            "maintenance.auto=false".into(),
+        ];
+        arguments.extend(command.arguments);
+        command.arguments = arguments;
+        self.inner.run(repository, &command)
+    }
+}
+
 pub(crate) fn git_path(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -1305,6 +1325,7 @@ pub fn pin_workspace_cut(
     checkout: &Path,
     ownership: &CheckoutOwnership,
 ) -> Result<PinnedWorkspaceCut> {
+    // Nested worktrees travel even if they existed at launch, by explicit policy.
     let nested = discover_linked_worktrees(runner, checkout)?;
     let refs = read_all_refs(runner, checkout)?;
     let read = |path: &Path| -> Result<SnapshotHead> {
@@ -1589,16 +1610,10 @@ pub(crate) fn remote_objects(
             tips.dedup();
             let missing = missing_tips(runner, checkout, &tips)?;
             if !missing.is_empty() {
-                // Automatic maintenance can expire stash reflogs before the
-                // snapshot pins them. These config keys also work on older Git.
                 let output = runner.run(
                     checkout,
                     &GitCommand {
                         arguments: [
-                            "-c",
-                            "gc.auto=0",
-                            "-c",
-                            "maintenance.auto=false",
                             "fetch",
                             "--no-write-fetch-head",
                             "--no-tags",
@@ -1883,6 +1898,8 @@ fn estimate_delta_with_source(
     origin_override: Option<String>,
     source: &ExclusionSource,
 ) -> Result<DeltaEstimate> {
+    let capture = CaptureGit { inner: runner };
+    let runner: &dyn GitCommandRunner = &capture;
     let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
     let remote = if configured.status == 0 {
         Some("origin".to_owned())
@@ -1901,7 +1918,8 @@ fn estimate_delta_with_source(
             remote_refs_stale: false,
         });
     };
-    let inventory = workspace_inventory(runner, checkout, ownership)?;
+    let inventory =
+        workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default())?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?.refs;
@@ -2035,6 +2053,8 @@ pub fn capture_session_snapshot(
     repositories: &[RepositoryInput],
     consent: &SessionCaptureConsent,
 ) -> Result<SessionSnapshot> {
+    let capture = CaptureGit { inner: runner };
+    let runner: &dyn GitCommandRunner = &capture;
     let none = CaptureConsent {
         untracked: UntrackedConsent::None,
         operations: OperationConsent::None,
@@ -2199,6 +2219,19 @@ fn capture_prepared_workspace(
             working_state: None,
             working_state_skipped: skipped,
             has_uncommitted_state: skipped
+                || !git_bytes(
+                    runner,
+                    checkout,
+                    [
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=no",
+                        "--ignore-submodules=all",
+                    ],
+                    &[],
+                    "inspect tracked edits in raw checkout",
+                )?
+                .is_empty()
                 || staged_gitlink_changes(runner, checkout)?
                 || submodule_positions_differ(&inventory),
             worktrees: Vec::new(),
@@ -2582,11 +2615,22 @@ fn repository_inventory(
             nested.keep_dir = repository.keep_dir.clone();
             nested.tracked_keep_files = tracked_keep_paths(
                 runner,
-                &repository.checkout.join(path),
+                &repository.checkout.join(path.as_path()),
                 &nested.checkout,
                 &keep,
                 None,
             )?;
+            nested.tracked_keep_files.extend(tracked_keep_paths(
+                runner,
+                &repository.checkout.join(path.as_path()),
+                &nested.checkout,
+                &keep,
+                Some("HEAD"),
+            )?);
+            nested
+                .tracked_keep_files
+                .sort_by(|left, right| left.value.cmp(&right.value));
+            nested.tracked_keep_files.dedup();
         }
     }
     Ok(inventory)
@@ -2596,12 +2640,16 @@ pub fn workspace_inventory(
     checkout: &Path,
     ownership: &CheckoutOwnership,
 ) -> Result<WorkspaceInventory> {
+    let capture = CaptureGit { inner: runner };
+    let runner: &dyn GitCommandRunner = &capture;
     workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default())
 }
 pub fn session_inventory(
     runner: &dyn GitCommandRunner,
     repositories: &[RepositoryInput],
 ) -> Result<BTreeMap<String, WorkspaceInventory>> {
+    let capture = CaptureGit { inner: runner };
+    let runner: &dyn GitCommandRunner = &capture;
     let mut result = BTreeMap::new();
     for repository in repositories {
         ensure!(
@@ -2677,11 +2725,18 @@ fn workspace_inventory_scoped(
             }
             let metadata = fs::symlink_metadata(checkout.join(&path))
                 .with_context(|| format!("inspect {}", path.display()))?;
+            let (bytes, identity) = if metadata.is_dir() {
+                // Git collapses an embedded untracked repository to one path.
+                // Consent must cover its files, not just the directory inode.
+                nested_repository_inventory(&checkout.join(&path))?
+            } else {
+                (metadata.len(), file_identity(&metadata)?)
+            };
             untracked.push(UntrackedPath {
                 checkout: key.clone(),
-                identity: file_identity(&metadata)?,
+                identity,
                 path,
-                bytes: metadata.len(),
+                bytes,
             });
         }
         Ok(WorkspaceInventory {
@@ -3677,6 +3732,13 @@ mod tests {
     use super::*;
     use crate::archive::SystemGit;
 
+    fn git_arguments(command: &GitCommand) -> &[OsString] {
+        let mut arguments = command.arguments.as_slice();
+        while arguments.len() >= 2 && arguments[0] == "-c" {
+            arguments = &arguments[2..];
+        }
+        arguments
+    }
     struct FileGit;
     impl GitCommandRunner for FileGit {
         fn run(
@@ -4263,11 +4325,104 @@ mod tests {
             SnapshotHead::Detached(_)
         ));
     }
+    // Hard-won: 7469d2e8b: a collapsed untracked repository used only its directory's metadata for consent.
+    #[test]
+    fn untracked_repository_child_edit_invalidates_shown_discard_consent() {
+        let root = Repo::new();
+        let embedded = root.checkout.join("embedded");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                root.origin.to_str().unwrap(),
+                embedded.to_str().unwrap(),
+            ],
+        );
+        let directory_identity = file_identity(&fs::symlink_metadata(&embedded).unwrap()).unwrap();
+        let inventory =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        let shown = inventory
+            .untracked
+            .iter()
+            .map(|entry| UntrackedItem::Path {
+                checkout: entry.checkout.clone(),
+                path: entry.path.clone(),
+                identity: entry.identity.clone(),
+            })
+            .collect::<Vec<_>>();
+        fs::write(embedded.join("file"), "edited existing embedded file\n").unwrap();
+        assert_eq!(
+            file_identity(&fs::symlink_metadata(&embedded).unwrap()).unwrap(),
+            directory_identity
+        );
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("refused.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Shown(shown.clone()),
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(items)) if !items.is_empty() && items != &shown),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(embedded.join("file")).unwrap(),
+            "edited existing embedded file\n"
+        );
+    }
+
+    // Hard-won: 7469d2e8b: linked HEAD keep entries escaped the current-state refusal after staged deletion.
+    #[test]
+    fn linked_worktree_head_under_keep_is_refused_after_staged_deletion() {
+        let root = Repo::new();
+        let keep = root.checkout.join(".mj/keep");
+        fs::create_dir_all(&keep).unwrap();
+        let linked = keep.join("lane");
+        git(
+            &root.checkout,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        git(&linked, &["rm", "file"]);
+        let input = RepositoryInput {
+            in_container: false,
+            id: "root".into(),
+            checkout: root.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: root.temp.path().join("refused.pack"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: Some(keep),
+        };
+        let consent = SessionCaptureConsent {
+            repositories: BTreeMap::from([(
+                "root".into(),
+                CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::Any,
+                },
+            )]),
+        };
+        let error = capture_session_snapshot(&FileGit, &[input], &consent).unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::TrackedKeepFiles { paths, .. })
+            if paths.iter().any(|entry| entry.checkout.checkout_path == Path::new(".mj/keep/lane") && entry.value == Path::new("file"))),
+            "{error:#}"
+        );
+    }
+
+    // Hard-won: 7469d2e8b: no-origin raw snapshots marked ordinary tracked edits as clean.
     #[test]
     fn raw_without_origin_is_in_place_only() {
         let r = Repo::new();
         git(&r.checkout, &["remote", "remove", "origin"]);
         let snapshot = r.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(!snapshot.has_uncommitted_state);
         assert!(snapshot.origin_urls.is_empty());
         assert!(snapshot.pack.is_none());
         assert!(snapshot.working_state.is_none());
@@ -4286,6 +4441,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("without an origin remote"));
+        let clean = fs::read(r.checkout.join("file")).unwrap();
+        fs::write(r.checkout.join("file"), "unstaged tracked edit\n").unwrap();
+        let dirty = r.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(dirty.has_uncommitted_state);
+        assert!(dirty.working_state.is_none());
+        git(&r.checkout, &["add", "file"]);
+        let index = git(&r.checkout, &["write-tree"]);
+        fs::write(r.checkout.join("file"), &clean).unwrap();
+        // Comparing only the working file to HEAD would miss this staged edit.
+        let staged = r.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(staged.has_uncommitted_state);
+        assert_eq!(git(&r.checkout, &["write-tree"]), index);
+        assert_eq!(fs::read(r.checkout.join("file")).unwrap(), clean);
     }
     #[test]
     fn shown_untracked_consent_refuses_only_new_paths_before_mutation() {
@@ -4499,7 +4667,8 @@ mod tests {
                 command: &GitCommand,
             ) -> Result<crate::archive::GitOutput> {
                 let output = SystemGit.run(repository, command)?;
-                if command.arguments == [OsString::from("stash"), OsString::from("create")]
+                if git_arguments(command)
+                    == [OsString::from("stash"), OsString::from("create")].as_slice()
                     && !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     git(repository, &["commit", "-am", "concurrent commit"]);
@@ -4943,8 +5112,7 @@ mod tests {
                 command: &GitCommand,
             ) -> Result<crate::archive::GitOutput> {
                 let output = SystemGit.run(repository, command)?;
-                if command
-                    .arguments
+                if git_arguments(command)
                     .first()
                     .is_some_and(|arg| arg == "for-each-ref")
                     && !self.added.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -5792,9 +5960,7 @@ mod tests {
                 command: &GitCommand,
             ) -> Result<crate::archive::GitOutput> {
                 if repository == self.root
-                    && command
-                        .arguments
-                        .starts_with(&["stash".into(), "create".into()])
+                    && git_arguments(command).starts_with(&["stash".into(), "create".into()])
                     && !self.changed.swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     git(
@@ -6172,6 +6338,16 @@ mod tests {
         }
         let error = capture(&CheckoutOwnership::Managed).unwrap_err();
         assert!(error.to_string().contains("sub/sub HEAD"), "{error:#}");
+        // git rm also deletes the live .gitmodules registration, but not its cache.
+        git(&root.checkout, &["rm", "sub"]);
+        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
+        assert!(error.to_string().contains("sub/sub HEAD"), "{error:#}");
+        let raw = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();
+        assert!(
+            raw.notices
+                .iter()
+                .any(|notice| notice.contains("sub/sub HEAD"))
+        );
     }
 
     // Hard-won: 3a4aef552: a parent-local rewrite could authorize an uninitialized mirror-only pin.
@@ -6315,9 +6491,7 @@ mod tests {
                 command: &GitCommand,
             ) -> Result<crate::archive::GitOutput> {
                 if repository == self.root
-                    && command
-                        .arguments
-                        .starts_with(&["stash".into(), "create".into()])
+                    && git_arguments(command).starts_with(&["stash".into(), "create".into()])
                     && !self.started.swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     git(repository, &["merge", "--no-commit", "--no-ff", "side"]);

@@ -69,6 +69,7 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub hidden_tracked_edits: Vec<PathBuf>,
     pub remote_refs_stale: bool,
     pub local_work: Vec<String>,
+    inspected_admins: BTreeSet<PathBuf>,
 }
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
@@ -83,6 +84,8 @@ pub(crate) fn inspect_snapshot_submodules(
         &mut inspection,
         Some(&mut snapshot),
     )?;
+    let modules = crate::snapshot::git_path(runner, repository, "modules")?;
+    inspect_cached_children(runner, &modules, Path::new(""), &mut snapshot)?;
     snapshot.dirty = inspection.dirty;
     snapshot.unregistered = inspection.unregistered;
     Ok(snapshot)
@@ -169,17 +172,6 @@ fn inspect_checkout(
         };
         let submodule = checkout.join(&gitlink);
         if !submodule.join(".git").exists() {
-            if let Some(snapshot) = snapshot.as_deref_mut() {
-                let name = std::str::from_utf8(config_key)?
-                    .strip_prefix("submodule.")
-                    .and_then(|key| key.strip_suffix(".path"))
-                    .context("invalid submodule path key")?;
-                let admin =
-                    crate::snapshot::git_path(runner, checkout, &format!("modules/{name}"))?;
-                if admin.is_dir() {
-                    inspect_cached_local_work(runner, &admin, &named, snapshot)?;
-                }
-            }
             if snapshot.is_some()
                 && !uninitialized_gitlink_available(runner, checkout, &gitlink, config_key)?
             {
@@ -189,6 +181,10 @@ fn inspect_checkout(
         }
         let mut origin_evidence = None;
         if let Some(snapshot) = snapshot.as_deref_mut() {
+            let (admin, _) = crate::archive::git::git_directories(runner, &submodule)?;
+            snapshot
+                .inspected_admins
+                .insert(std::fs::canonicalize(admin)?);
             snapshot.hidden_tracked_edits.extend(
                 crate::archive::hidden_tracked_paths(runner, &submodule)?
                     .into_iter()
@@ -390,21 +386,36 @@ fn inspect_cached_local_work(
     named: &Path,
     snapshot: &mut SnapshotSubmoduleInspection,
 ) -> Result<()> {
-    let cached = CachedModuleGit {
-        inner: runner,
-        admin,
-    };
-    let tracking = crate::snapshot::origin_tracking_objects(&cached, admin)?;
-    let evidence = crate::snapshot::remote_objects(&cached, admin, "origin", &tracking.objects)?;
-    snapshot.local_work.extend(unpublished_local_work(
-        &cached,
-        admin,
-        named,
-        &evidence.objects,
-        true,
-    )?);
+    if snapshot
+        .inspected_admins
+        .insert(std::fs::canonicalize(admin)?)
+    {
+        let cached = CachedModuleGit {
+            inner: runner,
+            admin,
+        };
+        let tracking = crate::snapshot::origin_tracking_objects(&cached, admin)?;
+        let evidence =
+            crate::snapshot::remote_objects(&cached, admin, "origin", &tracking.objects)?;
+        snapshot.local_work.extend(unpublished_local_work(
+            &cached,
+            admin,
+            named,
+            &evidence.objects,
+            true,
+        )?);
+    }
+    inspect_cached_children(runner, &admin.join("modules"), named, snapshot)
+}
+
+fn inspect_cached_children(
+    runner: &dyn GitCommandRunner,
+    modules: &Path,
+    named: &Path,
+    snapshot: &mut SnapshotSubmoduleInspection,
+) -> Result<()> {
     // Deinitializing a parent also hides cached repositories for its children.
-    let mut pending = vec![(admin.join("modules"), named.to_path_buf())];
+    let mut pending = vec![(modules.to_path_buf(), named.to_path_buf())];
     while let Some((directory, named)) = pending.pop() {
         let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
