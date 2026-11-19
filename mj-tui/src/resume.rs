@@ -2239,10 +2239,25 @@ fn native_project_target(project_directory: &str) -> String {
 const PREVIEW_MINIMUM_HEIGHT: u16 = 6;
 
 /// How tall the preview pane under the list is when the dialog shows one: two
-/// fifths of the body, and never less than [`PREVIEW_MINIMUM_HEIGHT`].
+/// fifths of the body, but never so much that the list keeps fewer than
+/// [`LIST_MINIMUM_ROWS`] session rows, and never less than
+/// [`PREVIEW_MINIMUM_HEIGHT`].
 fn preview_height(inner: Rect) -> u16 {
-    PREVIEW_MINIMUM_HEIGHT.max(inner.height * 2 / 5)
+    let without_list_and_preview = RESUME_FIXED_ROWS + LIST_MINIMUM_ROWS + LIST_CHROME_ROWS;
+    let room = inner.height.saturating_sub(without_list_and_preview);
+    PREVIEW_MINIMUM_HEIGHT.max((inner.height * 2 / 5).min(room))
 }
+
+/// Rows the list panel spends on its border and column header.
+const LIST_CHROME_ROWS: u16 = 3;
+/// Session rows the list keeps even while the transcript preview is showing.
+const LIST_MINIMUM_ROWS: u16 = 5;
+/// Rows every band but the list and the preview takes: tabs, search, footer
+/// and the four gaps between them and the preview.
+const RESUME_FIXED_ROWS: u16 = 10;
+/// The dialog's requested height: the minimum list, the minimum preview and
+/// the fixed bands, plus the dialog border and padding.
+const RESUME_DIALOG_HEIGHT: u16 = 28;
 
 /// The dialog body split into its bands: tabs, search, list, preview, footer.
 /// The preview band is present only when the dialog has something to show in
@@ -2253,7 +2268,7 @@ fn resume_bands(inner: Rect, preview: bool) -> Vec<Rect> {
         Constraint::Length(1), // tabs, gap
         Constraint::Length(1),
         Constraint::Length(1), // search, gap
-        Constraint::Min(5),
+        Constraint::Min(LIST_MINIMUM_ROWS + LIST_CHROME_ROWS),
         Constraint::Length(1), // list, gap
     ];
     if preview {
@@ -2269,7 +2284,7 @@ fn resume_bands(inner: Rect, preview: bool) -> Vec<Rect> {
 }
 
 pub(crate) fn resume_sessions_pane(area: Rect, preview: bool) -> Rect {
-    let popup = centered_rect(84, 24, area);
+    let popup = centered_rect(84, RESUME_DIALOG_HEIGHT, area);
     resume_bands(DialogShell::padded_inner(popup), preview)[2]
 }
 
@@ -2280,7 +2295,7 @@ pub(crate) fn render_resume_dialog(
     dialog: &ResumeDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 84, 24, area);
+    let popup = centered_modal(frame, surfaces, 84, RESUME_DIALOG_HEIGHT, area);
     let inner = DialogShell::padded_inner(popup);
     let preview = dialog.preview_body(dashboard.resume_rows());
     let bands = resume_bands(inner, preview.is_some());
