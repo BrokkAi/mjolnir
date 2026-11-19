@@ -782,6 +782,13 @@ pub(crate) struct SessionsArgs {
     /// Include sub-agents as well as top-level sessions.
     #[arg(long)]
     all: bool,
+    /// List only sessions on this target, as `mj hosts` names its targets.
+    /// A fleet's instances are selected this way.
+    #[arg(long, conflicts_with = "session")]
+    target: Option<String>,
+    /// List only sessions on this machine, as `mj hosts` names its hosts.
+    #[arg(long, conflicts_with = "session")]
+    host: Option<String>,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -1951,7 +1958,19 @@ pub(crate) async fn sessions(
         Some(name) => Some(crate::resolve_store_workspace(Some(&name)).await?),
         None => None,
     };
-    let list = client.sessions_in_workspace(workspace, args.all).await?;
+    let mut list = client.sessions_in_workspace(workspace, args.all).await?;
+    // The daemon's host table is the one place that says which machine a
+    // target runs on.
+    let rows = crate::daemon::connect_or_start()
+        .await?
+        .host_capacity()
+        .await?;
+    list.sessions = select_sessions(
+        std::mem::take(&mut list.sessions),
+        &rows,
+        args.target.as_deref(),
+        args.host.as_deref(),
+    )?;
     if args.json {
         return print_json(&list);
     }
@@ -1977,6 +1996,12 @@ pub(crate) async fn sessions(
             listed_state(session),
             sanitize_terminal_text(&session.title)
         );
+        println!(
+            "  target {}  host {}  profile {}",
+            sanitize_terminal_text(&session.target_id),
+            host_of_target(&rows, &session.target_id).unwrap_or("-"),
+            sanitize_terminal_text(&session.profile_id)
+        );
         if let Some(error) = &session.profile_login_error {
             println!(
                 "  profile {}: {}",
@@ -1992,6 +2017,59 @@ pub(crate) async fn sessions(
         }
     }
     Ok(())
+}
+
+/// The host `mj hosts` lists `target_id` under; a fleet's own name for its
+/// instances.
+fn host_of_target<'a>(
+    rows: &'a [mj_core::targets::HostCapacityRow],
+    target_id: &str,
+) -> Option<&'a str> {
+    rows.iter()
+        .find(|row| row.target_ids.iter().any(|id| id == target_id))
+        .map(|row| row.host.as_str())
+}
+
+/// Keep the sessions on `target` and `host`. A name `mj hosts` does not know
+/// is an error that lists the names it does, not an empty list.
+fn select_sessions(
+    sessions: Vec<ApiSession>,
+    rows: &[mj_core::targets::HostCapacityRow],
+    target: Option<&str>,
+    host: Option<&str>,
+) -> Result<Vec<ApiSession>> {
+    let known = |names: Vec<&str>| {
+        let names: std::collections::BTreeSet<_> = names.into_iter().collect();
+        names.into_iter().collect::<Vec<_>>().join(", ")
+    };
+    if let Some(target) = target
+        && !rows
+            .iter()
+            .any(|row| row.target_ids.iter().any(|id| id == target))
+    {
+        let names = rows
+            .iter()
+            .flat_map(|row| row.target_ids.iter().map(String::as_str));
+        bail!(
+            "no session matched: no target {target:?}; known targets: {}",
+            known(names.collect())
+        );
+    }
+    if let Some(host) = host
+        && !rows.iter().any(|row| row.host == host)
+    {
+        bail!(
+            "no session matched: no host {host:?}; known hosts: {}",
+            known(rows.iter().map(|row| row.host.as_str()).collect())
+        );
+    }
+    Ok(sessions
+        .into_iter()
+        .filter(|session| target.is_none_or(|target| session.target_id == target))
+        .filter(|session| {
+            host.is_none_or(|host| host_of_target(rows, &session.target_id) == Some(host))
+        })
+        .collect())
 }
 
 /// The STATE column: the session's state, and "disk full" when its target
@@ -5316,5 +5394,65 @@ mod tests {
                 .to_string(),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-hosts", &output);
+    }
+    #[test]
+    fn sessions_filter_selects_by_host_and_names_unknown_hosts() {
+        use mj_core::targets::HostCapacityRow;
+        let row = |host: &str, targets: &[&str]| -> HostCapacityRow {
+            serde_json::from_value(serde_json::json!({
+                "id": host, "host": host, "target_ids": targets, "kind": "host",
+                "fleet_instances": null, "has_reading": false, "cpu_percent": null,
+                "memory_used_bytes": 0, "memory_total_bytes": 0, "logical_cores": 0,
+                "filesystems": [], "sampled_at_epoch_seconds": null,
+                "probe_error": null, "on_demand": false,
+            }))
+            .unwrap()
+        };
+        let rows = [
+            row("local", &["local", "podman"]),
+            row("build.example", &["build"]),
+        ];
+        let session = |id: &str, target: &str| -> ApiSession {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "workspace_id": "w", "title": id, "harness_kind": "claude",
+                "profile_id": "p", "target_id": target, "bundle_id": "b",
+                "state": "Running", "lifecycle": "live", "chat_phase": "idle",
+                "is_idle": true, "has_error": false,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let all = || {
+            vec![
+                session("a", "local"),
+                session("b", "podman"),
+                session("c", "build"),
+            ]
+        };
+        let ids = |sessions: Vec<ApiSession>| -> Vec<String> {
+            sessions.into_iter().map(|session| session.id).collect()
+        };
+        assert_eq!(
+            ids(select_sessions(all(), &rows, None, Some("local")).unwrap()),
+            ["a", "b"]
+        );
+        assert_eq!(
+            ids(select_sessions(all(), &rows, Some("build"), None).unwrap()),
+            ["c"]
+        );
+        let error = select_sessions(all(), &rows, None, Some("nope"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "no session matched: no host \"nope\"; known hosts: build.example, local"
+        );
+        let error = select_sessions(all(), &rows, Some("nope"), None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "no session matched: no target \"nope\"; known targets: build, local, podman"
+        );
     }
 }
