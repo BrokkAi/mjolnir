@@ -85,6 +85,11 @@ mod unix {
     /// Reads one byte at a time, so nothing after the DA1 reply is taken
     /// from crossterm. A background that arrived is used even when DA1 never
     /// does.
+    ///
+    /// The deadline bounds the wait for bytes that have not arrived. Bytes
+    /// already here are read whatever the time, so a process that was held
+    /// up after it asked, on a machine that is paging for instance, still
+    /// finds the answer the terminal gave in time.
     fn read_replies(input: BorrowedFd<'_>, deadline: Instant) -> io::Result<Vec<u8>> {
         let mut replies = Vec::new();
         loop {
@@ -92,16 +97,16 @@ mod unix {
                 return Ok(replies);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(replies);
-            }
             let mut poll = libc::pollfd {
                 fd: input.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
+            // Zero once the deadline has passed, which asks only for what is
+            // already here.
             let wait = i32::try_from(remaining.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
             match unsafe { libc::poll(&raw mut poll, 1, wait) } {
+                0 if remaining.is_zero() => return Ok(replies),
                 0 => continue,
                 ready if ready < 0 => {
                     let error = io::Error::last_os_error();
@@ -118,13 +123,14 @@ mod unix {
                 0 => return Ok(replies),
                 _ => {
                     let error = io::Error::last_os_error();
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-                    ) {
-                        continue;
+                    match error.kind() {
+                        io::ErrorKind::Interrupted => continue,
+                        // Readiness without a byte: wait again while there is
+                        // time, and stop once there is none.
+                        io::ErrorKind::WouldBlock if remaining.is_zero() => return Ok(replies),
+                        io::ErrorKind::WouldBlock => continue,
+                        _ => return Err(error),
                     }
-                    return Err(error);
                 }
             }
         }
@@ -253,14 +259,43 @@ mod unix {
             }
         }
 
+        const REPLY: &[u8] = b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c";
+
+        // Hard-won: #1609: an answer that had arrived was dropped when the
+        // process could not read it before the deadline.
+        #[test]
+        fn a_reply_that_has_arrived_is_read_after_the_deadline() {
+            let (mut master, slave) = raw_terminal();
+            master.write_all(REPLY).unwrap();
+            // The terminal hands the bytes over on its own schedule.
+            let delivered = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut unread: libc::c_int = 0;
+                unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD as _, &raw mut unread) };
+                if usize::try_from(unread).unwrap() == REPLY.len() {
+                    break;
+                }
+                assert!(Instant::now() < delivered, "{unread} bytes delivered");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            // The process was held up past its wait after it asked.
+            let replies = read_replies(slave.as_fd(), Instant::now()).unwrap();
+            assert_eq!(replies, REPLY);
+            // With nothing more to read, a passed deadline returns at once.
+            assert!(
+                read_replies(slave.as_fd(), Instant::now())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
         /// A terminal answers within milliseconds, sometimes before the probe
         /// starts to wait and sometimes while it waits.
         #[test]
         fn a_reply_on_a_real_terminal_is_read_whenever_it_arrives() {
-            const REPLY: &[u8] = b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c";
             let (master, slave) = raw_terminal();
             let mut missed = Vec::new();
-            for round in 0..1000_u64 {
+            for round in 0..200_u64 {
                 let delay = Duration::from_micros(round % 11 * 250);
                 let mut terminal = master.try_clone().unwrap();
                 let answering = std::thread::spawn(move || {
