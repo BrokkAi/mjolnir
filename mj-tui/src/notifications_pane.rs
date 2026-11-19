@@ -229,7 +229,9 @@ impl NotificationEntry {
         }
         let previous_form = previous.form.as_ref()?;
         let form = card.form.as_ref()?;
-        (card.holder == previous.holder && form.request_id == previous_form.request_id)
+        (card.item_destination(&self.session_id, card.entries.len())
+            == previous.item_destination(&self.session_id, previous.entries.len())
+            && form.request_id == previous_form.request_id)
             .then_some(card.entries.len())
     }
 
@@ -552,9 +554,8 @@ impl DashboardState {
     fn notification_destination(&self, entry: &NotificationEntry) -> String {
         match &entry.published {
             Some(card) => card
-                .holder
-                .clone()
-                .unwrap_or_else(|| entry.session_id.clone()),
+                .item_destination(&entry.session_id, self.selected_notification_item(entry))
+                .to_owned(),
             None => self.notification_content_session(&entry.session_id, entry.level),
         }
     }
@@ -983,37 +984,52 @@ impl DashboardState {
         let Some(card) = &entry.published else {
             return self.notification_card_text(&entry.session_id, entry.level);
         };
-        let index = self.selected_notification_item(entry);
+        self.notification_item_text(
+            &entry.session_id,
+            card,
+            self.selected_notification_item(entry),
+        )
+    }
+
+    pub(crate) fn notification_item_text(
+        &self,
+        session: &str,
+        card: &mj_client::runtime_feed::NotificationCard,
+        index: usize,
+    ) -> String {
+        let destination = card.item_destination(session, index);
         let Some(item) = card.entries.get(index) else {
             return card
                 .form
                 .as_ref()
                 .map(|form| form.message.clone())
                 .or_else(|| {
-                    self.session_review(&entry.session_id)
+                    self.session_review(destination)
                         .and_then(|review| review.activity_label())
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| notification_message_placeholder(card.badge).to_owned());
         };
         if let EntryMessage::Found(id) = &item.message
-            && let Some(text) = self.loaded_notification_text(&entry.session_id, id)
+            && let Some(text) = self.loaded_notification_text(destination, id)
         {
             return text.to_owned();
         }
-        let Some(wanted) = self.notification_read_request(entry) else {
-            return notification_message_placeholder(item.kind).to_owned();
+        let source = match &item.message {
+            EntryMessage::Found(id) => NotificationReadSource::Item(id.clone()),
+            EntryMessage::Locating | EntryMessage::None => {
+                NotificationReadSource::Through(item.completed_ordinal)
+            }
         };
-        let read = self
-            .notifications
-            .message_read
-            .as_ref()
-            .filter(|read| read.request == wanted);
+        let read =
+            self.notifications.message_read.as_ref().filter(|read| {
+                read.request.session_id == destination && read.request.source == source
+            });
         if read.is_some_and(|read| read.status == crate::ingest::TranscriptHydration::Loading) {
             return "loading…".to_owned();
         }
         read.and_then(|read| read.text.clone())
-            .unwrap_or_else(|| match wanted.source {
+            .unwrap_or_else(|| match source {
                 NotificationReadSource::Item(_) => "message not available".to_owned(),
                 NotificationReadSource::Through(_) => {
                     notification_message_placeholder(item.kind).to_owned()
@@ -1222,7 +1238,15 @@ impl DashboardState {
     pub fn has_notification_for_session(&self, session_id: &str) -> bool {
         self.notification_entries()
             .iter()
-            .any(|entry| self.notification_destination(entry) == session_id)
+            .any(|entry| match &entry.published {
+                Some(card) => {
+                    (!card.entries.is_empty() && entry.session_id == session_id)
+                        || (card.form.is_some()
+                            && card.item_destination(&entry.session_id, card.entries.len())
+                                == session_id)
+                }
+                None => self.notification_destination(entry) == session_id,
+            })
     }
 
     /// Text copying uses the exact row space registered by the last render.
@@ -2673,6 +2697,11 @@ pub(crate) mod tests {
             dashboard.displayed_notification_session_id().as_deref(),
             Some("q2")
         );
+        assert_eq!(
+            dashboard.notification_destination(&dashboard.notification_entries()[0]),
+            "q2",
+            "the selected live form targets its holder"
+        );
 
         // Hard-won: a882023b6: a form beside dismissible messages fell back to a free-text reply.
         assert_eq!(
@@ -2777,6 +2806,15 @@ pub(crate) mod tests {
         );
         dashboard.sync_notification_message_read(Some(item.clone()), true);
         dashboard.handle_key(alt(KeyCode::PageUp));
+        assert_eq!(
+            dashboard.notification_destination(&dashboard.notification_entries()[0]),
+            "q1",
+            "the selected stack entry targets its own session"
+        );
+        assert!(
+            dashboard.has_notification_for_session("q2"),
+            "the same card still contains a live form for the child"
+        );
         assert_eq!(dashboard.wanted_notification_message(), Some(item.clone()));
         assert!(
             drawn(&mut dashboard, 120, 44)

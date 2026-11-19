@@ -245,6 +245,17 @@ impl ViewerPublication {
                 .as_ref()
                 .and_then(|cards| cards.get(&id))
                 .cloned();
+            if let Some(entry) = row
+                .notification_card
+                .as_ref()
+                .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
+            {
+                row.question_message = match &entry.message {
+                    mj_core::attention::EntryMessage::Found(id) => Some(id.clone()),
+                    mj_core::attention::EntryMessage::Locating
+                    | mj_core::attention::EntryMessage::None => None,
+                };
+            }
             row.form_holder = self.runtime.metadata.form_holders.get(&id).cloned();
             row.capabilities.dismiss_notification = row.notification_dismissal.is_some();
             row.native_subagent_attention = row
