@@ -13,7 +13,7 @@ What a contributor gains, stated honestly:
 - `mj-core/src/runtime.rs` loses the shutdown coordination it needs today only because tokio's timer driver must not be polled after the runtime shuts down. smol's reactor is one process-wide thread that never shuts down.
 - The runtime can be changed again by editing one module.
 
-What it does not buy: the switch does not by itself make generated code smaller. The prototype in Milestone 0 measured that smol's executor generates about 26% more code than tokio for every distinct future type it is handed. The large saving comes from boxing each future before handing it to the runtime (94% less per spawn, with either runtime). Master already does this for `spawn` and `spawn_blocking` (commit `d35e38c`, which took the `mj-daemon` test compile from 120 s to 71 s). This plan keeps and extends that boxing. Do not start this work expecting the runtime swap alone to speed up the build.
+What it does not buy: a large build-time saving. The prototype in Milestone 0 found smol's runtime smaller than tokio's: 344 KB against 589 KB of machine code for an empty program in a debug build, and 276 KB against 388 KB in release. With every spawn boxed, which mj now does, each spawn costs about the same in both (1.4 KB against 1.3 KB in debug, 0.41 KB against 0.50 KB in release). Unboxed spawns would cost 26% more on smol in a debug build. The large saving comes from boxing each future before handing it to the runtime (94% less per spawn, with either runtime), not from the choice of runtime. Master already does this for `spawn` and `spawn_blocking` (commit `d35e38c`, which took the `mj-daemon` test compile from 120 s to 71 s). This plan keeps and extends that boxing. Do not start this work expecting the runtime swap alone to speed up the build.
 
 To see it working at the end: the commands in Validation and Acceptance build and test the workspace with no tokio in `Cargo.lock`. A daemon, the TUI, the web viewer and a real session run in an isolated instance. The reliability smoke scenario passes. The build timings and binary sizes are recorded next to the baseline in `.agents/docs/build-performance-analysis.md`.
 
@@ -32,8 +32,8 @@ To see it working at the end: the commands in Validation and Acceptance build an
 
 ## Surprises & Discoveries
 
-- Observation: smol's executor generates more code per distinct spawned future than tokio, and boxing before spawning removes almost all of it in both.
-  Evidence: a 200-spawn prototype (see Artifacts), debug build with `debug = "line-tables-only"`, `.text` growth divided by 200: tokio 20,893 bytes per spawn, smol (`async-executor` 1.x) 26,386, tokio boxed 1,334, smol boxed 1,443. The empty program is 589 KB of `.text` on tokio and 344 KB on smol.
+- Observation: smol is the smaller runtime, but in a debug build its executor generates more code than tokio for each unboxed spawned future. Boxing before spawning removes almost all per-spawn code in both, and then the two cost the same.
+  Evidence: a 200-spawn prototype (see Artifacts), `.text` growth divided by 200. In a debug build with `debug = "line-tables-only"`: tokio 20,893 bytes per spawn, smol (`async-executor` 1.14) 26,386, tokio boxed 1,334, smol boxed 1,443; the empty program is 589 KB on tokio and 344 KB on smol. In a release build: tokio 4,153 per spawn, smol 3,696, tokio boxed 502, smol boxed 407; the empty program is 388 KB on tokio and 276 KB on smol. The debug excess comes from `async-executor`'s `spawn_inner` (`async-executor-1.14.1/src/lib.rs` lines 246 to 281). It wraps every future in `AsyncCallOnDrop`, which removes the task from the executor's active set when it ends, then hands it to `async_task`. Both are generic over the future type, and an unoptimized build keeps every copy. Compiling the bare runtime from scratch took 1.8 s for tokio (`rt-multi-thread`, `time`) and 1.2 s for smol's executor and `futures-lite`.
 
 - Observation: the ACP library is already runtime-neutral and already brings much of smol.
   Evidence: `agent-client-protocol` 5.0.0 depends on `futures` and `futures-concurrency`, not tokio. `cargo tree -i blocking` shows it pulling `blocking`, and through it `async-task`, `async-channel`, `event-listener` and `futures-lite`, into every workspace crate today.
@@ -268,13 +268,13 @@ Every milestone is a series of commits, each of which builds and passes its test
 
 Prototype from Milestone 0, to recreate: a binary crate with features `rt-tokio` (tokio with `rt-multi-thread`), `rt-smol` (`async-executor` 1 and `futures-lite` 2), `many` and `boxed`. With `many`, it defines 200 functions that each spawn a distinct `async move` block awaiting a small `async fn` twice. With `boxed`, the spawner boxes the future to `Pin<Box<dyn Future<Output = u64> + Send>>` before handing it over. Build in the dev profile with `debug = "line-tables-only"` and read `.text` from `readelf -SW target/debug/<bin>`.
 
-    variant                       .text bytes   per spawn (vs. none)
-    tokio, no spawns                  588,737
-    tokio, 200 spawns               4,767,329   20,893
-    tokio, 200 spawns, boxed          855,489    1,334
-    smol, no spawns                   343,891
-    smol, 200 spawns                5,621,139   26,386
-    smol, 200 spawns, boxed           632,403    1,443
+    variant                       debug .text   per spawn   release .text   per spawn
+    tokio, no spawns                  588,737                   388,184
+    tokio, 200 spawns               4,767,329      20,893     1,218,728       4,153
+    tokio, 200 spawns, boxed          855,489       1,334       488,552         502
+    smol, no spawns                   343,891                   275,683
+    smol, 200 spawns                5,621,139      26,386     1,014,819       3,696
+    smol, 200 spawns, boxed           632,403       1,443       357,091         407
 
 The spawner used in each runtime:
 
@@ -321,3 +321,5 @@ At the end of Milestone 2, also:
 At the end of Milestone 6, also `pub mod sync` with `mpsc`, `oneshot`, `watch`, `Notify`, `Mutex`, `RwLock`, `Semaphore`, `CancellationToken` and `DropGuard`, with the method names mj uses from tokio today.
 
 Revision note, 2026-11-19: first version, written after the inventory, the Milestone 0 prototype, and reading commit `d35e38c`, which had already boxed every spawn behind `mj_core::runtime`.
+
+Revision note, 2026-11-19: added the prototype's release-build measurements and the cause of smol's larger per-spawn code in debug builds. The first version reported only the debug figure, which read as if smol were the heavier runtime; it is the smaller one, and with boxing the per-spawn cost is equal.
