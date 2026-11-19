@@ -2,7 +2,9 @@
 //! test binary again as the relay (`mj_worker::stand_in_relay`). mj-daemon's
 //! tests use it through the `test-support` feature.
 
+#[cfg(unix)]
 use crate::session_manager::RelaySessionTarget;
+#[cfg(unix)]
 use crate::targets::CommandSpec;
 pub use mj_core::test_hooks::leased_relay::*;
 

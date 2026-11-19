@@ -1456,7 +1456,7 @@ async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T
 }
 
 // Callers outside the login pass only need to distinguish a deferral from failure.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(unix, any(test, feature = "test-support")))]
 pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
@@ -2389,7 +2389,7 @@ pub(super) struct CanonicalLogin {
 }
 
 /// A login as read from where its store keeps it.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(unix, any(test, feature = "test-support")))]
 type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
 
 /// How the controller reads and writes a profile's login: its store
@@ -2520,7 +2520,7 @@ pub(super) enum PassLogin {
     /// is reached is harmless: a pull rereads under the locks and installs
     /// only a strictly newer login, and a push of an older login is refused by
     /// the session for being older.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(unix, any(test, feature = "test-support")))]
     Keychain {
         read: Arc<LoginRead>,
         access: LoginAccess,
@@ -2679,7 +2679,7 @@ fn read_canonical_login(
     let kind = target.harness;
     let (access, credential, bytes) = match login {
         PassLogin::Shared(owner) => return owner.for_target(target),
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(all(unix, any(test, feature = "test-support")))]
         PassLogin::Keychain { read, access } => {
             let (credential, bytes) = read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
             (access.clone(), credential, bytes)

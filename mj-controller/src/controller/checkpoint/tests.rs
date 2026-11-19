@@ -1,7 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -40,7 +41,9 @@ use mj_transcript::projection::canonical_session_from_materialized_owned as cano
 #[cfg(unix)]
 use crate::targets::ProvisionStage;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
-use mj_core::relay::{RelayCommand, RelayCursor, RelayExecutionState};
+#[cfg(unix)]
+use mj_core::relay::RelayCommand;
+use mj_core::relay::{RelayCursor, RelayExecutionState};
 
 pub(crate) use super::stand_in::*;
 use super::*;

@@ -827,7 +827,7 @@ mod tests {
         const CHILD: &str = "MJ_UTILITY_QUOTA_STORED_REPORT_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
-            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
                 module_path!(),
                 "utility_quota_uses_only_fresh_stored_reports",
             ))

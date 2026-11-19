@@ -1572,7 +1572,7 @@ else:
         );
         assert!(marker.is_file());
         assert!(
-            !crate::upgrade::active_labels()
+            !mj_store::upgrade::active_labels()
                 .iter()
                 .any(|label| label.contains("mbx installation"))
         );

@@ -450,7 +450,14 @@ fn stale_worker_fails_before_any_container_is_created() {
             },
         )
         .unwrap();
-    assert!(controller.state.sessions.get(&session).unwrap().notifications_ignored);
+    assert!(
+        controller
+            .state
+            .sessions
+            .get(&session)
+            .unwrap()
+            .notifications_ignored
+    );
     let executor = RecordingExecutor::failing("no target command should run");
     let error =
         futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(

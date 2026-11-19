@@ -8,7 +8,6 @@ use mj_worker::stand_in_relay::seed_source_relay;
 use std::fs::{self};
 use std::path::PathBuf;
 
-#[cfg(unix)]
 use mj_controller::controller::move_session::MoveSourceRelay;
 use mj_controller::controller::test_support::{
     IsolatedTest, RefusingExecutor, checkpoint_test_session, resume_compatibility_config,
@@ -22,7 +21,6 @@ use mj_controller::targets::ProcessExecutor;
 use mj_core::relay::{RelayCommand, RelayRequest};
 use mj_worker::relay::DurableRelay;
 
-#[cfg(unix)]
 // Hard-won: #1538: a retried Move stored the destination choice as the source settings
 #[test]
 fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry() {
@@ -189,7 +187,6 @@ fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry()
     );
 }
 
-#[cfg(unix)]
 // Hard-won: #1498: idle active goals blocked quota Move at preparation and source lease.
 #[test]
 fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
@@ -411,7 +408,6 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
 
 /// A Native source has no parent tools, but its worker still has a request
 /// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
-#[cfg(unix)]
 // Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
 // Hard-won: dd56c0341: foreground Move blocked the result delivery its mutation drain needed.
 // Hard-won: 05b7a7f89: review holds blocked replies and legacy wait retirement discarded delivery state.
@@ -744,7 +740,6 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     }
 }
 
-#[cfg(unix)]
 fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
     fn submit(relay: &mut DurableRelay, id: &str, command: RelayCommand) {
         let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
@@ -811,7 +806,6 @@ fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
 }
 
 /// The executor the move tests use, running mj-worker's checkpoint operations.
-#[cfg(unix)]
 fn recording_executor() -> RecordingProcessExecutor {
     RecordingProcessExecutor::new(WorkerCheckpoint {
         restore: mj_worker::checkpoint::restore_from_spec_file,

@@ -1,6 +1,7 @@
 //! Fixtures shared by the worker client tests here and in mj-daemon, which reaches
 //! them through the `test-support` feature.
 
+#[cfg(unix)]
 use super::*;
 
 pub const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";

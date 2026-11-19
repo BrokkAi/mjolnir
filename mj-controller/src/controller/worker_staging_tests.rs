@@ -2,21 +2,24 @@
 //! controller above it: recovery through a real plan, and credential pushes
 //! into a staged home.
 
-use std::cell::RefCell;
-
-use mj_core::config::{ExecutionPolicy, HarnessKind};
+use mj_core::config::HarnessKind;
+#[cfg(unix)]
 use mj_core::hex::lower_hex;
 use mj_core::targets::SshTrafficClass;
 use mj_core::worker_build::verify_worker_build;
-use mj_core::worker_launch::{HarnessRuntimePolicy, WorkerLaunchConfig};
-use mj_session_types::{WorkerLaunchRefreshPlan, WorkerRecoveryPlan};
+use mj_core::worker_launch::WorkerLaunchConfig;
+#[cfg(unix)]
+use mj_session_types::WorkerLaunchRefreshPlan;
+use mj_session_types::WorkerRecoveryPlan;
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
 use super::worker_binary::launch::*;
 use super::worker_binary::test_fixtures::*;
 use super::worker_binary::*;
 use super::*;
-use crate::targets::{CommandOutput, CommandPlan, ProcessExecutor};
+use crate::targets::{CommandPlan, ProcessExecutor};
+#[cfg(unix)]
 use crate::test_isolation::{IsolatedTest, test_name};
 
 #[test]
@@ -362,6 +365,13 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
 // Hard-won: 6fb245e38: legacy mbx relinking appended config.toml to a configuration filename.
 #[test]
 fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
+    use std::cell::RefCell;
+
+    use mj_core::config::ExecutionPolicy;
+    use mj_core::worker_launch::HarnessRuntimePolicy;
+
+    use crate::targets::CommandOutput;
+
     struct CacheLinkExecutor {
         commands: RefCell<Vec<CommandSpec>>,
         worker_bin: PathBuf,

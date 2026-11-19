@@ -581,6 +581,7 @@ pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLe
 }
 
 /// Shared owner for fixtures exercising process mutation without a daemon.
+#[cfg(unix)]
 pub(crate) fn worker_test_observation(
     id: &str,
 ) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {

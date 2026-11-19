@@ -5811,6 +5811,7 @@ async fn credential_install_readback_mismatch_concludes_the_delivery() {
 }
 
 /// AWS's recorded refusal, as a file the stand-in `aws` can print.
+#[cfg(unix)]
 fn access_denied_reply(directory: &std::path::Path) -> std::path::PathBuf {
     let path = directory.join("access-denied.txt");
     std::fs::write(&path, crate::aws_assume_role::test_fixtures::ACCESS_DENIED).unwrap();

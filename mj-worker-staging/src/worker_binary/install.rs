@@ -164,6 +164,9 @@ pub fn append_staged_instructions(
                 permissions.set_mode(permissions.mode() | 0o200);
             }
             #[cfg(not(unix))]
+            // Windows files carry only a read-only attribute; clearing it is
+            // the owner-write grant above, not world-writable Unix modes.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             if permissions != metadata.permissions() {
                 std::fs::set_permissions(&path, permissions).with_context(|| {
