@@ -620,15 +620,15 @@ def validate_fact(fact, split, where, errors, query_checks, allowed):
 
 
 def append_rows(path, labels):
-    # Drop an unterminated fragment left by an interrupted append, so the new rows start on a
-    # fresh line. Safe because one run at a time holds the labels directory's lock.
-    if path.exists():
-        with path.open("r+b") as stream:
-            data = stream.read()
-            if data and not data.endswith(b"\n"):
-                stream.truncate(data.rfind(b"\n") + 1)
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write("".join(json.dumps(row, ensure_ascii=True) + "\n" for row in labels))
+    # Separate labeller locks still allow concurrent writes to shared logs.
+    # Hold the file lock until close flushes the append, including any tail repair.
+    with path.open("a+b") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        data = stream.read()
+        if data and not data.endswith(b"\n"):
+            stream.truncate(data.rfind(b"\n") + 1)
+        stream.write("".join(json.dumps(row, ensure_ascii=True) + "\n" for row in labels).encode("utf-8"))
 
 
 def append(path, row):
