@@ -949,6 +949,7 @@ fn render_combined_themed(
                         dashboard.pane_maximize_enabled(SupportPane::Quota),
                     ),
                     focused,
+                    crate::render_changes::epoch_seconds(),
                 ))
                 .title(minimized_pane_size_controls(
                     focused,

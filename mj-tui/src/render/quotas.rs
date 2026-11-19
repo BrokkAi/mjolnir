@@ -72,10 +72,16 @@ pub(crate) fn minimized_quota_line(
     dashboard: &DashboardState,
     width: u16,
     focused: bool,
+    now: u64,
 ) -> Line<'static> {
     let mut readings = Vec::new();
     let mut statuses = Vec::new();
-    for provider in dashboard.quota_pools() {
+    for provider in super::quota_pools::provider_pools(
+        &dashboard.config,
+        &dashboard.quotas,
+        &dashboard.quota_providers,
+        now,
+    ) {
         for pool in provider.pools {
             readings.push(SummaryReading {
                 name: if pool.label.is_empty() {
@@ -488,9 +494,16 @@ fn pool_bar(
         if index > 0 && index <= gaps {
             spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
         }
-        let filled = (cells * usize::from(member.remaining) + 50) / 100;
+        // A reading older than its own reset says nothing about what is left.
+        let filled = if member.awaiting_reading {
+            0
+        } else {
+            (cells * usize::from(member.remaining) + 50) / 100
+        };
         let mut label = vec![' '; cells];
-        let mut text = if refreshing.contains(&member.id) {
+        let mut text = if member.awaiting_reading {
+            "reset due".to_string()
+        } else if refreshing.contains(&member.id) {
             format!("refreshing{}", theme::glyphs().ellipsis)
         } else {
             format!(
@@ -516,7 +529,7 @@ fn pool_bar(
         }
         let text: Vec<_> = text.chars().collect();
         let legible_fill = cells > 1
-            && (member.remaining == 0 || filled > 0)
+            && (member.awaiting_reading || member.remaining == 0 || filled > 0)
             && (member.remaining == 100 || filled < cells);
         if cells >= 6 && text.len() <= cells && legible_fill {
             label[cells - text.len()..].copy_from_slice(&text);
@@ -525,9 +538,13 @@ fn pool_bar(
             }
         } else {
             omitted.push(format!(
-                "{} {}% {}{}",
+                "{} {} {}{}",
                 member.id,
-                member.remaining,
+                if member.awaiting_reading {
+                    "?".to_string()
+                } else {
+                    format!("{}%", member.remaining)
+                },
                 text.into_iter().collect::<String>(),
                 omitted_banked
                     .map(|banked| format!(" {banked} banked"))
@@ -584,7 +601,9 @@ fn lane(
     accent: Color,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    if member.awaiting_reading {
+    // A reading older than its own reset (weekly or five-hour) cannot say
+    // whether the profile is usable now, so draw no availability.
+    if member.awaiting_reading || member.five_hour_awaiting_reading {
         // The cached reading predates its own reset: nothing is known to be
         // available, so draw no availability.
         let symbol = if theme::ascii() { "?" } else { "·" };
@@ -668,10 +687,9 @@ fn lane_note(
     now: u64,
     clock: fn(i64, &str) -> String,
 ) -> String {
-    if member.awaiting_reading {
-        return "reset due, awaiting reading".into();
-    }
-    let mut note = if member.remaining == 0 {
+    let mut note = if member.awaiting_reading {
+        format!("{} reset due, awaiting reading", period.label())
+    } else if member.remaining == 0 {
         format!(
             "{} back {} ({})",
             period.label(),
@@ -689,7 +707,9 @@ fn lane_note(
             reset_duration(member.reset, now)
         )
     };
-    if let Some(five) = &member.five_hour {
+    if member.five_hour_awaiting_reading {
+        note.push_str(" · 5H reset due, awaiting reading");
+    } else if let Some(five) = &member.five_hour {
         note.push_str(&format!(
             " · 5H {}%, resets in {}",
             quota_remaining_percent(five)
@@ -697,10 +717,15 @@ fn lane_note(
                 .unwrap_or_else(|| "?".into()),
             reset_duration(five.resets_at_epoch_seconds, now)
         ));
-    } else if member.remaining > 0 && member.five_hour_idle && *period == PoolPeriod::Week {
+    } else if member.remaining > 0
+        && !member.awaiting_reading
+        && member.five_hour_idle
+        && *period == PoolPeriod::Week
+    {
         note.push_str(" · 5H idle: a fresh window starts on first use");
     }
     if member.remaining > 0
+        && !member.awaiting_reading
         && let Some(fable) = member.fable
     {
         note.push_str(&format!(" · Fable {fable}%"));
@@ -1460,7 +1485,7 @@ mod tests {
                 70,
                 9,
             );
-            let minimized = minimized_quota_line(&dashboard, 110, true);
+            let minimized = minimized_quota_line(&dashboard, 110, true, now);
             // Hard-won: quota review: Kimi's Week balance vanished behind its Month window.
             let (mut dashboard, now) = fixture();
             dashboard
@@ -1493,7 +1518,13 @@ mod tests {
                 100,
                 20,
             );
-            let pools = dashboard.quota_pools();
+            // Judge staleness on the fixture's clock, not the wall clock.
+            let pools = crate::render::quota_pools::provider_pools(
+                &dashboard.config,
+                &dashboard.quotas,
+                &dashboard.quota_providers,
+                now,
+            );
             let moonshot = pools
                 .iter()
                 .find(|provider| provider.provider == QuotaProvider::Moonshot)

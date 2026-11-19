@@ -314,10 +314,16 @@ pub(crate) struct QuotaPool {
 
 impl QuotaPool {
     pub(crate) fn percentage(&self) -> String {
+        // With every reading past its reset, nothing is known to remain.
+        let known = self.members.iter().any(|member| !member.awaiting_reading);
         format!(
             "{}{}%{}",
             if self.unweighted { "avg " } else { "" },
-            self.remaining,
+            if known {
+                self.remaining.to_string()
+            } else {
+                "?".into()
+            },
             if self.missing > 0 { "*" } else { "" }
         )
     }
@@ -333,6 +339,7 @@ pub(crate) struct PoolMember {
     pub awaiting_reading: bool,
     pub banked: Option<u64>,
     pub five_hour: Option<QuotaWindow>,
+    pub five_hour_awaiting_reading: bool,
     pub five_hour_idle: bool,
     pub fable: Option<u8>,
     pub note: Option<String>,
@@ -346,6 +353,25 @@ pub(crate) fn provider_pools(
 ) -> Vec<ProviderQuota> {
     let mut grouped = BTreeMap::<QuotaProvider, ProviderQuota>::new();
     for (id, profile) in config.enabled_profiles() {
+        if matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode)
+            && providers.provider(id, profile).is_none()
+        {
+            let heading =
+                QuotaProvider::Other(format!("{} (resolving)", profile.kind.display_name()));
+            grouped
+                .entry(heading.clone())
+                .or_insert_with(|| ProviderQuota {
+                    provider: heading,
+                    pools: Vec::new(),
+                    text: Vec::new(),
+                })
+                .text
+                .push((
+                    id.into(),
+                    format!("resolving provider{}", mj_chat::theme::glyphs().ellipsis),
+                ));
+            continue;
+        }
         let provider = providers.provider(id, profile).unwrap_or_else(|| {
             if matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode) {
                 QuotaProvider::Other(format!("{} (resolving)", profile.kind.display_name()))
@@ -369,7 +395,7 @@ pub(crate) fn provider_pools(
         };
         let label = if quota.is_usage_priced() {
             Some("pay-per-use".into())
-        } else if quota.is_not_reported() {
+        } else if quota.is_not_reported() || quota.extra.as_deref() == Some("n/a") {
             Some("not reported".into())
         } else if quota.error.is_some() {
             Some(
@@ -451,6 +477,13 @@ pub(crate) fn provider_pools(
                         .five_hour_window()
                         .filter(|five| *five != window)
                         .cloned(),
+                    five_hour_awaiting_reading: report.five_hour_window().is_some_and(|five| {
+                        five.resets_at_epoch_seconds.is_some_and(|reset| {
+                            reset >= 0
+                                && reset as u64 <= now
+                                && quota.refreshed_at_epoch_seconds < reset as u64
+                        })
+                    }),
                     // Claude omits the short window until first use; other adapters
                     // do not define an absent window as idle.
                     five_hour_idle: profile.kind == HarnessKind::Claude,
@@ -528,7 +561,10 @@ pub(crate) fn provider_pools(
                     let Some(report) = quotas.get(*id) else {
                         return eligible;
                     };
-                    if report.is_usage_priced() {
+                    if report.is_usage_priced()
+                        || report.is_not_reported()
+                        || report.extra.as_deref() == Some("n/a")
+                    {
                         return false;
                     }
                     // A failed probe cannot tell us which allowances the profile holds.
@@ -550,11 +586,22 @@ pub(crate) fn provider_pools(
                     scoped.is_some_and(|report| {
                         report.windows.iter().any(|window| {
                             PoolPeriod::of(window) == pool.key.period
-                                && quota_remaining_percent(window).is_none()
+                                && (quota_remaining_percent(window).is_none()
+                                    || window.resets_at_epoch_seconds.is_some_and(|reset| {
+                                        reset >= 0
+                                            && reset as u64 <= now
+                                            && report.refreshed_at_epoch_seconds < reset as u64
+                                    }))
                         })
                     })
                 })
-                .count();
+                .count()
+                // A pooled reading older than its own reset is missing too.
+                + pool
+                    .members
+                    .iter()
+                    .filter(|member| member.awaiting_reading)
+                    .count();
             // The provider, scope and period identify the allowance's unit.
             // Prefer its absolute capacity over a subscription's dollar price.
             if pool.members.iter().all(|member| member.limit.is_some()) {
@@ -567,14 +614,24 @@ pub(crate) fn provider_pools(
                     member.weight = 1.0;
                 }
             }
-            let total: f64 = pool.members.iter().map(|member| member.weight).sum();
-            pool.remaining = (pool
+            let total: f64 = pool
                 .members
                 .iter()
-                .map(|member| member.weight * f64::from(member.remaining))
-                .sum::<f64>()
-                / total)
-                .round() as u8;
+                .filter(|member| !member.awaiting_reading)
+                .map(|member| member.weight)
+                .sum();
+            pool.remaining = if total > 0.0 {
+                (pool
+                    .members
+                    .iter()
+                    .filter(|member| !member.awaiting_reading)
+                    .map(|member| member.weight * f64::from(member.remaining))
+                    .sum::<f64>()
+                    / total)
+                    .round() as u8
+            } else {
+                0
+            };
         }
     }
     grouped.into_values().collect()
