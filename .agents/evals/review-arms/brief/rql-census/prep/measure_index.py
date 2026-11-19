@@ -162,11 +162,6 @@ class Server:
         except subprocess.TimeoutExpired:
             rc = None
         scope = f"{self.unit}.scope"
-        # systemd records an OOM kill as the scope's Result; the scope isn't collected, so the
-        # result survives the process.
-        show = subprocess.run(["systemctl", "--user", "show", scope, "-p", "Result", "-p", "ActiveState"],
-                              capture_output=True, text=True).stdout
-        self.sample["scope_result"] = dict(l.split("=", 1) for l in show.split() if "=" in l).get("Result")
         # Stop the scope in every case: it kills the whole process tree (Bifrost and anything it
         # started). Then verify the tree is gone before the caller touches the worktree or cache.
         stopped = subprocess.run(["systemctl", "--user", "stop", scope], capture_output=True, text=True)
@@ -189,6 +184,12 @@ class Server:
                 except FileNotFoundError:
                     procs = ""
             if state in ("inactive", "failed") and not procs:
+                # Read the Result only now, after every process in the scope has exited, so an
+                # OOM kill of a child during shutdown is caught too (the uncollected failed
+                # scope keeps it until reset-failed).
+                self.sample["scope_result"] = subprocess.run(
+                    ["systemctl", "--user", "show", scope, "-p", "Result", "--value"],
+                    capture_output=True, text=True).stdout.strip()
                 break
             if time.monotonic() > deadline:
                 raise RuntimeError(f"{scope} not confirmed stopped (state={state!r}, procs={procs[:80]!r}, "
@@ -220,6 +221,8 @@ def phase(binary, root, cache, log):
             rec["cpu_to_ready_usec"] = int(dict(l.split() for l in open(f"{d}/cpu.stat"))["usage_usec"]) if d else None
         except (OSError, ValueError, KeyError):
             rec["cpu_to_ready_usec"] = None
+        if rec["cpu_to_ready_usec"] is None:
+            raise RuntimeError("cpu.stat unreadable at readiness: the ranking's CPU is missing")
         rec.update(wall=time.monotonic() - t0, polls=polls,
                    ready=True, readiness={k: payload.get(k) for k in
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
@@ -250,9 +253,21 @@ def require_ec2():
         vendor = ""
     if vendor != "Amazon EC2":
         sys.exit(f"refusing to run Bifrost indexing on a non-EC2 host (sys_vendor={vendor!r})")
-    if subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={MEMORY_MAX}", "true"],
-                      capture_output=True).returncode:
-        sys.exit("systemd-run --user --scope with MemoryMax is unavailable; the memory cap can't be enforced")
+    # The cap must fit the host with room to spare, and the user manager must enforce it: prove
+    # it by running a scope capped at 64M that tries to allocate 256M and must be OOM-killed.
+    mem_total_kib = int(next(l for l in open("/proc/meminfo") if l.startswith("MemTotal:")).split()[1])
+    units = {"K": 1, "M": 2**10, "G": 2**20, "T": 2**30}
+    cap_kib = int(MEMORY_MAX[:-1]) * units[MEMORY_MAX[-1].upper()] if MEMORY_MAX[-1].isalpha() else int(MEMORY_MAX) // 1024
+    if cap_kib > 0.8 * mem_total_kib:
+        sys.exit(f"memory cap {MEMORY_MAX} exceeds 80% of this host's {mem_total_kib // 2**20} GiB")
+    probe = f"rql-cap-probe-{os.getpid()}"
+    subprocess.run(["systemd-run", "--user", "--scope", "--quiet", f"--unit={probe}", "-p", "MemoryMax=64M",
+                    "-p", "MemorySwapMax=0", sys.executable, "-c", "x = bytearray(256 * 2**20)"], capture_output=True)
+    result = subprocess.run(["systemctl", "--user", "show", f"{probe}.scope", "-p", "Result", "--value"],
+                            capture_output=True, text=True).stdout.strip()
+    subprocess.run(["systemctl", "--user", "reset-failed", f"{probe}.scope"], capture_output=True)
+    if result != "oom-kill":
+        sys.exit(f"the user manager doesn't enforce MemoryMax (probe result {result!r}); refusing to index")
 
 
 def reap_leftover_scopes():
@@ -278,6 +293,14 @@ def reap_leftover_scopes():
 
 def main():
     require_ec2()
+    # One driver per host: a second invocation would reap the first's live scopes and race on
+    # its worktrees. The lock is held for the process lifetime.
+    import fcntl
+    lock = open(pathlib.Path.home() / ".rql-index-measure.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("another measure_index.py is running on this host")
     reap_leftover_scopes()
     # Each line is `owner__repo`, or `owner__repo <pinned sha> <origin url>`. The pinned form
     # clones from the origin (for hosts without /nfs/morannon) and measures at that commit.
@@ -293,14 +316,15 @@ def main():
     with open(binary, "rb") as f:
         binary_sha = hashlib.file_digest(f, "sha256").hexdigest()
     # A record is reusable only for the same repo, pinned revision and Bifrost binary.
-    done = set()
+    latest = {}  # the latest record per repo is the one readers use; resume follows it too
     if results.exists():
         for l in open(results):
             r = json.loads(l)
-            if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart")) \
-                    and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX \
-                    and (r["repo"] not in pins or r.get("head") == pins[r["repo"]][0]):
-                done.add(r["repo"])
+            latest[r["repo"]] = r
+    done = {repo for repo, r in latest.items()
+            if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
+            and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
+            and (repo not in pins or r.get("head") == pins[repo][0])}
     for repo in repos:
         if repo in done:
             continue
