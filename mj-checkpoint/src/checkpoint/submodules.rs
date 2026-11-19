@@ -60,10 +60,13 @@ pub fn inspect_submodules(
 /// Snapshot guard: any working changes and unpublished checked-out gitlink commits.
 #[derive(Default)]
 pub(crate) struct SnapshotSubmoduleInspection {
+    pub notices: Vec<String>,
     pub dirty: Vec<PathBuf>,
+    pub unregistered: Vec<PathBuf>,
     pub initialized: Vec<crate::snapshot::SnapshotSubmodule>,
     pub index_gitlinks: Vec<crate::snapshot::SnapshotGitlink>,
     pub untracked: Vec<PathBuf>,
+    pub hidden_tracked_edits: Vec<PathBuf>,
     pub remote_refs_stale: bool,
 }
 pub(crate) fn inspect_snapshot_submodules(
@@ -80,6 +83,7 @@ pub(crate) fn inspect_snapshot_submodules(
         Some(&mut snapshot),
     )?;
     snapshot.dirty = inspection.dirty;
+    snapshot.unregistered = inspection.unregistered;
     Ok(snapshot)
 }
 
@@ -113,7 +117,33 @@ fn inspect_checkout(
     inspection: &mut SubmoduleInspection,
     mut snapshot: Option<&mut SnapshotSubmoduleInspection>,
 ) -> Result<()> {
-    let gitlinks = gitlinks(runner, checkout)?;
+    let mut gitlinks = gitlinks(runner, checkout)?;
+    if snapshot.is_some() {
+        // Current index entries already cover unchanged gitlinks. The raw
+        // index diff adds HEAD gitlinks staged for deletion/type replacement.
+        let changed = submodule_git(
+            runner,
+            checkout,
+            &[
+                "diff",
+                "--cached",
+                "--raw",
+                "--no-renames",
+                "--no-ext-diff",
+                "-z",
+            ],
+        )?;
+        let fields: Vec<_> = changed
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty())
+            .collect();
+        ensure!(fields.len().is_multiple_of(2), "malformed Git index diff");
+        for pair in fields.as_chunks::<2>().0 {
+            if pair[0].starts_with(b":160000 ") {
+                gitlinks.insert(mj_core::path_input::from_git_bytes(pair[1])?);
+            }
+        }
+    }
     if gitlinks.is_empty() {
         return Ok(());
     }
@@ -138,11 +168,20 @@ fn inspect_checkout(
         };
         let submodule = checkout.join(&gitlink);
         if !submodule.join(".git").exists() {
+            if snapshot.is_some()
+                && !uninitialized_gitlink_available(runner, checkout, &gitlink, config_key)?
+            {
+                inspection.dirty.push(named);
+            }
             continue;
         }
-        let mut matching_remotes = Vec::new();
-        let mut witnesses: Vec<String> = Vec::new();
+        let mut origin_evidence = None;
         if let Some(snapshot) = snapshot.as_deref_mut() {
+            snapshot.hidden_tracked_edits.extend(
+                crate::archive::hidden_tracked_paths(runner, &submodule)?
+                    .into_iter()
+                    .map(|path| named.join(path)),
+            );
             let name = std::str::from_utf8(config_key)?
                 .strip_prefix("submodule.")
                 .and_then(|name| name.strip_suffix(".path"))
@@ -156,44 +195,64 @@ fn inspect_checkout(
                 continue;
             }
             let configured = std::str::from_utf8(&configured.stdout)?.trim();
-            let effective =
-                submodule_git(runner, checkout, &["ls-remote", "--get-url", configured])?;
-            let effective = std::str::from_utf8(&effective)?.trim();
-            let comparison_url = crate::snapshot::resolve_remote_path(checkout, effective)?;
-            for remote in
-                std::str::from_utf8(&submodule_git(runner, &submodule, &["remote"])?)?.lines()
-            {
-                let url = submodule_git(runner, &submodule, &["remote", "get-url", remote])?;
-                if crate::snapshot::resolve_remote_path(
-                    &submodule,
-                    std::str::from_utf8(&url)?.trim(),
-                )? == comparison_url
-                {
-                    matching_remotes.push(remote.to_owned());
-                }
+            let url = crate::snapshot::stored_remote(runner, checkout, configured)?;
+            let origins = crate::snapshot::config_values(runner, &submodule, "remote.origin.url")?;
+            if origins.is_empty() {
+                inspection.dirty.push(named);
+                continue;
             }
-            if !matching_remotes.is_empty() {
-                let mut fallback = Vec::new();
-                for remote in &matching_remotes {
-                    let listed = submodule_git(
-                        runner,
-                        &submodule,
-                        &[
-                            "for-each-ref",
-                            "--format=%(objectname)",
-                            &format!("refs/remotes/{remote}/"),
-                        ],
-                    )?;
-                    fallback.extend(std::str::from_utf8(&listed)?.lines().map(str::to_owned));
-                }
-                let remote_state =
-                    crate::snapshot::remote_objects(runner, &submodule, effective, &fallback)?;
-                snapshot.remote_refs_stale |= remote_state.stale;
-                witnesses = remote_state.objects;
-            }
+            let origin_urls = origins
+                .iter()
+                .map(|url| crate::snapshot::stored_remote(runner, &submodule, url))
+                .collect::<Result<Vec<_>>>()?;
+            let push_urls =
+                crate::snapshot::config_values(runner, &submodule, "remote.origin.pushurl")?
+                    .iter()
+                    .map(|url| crate::snapshot::stored_remote(runner, &submodule, url))
+                    .collect::<Result<Vec<_>>>()?;
+            let tracking = crate::snapshot::origin_tracking_objects(runner, &submodule)?;
+            let evidence =
+                crate::snapshot::remote_objects(runner, &submodule, "origin", &tracking.objects)?;
+            ensure!(
+                !(evidence.stale && tracking.ambiguous && evidence.objects.is_empty()),
+                "submodule {} has ambiguous offline origin refs; restore connectivity or use a unique fetch namespace",
+                named.display()
+            );
+            snapshot.remote_refs_stale |= evidence.stale && !evidence.objects.is_empty();
+            origin_evidence = Some(evidence);
+            let captured_rules = crate::snapshot::local_url_rules(runner, &submodule)?;
+            snapshot.notices.extend(
+                captured_rules
+                    .notices
+                    .into_iter()
+                    .map(|notice| format!("{}: {notice}", named.display())),
+            );
+            let url_rules = captured_rules.rules;
+            let captured_worktree_rules = crate::snapshot::worktree_url_rules(runner, &submodule)?;
+            snapshot.notices.extend(
+                captured_worktree_rules
+                    .notices
+                    .into_iter()
+                    .map(|notice| format!("{}: {notice}", named.display())),
+            );
+            let worktree_url_rules = captured_worktree_rules.rules;
             snapshot
                 .initialized
                 .push(crate::snapshot::SnapshotSubmodule {
+                    origin_urls,
+                    push_urls,
+                    worktree_config_enabled: crate::snapshot::worktree_config_enabled(
+                        runner, &submodule,
+                    )?,
+                    object_format: std::str::from_utf8(&submodule_git(
+                        runner,
+                        &submodule,
+                        &["rev-parse", "--show-object-format"],
+                    )?)?
+                    .trim()
+                    .to_owned(),
+                    url_rules,
+                    worktree_url_rules,
                     path: named.clone(),
                     commit: std::str::from_utf8(&submodule_git(
                         runner,
@@ -203,7 +262,7 @@ fn inspect_checkout(
                     .trim()
                     .to_owned(),
                     name: name.to_owned(),
-                    url: crate::snapshot::snapshot_remote(checkout, effective)?,
+                    url,
                 });
             for path in submodule_git(
                 runner,
@@ -249,7 +308,10 @@ fn inspect_checkout(
             commits.dedup();
             for commit in commits {
                 let mut available = false;
-                for witness in &witnesses {
+                let evidence = origin_evidence
+                    .as_ref()
+                    .context("missing submodule origin query")?;
+                for witness in &evidence.objects {
                     let output = runner.run(
                         &submodule,
                         &git_command(&["merge-base", "--is-ancestor", &commit, witness]),
@@ -264,7 +326,6 @@ fn inspect_checkout(
                     break;
                 }
             }
-            dirty |= matching_remotes.is_empty();
         }
         if dirty {
             inspection.dirty.push(named.clone());
@@ -280,6 +341,69 @@ fn inspect_checkout(
     Ok(())
 }
 
+fn uninitialized_gitlink_available(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    path: &Path,
+    config_key: &[u8],
+) -> Result<bool> {
+    let indexed = snapshot_index_gitlinks(runner, checkout)?
+        .into_iter()
+        .find(|entry| entry.path == path);
+    let Some(indexed) = indexed else {
+        return Ok(true);
+    };
+    let mut arguments: Vec<std::ffi::OsString> = ["ls-tree", "-z", "HEAD", "--"]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    arguments.push(path.as_os_str().to_owned());
+    let head = runner.run(
+        checkout,
+        &GitCommand {
+            arguments,
+            ..Default::default()
+        },
+    )?;
+    let old = head
+        .stdout
+        .split(|byte| *byte == 0)
+        .find(|entry| entry.starts_with(b"160000 "))
+        .and_then(|entry| entry.split(|byte| *byte == b'\t').next())
+        .and_then(|header| header.split(|byte| *byte == b' ').nth(2));
+    if old.is_some_and(|old| old == indexed.commit.as_bytes()) {
+        return Ok(true);
+    }
+    let key = std::str::from_utf8(config_key)?
+        .strip_suffix(".path")
+        .context("invalid submodule path key")?;
+    let url = runner.run(
+        checkout,
+        &git_command(&[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get",
+            &format!("{key}.url"),
+        ]),
+    )?;
+    if url.status != 0 {
+        return Ok(false);
+    }
+    let mut url = std::str::from_utf8(&url.stdout)?.trim().to_owned();
+    url = crate::snapshot::resolve_submodule_url(runner, checkout, &url)?;
+    let advertised = runner.run(checkout, &git_command(&["ls-remote", &url]))?;
+    if advertised.status != 0 {
+        return Ok(false);
+    }
+    Ok(std::str::from_utf8(&advertised.stdout)?
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .any(|(oid, name)| {
+            oid == indexed.commit
+                && (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+        }))
+}
 pub(crate) fn snapshot_index_gitlinks(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -317,7 +441,7 @@ pub(crate) fn snapshot_index_gitlinks(
 
 /// Objects needed from this submodule: committed and staged gitlinks. HEAD
 /// may have no entry for a newly added submodule; conflicted stages all count.
-fn snapshot_gitlink_commits(
+pub(crate) fn snapshot_gitlink_commits(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     path: &Path,
