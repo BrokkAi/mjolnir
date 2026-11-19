@@ -56,8 +56,9 @@ pub struct QuotaRefreshRequest {
     /// billed by usage the way Dsh and a Codex custom provider are. Other
     /// harnesses ignore it.
     pub opencode_usage_priced: bool,
-    /// The Antigravity pools the profile uses ([`HarnessProfile::antigravity_pools`]);
-    /// the report keeps only windows of these. Empty for other harnesses.
+    /// The Antigravity pools the profile uses ([`HarnessProfile::antigravity_pools`]).
+    /// The stored report keeps every pool, for selection and quota recovery;
+    /// the daemon publishes only these to people. Empty for other harnesses.
     pub antigravity_pools: Vec<mj_core::config::AntigravityQuotaPool>,
 }
 
@@ -664,7 +665,7 @@ async fn refresh_profile_with_cache_root(
         cwd,
         codex_source,
         opencode_usage_priced,
-        antigravity_pools,
+        antigravity_pools: _,
     } = request;
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     let refreshed_at_epoch_seconds = SystemTime::now()
@@ -1050,15 +1051,6 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Dsh => Ok(usage_priced()),
         HarnessKind::Antigravity => crate::antigravity_usage::query(&source_home, &environment)
             .await
-            .map(|mut windows| {
-                // One projection for every reader: a pool the profile turned
-                // off never reaches a report.
-                windows.retain(|window| {
-                    mj_client::quota::antigravity_pool_of_window(window)
-                        .is_none_or(|pool| antigravity_pools.contains(&pool))
-                });
-                windows
-            })
             .map(|windows| ProfileQuota {
                 paid_credits: None,
                 monthly_price_usd: None,

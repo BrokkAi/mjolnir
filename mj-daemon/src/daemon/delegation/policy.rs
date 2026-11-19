@@ -422,8 +422,16 @@ impl Policy {
     /// Tell every attached surface what the daemon knows about quota.
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
+        let pools = self
+            .batch
+            .profiles
+            .iter()
+            .chain(&self.batch.grants)
+            .chain(&self.batch.extra)
+            .map(|request| (request.profile_id.as_str(), &request.antigravity_pools))
+            .collect::<BTreeMap<_, _>>();
         self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(&reports),
+            reports: surface_quota_reports(&reports, &pools),
             probing: self.probing.clone(),
             cycles: self.cycles,
         });
@@ -766,15 +774,27 @@ fn reconcile_quota_publications(
     changed
 }
 
-fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQuota> {
+/// What people see of each report. An Antigravity profile shows only the
+/// pools its request names; the stored report keeps every pool for selection
+/// and quota recovery.
+fn surface_quota_reports(
+    reports: &QuotaReportMap,
+    pools: &BTreeMap<&str, &Vec<mj_core::config::AntigravityQuotaPool>>,
+) -> BTreeMap<String, ProfileQuota> {
     reports
         .iter()
         .filter_map(|(id, publication)| {
             publication.effective_report(id).map(|report| {
-                (
-                    id.clone(),
-                    mj_controller::quota::surface_quota_report(&report),
-                )
+                let mut surfaced = mj_controller::quota::surface_quota_report(&report);
+                if surfaced.harness == mj_core::config::HarnessKind::Antigravity
+                    && let Some(pools) = pools.get(id.as_str())
+                {
+                    surfaced.windows.retain(|window| {
+                        mj_client::quota::antigravity_pool_of_window(window)
+                            .is_none_or(|pool| pools.contains(&pool))
+                    });
+                }
+                (id.clone(), surfaced)
             })
         })
         .collect()
@@ -1205,10 +1225,33 @@ mod tests {
             }],
             ..report.clone()
         };
+        // An Antigravity profile with its third-party pool turned off: the
+        // stored report keeps both pools, people see only Gemini.
+        let pool_window =
+            |pool: mj_core::config::AntigravityQuotaPool| mj_controller::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(50),
+                duration_seconds: Some(604_800),
+                model_scope: Some(pool.model_scope().into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            };
+        let gemini = ProfileQuota {
+            profile_id: "gemini".into(),
+            harness: mj_core::config::HarnessKind::Antigravity,
+            windows: mj_core::config::AntigravityQuotaPool::ALL
+                .map(pool_window)
+                .to_vec(),
+            ..report.clone()
+        };
         let reports = BTreeMap::from([
             ("claude".to_owned(), report.clone()),
             ("codex".to_owned(), codex.clone()),
+            ("gemini".to_owned(), gemini.clone()),
         ]);
+        let gemini_pools = vec![mj_core::config::AntigravityQuotaPool::Gemini];
         let publications = reports
             .iter()
             .map(|(id, report)| {
@@ -1223,7 +1266,10 @@ mod tests {
             })
             .collect::<QuotaReportMap>();
         let snapshot = mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(&publications),
+            reports: surface_quota_reports(
+                &publications,
+                &BTreeMap::from([("gemini", &gemini_pools)]),
+            ),
             ..Default::default()
         };
         let serialized = serde_json::to_vec(&snapshot).expect("serialize published snapshot");
@@ -1240,5 +1286,18 @@ mod tests {
             Some(17)
         );
         assert_eq!(snapshot.reports["codex"].windows.len(), 0);
+        assert_eq!(
+            publications["gemini"]
+                .report
+                .as_ref()
+                .unwrap()
+                .windows
+                .len(),
+            2
+        );
+        assert_eq!(
+            snapshot.reports["gemini"].windows,
+            [pool_window(mj_core::config::AntigravityQuotaPool::Gemini)]
+        );
     }
 }

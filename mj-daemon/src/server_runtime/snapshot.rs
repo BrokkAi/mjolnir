@@ -605,12 +605,6 @@ pub(super) fn viewer_snapshot_selected(
         .unwrap_or_default()
         .as_secs();
     for profile in &mut snapshot.profiles {
-        let pools = controller
-            .config
-            .named_profile(&profile.id)
-            .ok()
-            .map(|config| config.antigravity_pools())
-            .unwrap_or_default();
         let Some(quota) = quotas.get(&profile.id) else {
             continue;
         };
@@ -629,9 +623,7 @@ pub(super) fn viewer_snapshot_selected(
                 .iter()
                 .filter(|window| {
                     window.model_scope.is_none()
-                        || (quota.harness == mj_core::config::HarnessKind::Antigravity
-                            && mj_client::quota::antigravity_pool_of_window(window)
-                                .is_some_and(|pool| pools.contains(&pool)))
+                        || quota.harness == mj_core::config::HarnessKind::Antigravity
                 })
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
