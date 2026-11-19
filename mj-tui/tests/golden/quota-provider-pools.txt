@@ -2217,3 +2217,25 @@ background runs (x..end, colour):
 19: 0..132 Rgb(22, 27, 30) NONE
 20: 0..132 Rgb(22, 27, 30) NONE
 21: 0..132 Rgb(22, 27, 30) NONE
+=== idle Muse with and without a weekly reading (100x10) ===
+╭ Profiles (refreshed 16s ago)─────────────────────────────────────────────────────────────────────╮
+│META                                                                                              │
+│>-                                                                                  ↻3d0h avg 78%*│
+│  1 profile not reporting                                                                         │
+│        12:26 20:26 04:26                                                                         │
+│  muse2                     week 78%, resets in 3d0h · 5H idle: a fresh window starts on first use│
+│  muse3: idle; usage shows after the next request                                                 │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+background runs (x..end, colour):
+0: 0..1 Rgb(22, 27, 30) NONE, 1..30 Rgb(22, 27, 30) BOLD, 30..100 Rgb(22, 27, 30) NONE
+1: 0..1 Rgb(22, 27, 30) NONE, 1..5 Rgb(22, 27, 30) BOLD, 5..100 Rgb(22, 27, 30) NONE
+2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..71 Rgb(0, 129, 251) NONE, 71..90 Rgb(11, 45, 75) NONE, 90..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+3: 0..100 Rgb(22, 27, 30) NONE
+4: 0..100 Rgb(22, 27, 30) NONE
+5: 0..9 Rgb(22, 27, 30) NONE, 9..27 Rgb(12, 38, 62) NONE, 27..100 Rgb(22, 27, 30) NONE
+6: 0..100 Rgb(22, 27, 30) NONE
+7: 0..100 Rgb(22, 27, 30) NONE
+8: 0..100 Rgb(22, 27, 30) NONE
+9: 0..100 Rgb(22, 27, 30) NONE
