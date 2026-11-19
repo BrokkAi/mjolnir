@@ -754,26 +754,43 @@ async fn build_session_evidence(
     }
     let session_id = session_id.to_owned();
     mj_core::runtime::spawn_blocking(move || {
-        let specs = pairs
-            .iter()
-            .map(|pair| {
-                Ok(mj_transcript::github_history::HistoryPairSpec {
+        // Items without searchable identifiers get empty history without a scan.
+        let mut specs = Vec::new();
+        let mut scanned = Vec::new();
+        for (index, pair) in pairs.iter().enumerate() {
+            if let Some(sink) =
+                mj_transcript::github_history::history_scanner(&pair.original, &pair.base)?
+            {
+                scanned.push(index);
+                specs.push(mj_transcript::github_history::HistoryPairSpec {
                     cutoff_ms: pair.cutoff_ms,
                     repo: pair.original.repo.clone(),
                     number: pair.original.number,
-                    sink: mj_transcript::github_history::history_scanner(
-                        &pair.original,
-                        &pair.base,
-                    )?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let history = mj_transcript::github_history::SessionHistory::new(&session_id, specs);
-        mj_controller::database::scan_github_history(&session_id, history, &|| stop.is_cancelled())?
-            .into_iter()
-            .zip(&pairs)
-            .map(|(spans, pair)| {
-                mj_transcript::github_history::build_evidence(&pair.base, spans.spans)
+                    sink,
+                });
+            }
+        }
+        let mut results = if specs.is_empty() {
+            Vec::new()
+        } else {
+            let history = mj_transcript::github_history::SessionHistory::new(&session_id, specs);
+            mj_controller::database::scan_github_history(&session_id, history, &|| {
+                stop.is_cancelled()
+            })?
+        }
+        .into_iter();
+        let mut scanned = scanned.into_iter().peekable();
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(index, pair)| {
+                anyhow::ensure!(!stop.is_cancelled(), "GitHub history evidence cancelled");
+                let spans = if scanned.next_if_eq(&index).is_some() {
+                    results.next().expect("one result per scanned item").spans
+                } else {
+                    Vec::new()
+                };
+                mj_transcript::github_history::build_evidence(&pair.base, spans)
                     .map(|(evidence, _)| evidence)
             })
             .collect()

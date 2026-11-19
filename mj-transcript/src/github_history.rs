@@ -275,6 +275,10 @@ pub trait TextSink {
     /// header (`None`) or the row with this ordinal. A sink that keeps
     /// positions uses it to say where in the stored rows a position lies.
     fn mark(&mut self, _ordinal: Option<usize>) {}
+    /// The sink takes no more text; the rest may be skipped.
+    fn is_full(&self) -> bool {
+        false
+    }
 }
 impl TextSink for String {
     fn push_str(&mut self, text: &str) {
@@ -325,6 +329,8 @@ struct IdState {
 
 const NO_STAMP: u32 = u32::MAX;
 const OPEN: u16 = u16::MAX;
+/// `Candidate::ids` while the window can still receive hits.
+const BUILDING: u32 = u32::MAX;
 /// The ordinal of the header, which is not a row.
 const HEADER: u32 = u32::MAX;
 
@@ -340,18 +346,18 @@ struct Candidate {
     /// The part of the transcript the start lies in, and its offset in that part.
     ordinal: u32,
     offset: u32,
-    /// Index in the interned identifier sets.
+    /// Index in the interned identifier sets, once the window takes no more hits.
     ids: u32,
     /// Length of the trimmed text in code points, or `OPEN`.
     len: u16,
 }
 
-/// Identifier sets, interned: a window holds the index of its set.
+/// Identifier sets, interned when a window stops receiving hits: a window
+/// holds the index of its set.
 #[derive(Default)]
 struct IdSets {
     sets: Vec<Vec<u32>>,
     index: std::collections::HashMap<Vec<u32>, u32>,
-    adds: std::collections::HashMap<(u32, u32), u32>,
 }
 impl IdSets {
     fn intern(&mut self, set: Vec<u32>) -> u32 {
@@ -362,21 +368,6 @@ impl IdSets {
         self.index.insert(set.clone(), i);
         self.sets.push(set);
         i
-    }
-    fn with(&mut self, set: u32, id: u32) -> u32 {
-        if let Some(&n) = self.adds.get(&(set, id)) {
-            return n;
-        }
-        let mut v = self.sets[set as usize].clone();
-        let n = match v.binary_search(&id) {
-            Ok(_) => set,
-            Err(at) => {
-                v.insert(at, id);
-                self.intern(v)
-            }
-        };
-        self.adds.insert((set, id), n);
-        n
     }
 }
 
@@ -461,6 +452,8 @@ pub struct HistoryScanner {
     /// Windows kept, ordered by start.
     live: Vec<Candidate>,
     sets: IdSets,
+    /// Identifiers of windows that can still receive hits.
+    building: Vec<(u32, Vec<u32>)>,
     /// Windows still collecting text: start and text.
     open: Vec<(u32, String)>,
     /// Positions of the stamps seen, pruned to those a future window can still need.
@@ -516,6 +509,7 @@ impl HistoryScanner {
             pending: Vec::new(),
             live: Vec::new(),
             sets: IdSets::default(),
+            building: Vec::new(),
             open: Vec::new(),
             stamps: Default::default(),
             stamp_open: None,
@@ -530,6 +524,9 @@ impl HistoryScanner {
 
     /// See `TextSink::mark`.
     pub fn mark(&mut self, ordinal: Option<usize>) {
+        if self.automaton.is_none() {
+            return;
+        }
         self.segments
             .push_back((self.seen, ordinal.map_or(HEADER, |o| o as u32)));
         while self.segments.len() >= 2 && self.segments[1].0 + self.ring_cap <= self.seen {
@@ -562,8 +559,20 @@ impl HistoryScanner {
         let key = start as u32;
         match self.find(key) {
             Ok(at) => {
-                let ids = self.live[at].ids;
-                self.live[at].ids = self.sets.with(ids, id as u32);
+                let at_building = match self.building.iter().position(|b| b.0 == key) {
+                    Some(n) => n,
+                    None => {
+                        // Cannot happen before a window closes; keep it correct anyway.
+                        let set = self.sets.sets[self.live[at].ids as usize].clone();
+                        self.live[at].ids = BUILDING;
+                        self.building.push((key, set));
+                        self.building.len() - 1
+                    }
+                };
+                let set = &mut self.building[at_building].1;
+                if let Err(pos) = set.binary_search(&(id as u32)) {
+                    set.insert(pos, id as u32);
+                }
             }
             Err(at) => {
                 let stop = self.seen.min(start + 500);
@@ -596,7 +605,7 @@ impl HistoryScanner {
                 if self.stamp_open.is_some_and(|(p, _)| p <= start) {
                     self.awaiting_stamp.push(key);
                 }
-                let single = self.sets.intern(vec![id as u32]);
+                self.building.push((key, vec![id as u32]));
                 self.live.insert(
                     at,
                     Candidate {
@@ -604,7 +613,7 @@ impl HistoryScanner {
                         stamp,
                         ordinal,
                         offset,
-                        ids: single,
+                        ids: BUILDING,
                         len,
                     },
                 );
@@ -615,6 +624,25 @@ impl HistoryScanner {
                         self.peak_texts = self.peak_texts.max(self.open.len());
                     }
                 }
+            }
+        }
+    }
+
+    /// Interns the identifiers of windows no later hit can reach: a hit
+    /// ends at most `ring_cap - 400` code points (the longest identifier)
+    /// past a start it can reach by 374.
+    fn close_windows(&mut self, all: bool) {
+        let reach = self.ring_cap - 400 + 376;
+        let seen = self.seen;
+        let mut i = 0;
+        while i < self.building.len() {
+            if all || self.building[i].0 as usize + reach <= seen {
+                let (start, set) = self.building.swap_remove(i);
+                if let Ok(at) = self.find(start) {
+                    self.live[at].ids = self.sets.intern(set);
+                }
+            } else {
+                i += 1;
             }
         }
     }
@@ -684,6 +712,7 @@ impl HistoryScanner {
             }
         }
         self.seen += 1;
+        self.close_windows(false);
         if let Some(automaton) = &self.automaton {
             let mut buffer = [0; 4];
             for &byte in c.encode_utf8(&mut buffer).as_bytes() {
@@ -726,6 +755,7 @@ impl HistoryScanner {
         for (start, text) in std::mem::take(&mut self.open) {
             self.settle(start, &text);
         }
+        self.close_windows(true);
         let total = self.seen;
         // `f64::ln_1p` calls the platform's C library, whose log1p is not
         // correctly rounded: glibc, Apple's libm and MSVC each differ by an
@@ -1065,7 +1095,9 @@ impl LineEndings {
             self.after_cr = false;
             s = s.strip_prefix('\n').unwrap_or(s);
         }
-        while let Some(i) = s.find('\r') {
+        while !sink.is_full()
+            && let Some(i) = s.find('\r')
+        {
             sink.push_str(&s[..i]);
             sink.push_str("\n");
             s = &s[i + 1..];
@@ -1075,7 +1107,9 @@ impl LineEndings {
                 None => {}
             }
         }
-        sink.push_str(s);
+        if !sink.is_full() {
+            sink.push_str(s);
+        }
     }
 }
 
@@ -1168,8 +1202,14 @@ impl Slice {
     }
 }
 impl TextSink for Slice {
+    fn is_full(&self) -> bool {
+        self.done()
+    }
     fn push_str(&mut self, text: &str) {
         for c in text.chars() {
+            if self.done() {
+                return;
+            }
             if (self.from..self.to).contains(&self.pos) {
                 self.out.push(c);
             }
@@ -1515,6 +1555,9 @@ impl<S: HistorySink> SessionHistory<S> {
                     replay.endings.push("\n\n", &mut replay.slice);
                 }
                 for piece in ["[", ts, "] ", text] {
+                    if replay.slice.done() {
+                        break;
+                    }
                     replay.endings.push(piece, &mut replay.slice);
                 }
                 replay.chunks += 1;
@@ -1558,13 +1601,18 @@ impl<S: HistorySink> SessionHistory<S> {
 
 /// A scanner for one item against one session. `base` must already be bounded
 /// and redacted once; the original item's full body is used only for retrieval.
+/// None when the item has no searchable identifiers, which gives empty history.
 pub fn history_scanner(
     original: &mj_core::github_item::GithubItem,
     base: &mj_core::github_item::GithubItemEvidence,
-) -> Result<HistoryScanner> {
+) -> Result<Option<HistoryScanner>> {
     let original: Value = serde_json::from_str(&serde_json::to_string(original)?)?;
     let base: Value = serde_json::from_str(&serde_json::to_string(base)?)?;
-    Ok(HistoryScanner::new(&original, &base["session"]))
+    // An item without searchable identifiers can never select a snippet.
+    if identifiers(&original).is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(HistoryScanner::new(&original, &base["session"])))
 }
 
 /// Build classifier-ready evidence from the spans a scanner retrieved.
