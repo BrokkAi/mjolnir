@@ -551,7 +551,8 @@ fn pool_bar(
             text = if member.awaiting_reading {
                 vec!['?']
             } else if refreshing.contains(&member.id) {
-                theme::glyphs().ellipsis.chars().collect()
+                // One cell, distinct from the spent fill in every theme.
+                vec![if theme::ascii() { '~' } else { '…' }]
             } else {
                 Vec::new()
             };
