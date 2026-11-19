@@ -1218,6 +1218,8 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::Warning { message })?;
         }
         RuntimeEvent::HarnessRestarting { message } => {
+            // Retire dead responders before any append can expose a quiet cut.
+            relay.record_observation(RelayObservation::SessionRestarted)?;
             relay.record_observation(RelayObservation::NativeAgent {
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
@@ -1232,7 +1234,6 @@ pub(crate) fn record_runtime_event_with_facts(
                     message.clone(),
                 )?;
             }
-            relay.record_observation(RelayObservation::SessionRestarted)?;
         }
         RuntimeEvent::TerminalClosed {
             terminal_id,

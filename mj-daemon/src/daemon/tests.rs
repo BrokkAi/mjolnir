@@ -16251,3 +16251,75 @@ async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
             .is_none()
     );
 }
+
+#[cfg(unix)]
+// Hard-won: d9dcf7c: a backpressured adoption frame stopped polling daemon drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_backpressured_response_releases_admission_on_handoff() {
+    use std::os::fd::AsRawFd;
+    const NAME: &str = "adoption_backpressured_response_releases_admission_on_handoff";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = tokio::net::TcpSocket::new_v4().unwrap();
+    // These fixture capacities force the peer to stop accepting a frame much
+    // larger than a pipe buffer. They do not constrain production sockets.
+    client.set_recv_buffer_size(4096).unwrap();
+    let client = client
+        .connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let capacity: libc::c_int = 4096;
+    // SAFETY: a live socket descriptor and an initialized integer of the
+    // documented SO_SNDBUF size; setsockopt copies it before returning.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&capacity as *const libc::c_int).cast(),
+                std::mem::size_of_val(&capacity) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let admission = mj_controller::upgrade::activity_unless_draining("adoption install").unwrap();
+    let server = tokio::spawn(async move {
+        let result = super::serve::write_adoption_response(
+            &mut stream,
+            ResponseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                result: Ok(DaemonReply::AdoptionWaiting {
+                    blockers: vec!["x".repeat(256 * 1024)],
+                    destroy_command: None,
+                }),
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        drop(admission);
+        result
+    });
+    tokio::time::timeout(Duration::from_secs(5), client.readable())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        !server.is_finished(),
+        "the peer is not consuming the blocked progress frame"
+    );
+    mj_controller::upgrade::gate().begin_draining();
+    let error = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("socket backpressure must not retain adoption admission")
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("handoff"));
+    assert!(mj_controller::upgrade::active_labels().is_empty());
+    drop(client);
+}

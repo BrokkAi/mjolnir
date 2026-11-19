@@ -6630,7 +6630,7 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
         })
         .unwrap();
     relay.record_observation(RelayObservation::SessionConfigured { config_options: vec![serde_json::from_value(serde_json::json!({
-        "id":"mode", "name":"Mode", "type":"select", "currentValue":"old", "options":[{"value":"old","name":"Old"},{"value":"new","name":"New"}]
+        "id":"collaboration_mode", "name":"Mode", "category":"mode", "type":"select", "currentValue":"plan", "options":[{"value":"plan","name":"Plan"},{"value":"default","name":"Default"}]
     })).unwrap(), serde_json::from_value(serde_json::json!({
         "id":"model", "name":"Model", "type":"select", "currentValue":"unselectable-transcript-id", "options":[{"value":"chosen-picker","name":"Chosen"}]
     })).unwrap()] }).unwrap();
@@ -6757,6 +6757,11 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
         );
         assert_eq!(projection.pending_elicitations, vec![question]);
         assert_eq!(projection.configuration.values["mode"], "new");
+        // Hard-won: d9dcf7c: legacy mode updates overwrote Codex's distinct selector.
+        assert_eq!(
+            projection.configuration.values["collaboration_mode"],
+            "plan"
+        );
         assert_eq!(projection.configuration.values["model"], "chosen-picker");
         assert!(
             projection.active_turn.is_none(),

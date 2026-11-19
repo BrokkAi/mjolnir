@@ -64,15 +64,7 @@ pub fn materialized_session_from_live_baseline(
         projection
             .configuration
             .values
-            .insert("mode".into(), Value::String(mode.clone()));
-        if let Some(option) =
-            mj_core::acp::find_session_config_option(&state.config_options, "mode")
-        {
-            projection
-                .configuration
-                .values
-                .insert(option.id.to_string(), Value::String(mode));
-        }
+            .insert("mode".into(), Value::String(mode));
     }
     projection
         .configuration

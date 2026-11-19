@@ -3967,6 +3967,19 @@ fn harness_restarting_interrupts_in_flight_commands() {
     let mut in_flight = BTreeMap::new();
     in_flight.insert("prompt-1".into(), prompt("go"));
 
+    // Hard-won: d9dcf7c: interruption exposed a cut with a dead question responder.
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("dead-responder", serde_json::json!({
+        "mode":"form", "sessionId":SESSION_ID, "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    {
+        let mut owner = relay.lock().unwrap();
+        owner.claim_pending_commands(true).unwrap();
+        owner
+            .record_observation(RelayObservation::ElicitationRequested { request: question })
+            .unwrap();
+    }
+    let mut cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
@@ -4006,7 +4019,10 @@ fn harness_restarting_interrupts_in_flight_commands() {
         .iter()
         .position(|event| matches!(event.observation, RelayObservation::SessionRestarted))
         .unwrap();
-    assert!(interrupted < restarted);
+    assert!(restarted < interrupted);
+    let cut = cut.try_recv().unwrap().unwrap();
+    assert!(cut.questions.is_empty());
+    assert!(cut.state.open_request.is_none());
 }
 
 // Hard-won: de056ae: late TerminalStarted reopened a completed fallback card and blocked recovery.

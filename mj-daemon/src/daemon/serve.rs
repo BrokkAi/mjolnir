@@ -478,10 +478,10 @@ pub(super) async fn serve_client(
                             progress_open = false;
                             if let Ok(publication) = publication {
                                 refresh_runtime_controller(&state).await;
-                                let delivered = write_response(&mut stream, ResponseEnvelope {
+                                let delivered = if disconnected { Ok(()) } else { write_adoption_response(&mut stream, ResponseEnvelope {
                                     protocol_version: request.protocol_version, request_id,
                                     result: Ok(DaemonReply::AdoptionInstalled { session_id: adoption.session_id.clone() }),
-                                }).await;
+                                }, &wait_cancel).await };
                                 if let Err(error) = delivered {
                                     tracing::debug!(%error, "adoption installed notice connection closed");
                                     disconnected = true;
@@ -498,10 +498,10 @@ pub(super) async fn serve_client(
                                 if blockers != previous_blockers {
                                     previous_blockers = blockers.clone();
                                     if let Some(blockers) = blockers && !disconnected
-                                        && let Err(error) = write_response(&mut stream, ResponseEnvelope {
+                                        && let Err(error) = write_adoption_response(&mut stream, ResponseEnvelope {
                                             protocol_version: request.protocol_version, request_id,
                                             result: Ok(DaemonReply::AdoptionWaiting { blockers, destroy_command: Some(destroy_command.clone()) }),
-                                        }).await {
+                                        }, &wait_cancel).await {
                                             tracing::debug!(%error, "adoption progress connection closed");
                                             disconnected = true;
                                             cancelled.store(true, Ordering::Release);
@@ -527,25 +527,22 @@ pub(super) async fn serve_client(
                     if let Err(error) = &result {
                         tracing::debug!(%error, "disconnected adoption finished");
                     }
-                    if admission.is_none() {
-                        return Ok(());
-                    }
+                    drop(admission);
+                    return Ok(());
                 }
-                write_response(
+                write_adoption_response(
                     &mut stream,
                     ResponseEnvelope {
                         protocol_version: request.protocol_version,
                         request_id,
                         result: result.map_err(|error| format!("{error:#}")),
                     },
+                    &wait_cancel,
                 )
                 .await?;
                 // The install guard spans final response delivery, as other
                 // admitted requests do; no worker wait or catch-up owns it.
                 drop(admission);
-                if disconnected {
-                    return Ok(());
-                }
                 continue;
             }
             if request.action.is_cancellable_machine_action() {
@@ -802,6 +799,22 @@ pub(super) async fn serve_client(
         )
         .await?;
         drop(import_registration);
+    }
+}
+
+/// A partial frame cannot be resumed: callers close the adoption connection
+/// on interruption, then finish or release any already accepted installation.
+pub(super) async fn write_adoption_response(
+    stream: &mut TcpStream,
+    response: ResponseEnvelope,
+    cancelled: &CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        // A ready socket can still deliver the final failure during drain.
+        biased;
+        result = write_response(stream, response) => result,
+        () = cancelled.cancelled() => anyhow::bail!("adoption response interrupted"),
+        () = mj_controller::upgrade::gate().wait_until_draining() => anyhow::bail!("adoption response interrupted for daemon handoff"),
     }
 }
 
