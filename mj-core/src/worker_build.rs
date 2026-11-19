@@ -295,20 +295,6 @@ struct ExecutableMemo {
 impl ExecutableMemo {
     fn lookup(&mut self, path: &Path, identity: &ExecutableIdentity) -> ExecutableRead {
         if self.by_path.get(path) != Some(identity) {
-            if !self.by_path.contains_key(path) {
-                // A new path: forget paths that no longer exist, such as a
-                // verified download's temporary file, so one-off paths do not
-                // accumulate for the life of the process.
-                let gone = self
-                    .by_path
-                    .keys()
-                    .filter(|known| std::fs::symlink_metadata(known).is_err())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for known in gone {
-                    self.forget(&known);
-                }
-            }
             self.forget(path);
             self.by_path.insert(path.to_owned(), identity.clone());
             self.by_identity.entry(identity.clone()).or_default().paths += 1;
@@ -353,10 +339,29 @@ fn memoized_executable_contents(path: &Path, input: &mut File) -> Result<Arc<Exe
     // inode. An in-place write updates ctime even if the writer restores mtime.
     // Keep both timestamps at their full nanosecond resolution.
     let identity = ExecutableIdentity::from_metadata(&input.metadata()?);
-    let read = MEMO
-        .lock()
-        .expect("worker executable memo")
-        .lookup(path, &identity);
+    // A new path first forgets known paths that no longer exist, such as a
+    // verified download's temporary file, so one-off paths do not accumulate
+    // for the life of the process. The filesystem is checked without the
+    // lock, so a slow mount cannot stall unrelated executables.
+    let known = {
+        let memo = MEMO.lock().expect("worker executable memo");
+        if memo.by_path.contains_key(path) {
+            Vec::new()
+        } else {
+            memo.by_path.keys().cloned().collect::<Vec<_>>()
+        }
+    };
+    let gone = known
+        .into_iter()
+        .filter(|known| std::fs::symlink_metadata(known).is_err())
+        .collect::<Vec<_>>();
+    let read = {
+        let mut memo = MEMO.lock().expect("worker executable memo");
+        for known in &gone {
+            memo.forget(known);
+        }
+        memo.lookup(path, &identity)
+    };
     // Concurrent launches of this file share the read. Other binaries
     // can be opened and read independently.
     let mut contents = read.lock().expect("worker executable read");
