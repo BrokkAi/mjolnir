@@ -528,6 +528,17 @@ pub fn usage_envelopes(
     Ok(envelopes)
 }
 
+/// A queued file may exist without its durable id record. The delivery-loop
+/// owner retains the spool for this cycle; unrelated projection errors do not.
+#[derive(Debug)]
+pub(crate) struct ObserveIdsNotDurable;
+impl std::fmt::Display for ObserveIdsNotDurable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Observe queued ids are not durable")
+    }
+}
+impl std::error::Error for ObserveIdsNotDurable {}
+
 /// A directory of newline-delimited Observe envelopes waiting for delivery.
 ///
 /// Files are named by timestamp, transcript position, ordinal, and the digest
@@ -538,6 +549,7 @@ pub fn usage_envelopes(
 pub struct ObserveSpool {
     root: PathBuf,
     ids: ObserveEmittedIds,
+    cancellation: CancellationToken,
 }
 
 impl ObserveSpool {
@@ -548,15 +560,27 @@ impl ObserveSpool {
         let ids = ObserveEmittedIds::new(&requested.with_file_name("delivery.json"));
         let root = fs::canonicalize(&requested)
             .with_context(|| format!("resolve Observe spool {}", requested.display()))?;
-        Ok(Self { root, ids })
+        Ok(Self {
+            root,
+            ids,
+            cancellation: CancellationToken::new(),
+        })
     }
 
     /// The logical Observe state path owns id logs, independently of where a
     /// symlink places the spool.
-    pub fn open_for_delivery(paths: &ObservePaths) -> Result<Self> {
+    pub fn open_for_delivery(
+        paths: &ObservePaths,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
         let mut spool = Self::open(&paths.spool)?;
         spool.ids = ObserveEmittedIds::new(&paths.state);
+        spool.cancellation = cancellation.clone();
         Ok(spool)
+    }
+
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
     }
 
     pub fn emitted_ids(&self) -> &ObserveEmittedIds {
@@ -604,13 +628,14 @@ impl ObserveSpool {
             if error.kind() != std::io::ErrorKind::AlreadyExists {
                 return Err(error).context("publish Observe spool entry");
             }
-            Self::check_queued_identity(&path, envelope)?;
-            mj_core::config::sync_directory(&self.root)?;
+            Self::check_queued_identity(&path, envelope).context(ObserveIdsNotDurable)?;
+            mj_core::config::sync_directory(&self.root).context(ObserveIdsNotDurable)?;
             return Ok(path);
         }
         fs::remove_file(&temporary)
-            .with_context(|| format!("remove Observe spool link {}", temporary.display()))?;
-        mj_core::config::sync_directory(&self.root)?;
+            .with_context(|| format!("remove Observe spool link {}", temporary.display()))
+            .context(ObserveIdsNotDurable)?;
+        mj_core::config::sync_directory(&self.root).context(ObserveIdsNotDurable)?;
         Ok(path)
     }
 

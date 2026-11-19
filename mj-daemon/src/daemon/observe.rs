@@ -7,9 +7,9 @@
 
 use super::*;
 use crate::observe::{
-    ObserveCheckpoint, ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool,
-    checkpoint_envelopes, envelopes_for_transcript, transcript_response_from_materialized,
-    usage_envelopes,
+    ObserveCheckpoint, ObserveDeliveryState, ObserveIdsNotDurable, ObservePaths, ObserveSession,
+    ObserveSpool, checkpoint_envelopes, envelopes_for_transcript,
+    transcript_response_from_materialized, usage_envelopes,
 };
 use mj_core::observe::{ObserveCommit, ObserveDeliveryConfig, ObserveGitMeta};
 use mj_core::state::MaterializedExecutionState;
@@ -97,13 +97,7 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            // One owner exports and durably records ids before delivering.
-            // A failed pass may have left an unlogged spool entry behind.
-            let flush = if export.is_ok() {
-                flush_spool(&paths, &config, &client, &cancellation).await
-            } else {
-                Ok(0)
-            };
+            let flush = flush_after_export(&export, &paths, &config, &client, &cancellation).await;
             match &flush {
                 Ok(delivered) => {
                     if *delivered > 0 {
@@ -203,7 +197,7 @@ async fn publish_changed_sessions(
         let mut delivery = delivery
             .lock()
             .map_err(|_| anyhow!("Observe state lock poisoned"))?;
-        let spool = ObserveSpool::open_for_delivery(&paths)?;
+        let spool = ObserveSpool::open_for_delivery(&paths, &cancellation)?;
         let mut ids = runtime_state
             .sessions
             .keys()
@@ -265,7 +259,16 @@ async fn publish_changed_sessions(
                 }
             }
         }
-        delivery.save(&paths.state)?;
+        let ids_not_durable = failures
+            .iter()
+            .any(|error| error.downcast_ref::<ObserveIdsNotDurable>().is_some());
+        delivery.save(&paths.state).map_err(|error| {
+            if ids_not_durable {
+                error.context(ObserveIdsNotDurable)
+            } else {
+                error
+            }
+        })?;
         if emitted > 0 {
             tracing::debug!(emitted, "enqueued Mjolnir events for Brokk Observe");
         }
@@ -281,7 +284,11 @@ async fn publish_changed_sessions(
                     .collect::<Vec<_>>()
                     .join("; ")
             );
-            Err(error)
+            Err(if ids_not_durable {
+                error.context(ObserveIdsNotDurable)
+            } else {
+                error
+            })
         }
     })
     .await
@@ -561,22 +568,33 @@ fn enqueue_envelopes(
     let mut appended = Vec::new();
     let mut count = 0_usize;
     for envelope in envelopes {
+        if spool.cancellation().is_cancelled() {
+            if !appended.is_empty() {
+                ids.append(session_id, &appended)
+                    .context(ObserveIdsNotDurable)?;
+            }
+            // Preserve the committed prefix without advancing the session
+            // cursor. The next daemon resumes from the durable exact-id log.
+            return Ok(count);
+        }
         if emitted.contains(&envelope.meta.event_id) {
             continue;
         }
         if let Err(error) = spool.enqueue(&envelope) {
             if !appended.is_empty() {
-                ids.append(session_id, &appended)?;
+                ids.append(session_id, &appended)
+                    .context(ObserveIdsNotDurable)?;
             }
-            // The failed pass cannot flush. Its next projection retries this
-            // envelope against the existing-file idempotence check.
+            // Post-publication errors retain their undurable-id marker. An
+            // error before publication cannot create an unlogged queue entry.
             return Err(error);
         }
         emitted.insert(envelope.meta.event_id.clone());
         appended.push(envelope.meta.event_id.clone());
         count += 1;
     }
-    ids.append(session_id, &appended)?;
+    ids.append(session_id, &appended)
+        .context(ObserveIdsNotDurable)?;
     let cursor = delivery.sessions.entry(session_id.to_owned()).or_default();
     cursor.record_updated_at = batch.revision.to_owned();
     cursor.materialized_event_ordinal = batch.materialized_event_ordinal;
@@ -785,6 +803,24 @@ fn git_observation(record: &SessionRecord) -> (Option<ObserveGitMeta>, Vec<Obser
     (git, commits)
 }
 
+/// Export is serialized before delivery. Only a failed id commit (or a
+/// post-publication enqueue failure) leaves this cycle unsafe to flush.
+async fn flush_after_export(
+    export: &Result<()>,
+    paths: &ObservePaths,
+    config: &ObserveDeliveryConfig,
+    client: &reqwest::Client,
+    cancellation: &CancellationToken,
+) -> Result<usize> {
+    if export
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<ObserveIdsNotDurable>().is_some())
+    {
+        return Ok(0);
+    }
+    flush_spool(paths, config, client, cancellation).await
+}
+
 async fn flush_spool(
     paths: &ObservePaths,
     config: &ObserveDeliveryConfig,
@@ -794,7 +830,7 @@ async fn flush_spool(
     let delivery_paths = paths.clone();
     let preparing_cancellation = cancellation.clone();
     let (spool, pending) = tokio::task::spawn_blocking(move || {
-        let spool = ObserveSpool::open_for_delivery(&delivery_paths)?;
+        let spool = ObserveSpool::open_for_delivery(&delivery_paths, &preparing_cancellation)?;
         let pending = spool.pending_cancellable(&preparing_cancellation)?;
         Ok::<_, anyhow::Error>((spool, Arc::new(pending)))
     })
@@ -1084,11 +1120,29 @@ mod tests {
             BTreeSet::new(),
         );
         std::fs::set_permissions(spool.root(), permissions).unwrap();
-        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<ObserveIdsNotDurable>()
+                .is_some()
+        );
         assert!(!delivery.sessions.contains_key(session_id));
         assert!(spool.emitted_ids().load(session_id).unwrap().is_empty());
         let queued = spool.pending().unwrap();
         assert_eq!(queued.len(), 1);
+        spool.cancellation().cancel();
+        // Hard-won: 098571603: cancellation must stop a session batch without committing its cursor.
+        assert_eq!(
+            replay_stop(
+                &spool,
+                &mut delivery,
+                projected_stop(session_id, "longer answer")
+            ),
+            0
+        );
+        assert!(!delivery.sessions.contains_key(session_id));
+        assert_eq!(spool.pending().unwrap(), queued);
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
         let replay = projected_stop(session_id, "longer answer");
         assert_eq!(replay_stop(&spool, &mut delivery, replay), 1);
         assert_eq!(spool.pending().unwrap(), queued);
@@ -1163,7 +1217,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(relocated_spool.path(), &paths.spool).unwrap();
         // Hard-won: d91380c89: a relocated spool must use the migrated id log.
-        let spool = ObserveSpool::open_for_delivery(&paths).unwrap();
+        let spool = ObserveSpool::open_for_delivery(&paths, &CancellationToken::new()).unwrap();
 
         assert_eq!(replay_stop(&spool, &mut reloaded, envelope), 0);
         assert!(spool.pending().unwrap().is_empty());
@@ -1548,10 +1602,23 @@ mod tests {
             timeout_ms: 3_000,
         };
         let client = reqwest::Client::new();
+        let corrupt_archive = root.path().join("corrupt-checkpoint.tar.zst");
+        std::fs::write(&corrupt_archive, b"not a checkpoint archive").unwrap();
+        let failed_export = mj_checkpoint::archive::verify_archive_streaming(&corrupt_archive)
+            .map(|_| ())
+            .context("export another session's checkpoint");
+        assert!(failed_export.is_err());
+        // Hard-won: 098571603: one corrupt session blocked delivery for every healthy session.
         assert!(
-            flush_spool(&paths, &config, &client, &CancellationToken::new())
-                .await
-                .unwrap()
+            flush_after_export(
+                &failed_export,
+                &paths,
+                &config,
+                &client,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap()
                 >= 2
         );
         assert!(spool.pending().unwrap().is_empty());
