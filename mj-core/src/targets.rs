@@ -3881,13 +3881,12 @@ mod executor_tests {
     fn container_exec_drain_preserves_streams_stdin_and_status() {
         let temp = tempfile::tempdir().unwrap();
         let fake = temp.path().join("podman");
-        fs::write(
-            &fake,
-            "#!/bin/sh\nshift 3\ncat\nprintf 'stderr bytes\\n' >&2\nexit \"$1\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        // Never exec a file this multi-threaded test just wrote (ETXTBSY).
+        crate::test_hooks::install_fake_command(
+            temp.path(),
+            "podman",
+            "shift 3\ncat\nprintf 'stderr bytes\\n' >&2\nexit \"$1\"\n",
+        );
         for status in [0, 37, 23, 255] {
             let plain = CommandSpec::new(
                 fake.to_str().unwrap(),
@@ -3933,9 +3932,11 @@ mod executor_tests {
     fn container_exec_drain_survives_closed_downstream_pipes() {
         let temp = tempfile::tempdir().unwrap();
         let fake = temp.path().join("podman");
-        fs::write(&fake, "#!/bin/sh\nset -e\nshift 3\nhead -c 204800 /dev/zero\nhead -c 204800 /dev/zero >&2\nprintf done > \"$1\"\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_hooks::install_fake_command(
+            temp.path(),
+            "podman",
+            "set -e\nshift 3\nhead -c 204800 /dev/zero\nhead -c 204800 /dev/zero >&2\nprintf done > \"$1\"\n",
+        );
         let marker = temp.path().join("normal-exit");
         let wrapped =
             drained_container_exec(fake.to_str().unwrap(), "ctr", [marker.to_str().unwrap()]);
@@ -4656,10 +4657,7 @@ if [ "$count" -eq 0 ]; then
 fi
 exit 0
 "#;
-        let fake = directory.path().join("scp");
-        std::fs::write(&fake, script).unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_hooks::install_fake_command(directory.path(), "scp", script);
         let ssh = SshTarget {
             destination: "fake-host".to_owned(),
             ssh_args: Vec::new(),
