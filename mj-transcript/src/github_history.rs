@@ -476,9 +476,13 @@ pub struct HistoryScanner {
 impl HistoryScanner {
     /// `item` is the original title/body; `session` the bounded session digest.
     pub fn new(item: &Value, session: &Value) -> Self {
+        Self::with_identifiers(identifiers(item), session)
+    }
+
+    /// Like [`Self::new`] with the item's identifiers already extracted.
+    fn with_identifiers(ids: Vec<(String, f64)>, session: &Value) -> Self {
         use aho_corasick::automaton::Automaton;
         use aho_corasick::nfa::contiguous::NFA;
-        let ids = identifiers(item);
         let info = ids
             .iter()
             .map(|(id, _)| IdState {
@@ -1611,10 +1615,14 @@ pub fn history_scanner(
     let original: Value = serde_json::from_str(&serde_json::to_string(original)?)?;
     let base: Value = serde_json::from_str(&serde_json::to_string(base)?)?;
     // An item without searchable identifiers can never select a snippet.
-    if identifiers(&original).is_empty() {
+    let ids = identifiers(&original);
+    if ids.is_empty() {
         return Ok(None);
     }
-    Ok(Some(HistoryScanner::new(&original, &base["session"])))
+    Ok(Some(HistoryScanner::with_identifiers(
+        ids,
+        &base["session"],
+    )))
 }
 
 /// Build classifier-ready evidence from the spans a scanner retrieved.
