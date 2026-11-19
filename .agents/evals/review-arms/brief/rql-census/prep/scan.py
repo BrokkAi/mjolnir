@@ -68,6 +68,10 @@ def emit(path, rec):
         f.write(json.dumps(rec) + "\n")
 
 
+MISSING_OBJECT = re.compile(r"bad object|unknown revision|bad revision|not a valid object|"
+                            r"ambiguous argument|invalid object name", re.I)
+
+
 def stage_roots(repos):
     """Root commits of every clone. Clones sharing a root share history: forks and renames share
     their roots, and a subtree merge imports the subtree's roots into the host repo."""
@@ -114,8 +118,10 @@ def stage_dates(by_repo):
                     rc3, so3, se3 = git(repo, "log", "-1", "--format=%ct", h)
                     if rc3 == 0 and so3.strip():
                         dates[h] = so3.strip()
-                    else:
-                        undatable[h] = se3.strip()[-200:]
+                    elif MISSING_OBJECT.search(se3):
+                        undatable[h] = se3.strip()[-200:]  # Git says the commit isn't in this clone
+                    else:  # anything else (I/O, a killed git) fails the repo visibly
+                        raise RuntimeError(f"dating {h}: exit {rc3}: {se3.strip()[-200:]}")
             emit(out, {"repo": repo, "clone_ct": int(head.strip() or 0),
                        "dates": {h: int(t) for h, t in dates.items()}, "undatable": undatable, "error": None})
         except Exception as e:  # report, don't drop
