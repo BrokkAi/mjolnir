@@ -2102,13 +2102,11 @@ pub(crate) fn unquote_git_path(path: &[u8]) -> Result<PathBuf> {
     mj_core::path_input::from_git_bytes(&decoded)
 }
 
-/// Read Git's registered checkout paths without pruning them. Capture scopes
-/// old-Git path checks to its checkout; restore also needs outside registrations
-/// before it can claim ownership of shared refs.
+/// Read registered checkout paths without pruning them. Old-Git path checks
+/// apply only inside the requested checkout.
 pub(crate) fn registered_worktree_paths(
     runner: &dyn GitCommandRunner,
     repository: &Path,
-    scoped: bool,
 ) -> Result<Vec<PathBuf>> {
     let top_level = fs::canonicalize(repository)
         .with_context(|| format!("resolve {}", repository.display()))?;
@@ -2143,10 +2141,7 @@ pub(crate) fn registered_worktree_paths(
                         let checkout = registered
                             .parent()
                             .context("worktree registration has no checkout")?;
-                        if scoped
-                            && !checkout.starts_with(repository)
-                            && !checkout.starts_with(&top_level)
-                        {
+                        if !checkout.starts_with(repository) && !checkout.starts_with(&top_level) {
                             continue;
                         }
                         ensure!(
@@ -2200,7 +2195,7 @@ pub(crate) fn discover_linked_worktrees(
         .with_context(|| format!("resolve {}", repository.display()))?;
     let (_, common_directory) = git_directories(runner, repository)?;
     let mut found = Vec::new();
-    for path in registered_worktree_paths(runner, repository, true)? {
+    for path in registered_worktree_paths(runner, repository)? {
         // `worktree list` names the user's worktrees anywhere on disk. Only a
         // path that can lie inside the checkout may fail the capture, so
         // decide that lexically, against the top level as given and resolved.
