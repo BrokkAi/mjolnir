@@ -764,6 +764,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         raise ValueError("--work-dir must be absolute")
     args.work_dir.mkdir(parents=True, exist_ok=True)
     unit = Path(mkdtemp(prefix=f"{split}-{role}-", dir=args.work_dir))
+    launch_requested = False
     try:
         work = checkout(args, repo, revision, unit)
         head = git(work, "rev-parse", "HEAD").decode().strip()
@@ -787,16 +788,22 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         title = f"RQL census {role} {repo} {tag}"
         log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
             ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
+        launch_requested = True
         sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
                         "--project-directory", work,
                         "--profile", profile, "--effort", "high",
                         "--review", "off", "--no-project-memory", "--no-github-events",
                         "--no-github-credentials", "--subagents", "none", "--title", title,
                         timeout=900)["session_id"]
-    except BaseException:
-        # Interruptions (including a quota wait) also leave no pre-launch
-        # session to own the checkout. Keep the rest of the unit for audit.
-        if (unit / "repo").exists():
+    except BaseException as error:
+        if launch_requested:
+            # mj new may have been accepted before it failed or was interrupted, so a session may
+            # be provisioning from this checkout. Stop that process first, then remove files:
+            # keep the checkout and log it for the operator.
+            log(args.labels_dir, "launch-unconfirmed", title=title, unit=str(unit), error=str(error))
+        elif (unit / "repo").exists():
+            # Before mj new no session can own the checkout, including during a quota wait.
+            # Keep the rest of the unit for audit.
             shutil.rmtree(unit / "repo")
         raise
     # A session with inaccessible output stays available for manual fetch.
