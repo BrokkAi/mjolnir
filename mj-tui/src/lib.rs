@@ -1164,7 +1164,7 @@ pub struct DashboardState {
     /// any extra bookkeeping.
     pub(crate) collapsed_project_keys: Tracked<BTreeSet<String>>,
     pub(crate) alert_sequence: Option<u64>,
-    pub(crate) pending_alerts: Vec<crate::notify::Notification>,
+    pub(crate) pending_alerts: Vec<crate::notify::PendingAlert>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
     pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a

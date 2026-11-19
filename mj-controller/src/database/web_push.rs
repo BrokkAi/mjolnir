@@ -97,16 +97,23 @@ fn alert_events_since_with(
         [],
         |r| r.get::<_, u64>(0),
     )?;
-    let events = tx.prepare("SELECT sequence,destination,session_title,text,kind FROM alert_events WHERE sequence>?1 AND sequence<=?2 ORDER BY sequence")?
-        .query_map(params![after.unwrap_or(high), high], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get::<_,String>(4)?)))?
-        .map(|row| { let (sequence,destination,session_title,text,kind) = row?; Ok(mj_client::runtime_feed::AlertEvent { sequence,destination,session_title,text,kind: serde_json::from_str(&kind)? }) })
+    let events = tx.prepare("SELECT sequence,destination,session_title,text,kind,identity FROM alert_events WHERE sequence>?1 AND sequence<=?2 ORDER BY sequence")?
+        .query_map(params![after.unwrap_or(high), high], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get::<_,String>(4)?,r.get(5)?)))?
+        .map(|row| { let (sequence,destination,session_title,text,kind,identity) = row?; Ok(mj_client::runtime_feed::AlertEvent { sequence,destination,session_title,text,identity,kind: serde_json::from_str(&kind)? }) })
         .collect::<Result<Vec<_>>>()?;
     tx.commit()?;
     Ok((high, events))
 }
 
 /// The daemon notification service is the sole observer of published items.
-pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<Option<bool>> {
+pub(crate) struct NotificationReconcile {
+    pub alerts_changed: bool,
+    pub complete: bool,
+}
+
+pub(crate) fn notification_reconcile(
+    runtime: RuntimeProjection,
+) -> Result<Option<NotificationReconcile>> {
     // The blocking owner holds admission from queueing through commit. A drain
     // refuses this disposable observation; the next daemon rebuilds it.
     let Ok(_work) = crate::upgrade::activity_unless_draining("notification reconciliation") else {
@@ -115,11 +122,16 @@ pub(crate) fn notification_reconcile(runtime: RuntimeProjection) -> Result<Optio
     submit_database_write("observe notification entries", move |db| {
         let before = alert_events_since_with(db, None)?.0;
         let tx = db.transaction()?;
-        if let Some(entries) = card_entries(&runtime) {
-            push_observe_in(&tx, &runtime, &entries, Utc::now().timestamp())?;
-        }
+        let complete = if let Some(entries) = card_entries(&runtime) {
+            push_observe_in(&tx, &runtime, &entries, Utc::now().timestamp())?
+        } else {
+            true
+        };
         tx.commit()?;
-        Ok(Some(alert_events_since_with(db, None)?.0 != before))
+        Ok(Some(NotificationReconcile {
+            alerts_changed: alert_events_since_with(db, None)?.0 != before,
+            complete,
+        }))
     })
 }
 
@@ -174,7 +186,8 @@ fn push_observe_in(
     runtime: &RuntimeProjection,
     entries: &BTreeMap<String, PushEntry<&str>>,
     now: i64,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut complete = true;
     // The cutover baseline applies even to devices enrolled later. An absent
     // card map cannot consume it, and a locator still in flight has no identity.
     let baseline = tx.execute("INSERT OR IGNORE INTO push_entry_cutover VALUES(1)", [])? == 1;
@@ -224,6 +237,7 @@ fn push_observe_in(
             Ok(message) => message,
             Err(error) => {
                 tracing::warn!(session = entry.session, %identity, error = format!("{error:#}"), "could not read notification text; leaving item pending");
+                complete = false;
                 continue;
             }
         };
@@ -233,7 +247,7 @@ fn push_observe_in(
             params![identity, entry.holder, notice.title, notice.body, serde_json::to_string(&entry.kind)?],
         )?;
     }
-    Ok(())
+    Ok(complete)
 }
 
 pub(crate) fn push_test(endpoint: String) -> Result<()> {

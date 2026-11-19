@@ -348,6 +348,31 @@ impl NotificationCard {
         }
     }
 
+    /// The durable notify-once key shared by the ledger and delayed alerts.
+    pub fn item_identity(&self, session: &str, item: usize) -> Option<String> {
+        use mj_core::attention::EntryMessage;
+        let identity = if let Some(entry) = self.entries.get(item) {
+            match &entry.message {
+                EntryMessage::Locating => return None,
+                EntryMessage::Found(id) => serde_json::json!(["message", session, id]),
+                EntryMessage::None => {
+                    serde_json::json!(["completion", session, entry.completed_ordinal])
+                }
+            }
+        } else if item == self.entries.len() {
+            let form = self.form.as_ref()?;
+            serde_json::json!([
+                "form",
+                self.item_destination(session, item),
+                form.request_id,
+                form.raised_at_ms
+            ])
+        } else {
+            return None;
+        };
+        Some(identity.to_string())
+    }
+
     /// The newest shown stack question, even when a live form shares the card.
     pub fn shown_question(&self) -> Option<&mj_core::attention::NotificationStackEntry> {
         if !matches!(
@@ -375,6 +400,9 @@ pub struct CardForm {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlertEvent {
     pub sequence: u64,
+    /// Durable item key, used to verify it is still published after a delay.
+    #[serde(default)]
+    pub identity: String,
     pub destination: String,
     pub session_title: String,
     pub text: String,

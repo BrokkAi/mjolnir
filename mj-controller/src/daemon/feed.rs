@@ -479,6 +479,7 @@ mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
 
+    // Hard-won: 751b46ebb: a partial text-read failure cached the observation and prevented retries.
     // Hard-won: 78a59a943: one unreadable notification body stopped the observer and daemon.
     // Hard-won: eb348fefb: deferred observations never resumed after a handoff lapsed without a revision.
     // Hard-won: 6b12ea8ea: transcript-only revisions repeatedly submitted notification writes.
@@ -765,6 +766,44 @@ mod tests {
             undecided,
             "a failed item remains eligible for a later observation"
         );
+        let before_repair = crate::web_push::blocking(|| crate::database::alert_events_since(None))
+            .await
+            .unwrap()
+            .0;
+        crate::web_push::blocking(|| {
+            let connection = rusqlite::Connection::open(crate::database::database_path())?;
+            let body = mj_core::transcript::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "Recovered question?"}})],
+                streaming: false,
+            };
+            connection.execute(
+                "UPDATE materialized_transcript_items SET body_json=?1 WHERE session_id='hidden' AND stable_id='agent:corrupt'",
+                [serde_json::to_string(&body)?],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        revisions.borrow_and_update();
+        state.publish_revision();
+        loop {
+            tokio::select! {
+                changed = revisions.changed() => { changed.unwrap(); },
+                result = &mut observer => panic!("observer stopped before retrying repaired text: {result:?}"),
+            }
+            let (_, recovered) = crate::web_push::blocking(move || {
+                crate::database::alert_events_since(Some(before_repair))
+            })
+            .await
+            .unwrap();
+            if !recovered.is_empty() {
+                assert_eq!(recovered.len(), 1, "successful items must not alert again");
+                assert_eq!(recovered[0].text, "Recovered question?");
+                assert_eq!(
+                    recovered[0].identity,
+                    r#"["message","hidden","agent:corrupt"]"#
+                );
+                break;
+            }
+        }
         cancellation.cancel();
         observer.await.unwrap().unwrap();
         let mut observer_inputs = crate::web_push::NotificationReconciler::default();

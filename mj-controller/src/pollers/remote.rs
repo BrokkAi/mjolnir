@@ -481,6 +481,7 @@ mod expired_tail_cursor_tests {
                                 metadata: mj_client::runtime_feed::RuntimeMetadata {
                                     alert_high_sequence: 7,
                                     alert_events: vec![mj_client::runtime_feed::AlertEvent {
+                                        identity: "test".into(),
                                         sequence: 7,
                                         destination: "parent".into(),
                                         session_title: "Parent".into(),
@@ -852,6 +853,7 @@ mod tests {
         metadata
             .alert_events
             .push(mj_client::runtime_feed::AlertEvent {
+                identity: "test".into(),
                 sequence: 8,
                 destination: "s".into(),
                 session_title: "Session".into(),

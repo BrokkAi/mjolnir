@@ -250,21 +250,17 @@ pub(crate) fn card_entries(
     let mut entries: BTreeMap<String, PushEntry<&str>> = BTreeMap::new();
     for (session, card) in cards {
         let holder = card.item_destination(session, card.entries.len());
-        for entry in &card.entries {
-            let (identity, message_id) = match &entry.message {
-                EntryMessage::Locating => continue,
-                EntryMessage::Found(id) => (
-                    serde_json::json!(["message", session, id]),
-                    Some(id.as_str()),
-                ),
-                EntryMessage::None => (
-                    serde_json::json!(["completion", session, entry.completed_ordinal]),
-                    None,
-                ),
+        for (item, entry) in card.entries.iter().enumerate() {
+            let Some(identity) = card.item_identity(session, item) else {
+                continue;
+            };
+            let message_id = match &entry.message {
+                EntryMessage::Found(id) => Some(id.as_str()),
+                _ => None,
             };
             // The same stable message can be classified in two completions.
             // The card's oldest-first order gives that identity its first position.
-            entries.entry(identity.to_string()).or_insert(PushEntry {
+            entries.entry(identity).or_insert(PushEntry {
                 session,
                 completed_ordinal: Some(entry.completed_ordinal),
                 paused: unavailable(session),
@@ -280,8 +276,9 @@ pub(crate) fn card_entries(
                 .get(holder)
                 .is_some_and(|record| record.notifications_ignored)
         {
-            let identity =
-                serde_json::json!(["form", holder, form.request_id, form.raised_at_ms]).to_string();
+            let identity = card
+                .item_identity(session, card.entries.len())
+                .expect("form identity");
             entries.insert(
                 identity,
                 PushEntry {
@@ -381,9 +378,11 @@ impl NotificationReconciler {
         // Refused observations were not accepted: retain the previous inputs so
         // a lapsed handoff can reobserve them, as a fresh daemon would.
         match result {
-            Some(changed) => {
-                self.previous = Some(inputs);
-                Ok(NotificationObservation::Observed(changed))
+            Some(result) => {
+                // Partial observations commit successful items, but the next
+                // runtime revision must retry any unreadable items.
+                self.previous = result.complete.then_some(inputs);
+                Ok(NotificationObservation::Observed(result.alerts_changed))
             }
             None => Ok(NotificationObservation::Deferred),
         }

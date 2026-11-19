@@ -3436,11 +3436,33 @@ fn golden_attention_navigation() {
         .get_mut("done")
         .unwrap()
         .last_agent_message = Some("Review the deployment result".into());
+    important.config.notify.delay_seconds = 0;
+    important.notification_cards = Some(
+        [(
+            "done".into(),
+            mj_client::runtime_feed::NotificationCard {
+                since_ms: 0,
+                badge: mj_core::attention::NotificationKind::Important,
+                entries: vec![mj_core::attention::NotificationStackEntry {
+                    kind: mj_core::attention::NotificationKind::Important,
+                    completed_ordinal: 1,
+                    completed_at_ms: 0,
+                    message: mj_core::attention::EntryMessage::None,
+                }],
+                dismissal: None,
+                holder: None,
+                form: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
     important.set_alert_events(0, Vec::new());
     important.set_alert_events(
         1,
         vec![mj_client::runtime_feed::AlertEvent {
             sequence: 1,
+            identity: serde_json::json!(["completion", "done", 1]).to_string(),
             destination: "done".into(),
             session_title: "ACP pretty name".into(),
             text: "Review the deployment result".into(),
@@ -3448,6 +3470,7 @@ fn golden_attention_navigation() {
         }],
     );
     let notices = important.notification_events();
+    important.notification_cards = None;
     let notice = notices
         .iter()
         .find(|notice| notice.session_id == "done")

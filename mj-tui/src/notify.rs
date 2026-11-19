@@ -1,6 +1,7 @@
 //! Desktop and bell alerts consume the daemon notify-once event stream.
 
 use mj_core::config::NotifyMode;
+use std::time::{Duration, Instant};
 
 use crate::{AttentionLevel, DashboardState};
 
@@ -14,6 +15,11 @@ pub struct Notification {
     /// One line saying what happened: the question, the failure, or that the
     /// agent finished.
     pub body: String,
+}
+
+pub(crate) struct PendingAlert {
+    event: mj_client::runtime_feed::AlertEvent,
+    received: Instant,
 }
 
 impl DashboardState {
@@ -60,7 +66,43 @@ impl DashboardState {
             {
                 continue;
             }
-            self.pending_alerts.push(Notification {
+            self.pending_alerts.push(PendingAlert {
+                event,
+                received: Instant::now(),
+            });
+        }
+        self.alert_sequence = Some(after.max(high));
+    }
+
+    pub fn notification_events(&mut self) -> Vec<Notification> {
+        self.notification_events_at(Instant::now())
+    }
+
+    fn notification_events_at(&mut self, now: Instant) -> Vec<Notification> {
+        let pending = std::mem::take(&mut self.pending_alerts);
+        if self.config.notify.mode == NotifyMode::Off {
+            return Vec::new();
+        }
+        let delay = Duration::from_secs(self.config.notify.delay_seconds);
+        let mut notices = Vec::new();
+        for alert in pending {
+            if now.saturating_duration_since(alert.received) < delay {
+                self.pending_alerts.push(alert);
+                continue;
+            }
+            let event = alert.event;
+            let published = self.notification_cards.as_ref().is_some_and(|cards| {
+                cards.iter().any(|(session, card)| {
+                    (0..card.entries.len() + usize::from(card.form.is_some())).any(|item| {
+                        card.item_destination(session, item) == event.destination
+                            && card.item_identity(session, item).as_deref() == Some(&event.identity)
+                    })
+                })
+            });
+            if !published || self.current_session_id() == Some(event.destination.as_str()) {
+                continue;
+            }
+            notices.push(Notification {
                 session_id: event.destination,
                 session_title: event.session_title,
                 body: event.text,
@@ -70,19 +112,7 @@ impl DashboardState {
                 },
             });
         }
-        self.alert_sequence = Some(after.max(high));
-    }
-
-    pub fn notification_events(&mut self) -> Vec<Notification> {
-        let pending = std::mem::take(&mut self.pending_alerts);
-        if self.config.notify.mode == NotifyMode::Off {
-            return Vec::new();
-        }
-        let visible = self.current_session_id();
-        pending
-            .into_iter()
-            .filter(|event| visible != Some(event.session_id.as_str()))
-            .collect()
+        notices
     }
 
     pub(crate) fn notification_content_session(
@@ -527,12 +557,38 @@ mod tests {
         );
     }
 
+    // Hard-won: 751b46ebb: alert consumption ignored the configured delay and item disappearance.
     #[test]
     fn alert_cursor_suppresses_history_duplicates_and_visible_destinations() {
         use mj_client::runtime_feed::AlertEvent;
+        use std::time::Duration;
         let mut dashboard = dashboard();
+        dashboard.config.notify.delay_seconds = 0;
+        dashboard.notification_cards = Some(
+            ["asks", "done"]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.into(),
+                        mj_client::runtime_feed::NotificationCard {
+                            since_ms: 0,
+                            badge: mj_core::attention::NotificationKind::NeedsInput,
+                            entries: Vec::new(),
+                            dismissal: None,
+                            holder: None,
+                            form: Some(mj_client::runtime_feed::CardForm {
+                                raised_at_ms: 1,
+                                request_id: "elicitation-1".into(),
+                                message: "Question?".into(),
+                            }),
+                        },
+                    )
+                })
+                .collect(),
+        );
         let event = |sequence, destination: &str| AlertEvent {
             sequence,
+            identity: serde_json::json!(["form", destination, "elicitation-1", 1]).to_string(),
             destination: destination.into(),
             session_title: "Title".into(),
             text: "Question?".into(),
@@ -569,6 +625,58 @@ mod tests {
         assert!(
             dashboard.notification_events().is_empty(),
             "turning notifications off before emission suppresses the ring"
+        );
+        dashboard.config.notify.mode = mj_core::config::NotifyMode::Terminal;
+        dashboard.config.notify.delay_seconds = 5;
+        dashboard.set_alert_events(14, vec![event(14, "asks")]);
+        let received = dashboard.pending_alerts[0].received;
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(4))
+                .is_empty()
+        );
+        assert_eq!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(5))
+                .len(),
+            1
+        );
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(6))
+                .is_empty()
+        );
+
+        dashboard.set_alert_events(15, vec![event(15, "asks")]);
+        let received = dashboard.pending_alerts[0].received;
+        // A new form reuses the request ID, but is a different published item.
+        dashboard
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("asks")
+            .unwrap()
+            .form
+            .as_mut()
+            .unwrap()
+            .raised_at_ms = 2;
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(5))
+                .is_empty()
+        );
+
+        dashboard.set_alert_events(16, vec![event(16, "done")]);
+        let received = dashboard.pending_alerts[0].received;
+        dashboard
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .remove("done");
+        assert!(
+            dashboard
+                .notification_events_at(received + Duration::from_secs(5))
+                .is_empty()
         );
     }
 }
