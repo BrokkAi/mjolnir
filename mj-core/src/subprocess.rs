@@ -38,6 +38,29 @@ pub async fn with_preparation_cancellation<F: std::future::Future>(
     CANCELLATION.scope(token, future).await
 }
 
+/// A preparation stopped because its cancellation token fired. It is a type,
+/// not a message, so callers that treat a failed probe or command as grounds
+/// to repair or remove something can tell "the probe said the thing is broken"
+/// from "the probe was cut short" and must propagate the latter.
+#[derive(Debug)]
+pub struct PreparationCancelled;
+
+impl std::fmt::Display for PreparationCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("preparation cancelled")
+    }
+}
+
+impl std::error::Error for PreparationCancelled {}
+
+/// Whether `error`, at any depth of its context chain, is a cancelled
+/// preparation.
+pub fn is_preparation_cancelled(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<PreparationCancelled>())
+}
+
 pub(crate) fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
     CANCELLATION.try_with(Clone::clone).ok()
 }
@@ -157,8 +180,8 @@ impl SupervisedChild {
         let captured = stderr.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let (finished, done) = tokio::sync::watch::channel(None);
-        tokio::spawn(async move {
-            let reader = tokio::spawn(async move {
+        crate::runtime::spawn(async move {
+            let reader = crate::runtime::spawn(async move {
                 let mut bytes = [0; 8192];
                 loop {
                     let count = pipe.read(&mut bytes).await?;
@@ -364,7 +387,9 @@ pub async fn run_bounded_observed(
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     let cancellation = preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(PreparationCancelled.into());
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -425,7 +450,7 @@ pub async fn run_bounded_observed(
     });
     let result = tokio::select! {
         result = work => result,
-        _ = cancellation.cancelled() => Ok(Err(anyhow!("preparation cancelled"))),
+        _ = cancellation.cancelled() => Ok(Err(anyhow::Error::from(PreparationCancelled))),
     };
     let result = result.map(|status| {
         status.map(|status| Output {
@@ -1154,7 +1179,9 @@ pub async fn run_capturing_stdout_cancellable(
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     let cancellation = preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(PreparationCancelled.into());
+    }
     command
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
@@ -1175,7 +1202,7 @@ pub async fn run_capturing_stdout_cancellable(
             let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
             Ok::<_, anyhow::Error>(status)
         } => result,
-        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+        _ = cancellation.cancelled() => Err(anyhow::Error::from(PreparationCancelled)),
     };
     drop(group);
     #[cfg(windows)]
@@ -1335,7 +1362,7 @@ mod tests {
         let log_path = temp.path().join("log");
         let output = std::fs::File::create(&log_path).unwrap();
         let child_pid_file = pid_file.clone();
-        let command = tokio::spawn(async move {
+        let command = crate::runtime::spawn(async move {
             let mut command = tokio::process::Command::new("sh");
             command.args(["-c", "head -c 131072 /dev/zero; echo diagnostics >&2; echo $$ > \"$1\"; sleep 60 & wait", "logged-fixture"])
                 .arg(child_pid_file);

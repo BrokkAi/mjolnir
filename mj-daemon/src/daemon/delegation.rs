@@ -189,7 +189,7 @@ fn spawn_with_quota_source_reader(
         quota_source_reader.clone(),
     );
     let services = policy.services.clone();
-    let task = tokio::spawn(run(state, updates, policy, cancellation));
+    let task = mj_core::runtime::spawn(run(state, updates, policy, cancellation));
     (services, task)
 }
 
@@ -202,7 +202,8 @@ async fn run(
     let backend = policy.services.backend.clone();
     // Housekeeping for stores written by builds that kept acknowledged rows.
     if let Err(error) =
-        tokio::task::spawn_blocking(mj_controller::database::prune_acknowledged_delegations).await?
+        mj_core::runtime::spawn_blocking(mj_controller::database::prune_acknowledged_delegations)
+            .await?
     {
         tracing::warn!(%error, "could not prune acknowledged delegation records");
     }
@@ -526,7 +527,7 @@ async fn run(
 async fn quota_source_scan(
     read: impl FnOnce() -> Vec<mj_controller::quota::QuotaRefreshRequest> + Send + 'static,
 ) -> Result<Vec<mj_controller::quota::QuotaRefreshRequest>> {
-    tokio::task::spawn_blocking(read)
+    mj_core::runtime::spawn_blocking(read)
         .await
         .context("quota source scan blocking task failed")
 }
@@ -539,7 +540,8 @@ async fn complete_child(
 ) -> Result<ChildCompletion> {
     let id = child_id.clone();
     let relation =
-        tokio::task::spawn_blocking(move || mj_controller::database::load_subagent(&id)).await??;
+        mj_core::runtime::spawn_blocking(move || mj_controller::database::load_subagent(&id))
+            .await??;
     let Some(relation) = relation else {
         return Ok(ChildCompletion::Settled);
     };
@@ -558,7 +560,7 @@ async fn complete_child(
     let handback_queued = {
         let child = child_id.clone();
         let queued = observation.queued_handbacks();
-        tokio::task::spawn_blocking(move || -> Result<bool> {
+        mj_core::runtime::spawn_blocking(move || -> Result<bool> {
             for request in queued {
                 match mj_controller::database::load_delegation(&child, &request)? {
                     Some((_, Some(_))) => {}
@@ -618,12 +620,13 @@ async fn settle_child(
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         let id = child_id.clone();
         let command_id = outcome.command_id.clone();
-        let answer =
-            tokio::task::spawn_blocking(move || mj_controller::database::load_subagent_report(&id))
-                .await??
-                .handback
-                .filter(|handback| handback.answers(&command_id))
-                .map(|handback| handback.message);
+        let answer = mj_core::runtime::spawn_blocking(move || {
+            mj_controller::database::load_subagent_report(&id)
+        })
+        .await??
+        .handback
+        .filter(|handback| handback.answers(&command_id))
+        .map(|handback| handback.message);
         // The worker's queue owns a handback until the daemon has executed
         // it. A turn can end first, when the worker answered its caller after
         // its reply budget with the request still unexecuted (#1580), so a
@@ -690,7 +693,7 @@ async fn settle_child(
             return Ok(ChildCompletion::Held { give_up_at_ms });
         }
         let id = child_id.clone();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_controller::database::mark_subagent_turn_noticed(&id, outcome.completed_ordinal)
         })
         .await??;
@@ -728,7 +731,7 @@ async fn settle_child(
         // reported.
         crate::server_runtime::api::ChildReport::NotFinished => {
             let child = child_id.clone();
-            let (last, active) = tokio::task::spawn_blocking(move || {
+            let (last, active) = mj_core::runtime::spawn_blocking(move || {
                 crate::server_runtime::api::load_child_turns(&child)
             })
             .await??;
@@ -861,7 +864,7 @@ pub(crate) async fn deliver(
 ) -> Result<()> {
     let parent = handle.session_id().to_owned();
     let request_id = stored_result.result.request_id.clone();
-    let current = tokio::task::spawn_blocking({
+    let current = mj_core::runtime::spawn_blocking({
         let parent = parent.clone();
         let request_id = request_id.clone();
         move || mj_controller::database::load_delegation(&parent, &request_id)
@@ -879,7 +882,7 @@ pub(crate) async fn deliver(
     lease.release();
     delivered?;
     reconcile_reports.await;
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         mj_controller::database::acknowledge_delegation(parent, request_id)
     })
     .await??;

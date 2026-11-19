@@ -775,7 +775,7 @@ impl RecoveryAttempt {
         work: impl FnOnce(RecoveryAttempt) -> T + Send + 'static,
     ) -> (Result<T, tokio::task::JoinError>, Self) {
         let executing = self.clone();
-        let result = tokio::task::spawn_blocking(move || work(executing)).await;
+        let result = mj_core::runtime::spawn_blocking(move || work(executing)).await;
         (result, self)
     }
 }
@@ -1250,7 +1250,7 @@ mod tests {
     async fn lifecycle_reservation_preempts_background_work_before_releasing_admission() {
         let gate = Arc::new(RecoveryGate::default());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
+        let task = mj_core::runtime::spawn({
             let gate = gate.clone();
             async move {
                 gate.run_background("child", BackgroundWork::CredentialSync, async {
@@ -1321,7 +1321,7 @@ mod tests {
     async fn aborting_background_task_releases_worker_admission() {
         let gate = Arc::new(RecoveryGate::default());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
+        let task = mj_core::runtime::spawn({
             let gate = gate.clone();
             async move {
                 gate.run_background("child", BackgroundWork::CredentialSync, async {
@@ -1416,7 +1416,7 @@ mod tests {
             .unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
-        let waiter = tokio::spawn(attempt.run_blocking(move |_| {
+        let waiter = mj_core::runtime::spawn(attempt.run_blocking(move |_| {
             started_tx.send(()).unwrap();
             finish_rx.recv().unwrap();
         }));

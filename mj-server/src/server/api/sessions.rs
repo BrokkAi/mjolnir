@@ -243,6 +243,7 @@ pub(super) async fn start_session(
         no_project_memory: request.no_project_memory,
         no_github_events: request.no_github_events,
         no_github_credentials: request.no_github_credentials,
+        notifications_ignored: request.notifications_ignored,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,

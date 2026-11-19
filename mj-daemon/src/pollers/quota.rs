@@ -10,6 +10,83 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// The enabled profiles whose harness kind can need a managed quota harness
+/// (not OpenCode and the rest), copied cheaply under the controller lock. Building
+/// requests from them reads credential and provider files, so that happens off
+/// the lock ([`quota_requests_from`]).
+#[cfg(unix)]
+pub fn enabled_quota_profiles(
+    config: &mj_core::config::Config,
+) -> Vec<(String, mj_core::config::HarnessProfile)> {
+    config
+        .enabled_profiles()
+        .filter(|(_, profile)| {
+            mj_controller::quota::kind_may_need_managed_quota_harness(profile.kind)
+        })
+        .map(|(id, profile)| (id.to_owned(), profile.clone()))
+        .collect()
+}
+
+#[cfg(unix)]
+fn quota_requests_from(
+    profiles: Vec<(String, mj_core::config::HarnessProfile)>,
+) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    profiles
+        .iter()
+        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
+        .filter(QuotaRefreshRequest::runs_host_harness)
+        .collect()
+}
+
+/// Install, in the background, the pinned harnesses the quota checks would
+/// otherwise install inline on their first run (#1595), so that wait is
+/// usually over before a check needs it. It holds no handoff admission and
+/// the next daemon prepares again, so it is safe to stop. Cancellation
+/// reaches the installers, which stop their process groups and their archive
+/// extraction (between entries) and release the cache lock and staging only
+/// once their writers have stopped; this task awaits them. A failure is
+/// logged and not retried; the next check that needs the harness installs it.
+#[cfg(unix)]
+pub fn spawn_quota_harness_prewarm(
+    profiles: Vec<(String, mj_core::config::HarnessProfile)>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    mj_core::runtime::spawn(async move {
+        // Building requests reads credential and provider files, which a
+        // stalled filesystem can hang. Shutdown must not wait for that, so the
+        // read races cancellation. Abandoning it is safe: it only reads, and
+        // deletes and publishes nothing.
+        let read = mj_core::runtime::spawn_blocking(move || quota_requests_from(profiles));
+        let requests = tokio::select! {
+            () = cancellation.cancelled() => return,
+            read = read => match read {
+                Ok(requests) => requests,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
+                    return;
+                }
+            },
+        };
+        // The scope cancels its token when it ends, so it gets a child.
+        let failures = mj_core::subprocess::with_preparation_cancellation(
+            cancellation.child_token(),
+            mj_controller::quota::prepare_managed(&requests),
+        )
+        .await;
+        if cancellation.is_cancelled() {
+            return;
+        }
+        for (harness, error) in failures {
+            tracing::warn!(
+                harness = harness.id(),
+                error = %format!("{error:#}"),
+                "could not prepare the pinned harness ahead of quota checks; the next check retries"
+            );
+        }
+    })
+}
+
 /// The disabled Claude profiles whose sessions are live, from the credential
 /// sync's published targets (the one owner of which sessions hold which
 /// profile's copy). A session copy holds no refresh token, so the profile's
@@ -93,7 +170,7 @@ pub(super) fn spawn_quota_refresher_with(
         },
         Some(updates_tx.clone()),
     );
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut quotas = QuotaManager::default();
         let mut batch = QuotaRefreshBatch::default();
         // The cache identity each profile was last adopted under. A changed
@@ -244,7 +321,7 @@ pub(super) fn spawn_claude_grant_refresher(
     renewal: GrantRenewal,
     updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         let mut running: std::collections::BTreeMap<tokio::task::Id, QuotaRefreshRequest> =
             Default::default();
@@ -422,7 +499,7 @@ async fn adopt_profiles(
         quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
-        let stored = match tokio::task::spawn_blocking(move || load(&for_request)).await {
+        let stored = match mj_core::runtime::spawn_blocking(move || load(&for_request)).await {
             Ok(stored) => stored,
             Err(error) => {
                 tracing::warn!(%error, "stored quota read task failed");
@@ -540,7 +617,7 @@ pub fn spawn_image_refresher(
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
             IMAGE_REFRESH_INTERVAL,
@@ -767,7 +844,7 @@ pub(super) async fn refresh_host_after_startup(
     }
     // ProcessExecutor is synchronous, and a pull is long: it belongs on a
     // blocking thread, never on the runtime.
-    match tokio::task::spawn_blocking(move || run(refresh)).await {
+    match mj_core::runtime::spawn_blocking(move || run(refresh)).await {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, "container image refresh task failed");

@@ -948,7 +948,7 @@ mod tests {
             scan.start(old.clone()),
             Some(crate::daemon::QuotaRefreshIntent::ReconcileSources)
         );
-        let task = tokio::spawn(async {});
+        let task = mj_core::runtime::spawn(async {});
         let task_id = task.id();
         task.await.unwrap();
         scan.task_started(task_id);
@@ -975,7 +975,7 @@ mod tests {
             scan.start(config.clone()),
             Some(crate::daemon::QuotaRefreshIntent::Force)
         );
-        let task = tokio::spawn(async {});
+        let task = mj_core::runtime::spawn(async {});
         let task_id = task.id();
         task.await.unwrap();
         scan.task_started(task_id);

@@ -79,7 +79,7 @@ pub(super) fn spawn(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         loop {
             // Register before reading the clock, so activity cannot lose a wake.
             let changed = state.inactivity_changed.notified();
@@ -128,7 +128,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let metadata = super::super::tests::test_metadata(listener.local_addr().unwrap());
         let cancellation = CancellationToken::new();
-        let service = tokio::spawn({
+        let service = mj_core::runtime::spawn({
             let state = state.clone();
             let cancellation = cancellation.clone();
             let metadata = metadata.clone();
@@ -171,12 +171,12 @@ mod tests {
         service.await.unwrap();
         let mut clock = state.config_mutation.lock().await;
         clock.last_activity = Some(Instant::now() - Duration::from_secs(60));
-        let activity = tokio::spawn({
+        let activity = mj_core::runtime::spawn({
             let state = state.clone();
             async move { state.record_operator_activity().await }
         });
         tokio::task::yield_now().await;
-        let stale_expiry = tokio::spawn({
+        let stale_expiry = mj_core::runtime::spawn({
             let state = state.clone();
             let cancellation = cancellation.clone();
             async move { state.expire_inactivity(&cancellation).await }
@@ -278,7 +278,7 @@ mod store_tests {
         connection
             .execute_batch("DROP TRIGGER reject_afk_return; BEGIN IMMEDIATE;")
             .unwrap();
-        let returning = tokio::spawn({
+        let returning = mj_core::runtime::spawn({
             let state = state.clone();
             async move { state.set_operator_away(false).await }
         });

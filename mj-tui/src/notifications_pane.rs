@@ -229,7 +229,9 @@ impl NotificationEntry {
         }
         let previous_form = previous.form.as_ref()?;
         let form = card.form.as_ref()?;
-        (card.holder == previous.holder && form.request_id == previous_form.request_id)
+        (card.item_destination(&self.session_id, card.entries.len())
+            == previous.item_destination(&self.session_id, previous.entries.len())
+            && form.request_id == previous_form.request_id)
             .then_some(card.entries.len())
     }
 
@@ -552,9 +554,8 @@ impl DashboardState {
     fn notification_destination(&self, entry: &NotificationEntry) -> String {
         match &entry.published {
             Some(card) => card
-                .holder
-                .clone()
-                .unwrap_or_else(|| entry.session_id.clone()),
+                .item_destination(&entry.session_id, self.selected_notification_item(entry))
+                .to_owned(),
             None => self.notification_content_session(&entry.session_id, entry.level),
         }
     }
@@ -822,6 +823,7 @@ impl DashboardState {
                             CommandId::NotificationOpen
                                 | CommandId::NotificationClear
                                 | CommandId::NotificationSkip
+                                | CommandId::NotificationIgnoreSession
                                 | CommandId::NotificationClearImportant
                                 | CommandId::NotificationPreviousMessage
                                 | CommandId::NotificationNextMessage
@@ -983,37 +985,52 @@ impl DashboardState {
         let Some(card) = &entry.published else {
             return self.notification_card_text(&entry.session_id, entry.level);
         };
-        let index = self.selected_notification_item(entry);
+        self.notification_item_text(
+            &entry.session_id,
+            card,
+            self.selected_notification_item(entry),
+        )
+    }
+
+    pub(crate) fn notification_item_text(
+        &self,
+        session: &str,
+        card: &mj_client::runtime_feed::NotificationCard,
+        index: usize,
+    ) -> String {
+        let destination = card.item_destination(session, index);
         let Some(item) = card.entries.get(index) else {
             return card
                 .form
                 .as_ref()
                 .map(|form| form.message.clone())
                 .or_else(|| {
-                    self.session_review(&entry.session_id)
+                    self.session_review(destination)
                         .and_then(|review| review.activity_label())
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| notification_message_placeholder(card.badge).to_owned());
         };
         if let EntryMessage::Found(id) = &item.message
-            && let Some(text) = self.loaded_notification_text(&entry.session_id, id)
+            && let Some(text) = self.loaded_notification_text(destination, id)
         {
             return text.to_owned();
         }
-        let Some(wanted) = self.notification_read_request(entry) else {
-            return notification_message_placeholder(item.kind).to_owned();
+        let source = match &item.message {
+            EntryMessage::Found(id) => NotificationReadSource::Item(id.clone()),
+            EntryMessage::Locating | EntryMessage::None => {
+                NotificationReadSource::Through(item.completed_ordinal)
+            }
         };
-        let read = self
-            .notifications
-            .message_read
-            .as_ref()
-            .filter(|read| read.request == wanted);
+        let read =
+            self.notifications.message_read.as_ref().filter(|read| {
+                read.request.session_id == destination && read.request.source == source
+            });
         if read.is_some_and(|read| read.status == crate::ingest::TranscriptHydration::Loading) {
             return "loading…".to_owned();
         }
         read.and_then(|read| read.text.clone())
-            .unwrap_or_else(|| match wanted.source {
+            .unwrap_or_else(|| match source {
                 NotificationReadSource::Item(_) => "message not available".to_owned(),
                 NotificationReadSource::Through(_) => {
                     notification_message_placeholder(item.kind).to_owned()
@@ -1149,7 +1166,7 @@ impl DashboardState {
                     target,
                 }
             }
-            CommandId::NotificationSkip => {
+            CommandId::NotificationSkip | CommandId::NotificationIgnoreSession => {
                 let entries = self.notification_entries();
                 let skipped = identity.skip_identity();
                 self.notifications.skipped.retain(|previous| {
@@ -1163,6 +1180,12 @@ impl DashboardState {
                 let card = card.clone();
                 self.sync_notification_selection(self.notification_entries().first());
                 self.notifications.scroll = 0;
+                if command == CommandId::NotificationIgnoreSession {
+                    return DashboardAction::SetSessionNotificationsIgnored {
+                        session_id: card.session_id.clone(),
+                        ignored: true,
+                    };
+                }
                 DashboardAction::NotificationSkip { card }
             }
             CommandId::NotificationPreviousMessage | CommandId::NotificationNextMessage => {
@@ -1222,7 +1245,15 @@ impl DashboardState {
     pub fn has_notification_for_session(&self, session_id: &str) -> bool {
         self.notification_entries()
             .iter()
-            .any(|entry| self.notification_destination(entry) == session_id)
+            .any(|entry| match &entry.published {
+                Some(card) => {
+                    (!card.entries.is_empty() && entry.session_id == session_id)
+                        || (card.form.is_some()
+                            && card.item_destination(&entry.session_id, card.entries.len())
+                                == session_id)
+                }
+                None => self.notification_destination(entry) == session_id,
+            })
     }
 
     /// Text copying uses the exact row space registered by the last render.
@@ -1352,6 +1383,7 @@ pub(crate) fn render(
         CommandId::NotificationRestore,
         CommandId::NotificationClear,
         CommandId::NotificationSkip,
+        CommandId::NotificationIgnoreSession,
         CommandId::NotificationPreviousMessage,
         CommandId::NotificationNextMessage,
     ]
@@ -1626,6 +1658,11 @@ pub(crate) fn render(
             entry.target.is_some() && !dashboard.notification_dismissal_pending(&entry.session_id),
         ),
         (CommandId::NotificationSkip, "Skip".to_owned(), true),
+        (
+            CommandId::NotificationIgnoreSession,
+            "Ignore Session".to_owned(),
+            true,
+        ),
         (
             CommandId::NotificationClearImportant,
             format!("Clear all ! ({important})"),
@@ -2673,6 +2710,11 @@ pub(crate) mod tests {
             dashboard.displayed_notification_session_id().as_deref(),
             Some("q2")
         );
+        assert_eq!(
+            dashboard.notification_destination(&dashboard.notification_entries()[0]),
+            "q2",
+            "the selected live form targets its holder"
+        );
 
         // Hard-won: a882023b6: a form beside dismissible messages fell back to a free-text reply.
         assert_eq!(
@@ -2777,6 +2819,15 @@ pub(crate) mod tests {
         );
         dashboard.sync_notification_message_read(Some(item.clone()), true);
         dashboard.handle_key(alt(KeyCode::PageUp));
+        assert_eq!(
+            dashboard.notification_destination(&dashboard.notification_entries()[0]),
+            "q1",
+            "the selected stack entry targets its own session"
+        );
+        assert!(
+            dashboard.has_notification_for_session("q2"),
+            "the same card still contains a live form for the child"
+        );
         assert_eq!(dashboard.wanted_notification_message(), Some(item.clone()));
         assert!(
             drawn(&mut dashboard, 120, 44)
@@ -3253,6 +3304,164 @@ pub(crate) mod tests {
             .unwrap()
             .last_activity_at_ms = Some(0);
         assert_eq!(recency.notification_entries()[0].session_id, "q2");
+    }
+
+    #[tokio::test]
+    async fn dragging_an_answer_row_selects_its_drawn_text_and_a_click_still_answers() {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use mj_chat::selection::{SelectionAction, SelectionState, SurfaceId};
+        let mut dashboard = dashboard_with_session(running_session());
+        serve_attention(&mut dashboard, &["session-1"], SessionAttention::NeedsInput);
+        let mut request = question("session-1");
+        request.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::Boolean {
+            default: Some(false),
+        };
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut dashboard, "session-1", None, &request);
+        dashboard.notifications.size = PaneSize::Maximized;
+        dashboard.focus = Focus::Notifications;
+        let (chat, _) = form_chat("session-1", request);
+        let mut chats = std::collections::BTreeMap::from([("session-1".to_owned(), chat)]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 44)).unwrap();
+        let draw = |terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+                    dashboard: &mut DashboardState,
+                    chats: &mut _| {
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        dashboard,
+                        chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            buffer_lines(terminal.backend().buffer())
+        };
+        draw(&mut terminal, &mut dashboard, &mut chats);
+        let lines = draw(&mut terminal, &mut dashboard, &mut chats);
+        assert!(dashboard.notifications.form_area.is_some(), "{lines:#?}");
+        // The conversation pane shows the same question; use the card's copy.
+        let form = dashboard.notifications.form_area.unwrap();
+        let (x, row) = point(
+            &lines[usize::from(form.y)..],
+            mj_chat::components::Checkbox::marker(false),
+        );
+        let y = form.y + row;
+        let event = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let mut selection = SelectionState::new();
+
+        // A drag from the answer row selects what is drawn there; the form
+        // gets the press but never the click.
+        let press = event(MouseEventKind::Down(MouseButton::Left), x, y);
+        let forwarded = dashboard
+            .route_question_press(&mut selection, true, &press)
+            .expect("the press reaches the form");
+        dashboard
+            .handle_notification_form_event(&mut chats, &forwarded)
+            .unwrap();
+        let surfaces = dashboard.frame_surfaces().clone();
+        selection.on_mouse_drag(x + 6, y, &surfaces);
+        dashboard.settle_question_press(&selection, &mut chats);
+        let SelectionAction::CopyRequested { surface, range } =
+            selection.on_mouse_up(x + 6, y, &surfaces)
+        else {
+            panic!("a drag copies");
+        };
+        assert!(matches!(surface, SurfaceId::NotificationFormBody(_)));
+        let frame = *surfaces.surface(surface).unwrap();
+        let drawn = mj_chat::selection::extract_rows(terminal.backend().buffer(), &frame, &range);
+        let expected: String = lines[usize::from(y)]
+            .chars()
+            .skip(usize::from(x))
+            .take(7)
+            .collect();
+        assert_eq!(drawn, expected.trim_end());
+        let lines = draw(&mut terminal, &mut dashboard, &mut chats);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(mj_chat::components::Checkbox::marker(false))),
+            "the drag did not choose the option: {lines:#?}"
+        );
+        assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+
+        // A release in another cell with no drag event in between is still
+        // a selection, not a click.
+        let mut selection = SelectionState::new();
+        let forwarded = dashboard
+            .route_question_press(&mut selection, true, &press)
+            .expect("the press reaches the form");
+        dashboard
+            .handle_notification_form_event(&mut chats, &forwarded)
+            .unwrap();
+        let moved_release = event(MouseEventKind::Up(MouseButton::Left), x + 6, y);
+        assert!(
+            dashboard
+                .route_question_press(&mut selection, true, &moved_release)
+                .is_none(),
+            "a moved release is not forwarded as a click"
+        );
+        assert!(matches!(
+            selection.on_mouse_up(x + 6, y, &surfaces),
+            SelectionAction::CopyRequested { .. }
+        ));
+        dashboard.settle_question_press(&selection, &mut chats);
+        assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+
+        // The question's own text can start a selection too.
+        let (text_x, text_row) = point(&lines[usize::from(form.y)..], "Choose a path");
+        let text_y = form.y + text_row;
+        assert!(
+            matches!(
+                surfaces.surface_at(text_x, text_y).map(|frame| frame.id),
+                Some(SurfaceId::NotificationText(_) | SurfaceId::ElicitationMessage)
+            ),
+            "{lines:#?}"
+        );
+        let mut selection = SelectionState::new();
+        assert!(
+            dashboard
+                .route_question_press(
+                    &mut selection,
+                    true,
+                    &event(MouseEventKind::Down(MouseButton::Left), text_x, text_y),
+                )
+                .is_some()
+        );
+        dashboard.settle_question_press(&SelectionState::new(), &mut chats);
+
+        // A press and release in place is still a click.
+        let mut selection = SelectionState::new();
+        let release = event(MouseEventKind::Up(MouseButton::Left), x, y);
+        for pointer in [press, release] {
+            let forwarded = dashboard
+                .route_question_press(&mut selection, true, &pointer)
+                .expect("a click reaches the form");
+            dashboard
+                .handle_notification_form_event(&mut chats, &forwarded)
+                .unwrap();
+        }
+        let lines = draw(&mut terminal, &mut dashboard, &mut chats);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(mj_chat::components::Checkbox::marker(true))),
+            "the click chose the option: {lines:#?}"
+        );
     }
 
     #[tokio::test]

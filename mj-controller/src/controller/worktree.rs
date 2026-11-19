@@ -17,7 +17,10 @@ use mj_core::state::{
 };
 use mj_core::target_path;
 
-use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
+use crate::targets::{
+    self, CommandExecutor, CommandOutput, CommandSpec, SshTarget, managed_target_command,
+    managed_target_ssh, path_exists_on_managed_target,
+};
 pub(crate) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility, resume_compatibility_with_checkout};
 
@@ -763,39 +766,6 @@ pub(super) fn managed_network_git_command(
         mj_core::local_git::unattended_git_environment(&mut command);
     }
     command
-}
-
-fn managed_target_ssh(target: &ManagedWorktreeTarget) -> Option<SshTarget> {
-    match target {
-        ManagedWorktreeTarget::Local => None,
-        ManagedWorktreeTarget::Ssh {
-            destination,
-            ssh_args,
-        } => Some(SshTarget {
-            destination: destination.clone(),
-            ssh_args: ssh_args.clone(),
-        }),
-    }
-}
-
-pub(super) fn managed_target_command(
-    class: SshTrafficClass,
-    target: &ManagedWorktreeTarget,
-    program: &str,
-    args: impl IntoIterator<Item = impl AsRef<str>>,
-) -> CommandSpec {
-    let args = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    match managed_target_ssh(target) {
-        None => CommandSpec::new(program, args),
-        Some(ssh) => {
-            let mut remote = vec![program.to_owned()];
-            remote.extend(args);
-            crate::targets::ssh_command(class, &ssh, remote)
-        }
-    }
 }
 
 pub(super) fn managed_git_command(
@@ -2011,36 +1981,6 @@ fn ensure_managed_worktree_excluded(
         }
     }
     Ok(())
-}
-
-pub fn path_exists_on_managed_target(
-    executor: &impl CommandExecutor,
-    target: &ManagedWorktreeTarget,
-    path: &Path,
-) -> Result<bool> {
-    match target {
-        ManagedWorktreeTarget::Local => path
-            .try_exists()
-            .with_context(|| format!("check managed project path {}", path.display())),
-        ManagedWorktreeTarget::Ssh { .. } => {
-            let command = managed_target_command(
-                SshTrafficClass::Control,
-                target,
-                "test",
-                ["-e", &path.to_string_lossy()],
-            )
-            .purpose("check managed worktree path");
-            let output = executor.execute(&command)?;
-            match output.status {
-                0 => Ok(true),
-                1 => Ok(false),
-                status => bail!(
-                    "check managed worktree path failed with status {status}: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            }
-        }
-    }
 }
 
 pub(super) fn managed_worktree_checkout_exists(

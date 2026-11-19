@@ -23,6 +23,39 @@ fn upgrade_storage() -> common::DaemonStorage {
     common::DaemonStorage::new(root, config, data)
 }
 
+/// Ask a daemon to prepare for replacement, as a client does. A daemon with
+/// its own work in flight answers `UpgradePending` and starts draining, so a
+/// client asks again until the daemon has closed admission. Panics, naming
+/// what the daemon was waiting for, when that does not happen.
+// Its callers are the login terminal tests, which need a Unix PTY.
+#[cfg(unix)]
+async fn prepare_upgrade(metadata: &mj_client::daemon::DaemonMetadata) {
+    use mj_client::daemon::{DaemonAction, DaemonClient, DaemonReply};
+    let request = |action| async {
+        DaemonClient::connect(metadata.clone())
+            .await
+            .unwrap()
+            .request(action)
+            .await
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match request(DaemonAction::PrepareUpgrade).await {
+            DaemonReply::Done => return,
+            DaemonReply::UpgradePending if std::time::Instant::now() < deadline => {
+                let blockers = request(DaemonAction::UpgradeBlockers).await;
+                eprintln!("upgrade preparation is waiting for {blockers:?}");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            reply => panic!(
+                "upgrade preparation was not admitted: {reply:?}; the daemon reports {:?}",
+                request(DaemonAction::UpgradeBlockers).await
+            ),
+        }
+    }
+}
+
 fn upgrade_command(storage: &common::DaemonStorage) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
     common::own_test_daemons(&mut command)
@@ -1869,16 +1902,7 @@ open({output:?}, 'w').write('helper survived cancellation')
                 if ending == 0 {
                     drop(terminal);
                 } else if ending == 1 {
-                    let reply = DaemonClient::connect(metadata.clone())
-                        .await
-                        .unwrap()
-                        .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
-                        .await
-                        .unwrap();
-                    assert!(
-                        matches!(reply, mj_client::daemon::DaemonReply::Done),
-                        "upgrade preparation was not admitted: {reply:?}"
-                    );
+                    prepare_upgrade(&metadata).await;
                     drop(terminal);
                 } else {
                     // Simulate daemon death: all duplicated masters close in
@@ -1945,13 +1969,7 @@ open({output:?}, 'w').write('helper survived cancellation')
                         .unwrap();
                     }
                     if mode == 2 {
-                        let reply = DaemonClient::connect(metadata.clone())
-                            .await
-                            .unwrap()
-                            .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
-                            .await
-                            .unwrap();
-                        assert!(matches!(reply, mj_client::daemon::DaemonReply::Done));
+                        prepare_upgrade(&metadata).await;
                         loop {
                             match read_frame::<TerminalOutput>(&mut terminal.stream).await {
                                 Ok(TerminalOutput::Failed(message)) => {

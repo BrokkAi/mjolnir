@@ -277,7 +277,7 @@ impl StderrTail {
     fn capture(stderr: crate::streamed_child::ProxyReader) -> (Self, tokio::task::JoinHandle<()>) {
         let tail = Self::default();
         let writer = tail.clone();
-        let reader = tokio::spawn(async move {
+        let reader = mj_core::runtime::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = Vec::new();
             loop {

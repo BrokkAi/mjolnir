@@ -138,7 +138,6 @@ fn open_writable(path: &Path) -> Result<Connection> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA journal_mode = WAL;
          PRAGMA synchronous = FULL;",
     )?;
     verify_schema_once(path, &connection)?;
@@ -353,6 +352,11 @@ fn verify_schema_once(path: &Path, connection: &Connection) -> Result<()> {
     let mut verified = verified_schemas()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // Converting a fresh file to WAL fails at once with SQLITE_BUSY, without
+    // the busy handler, while another connection is migrating it. This lock
+    // is what keeps first opens from overlapping, so the conversion belongs
+    // under it. Once the file is WAL the pragma only reads the mode.
+    connection.execute_batch("PRAGMA journal_mode = WAL;")?;
     let state = read_schema_state(connection)?;
     if state.revision > SCHEMA_VERSION
         || (state.revision == SCHEMA_VERSION && verified.contains(&key))
@@ -2659,6 +2663,30 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              PRAGMA user_version = 138;
              COMMIT;",
         ))?;
+    }
+    // Compatible: older readers and writers leave the independent alert ledger intact.
+    if version < 139 {
+        connection.execute_batch(concat!(
+            "BEGIN IMMEDIATE;",
+            include_str!("alert_events.sql"),
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (139, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 139;
+             COMMIT;",
+        ))?;
+    }
+    // Compatible: older session deletion also runs this trigger; the indexes only speed
+    // its lookups, and no existing data shape changes.
+    if version < 140 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE INDEX IF NOT EXISTS push_entries_session ON push_entries(session);
+            CREATE TRIGGER IF NOT EXISTS alert_events_session_destroyed AFTER DELETE ON sessions BEGIN
+                DELETE FROM alert_events WHERE destination=OLD.session_id OR identity IN
+                    (SELECT identity FROM push_entries WHERE session=OLD.session_id);
+            END;
+            INSERT INTO schema_migrations(version,applied_at) VALUES(140,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+            PRAGMA user_version=140;
+            COMMIT;")?;
     }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {

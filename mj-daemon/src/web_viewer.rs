@@ -291,7 +291,7 @@ async fn stop_listener(
 ) -> Result<()> {
     let pid = expected.pid;
     let signal_cancel = cancel.clone();
-    let mut task = tokio::task::spawn_blocking(move || {
+    let mut task = mj_core::runtime::spawn_blocking(move || {
         // Acquire a stable process handle before re-inspecting, so PID reuse cannot redirect a signal.
         #[cfg(target_os = "linux")]
         let process_handle = open_process_handle(pid)?;
@@ -596,7 +596,7 @@ mod tests {
         options: ServerOptions,
         control: Arc<ViewerControl>,
     ) -> tokio::task::JoinHandle<Result<()>> {
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let ready = ready(options.bind);
             serve(options, ready, &control, |access| control.publish(access)).await
         })
@@ -649,7 +649,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(3));
             Ok::<(), anyhow::Error>(())
         };
-        let request = tokio::spawn(async move {
+        let request = mj_core::runtime::spawn(async move {
             busy_rx.await.unwrap();
             api_response(address, Duration::from_secs(1)).await
         });
@@ -862,7 +862,7 @@ mod tests {
             "socket {address} owners: {pids:?}; expected {}",
             std::process::id()
         );
-        let processes = tokio::task::spawn_blocking(move || inspect_listener(address))
+        let processes = mj_core::runtime::spawn_blocking(move || inspect_listener(address))
             .await
             .unwrap()
             .unwrap();
@@ -888,7 +888,7 @@ mod tests {
     async fn stopping_rejects_a_stale_inspected_identity() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let mut own = tokio::task::spawn_blocking(move || inspect_listener(address))
+        let mut own = mj_core::runtime::spawn_blocking(move || inspect_listener(address))
             .await
             .unwrap()
             .unwrap()

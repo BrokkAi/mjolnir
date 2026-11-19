@@ -13,7 +13,6 @@ use tracing::Instrument;
 use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
-use mj_core::codex_provider::BuiltInCodexProvider;
 use mj_core::config::{AuthScheme, HarnessKind, HarnessProfile, harness_authentication_marker};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
@@ -58,63 +57,19 @@ pub struct QuotaRefreshRequest {
     pub opencode_usage_priced: bool,
 }
 
-/// Where a Codex profile's quota comes from, decided once from its provider
-/// configuration. Only Codex's own OpenAI login has ChatGPT rate-limit
-/// windows; every other provider must never be probed through that login,
-/// or it reports the ChatGPT account's quota as its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CodexQuotaSource {
-    /// No `model_provider`, or the built-in `openai` provider.
-    ChatGptLogin,
-    /// A custom provider whose API key and host Mjolnir can read; its quota
-    /// comes from the provider's own endpoint when it publishes one.
-    Provider(ProviderCredential),
-    /// Any other provider: a local or Bedrock built-in, or a custom provider
-    /// whose key Mjolnir cannot read. It has no allowance to report.
-    UsagePriced { provider: String },
-    /// The profile's Codex configuration could not be read.
-    Unreadable(String),
+/// Whether a quota check for this harness can call the managed installer at
+/// all (a host harness or the pinned Antigravity), decided from the kind alone, before reading any profile file. Whether
+/// one profile does ([`QuotaRefreshRequest::runs_host_harness`]) also depends
+/// on its login and provider.
+#[cfg(unix)]
+pub fn kind_may_need_managed_quota_harness(kind: HarnessKind) -> bool {
+    matches!(
+        kind,
+        HarnessKind::Codex | HarnessKind::Grok | HarnessKind::Claude | HarnessKind::Antigravity
+    )
 }
 
-impl CodexQuotaSource {
-    /// The source for one configured profile. `mj doctor` reads the same
-    /// answer to say where each profile's quota comes from.
-    pub fn of_profile(profile: &HarnessProfile) -> Self {
-        let provider = match profile.codex_provider() {
-            Ok(None) => return Self::ChatGptLogin,
-            Ok(Some(provider)) => provider,
-            Err(error) => return Self::Unreadable(format!("{error:#}")),
-        };
-        if provider.built_in() == Some(BuiltInCodexProvider::OpenAi) {
-            return Self::ChatGptLogin;
-        }
-        match (
-            provider.custom(),
-            profile.codex_provider_api_key(),
-            provider.host(),
-        ) {
-            (Some(_), Some(api_key), Some(host)) => Self::Provider(ProviderCredential {
-                id: provider.id().to_owned(),
-                host,
-                api_key,
-            }),
-            _ => Self::UsagePriced {
-                provider: provider.id().to_owned(),
-            },
-        }
-    }
-}
-
-/// Where a profile's quota lives when the profile authenticates with an API
-/// key against a provider named in its harness configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderCredential {
-    /// Provider id from the harness configuration, for error messages.
-    pub id: String,
-    /// Host of the provider's base URL, for example `api.z.ai`.
-    pub host: String,
-    pub api_key: String,
-}
+pub use mj_core::config::{CodexQuotaSource, ProviderCredential};
 
 impl QuotaRefreshRequest {
     pub fn cache_identity(&self) -> String {
@@ -144,6 +99,30 @@ impl QuotaRefreshRequest {
         }
         hash.update([u8::from(self.opencode_usage_priced)]);
         mj_core::hex::lower_hex(hash.finalize())
+    }
+
+    /// Whether this profile's check runs a host harness program, through
+    /// `quota_harness::locate`, rather than answering from configuration or
+    /// an HTTP endpoint.
+    /// Whether this profile's check or login renewal would call
+    /// `quota_harness::locate`: the question the daemon's prewarm asks, so it
+    /// installs nothing a check would not. It reads the Claude login file, so
+    /// call it on a blocking thread. Claude's decision is
+    /// [`claude_usage::runs_cli`]; Codex and Grok resolve their program
+    /// before reading any login, so the kind and Codex's ChatGPT source decide.
+    #[cfg(unix)]
+    pub fn runs_host_harness(&self) -> bool {
+        kind_may_need_managed_quota_harness(self.harness)
+            && match self.harness {
+                HarnessKind::Claude => {
+                    self.auth_scheme != AuthScheme::AwsCredentialChain
+                        && claude_usage::runs_cli(&self.source_home)
+                }
+                HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
+                // Grok and Antigravity resolve their program before reading
+                // any login.
+                _ => true,
+            }
     }
 
     /// Build the request for one configured profile. The harness home
@@ -218,6 +197,8 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
+#[cfg(unix)]
+pub use crate::quota_harness::prepare_managed;
 pub use mj_core::retry_after::retry_after_header;
 
 /// The hold for a 429: what the provider asked for, kept between one minute
@@ -1084,7 +1065,7 @@ async fn refresh_profile_with_cache_root(
     if crate::database::database_writer_installed() {
         let observed = report.clone();
         let identity = cache_identity.clone();
-        match tokio::task::spawn_blocking(move || {
+        match mj_core::runtime::spawn_blocking(move || {
             crate::database::save_quota_report(&identity, &observed)
         })
         .await

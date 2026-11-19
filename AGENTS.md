@@ -391,7 +391,7 @@ persisted formats, and run the suites at that boundary, including affected
 consumers. Release work must still pass all validations in `RELEASING.md`.
 
 Run those checks on the dev profile, which is where `debug_assert!` and
-overflow checks run; this workspace sets no `[profile.release]` overrides, so a
+overflow checks run; the workspace's `[profile.release]` turns neither on, so a
 release test run silently drops both. The build scripts defaulting to release is
 not a reason to validate there.
 

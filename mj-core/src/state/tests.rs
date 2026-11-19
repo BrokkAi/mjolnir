@@ -596,13 +596,18 @@ fn recorded_container_execution_policy_selects_yolo_subagents() {
     let mut container = sample_session();
     container.target_template_id = "podman".into();
     let runtime = TargetRuntimeSettings::from(&config.targets["podman"]);
-    assert_eq!(runtime.execution_policy, crate::config::ExecutionPolicy::Unconstrained);
+    assert_eq!(
+        runtime.execution_policy,
+        crate::config::ExecutionPolicy::Unconstrained
+    );
     container.target_runtime = Some(std::sync::Arc::new(runtime));
     assert!(container.is_yolo_target(&config));
     assert!(container.execution_enforcement(&config).is_some());
 
     let mut localhost = sample_session();
-    config.targets.insert("local".into(), TargetTemplate::LocalBare);
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
     localhost.target_template_id = "local".into();
     assert!(!localhost.is_yolo_target(&config));
 }

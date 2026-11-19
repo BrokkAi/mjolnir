@@ -68,6 +68,7 @@ impl ViewerHistory {
 
     fn cursor(&self, revision: u64) -> RuntimeCursor {
         RuntimeCursor {
+            alert_sequence: 0,
             incarnation: self.incarnation.clone(),
             sequence: revision,
             subagent_parents: Default::default(),
@@ -161,6 +162,7 @@ impl ViewerFeed {
             (current_entry, base, history.incarnation.clone())
         };
         let cursor = RuntimeCursor {
+            alert_sequence: 0,
             incarnation,
             sequence: current.revision,
             subagent_parents: Default::default(),
@@ -196,6 +198,7 @@ impl ViewerFeed {
             return self.start(
                 current,
                 Some(RuntimeCursor {
+                    alert_sequence: 0,
                     incarnation,
                     sequence: current_entry.revision,
                     subagent_parents: Default::default(),
@@ -207,6 +210,7 @@ impl ViewerFeed {
         }
         let incarnation = self.history.lock()?.incarnation.clone();
         let cursor = RuntimeCursor {
+            alert_sequence: 0,
             incarnation,
             sequence: current_entry.revision,
             subagent_parents: Default::default(),
@@ -316,6 +320,7 @@ pub(super) fn parse_cursor(text: &str) -> Option<RuntimeCursor> {
         return None;
     }
     Some(RuntimeCursor {
+        alert_sequence: 0,
         incarnation: incarnation.to_owned(),
         sequence: sequence.parse().ok()?,
         subagent_parents: Default::default(),
@@ -444,6 +449,7 @@ mod tests {
             .start(
                 snapshot(21, vec![row("a", "live")]),
                 Some(RuntimeCursor {
+                    alert_sequence: 0,
                     incarnation: "old-daemon".into(),
                     sequence: 20,
                     subagent_parents: Default::default(),

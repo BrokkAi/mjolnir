@@ -90,7 +90,7 @@ async fn prewarm_host(
     let finished = CancellationToken::new();
     let watcher = {
         let (stop, token, finished) = (stop.clone(), token.clone(), finished.clone());
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => stop.store(true, std::sync::atomic::Ordering::SeqCst),
                 _ = finished.cancelled() => {}
@@ -98,7 +98,7 @@ async fn prewarm_host(
         })
     };
     let host = plan.key.clone();
-    let failures = tokio::task::spawn_blocking(move || {
+    let failures = mj_core::runtime::spawn_blocking(move || {
         let executor = mj_controller::targets::CancellableProcessExecutor::new(stop);
         let mut failures = Vec::new();
         for profile in profiles {
@@ -147,7 +147,7 @@ pub(super) fn spawn(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut revisions = state.revisions();
         let mut covered = BTreeSet::<String>::new();
         let mut running = BTreeSet::<String>::new();

@@ -19,7 +19,7 @@ pub(super) async fn run(cancellation: CancellationToken) -> Result<()> {
         else {
             return Ok(());
         };
-        let batch = tokio::task::spawn_blocking(move || {
+        let batch = mj_core::runtime::spawn_blocking(move || {
             let _work = work;
             mj_controller::database::prune_api_activity_events(after_seq)
         })

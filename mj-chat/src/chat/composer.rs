@@ -465,8 +465,8 @@ impl ChatState {
         let generation = self.input_generation();
         let target = self.clipboard_target();
         let staging = self.standby;
-        tokio::spawn(async move {
-            let result = match tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn(async move {
+            let result = match mj_core::runtime::spawn_blocking(move || {
                 if text_only {
                     crate::clipboard::read_text().map(ClipboardContent::Text)
                 } else {
@@ -679,7 +679,7 @@ impl ChatState {
             self.composer_runtime
                 .attachment_cancellations
                 .insert(sequence, cancel);
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let upload_session = session_id;
                 let preparation = async move { prepare_attachment(&upload_session, source).await };
                 let result = tokio::select! {
@@ -717,7 +717,7 @@ pub(super) async fn prepare_attachment(
     source: AttachmentSource,
 ) -> Result<ClipboardImage, String> {
     let blocking_session = session_id.to_owned();
-    let image = match tokio::task::spawn_blocking(move || match source {
+    let image = match mj_core::runtime::spawn_blocking(move || match source {
         AttachmentSource::Clipboard(image) => {
             attachments::install_clipboard_image(&blocking_session, image)
         }

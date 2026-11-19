@@ -3,6 +3,8 @@ use mj_client::runtime_feed::RuntimeProjection;
 use mj_core::snapshot_map::SnapshotMap;
 
 pub struct RemoteDashboardWorkerPoller {
+    pub alerts:
+        tokio::sync::mpsc::UnboundedReceiver<(u64, Vec<mj_client::runtime_feed::AlertEvent>)>,
     pub updates: SessionManagerUpdates,
     pub control: SessionManagerControl,
     pub shutdown: SessionManagerShutdown,
@@ -189,7 +191,7 @@ where
     LF: Future<Output = Result<StoredProjection>> + Send + 'static,
 {
     let (tx, updates) = tokio::sync::mpsc::channel(32);
-    let task = tokio::spawn(async move {
+    let task = mj_core::runtime::spawn(async move {
         let result = run_runtime_feed(workspace_id, poll, load, &tx).await;
         if let Err(error) = result {
             let message = format!("Runtime feed stopped: {error:#}");

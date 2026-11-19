@@ -567,7 +567,7 @@ for line in sys.stdin:
     .env(CHILD_HOME, directory.path())
     .env(CHILD_ENV, serde_json::to_string(&environment).unwrap())
     .isolated_store(&directory.path().join("child-instance"));
-    let mut child = tokio::task::spawn_blocking(move || child.output());
+    let mut child = mj_core::runtime::spawn_blocking(move || child.output());
     let (mut control, _) = tokio::select! {
         result = tokio::time::timeout(Duration::from_secs(20), listener.accept()) => {
             result.expect("first process entered its refresh").unwrap()
@@ -774,7 +774,8 @@ done
     );
 }
 
-#[cfg(unix)]
+// macOS filesystems reject the non-UTF-8 directory name this fixture needs.
+#[cfg(all(unix, not(target_os = "macos")))]
 // Hard-won: 7f4649508: an ambient CLI's non-UTF-8 directory was replaced before process startup.
 #[tokio::test]
 async fn inherited_native_path_reports_a_non_utf8_quota_harness() {
@@ -829,7 +830,7 @@ IFS= read -r line
     .env(CHILD_HOME, directory.path())
     .env("PATH", std::env::join_paths([bin]).unwrap())
     .isolated_store(&directory.path().join("child-instance"));
-    let output = tokio::task::spawn_blocking(move || child.output())
+    let output = mj_core::runtime::spawn_blocking(move || child.output())
         .await
         .unwrap();
     assert!(
@@ -1110,7 +1111,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         .with_state(rejected.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let server = mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
@@ -1216,7 +1217,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         .with_state(status.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let server = mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
@@ -1517,7 +1518,7 @@ async fn kimi_quota_refreshes_after_unauthorized_and_retries() {
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
@@ -1616,7 +1617,7 @@ async fn kimi_quota_accepts_an_api_key_without_oauth_credentials() {
     let app = Router::new().route("/coding/v1/usages", get(test_kimi_api_key_usage));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 

@@ -282,10 +282,13 @@ pub struct WorkerLaunchConfig {
         skip_serializing_if = "crate::config::ClaudePermissionMode::is_auto"
     )]
     pub claude_permission_mode: crate::config::ClaudePermissionMode,
-    /// Optional synchronous Brokk Observe guardrails. Present only when the
-    /// selected harness can ask Mjolnir before every policy-eligible tool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observe_policy: Option<crate::observe::ObserveEnforcementConfig>,
+    /// Accepted from older daemon launch files, which carried Brokk Observe
+    /// guardrail settings here; no longer used or written. This struct
+    /// rejects unknown fields, so dropping the name would make a new worker
+    /// refuse those launches. The contents (including a bearer token) are
+    /// discarded while parsing, so they never reach `Debug` output.
+    #[serde(default, skip_serializing)]
+    pub observe_policy: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1036,6 +1039,24 @@ mod tests {
         assert_eq!(
             launch.subagent_mcp_role(),
             Some(crate::subagent::SubagentMcpRole::MessageOnly)
+        );
+    }
+
+    #[test]
+    fn a_launch_from_a_daemon_with_observe_guardrails_still_loads_and_drops_them() {
+        // Older daemons wrote Brokk Observe settings under `observe_policy`.
+        // The struct rejects unknown fields, so the name must stay accepted.
+        let mut value = launch_json();
+        value["observe_policy"] = serde_json::json!({
+            "url": "http://observe.invalid", "token": "secret", "timeout_ms": 3000, "fail_closed": true
+        });
+        let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
+        assert!(launch.observe_policy.is_some());
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("observe_policy")
+                .is_none()
         );
     }
 

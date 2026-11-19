@@ -4,9 +4,11 @@ use std::cell::RefCell;
 use anyhow::Result;
 
 use crate::controller::Controller;
+#[cfg(unix)]
+use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
-    IsolatedTest, checkpoint_test_session, committed_repository, managed_worktree_session,
-    test_git, write_checkpoint_gate_archive,
+    checkpoint_test_session, committed_repository, managed_worktree_session, test_git,
+    write_checkpoint_gate_archive,
 };
 use mj_core::config::{Config, ContainerTemplate as ConfigContainer, TargetTemplate};
 use mj_core::state::{SessionState, State, TargetLocator};

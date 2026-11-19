@@ -22,7 +22,7 @@ pub fn wake_signal() -> &'static tokio::sync::Notify {
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(f)
+    mj_core::runtime::spawn_blocking(f)
         .await
         .context("Web Push storage task panicked")?
 }
@@ -219,17 +219,18 @@ fn phone_line(text: &str, fallback: &str) -> String {
     }
 }
 
-pub struct PushEntry<'a> {
-    pub session: &'a str,
+#[derive(Debug, PartialEq, Eq)]
+pub struct PushEntry<S> {
+    pub session: S,
     pub completed_ordinal: Option<u64>,
     pub paused: bool,
-    pub holder: &'a str,
+    pub holder: S,
     pub kind: NotificationKind,
-    pub text: Option<&'a str>,
-    pub message_id: Option<&'a str>,
+    pub text: Option<S>,
+    pub message_id: Option<S>,
 }
 
-pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, PushEntry<'_>>> {
+pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, PushEntry<&str>>> {
     let cards = runtime.metadata.notification_cards.as_ref()?;
     // Attention supplies only worker availability. Card publication owns
     // notification eligibility, including ignored sessions and managed children.
@@ -243,42 +244,43 @@ pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, Push
             )
         )
     };
-    let mut entries = BTreeMap::new();
+    let mut entries: BTreeMap<String, PushEntry<&str>> = BTreeMap::new();
     for (session, card) in cards {
-        let holder = card.holder.as_deref().unwrap_or(session);
-        let paused = unavailable(session) || unavailable(holder);
-        for entry in &card.entries {
-            let (identity, message_id) = match &entry.message {
-                EntryMessage::Locating => continue,
-                EntryMessage::Found(id) => (
-                    serde_json::json!(["message", session, id]),
-                    Some(id.as_str()),
-                ),
-                EntryMessage::None => (
-                    serde_json::json!(["completion", session, entry.completed_ordinal]),
-                    None,
-                ),
+        let holder = card.item_destination(session, card.entries.len());
+        for (item, entry) in card.entries.iter().enumerate() {
+            let Some(identity) = card.item_identity(session, item) else {
+                continue;
+            };
+            let message_id = match &entry.message {
+                EntryMessage::Found(id) => Some(id.as_str()),
+                _ => None,
             };
             // The same stable message can be classified in two completions.
             // The card's oldest-first order gives that identity its first position.
-            entries.entry(identity.to_string()).or_insert(PushEntry {
+            entries.entry(identity).or_insert(PushEntry {
                 session,
                 completed_ordinal: Some(entry.completed_ordinal),
-                paused,
-                holder,
+                paused: unavailable(session),
+                holder: card.item_destination(session, 0),
                 kind: entry.kind,
                 text: None,
                 message_id,
             });
         }
-        if let Some(form) = &card.form {
-            let identity = serde_json::json!(["form", holder, form.request_id]).to_string();
+        if let Some(form) = &card.form
+            && !runtime
+                .records
+                .get(holder)
+                .is_some_and(|record| record.notifications_ignored)
+            // A form with an unknown raise time has no identity: it is not pushable here.
+            && let Some(identity) = card.item_identity(session, card.entries.len())
+        {
             entries.insert(
                 identity,
                 PushEntry {
                     session,
                     completed_ordinal: None,
-                    paused,
+                    paused: unavailable(session) || unavailable(holder),
                     holder,
                     kind: NotificationKind::NeedsInput,
                     text: Some(&form.message),
@@ -290,7 +292,19 @@ pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, Push
     Some(entries)
 }
 
-impl PushEntry<'_> {
+impl PushEntry<&str> {
+    pub fn owned(&self) -> PushEntry<String> {
+        PushEntry {
+            session: self.session.to_owned(),
+            completed_ordinal: self.completed_ordinal,
+            paused: self.paused,
+            holder: self.holder.to_owned(),
+            kind: self.kind,
+            text: self.text.map(str::to_owned),
+            message_id: self.message_id.map(str::to_owned),
+        }
+    }
+
     pub fn notice(
         &self,
         runtime: &RuntimeProjection,
@@ -320,6 +334,53 @@ impl PushEntry<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_client::runtime_feed::{CardForm, NotificationCard};
+
+    #[test]
+    fn each_card_item_push_targets_its_own_session_or_form_holder() {
+        let mut runtime = RuntimeProjection::default();
+        runtime.metadata.notification_cards = Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "parent".into(),
+            NotificationCard {
+                since_ms: 1,
+                badge: NotificationKind::NeedsInput,
+                entries: vec![mj_core::attention::NotificationStackEntry {
+                    completed_at_ms: 1,
+                    completed_ordinal: 4,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::None,
+                }],
+                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 1 }),
+                holder: Some("child".into()),
+                form: Some(CardForm {
+                    source: mj_client::runtime_feed::CardFormSource::Elicitation,
+                    raised_at_ms: 2,
+                    request_id: "r1".into(),
+                    message: "form".into(),
+                }),
+            },
+        )]));
+        let entries = card_entries(&runtime).unwrap();
+        let question = entries
+            .values()
+            .find(|entry| entry.completed_ordinal == Some(4))
+            .unwrap();
+        let form = entries
+            .values()
+            .find(|entry| entry.completed_ordinal.is_none())
+            .unwrap();
+        assert_eq!(question.holder, "parent");
+        assert_eq!(
+            question.notice(&runtime, "question".into(), None).url,
+            "/#conversation/parent"
+        );
+        assert_eq!(form.holder, "child");
+        assert_eq!(
+            form.notice(&runtime, "form".into(), None).url,
+            "/#conversation/child"
+        );
+    }
+
     fn decode(value: &str) -> Vec<u8> {
         B64.decode(value).unwrap()
     }

@@ -116,7 +116,7 @@ impl GrokUsageSession {
             stdout,
             stderr,
         } = stdio;
-        let stderr = tokio::spawn(async move {
+        let stderr = mj_core::runtime::spawn(async move {
             let _ = crate::streamed_child::collect_bounded(stderr, 64 * 1024).await;
         });
         Ok(Self {
@@ -438,7 +438,7 @@ mod tests {
         .env("GROK_HOME", root.join("home"))
         .env("PATH", root.join("empty"))
         .isolated_store(&root.join("child-instance"));
-        tokio::task::spawn_blocking(move || child.run())
+        mj_core::runtime::spawn_blocking(move || child.run())
             .await
             .unwrap();
     }

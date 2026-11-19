@@ -35,7 +35,7 @@ async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
             upgrade_admission,
         ));
 
-    let request = tokio::spawn(
+    let request = mj_core::runtime::spawn(
         app.clone()
             .oneshot(Request::get("/").body(Body::empty()).unwrap()),
     );
@@ -472,7 +472,7 @@ async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
         assert_eq!(session["background_tasks"][0]["can_stop"], true);
     }
 
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.clone().oneshot(
             Request::post(path)
                 .header("authorization", "Bearer test-api-token")
@@ -513,7 +513,7 @@ async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
 async fn background_task_stop_validates_the_snapshot_and_waits_for_acknowledgement() {
     let (app, mut requests) = app_with_background_stop_receiver(true);
     let cookie = login_cookie(&app).await;
-    let response = tokio::spawn({
+    let response = mj_core::runtime::spawn({
         let app = app.clone();
         let cookie = cookie.clone();
         async move {
@@ -558,7 +558,7 @@ async fn background_task_stop_validates_the_snapshot_and_waits_for_acknowledgeme
 async fn background_task_stop_reports_provider_failure_without_leaking_details() {
     let (app, mut requests) = app_with_background_stop_receiver(true);
     let cookie = login_cookie(&app).await;
-    let response = tokio::spawn({
+    let response = mj_core::runtime::spawn({
         let app = app.clone();
         async move {
             app.oneshot(
@@ -605,7 +605,7 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
     assert!(bundles.try_recv().is_err());
 
     let cookie = login_cookie(&app).await;
-    let response = tokio::spawn({
+    let response = mj_core::runtime::spawn({
         let app = app.clone();
         let cookie = cookie.clone();
         async move {
@@ -973,46 +973,37 @@ fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
     snapshot.sessions[0].pending_elicitations = vec![sample_elicitation()];
 }
 
+// Hard-won: bbe5c1a01: retained questions intercepted live forms on the compatibility endpoint.
 #[tokio::test]
-async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
-        pending_elicitation_snapshot(snapshot);
-        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::NeedsInput;
-    });
-    let cookie = login_cookie(&app).await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get(
-                "/api/sessions/session-1/notification-message?holder=session-1&requests=elicitation-1",
-            )
-                .header(COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: serde_json::Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(
-        body["text"],
-        "Which CI architecture should the workflow use?"
-    );
-
-    // A card that captured another holder or request gets a conflict, never text.
-    for stale in [
-        "holder=other-session&requests=elicitation-1",
-        "holder=session-1&requests=elicitation-0",
-        "holder=session-1&requests=elicitation-1&question=agent:9",
-        "holder=session-1",
+async fn notification_message_reads_only_the_current_form_identity() {
+    for (holder, request_id) in [
+        ("session-1", "elicitation-1"),
+        ("session-2", "child-approval"),
+        ("session-1", "review-verdict.reviewer.findings"),
     ] {
+        let (app, ..) = app_with_snapshot(|snapshot| {
+            snapshot.sessions[0].notification_card =
+                Some(mj_client::runtime_feed::NotificationCard {
+                    since_ms: 0,
+                    badge: mj_core::attention::NotificationKind::NeedsInput,
+                    entries: vec![],
+                    dismissal: None,
+                    holder: Some(holder.into()),
+                    form: Some(mj_client::runtime_feed::CardForm {
+                        source: mj_client::runtime_feed::CardFormSource::Elicitation,
+                        raised_at_ms: 42,
+                        request_id: request_id.into(),
+                        message: "Approve this action?".into(),
+                    }),
+                });
+        });
+        let cookie = login_cookie(&app).await;
+        let query = format!("holder={holder}&request_id={request_id}&raised_at_ms=42");
         let response = app
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{stale}"
+                    "/api/sessions/session-1/notification-message?{query}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -1020,32 +1011,53 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+        assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(body["code"], "notification_changed");
-    }
-
-    let missing = app
-        .oneshot(
-            Request::get(
-                "/api/sessions/unknown-session/notification-message?holder=unknown-session",
+        assert_eq!(
+            body,
+            serde_json::json!({"session_id": holder, "text": "Approve this action?"})
+        );
+        for stale in [
+            format!("holder=wrong&request_id={request_id}&raised_at_ms=42"),
+            format!("holder={holder}&request_id=stale&raised_at_ms=42"),
+            format!("holder={holder}&request_id={request_id}&raised_at_ms=41"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/api/sessions/session-1/notification-message?{stale}"
+                    ))
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let missing = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/unknown-session/notification-message?{query}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
             )
-            .header(COOKIE, cookie)
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[tokio::test]
 async fn elicitation_answer_is_typed_and_forwarded() {
     let (app, mut actions, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
     let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/actions")
                 .header(COOKIE, cookie)
@@ -1676,7 +1688,7 @@ async fn operator_away_action_is_sessionless_and_reaches_controller() {
     let (app, mut actions, _, _, _) =
         app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
     let cookie = login_cookie(&app).await;
-    let posted = tokio::spawn(post_action(
+    let posted = mj_core::runtime::spawn(post_action(
         app,
         cookie,
         r#"{"action":"set-operator-away","away":true}"#.into(),
@@ -1695,7 +1707,7 @@ async fn operator_activity_action_is_sessionless_and_reaches_controller() {
     let (app, mut actions, _, _, _) =
         app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
     let cookie = login_cookie(&app).await;
-    let posted = tokio::spawn(post_action(
+    let posted = mj_core::runtime::spawn(post_action(
         app,
         cookie,
         r#"{"action":"record-operator-activity"}"#.into(),
@@ -1855,7 +1867,7 @@ async fn a_config_key_the_harness_never_advertised_is_refused() {
 
     // The value the harness did advertise is forwarded unchanged.
     let (app, mut actions, _, _, _) = app_with_snapshot(capable);
-    let response = tokio::spawn(post_action(
+    let response = mj_core::runtime::spawn(post_action(
         app,
         cookie(),
         r#"{"action":"set-config","session_id":"session-1","key":"model","value":"sonnet"}"#
@@ -2006,7 +2018,7 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
         "additional_mounts": mounts,
     });
     let (app, _, _, mut preflights, _) = app();
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/preflight/new")
                 .header(COOKIE, cookie())
@@ -2032,7 +2044,7 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
     let (app, mut actions, _, _, _) = self::app();
     let mut body = body;
     body["action"] = "new".into();
-    let response = tokio::spawn(post_action(app, cookie(), body.to_string()));
+    let response = mj_core::runtime::spawn(post_action(app, cookie(), body.to_string()));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New {
         additional_mounts,
@@ -2149,7 +2161,7 @@ async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_contro
 #[tokio::test]
 async fn a_bare_preflight_validation_failure_is_actionable_without_its_details() {
     let (app, _, _, mut preflights, _) = app();
-    let response = tokio::spawn(app.oneshot(
+    let response = mj_core::runtime::spawn(app.oneshot(
         Request::post("/api/preflight/new")
             .header(COOKIE, cookie())
             .header(CONTENT_TYPE, "application/json")
@@ -2178,7 +2190,7 @@ async fn a_bare_preflight_validation_failure_is_actionable_without_its_details()
 #[tokio::test]
 async fn a_bundle_preflight_controller_failure_keeps_the_generic_service_error() {
     let (app, _, _, mut preflights, _) = app();
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/preflight/new")
                 .header(COOKIE, cookie())
@@ -2777,7 +2789,7 @@ async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
     body.push_str(&" ".repeat(MAX_BODY_BYTES));
     assert!(body.len() > MAX_BODY_BYTES);
     assert!(body.len() < MAX_PROMPT_BODY_BYTES);
-    let response = tokio::spawn(post_action(app, cookie, body));
+    let response = mj_core::runtime::spawn(post_action(app, cookie, body));
     let action = actions.recv().await.unwrap();
     action.reply.send(ActionOutcome::accepted()).unwrap();
     assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
@@ -2961,7 +2973,7 @@ async fn confirmed_move_action_forwards_the_fingerprinted_request() {
         snapshot.sessions[0].capabilities.move_session = true;
     });
     let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/actions")
                 .header(COOKIE, cookie)
@@ -3051,6 +3063,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
         no_project_memory: false,
         no_github_events: false,
         no_github_credentials: false,
+        notifications_ignored: false,
         at: None,
         branch: None,
         base: None,
@@ -3141,6 +3154,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -3758,7 +3772,7 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
     // A prompt for the same session stays in flight for the whole test, so
     // a receipt that still travelled the action pipeline would either
     // queue behind it or be rejected for the occupied session slot.
-    let prompt = tokio::spawn(
+    let prompt = mj_core::runtime::spawn(
         app.clone().oneshot(
             Request::post("/api/actions")
                 .header(COOKIE, cookie.clone())
@@ -3771,7 +3785,7 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
     );
     let action = actions.recv().await.unwrap();
 
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/conversations/session-1/read")
                 .header(COOKIE, cookie)
@@ -3848,7 +3862,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
     ] {
         let (app, mut actions, _, _, _) = app();
         let cookie = login_cookie(&app).await;
-        let response = tokio::spawn(
+        let response = mj_core::runtime::spawn(
             app.oneshot(
                 Request::post("/api/actions")
                     .header(COOKIE, cookie)
@@ -4477,7 +4491,7 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
         .next()
         .unwrap()
         .to_owned();
-    let pending = tokio::spawn(
+    let pending = mj_core::runtime::spawn(
         app.clone().oneshot(
             Request::post("/api/bundles")
                 .header(COOKIE, &cookie)
@@ -4758,7 +4772,7 @@ async fn project_discovery_returns_actionable_failures_and_closes_abandoned_repl
             .body(Body::from(r#"{"kind":"github","query":""}"#))
             .unwrap()
     };
-    let response = tokio::spawn(app.clone().oneshot(make_request()));
+    let response = mj_core::runtime::spawn(app.clone().oneshot(make_request()));
     let PreflightRequest::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
         panic!("discovery");
     };
@@ -4769,7 +4783,7 @@ async fn project_discovery_returns_actionable_failures_and_closes_abandoned_repl
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&body).contains(message));
 
-    let response = tokio::spawn(app.oneshot(make_request()));
+    let response = mj_core::runtime::spawn(app.oneshot(make_request()));
     let PreflightRequest::DiscoverProjects(mut request) = preflights.recv().await.unwrap() else {
         panic!("discovery");
     };
@@ -5365,7 +5379,8 @@ async fn resume_validates_the_workspace_against_the_store_not_the_published_list
         })
         .unwrap()
     };
-    let response = tokio::spawn(post_action(app.clone(), cookie.clone(), resume("default")));
+    let response =
+        mj_core::runtime::spawn(post_action(app.clone(), cookie.clone(), resume("default")));
     // A refusal never reaches the controller, so bound the wait for the action.
     let request = tokio::time::timeout(Duration::from_secs(10), actions.recv()).await;
     let Ok(Some(request)) = request else {
@@ -5620,64 +5635,6 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
     );
 }
 
-// A worker without open requests (relay protocol before 64) has no question
-// target, so its question is the last thing the agent wrote.
-#[test]
-fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message() {
-    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
-    let facts = |supports_open_request| NotificationMessageFacts {
-        pending_request: None,
-        review_activity: None,
-        question_message: None,
-        supports_open_request,
-    };
-    let read = |facts| {
-        super::handlers::notification_message_text(
-            NotificationKind::NeedsInput,
-            &facts,
-            |_| unreachable!("no question target"),
-            || Ok(Some("the agent's last words".to_owned())),
-        )
-        .unwrap()
-    };
-    assert_eq!(
-        read(facts(false)).as_deref(),
-        Some("the agent's last words")
-    );
-    assert_eq!(read(facts(true)), None);
-}
-
-// An `!` card names its message by ReadThrough ordinal: a different or missing
-// boundary is a conflict, never the latest reply.
-#[tokio::test]
-async fn notification_message_for_an_important_card_requires_its_read_through_boundary() {
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
-        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::Important;
-        snapshot.sessions[0].notification_dismissal =
-            Some(mj_core::attention::NotificationDismissal::ReadThrough(3));
-    });
-    let cookie = login_cookie(&app).await;
-    for stale in [
-        "holder=session-1&through=4",
-        "holder=session-1",
-        "holder=session-1&through=3&requests=x",
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{stale}"
-                ))
-                .header(COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
-    }
-}
-
 // Hard-won: 8dd7f6384: a turn without text used a preceding turn's reply.
 #[tokio::test]
 async fn notification_message_reads_only_entries_on_the_current_card() {
@@ -5784,6 +5741,12 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 },
+                NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal: 11,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::Locating,
+                },
             ],
             dismissal: None,
             holder: None,
@@ -5795,6 +5758,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         ("message_id=agent%3A1", Some(Some("exact"))),
         ("through=5", Some(Some("bounded"))),
         ("through=9", Some(None)),
+        ("through=11", Some(None)),
         ("message_id=agent%3A7", None),
         ("through=2", None),
         ("through=8", None),
@@ -5823,6 +5787,33 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         } else {
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{query}");
         }
+    }
+
+    for invalid in [
+        "",
+        "holder=session-1&requests=elicitation-1",
+        "holder=session-1&question=agent:1",
+        "holder=session-1&through=9",
+        "holder=session-1&request_id=elicitation-1",
+        "message_id=agent:1&through=5",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{invalid}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "explicit current item selectors are required: {invalid}"
+        );
     }
 
     let response = app

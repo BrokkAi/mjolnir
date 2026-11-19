@@ -1082,7 +1082,7 @@ pub(super) async fn load_materialized_activity(
         .keys()
         .cloned()
         .collect::<Vec<_>>();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let activity_by_session = mj_controller::database::load_materialized_activity()?;
         Ok(session_ids
             .into_iter()

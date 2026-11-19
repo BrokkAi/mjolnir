@@ -1184,7 +1184,7 @@ mod tests {
                 .await
                 .expect("bind the fake daemon");
             let address = listener.local_addr().expect("fake daemon address");
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let _ = axum::serve(listener, app).await;
             });
             let client = ApiClient::new(format!("http://{address}"), "test-token".to_owned())
@@ -1443,7 +1443,7 @@ mod tests {
             let (outgoing, from_adapter) = mpsc::unbounded::<String>();
             let outgoing = outgoing.sink_map_err(std::io::Error::other);
             let transport = agent_client_protocol::Lines::new(outgoing, incoming);
-            let served = tokio::spawn(serve_on(adapter, transport));
+            let served = mj_core::runtime::spawn(serve_on(adapter, transport));
             Self {
                 to_adapter,
                 from_adapter,
