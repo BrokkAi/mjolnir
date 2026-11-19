@@ -55,6 +55,7 @@ anvil-client.workspace = true
 mj-controller.workspace = true
 mj-setup.workspace = true
 mj-server.workspace = true
+mj-review-host.workspace = true
 mj-github-relevance.workspace = true
 
 [dev-dependencies]

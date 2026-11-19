@@ -169,6 +169,11 @@ it or introduce a dependency between sibling branches.
   worker recovery, checkpoint transfer, and GitHub credentials. It builds on
   worker staging and worker launch. `mj_controller` re-exports its modules
   under their old names.
+- `brokk-mj-review-host` (`mj-review-host/`, library `mj_review_host`) is
+  where turn review runs: the host that feeds the review driver, its state,
+  and the environment trait it reviews through. It builds on the session
+  runtime and the store and does not depend on the controller. The daemon
+  supplies the production environment in `mj-daemon/src/review_host/`.
 - `brokk-mj-worker-launch` (`mj-worker-launch/`, library `mj_worker_launch`)
   plans what a session's worker is launched with, as functions over the
   configuration and the session records: launch configuration, staged files,

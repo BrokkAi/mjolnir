@@ -4,7 +4,7 @@ impl HostState {
     /// Puts one controller-authored line into the session's conversation, so a
     /// resolution is visible on every surface rather than in one UI's notice
     /// bar.
-    pub(super) fn record_notice(&self, session_id: &str, text: String) {
+    pub fn record_notice(&self, session_id: &str, text: String) {
         let control = self.control.clone();
         let session_id = session_id.to_owned();
         mj_core::runtime::spawn(async move {
@@ -36,7 +36,7 @@ impl HostState {
 
     /// Runs one reviewer action for the default role and feeds its outcome
     /// back to the review that asked for it.
-    pub(super) fn review_step(
+    pub fn review_step(
         &mut self,
         session_id: &str,
         action: ReviewerAction,
@@ -55,7 +55,7 @@ impl HostState {
         });
     }
 
-    pub(super) fn spawn_reviewer(
+    pub fn spawn_reviewer(
         &self,
         session_id: String,
         role: Option<String>,
@@ -74,7 +74,7 @@ impl HostState {
 
     /// Republishes what surfaces read. Called after every state change, so a
     /// snapshot poll and a phone request see the same review.
-    pub(super) fn publish(&self, session_id: &str) {
+    pub fn publish(&self, session_id: &str) {
         let mut views = self
             .shared
             .views
@@ -141,7 +141,7 @@ impl HostState {
         }
     }
 
-    pub(super) async fn shutdown(&mut self) -> Result<(), String> {
+    pub async fn shutdown(&mut self) -> Result<(), String> {
         // The child index and its durable close intent survive this host.
         // Never hold daemon handoff for a retry or an unavailable worker.
         self.child_closures.shutdown().await;

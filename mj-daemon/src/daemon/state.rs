@@ -87,7 +87,7 @@ impl RuntimeState {
             .flatten();
         let profile_catalog = crate::review_host::SharedProfileCatalog::default();
         let reviewer_runtime = crate::review_host::SharedReviewerRuntime::default();
-        let review_host = TurnReviewHost::spawn_notifying(
+        let review_host = crate::review_host::spawn_notifying(
             session_manager.clone(),
             {
                 let installed = review_config.clone();

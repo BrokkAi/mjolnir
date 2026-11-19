@@ -1,8 +1,8 @@
 use super::*;
-use mj_controller::session_manager::{
+use mj_core::state::{ManagedSessionSnapshot, MaterializedExecutionState, MaterializedSession};
+use mj_session_runtime::session_manager::{
     RelaySessionTarget, RemoteSessionRequest, RemoteSessionRequests, spawn_remote_session_manager,
 };
-use mj_core::state::{ManagedSessionSnapshot, MaterializedExecutionState, MaterializedSession};
 use std::path::PathBuf;
 
 /// One session id per test keeps the fake manager and durable review state
@@ -58,11 +58,11 @@ struct FakeManager {
     session: String,
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
-    publisher: mj_controller::session_manager::RemoteSessionPublisher,
+    publisher: mj_session_runtime::session_manager::RemoteSessionPublisher,
     /// Refusals the next captures answer with, in order, the way a lease
     /// the recovery copy holds refuses a reviewer action.
     capture_refusals: std::collections::VecDeque<String>,
-    _shutdown: mj_controller::session_manager::SessionManagerShutdown,
+    _shutdown: mj_session_runtime::session_manager::SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
 
@@ -75,7 +75,7 @@ impl FakeManager {
         // request to the test instead of to a worker.
         channels.targets.send_replace(vec![RelaySessionTarget {
             session_id: session.to_owned(),
-            spec: mj_controller::targets::CommandSpec::new("true", Vec::<String>::new()),
+            spec: mj_targets::targets::CommandSpec::new("true", Vec::<String>::new()),
             worker_recovery: None,
             project_memory: None,
         }]);
@@ -151,9 +151,9 @@ impl FakeManager {
                             .enter_foreground(
                                 &self.session,
                                 "test capture lifecycle",
-                                mj_controller::recovery_gate::LifecycleOrigin::Person,
+                                mj_store::recovery_gate::LifecycleOrigin::Person,
                                 &std::sync::atomic::AtomicBool::new(false),
-                                &mj_controller::targets::ProcessExecutor,
+                                &mj_targets::targets::ProcessExecutor,
                             )
                             .await
                             .unwrap();
@@ -294,7 +294,7 @@ struct FakeEnvironment {
     review_refusal: Mutex<Option<String>>,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
-    resolve_release: Mutex<Option<mj_controller::recovery_gate::ForegroundAdmission>>,
+    resolve_release: Mutex<Option<mj_store::recovery_gate::ForegroundAdmission>>,
     /// How many background holds the host took on the session.
     background_holds: std::sync::atomic::AtomicUsize,
     background_hangs: std::sync::atomic::AtomicBool,
@@ -304,7 +304,7 @@ struct FakeEnvironment {
     /// reviewer choice can take minutes on a real host (I2-10).
     resolve_hangs: std::sync::atomic::AtomicBool,
     /// Every report the host handed to persistence, in arrival order.
-    saved_reports: Mutex<Vec<mj_controller::database::AcceptedReport>>,
+    saved_reports: Mutex<Vec<mj_store::database::AcceptedReport>>,
 }
 
 struct SaveGate {
@@ -710,7 +710,7 @@ impl ReviewEnvironment for FakeEnvironment {
         &self,
         session_id: &str,
         state: &TurnReviewState,
-        reports: &[mj_controller::database::AcceptedReport],
+        reports: &[mj_store::database::AcceptedReport],
     ) -> Result<(), String> {
         self.saved_reports
             .lock()
@@ -787,9 +787,9 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
             .enter_foreground(
                 session,
                 "test reviewer lifecycle",
-                mj_controller::recovery_gate::LifecycleOrigin::Person,
+                mj_store::recovery_gate::LifecycleOrigin::Person,
                 &std::sync::atomic::AtomicBool::new(false),
-                &mj_controller::targets::ProcessExecutor,
+                &mj_targets::targets::ProcessExecutor,
             )
             .await
             .unwrap(),
@@ -1981,7 +1981,7 @@ async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
     finished.await.unwrap().unwrap();
     assert_eq!(
         environment.saved_reports.lock().unwrap().clone(),
-        vec![mj_controller::database::AcceptedReport {
+        vec![mj_store::database::AcceptedReport {
             role: "reviewer-1".into(),
             text: "No findings.".into(),
         }],
@@ -2894,16 +2894,16 @@ fn stored_handback(
         .request_key
         .clone();
     // Use the actual submission path, not the driver's logical command key.
-    let command_id = mj_controller::database::api_followup_steps(
+    let command_id = mj_store::database::api_followup_steps(
         &request_key,
-        mj_controller::database::StartFollowup {
+        mj_store::database::StartFollowup {
             prompt: Some("review the changes".into()),
             ..Default::default()
         },
     )
     .into_iter()
     .find_map(|(id, step)| {
-        matches!(step, mj_controller::database::StartupStep::ApiPrompt { .. }).then_some(id)
+        matches!(step, mj_store::database::StartupStep::ApiPrompt { .. }).then_some(id)
     })
     .expect("the submitted prompt step");
     Some(mj_core::subagent::SubagentHandback {
@@ -5179,7 +5179,8 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
     let host =
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
     let moving =
-        mj_controller::controller::move_session::MoveMutationGuard::reserve(&session).unwrap();
+        mj_session_runtime::session_manager::move_ownership::MoveMutationGuard::reserve(&session)
+            .unwrap();
     assert_eq!(
         host.begin_push(&session, None).await.unwrap_err().0,
         "session is moving"
@@ -5312,7 +5313,7 @@ async fn push_recording_waits_past_ten_seconds_without_losing_clean_verdict() {
     let (_, action, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
         .await;
-    let mut order = mj_controller::session_manager::SessionRequestOrder::new();
+    let mut order = mj_session_runtime::session_manager::SessionRequestOrder::new();
     let (release, released) = oneshot::channel();
     let (prior_reply, _prior_result) = oneshot::channel();
     order.dispatch(
@@ -5604,7 +5605,7 @@ async fn push_recording_permanent_refusal_delivers_failure_without_retrying() {
         .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
         .await;
     reply
-        .send(Err(mj_controller::worker_client::RelayRejected(
+        .send(Err(mj_session_runtime::worker_client::RelayRejected(
             mj_core::relay::RelayProtocolError {
                 code: mj_core::relay::RelayErrorCode::InvalidState,
                 message: "repository is gone".into(),
@@ -5668,7 +5669,7 @@ async fn push_recording_does_not_block_daemon_handoff() {
     if std::env::var_os(PROBE).is_none() {
         mj_core::runtime::spawn_blocking(|| {
             let root = tempfile::tempdir().unwrap();
-            mj_controller::controller::test_support::IsolatedTest::new(
+            mj_targets::test_isolation::IsolatedTest::new(
                 "review_host::tests::push_recording_does_not_block_daemon_handoff",
             )
             .env(PROBE, "1")
@@ -5690,9 +5691,9 @@ async fn push_recording_does_not_block_daemon_handoff() {
         .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
         .await;
     assert!(
-        mj_controller::upgrade::gate().try_close(),
+        mj_store::upgrade::gate().try_close(),
         "a worker recording wait must not hold daemon handoff admission: {:?}",
-        mj_controller::upgrade::gate().active_labels()
+        mj_store::upgrade::gate().active_labels()
     );
     tokio::time::timeout(Duration::from_secs(5), host.shutdown())
         .await
@@ -5719,7 +5720,7 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
         mj_core::runtime::spawn_blocking(|| {
             for kind in ["baseline", "override"] {
                 let root = tempfile::tempdir().unwrap();
-                mj_controller::controller::test_support::IsolatedTest::new(
+                mj_targets::test_isolation::IsolatedTest::new(
                     "review_host::tests::push_state_changes_do_not_block_daemon_handoff",
                 )
                 .env(PROBE, kind)
@@ -5761,7 +5762,7 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
             )
         })
         .await;
-    let mut order = mj_controller::session_manager::SessionRequestOrder::new();
+    let mut order = mj_session_runtime::session_manager::SessionRequestOrder::new();
     let (release, released) = oneshot::channel();
     let (prior_reply, _prior_result) = oneshot::channel();
     order.dispatch(
@@ -5795,9 +5796,9 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
         "role queue time must not expire the request"
     );
     assert!(
-        mj_controller::upgrade::gate().try_close(),
+        mj_store::upgrade::gate().try_close(),
         "worker queue holds admission: {:?}",
-        mj_controller::upgrade::gate().active_labels()
+        mj_store::upgrade::gate().active_labels()
     );
     tokio::time::timeout(Duration::from_secs(5), host.shutdown())
         .await

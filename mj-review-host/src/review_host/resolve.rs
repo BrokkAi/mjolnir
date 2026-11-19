@@ -2,11 +2,7 @@ use super::*;
 
 impl HostState {
     /// Cancel an open review or its preparation.
-    pub(super) fn resolve(
-        &mut self,
-        session_id: &str,
-        resolution: Resolution,
-    ) -> Result<(), String> {
+    pub fn resolve(&mut self, session_id: &str, resolution: Resolution) -> Result<(), String> {
         if resolution != Resolution::Cancelled {
             return Err(
                 "reviews deliver their verdict automatically; only Cancel is available".into(),
@@ -35,7 +31,7 @@ impl HostState {
     }
 
     /// Ends a review that cannot continue without advancing its baseline.
-    pub(super) fn fail(&mut self, session_id: &str, message: impl Into<String>) {
+    pub fn fail(&mut self, session_id: &str, message: impl Into<String>) {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
         };
@@ -51,7 +47,7 @@ impl HostState {
         self.run(session_id, requests);
     }
 
-    pub(super) fn run(&mut self, session_id: &str, requests: Vec<ReviewRequest>) {
+    pub fn run(&mut self, session_id: &str, requests: Vec<ReviewRequest>) {
         // Verdict delivery can discard the group. Transfer its child ownership
         // to supervised cleanup before that asynchronous delivery starts.
         for request in &requests {
@@ -116,7 +112,7 @@ impl HostState {
         true
     }
 
-    pub(super) fn retry_push_delivery(&mut self, session_id: &str, error: impl std::fmt::Display) {
+    pub fn retry_push_delivery(&mut self, session_id: &str, error: impl std::fmt::Display) {
         let (delay, epoch) = {
             let Some(slot) = self.reviews.get_mut(session_id) else {
                 return;
@@ -137,7 +133,7 @@ impl HostState {
     }
 }
 
-pub(super) async fn finish_push_delivery(
+pub async fn finish_push_delivery(
     environment: Arc<dyn ReviewEnvironment>,
     completion: PushCompletion,
 ) -> Result<(Box<TurnReviewState>, ReviewVerdict), String> {
@@ -193,7 +189,7 @@ pub(super) async fn finish_push_delivery(
         };
         if let Err(reason) = recorded {
             if reason
-                .downcast_ref::<mj_controller::worker_client::RelayRejected>()
+                .downcast_ref::<mj_session_runtime::worker_client::RelayRejected>()
                 .is_some_and(|rejected| !rejected.is_retryable())
             {
                 verdict = ReviewVerdict::Failed {
@@ -214,7 +210,7 @@ pub(super) async fn finish_push_delivery(
     }
     // Worker waits are resumable from the terminal snapshot and must not
     // delay handoff. Only the final durable delivery owns daemon admission.
-    let admission = mj_controller::upgrade::activity_unless_draining("push review verdict")
+    let admission = mj_store::upgrade::activity_unless_draining("push review verdict")
         .map_err(|error| format!("push review delivery deferred for daemon handoff: {error}"))?;
     if !delivery.begin_commit() {
         return Err("approval recording cancelled".into());
@@ -222,8 +218,8 @@ pub(super) async fn finish_push_delivery(
     state.active = None;
     state.active_group = None;
     let resolution = match &verdict {
-        ReviewVerdict::Failed { .. } => mj_controller::database::FinishedReviewResolution::Failed,
-        _ => mj_controller::database::FinishedReviewResolution::Completed,
+        ReviewVerdict::Failed { .. } => mj_store::database::FinishedReviewResolution::Failed,
+        _ => mj_store::database::FinishedReviewResolution::Completed,
     };
     let result = mj_core::runtime::spawn_blocking(move || {
         let _admission = admission;
@@ -256,7 +252,7 @@ pub(super) async fn finish_push_delivery(
     result
 }
 
-pub(super) async fn push_action(
+pub async fn push_action(
     control: &SessionManagerControl,
     session: &str,
     action: ReviewerAction,
@@ -274,7 +270,7 @@ pub(super) async fn push_action(
 // The transition to committing and user cancellation share one decision point.
 // Once committing starts there is no worker wait left to cancel.
 #[derive(Default)]
-pub(super) struct Delivery(std::sync::Mutex<DeliveryPhase>);
+pub struct Delivery(std::sync::Mutex<DeliveryPhase>);
 
 #[derive(Default)]
 enum DeliveryPhase {
@@ -313,7 +309,7 @@ impl Delivery {
         }
     }
 
-    pub(super) fn cancel(&self) -> bool {
+    pub fn cancel(&self) -> bool {
         let mut phase = self.0.lock().expect("review delivery poisoned");
         if matches!(*phase, DeliveryPhase::Committing) {
             return false;

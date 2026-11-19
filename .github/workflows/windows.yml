@@ -58,7 +58,7 @@ jobs:
       run: >-
         cargo test --no-fail-fast -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui
         -p brokk-mj-client -p brokk-mj-review -p brokk-mj-transcript
-        -p brokk-mjolnir -p brokk-mj-targets -p brokk-mj-store -p brokk-mj-accounts -p brokk-mj-import -p brokk-mj-sessionwiki -p brokk-mj-build-cache -p brokk-mj-worker-staging -p brokk-mj-worker-launch -p brokk-mj-session-runtime -p brokk-mj-profile-catalog
+        -p brokk-mjolnir -p brokk-mj-targets -p brokk-mj-store -p brokk-mj-accounts -p brokk-mj-import -p brokk-mj-sessionwiki -p brokk-mj-build-cache -p brokk-mj-worker-staging -p brokk-mj-worker-launch -p brokk-mj-session-runtime -p brokk-mj-review-host -p brokk-mj-profile-catalog
         -p brokk-mj-github-relevance
         -p brokk-mj-controller -p brokk-mj-setup -p brokk-mj-server
         -p brokk-mj-daemon

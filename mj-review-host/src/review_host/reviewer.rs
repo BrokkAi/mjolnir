@@ -10,7 +10,7 @@ use super::*;
 /// checkpoint refused the follow-up review's reviewer launch). Preparation has
 /// the same rule (`after_background_work`); this covers the running review.
 /// Any other error, or one that outlasts [`LIFECYCLE_WAIT`], is returned.
-pub(super) async fn reviewer_action(
+pub async fn reviewer_action(
     control: &SessionManagerControl,
     session_id: &str,
     _role: Option<String>,
@@ -58,7 +58,7 @@ pub(super) async fn reviewer_action(
 
 /// How long a running review's reviewer action waits out a foreground
 /// operation holding the session before the review reports the refusal.
-pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+pub const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The step of review preparation in progress.
 ///
@@ -66,7 +66,7 @@ pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from
 /// preparation names the step it spent its time in, and a cancellation says
 /// which step it interrupted (#1503).
 #[derive(Default)]
-pub(super) struct PreparationStages {
+pub struct PreparationStages {
     current: std::sync::Mutex<Option<(&'static str, std::time::Instant)>>,
 }
 
@@ -89,7 +89,7 @@ impl PreparationStages {
 
     /// The refusal for a preparation cancelled now, naming the step it
     /// stopped.
-    pub(super) fn cancelled(&self) -> String {
+    pub fn cancelled(&self) -> String {
         match *self
             .current
             .lock()
@@ -124,7 +124,7 @@ impl Drop for PreparationStage<'_> {
 /// Everything a review needs that only the database and the worker can answer.
 ///
 /// The caller cancels preparation by dropping this future.
-pub(super) async fn prepare(
+pub async fn prepare(
     control: &SessionManagerControl,
     environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
@@ -300,14 +300,14 @@ pub(super) async fn prepare(
 
 /// How long a review waits for other work holding its session, such as the
 /// automatic recovery copy the same finished turn starts, before it gives up.
-pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Hold the session's background work off its worker until the returned hold
 /// is dropped, waiting until `deadline` for work already running. Everything
 /// in the review host that sends reviewer work to the worker takes this first:
 /// the worker refuses that work while a recovery copy holds its checkpoint
 /// barrier, and only the gate behind this hold knows whether one is running.
-pub(super) async fn hold_background_work(
+pub async fn hold_background_work(
     environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
     deadline: tokio::time::Instant,
@@ -317,7 +317,7 @@ pub(super) async fn hold_background_work(
         .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))
 }
 
-pub(super) use mj_controller::review_selection::preempted_by_lifecycle;
+pub use mj_accounts::review_selection::preempted_by_lifecycle;
 
 /// Runs one step of review preparation, trying again while a lifecycle
 /// operation holds the session.
@@ -327,7 +327,7 @@ pub(super) use mj_controller::review_selection::preempted_by_lifecycle;
 /// cancel the capture or the reviewer choice. The step tries again until
 /// `deadline` instead of giving up. Cancelling the review drops this future.
 async fn after_background_work<T, Step, Attempt>(
-    gate: &Arc<mj_controller::recovery_gate::RecoveryGate>,
+    gate: &Arc<mj_store::recovery_gate::RecoveryGate>,
     session_id: &str,
     deadline: tokio::time::Instant,
     mut step: Step,
@@ -426,7 +426,7 @@ fn short_failure_reason(reason: &str) -> String {
 /// context boundary is intent. Nothing the primary agent wrote is included.
 /// The declined findings for the captured repositories are added when the
 /// review starts.
-pub(super) fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed {
+pub fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed {
     let mut task = String::new();
     let mut user_messages = Vec::new();
 

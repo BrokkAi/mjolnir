@@ -2,7 +2,7 @@ use super::*;
 
 impl HostState {
     /// Records one session's view for reviewer-child questions and recovery.
-    pub(super) async fn observe(
+    pub async fn observe(
         &mut self,
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
@@ -42,13 +42,15 @@ impl HostState {
         }
     }
 
-    pub(super) fn begin_push(
+    pub fn begin_push(
         &mut self,
         session_id: String,
         path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
-        let refusal = if mj_controller::controller::move_session::move_owns_session(&session_id) {
+        let refusal = if mj_session_runtime::session_manager::move_ownership::move_owns_session(
+            &session_id,
+        ) {
             Some("session is moving")
         } else if self.reviews.contains_key(&session_id) || self.preparing.contains_key(&session_id)
         {

@@ -2,7 +2,7 @@ use super::*;
 
 impl HostState {
     /// Reattach durable reviewer work without waiting for a worker turn.
-    pub(super) fn restore_group(
+    pub fn restore_group(
         &mut self,
         session_id: String,
         state: TurnReviewState,

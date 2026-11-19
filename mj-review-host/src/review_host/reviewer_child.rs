@@ -19,12 +19,12 @@ const CLOSE_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(300)
 /// 512-thread blocking pool and an unrelated blocking call waited up to 98
 /// seconds; at 128 in flight it waited under 60 milliseconds. 64 is twice the
 /// knee and an eighth of the pool.
-pub(super) const SWEEP_CLOSE_WIDTH: usize = 64;
+pub const SWEEP_CLOSE_WIDTH: usize = 64;
 
 /// What the closer has learned about one child's close: how many attempts in a
 /// row failed and the last failure it reported.
 #[derive(Default)]
-pub(super) struct CloseAttempts {
+pub struct CloseAttempts {
     failures: u32,
     last_failure: Option<String>,
     /// The restart sweep started this close, and its first result starts the
@@ -41,7 +41,7 @@ impl CloseAttempts {
         let report = self.last_failure.as_ref() != Some(&failure);
         self.last_failure = Some(failure);
         (
-            mj_controller::backoff::backoff_delay(CLOSE_RETRY_BASE, CLOSE_RETRY_CAP, self.failures),
+            mj_core::backoff::backoff_delay(CLOSE_RETRY_BASE, CLOSE_RETRY_CAP, self.failures),
             report,
         )
     }
@@ -96,12 +96,7 @@ fn settle_ended_reviewer(
 }
 
 impl HostState {
-    pub(super) fn register_reviewer_child(
-        &mut self,
-        session_id: &str,
-        role: String,
-        prompt: String,
-    ) {
+    pub fn register_reviewer_child(&mut self, session_id: &str, role: String, prompt: String) {
         let Some(slot) = self.reviews.get(session_id) else {
             return;
         };
@@ -177,7 +172,7 @@ impl HostState {
         });
     }
 
-    pub(super) fn child_registered(
+    pub fn child_registered(
         &mut self,
         session_id: String,
         epoch: u64,
@@ -223,7 +218,7 @@ impl HostState {
         self.publish(&session_id);
     }
 
-    pub(super) fn launch_reviewer_child(&self, session_id: &str, role: &str, fresh: bool) {
+    pub fn launch_reviewer_child(&self, session_id: &str, role: &str, fresh: bool) {
         let Some(slot) = self.reviews.get(session_id) else {
             return;
         };
@@ -248,8 +243,7 @@ impl HostState {
         }
         // Startup owns the relay command ID; driver role keys only identify
         // logical review work and are not the prompt the child answered.
-        let command_id =
-            mj_controller::database::startup_step_id(&registration.request_key, "prompt");
+        let command_id = mj_store::database::startup_step_id(&registration.request_key, "prompt");
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
@@ -311,7 +305,7 @@ impl HostState {
     /// Reads a reviewer's standing again after the delay the review uses for
     /// its other retries, until a read answers. The role is not settled in
     /// between: a failed read says nothing about whether it saved a handback.
-    pub(super) fn reviewer_standing_unread(
+    pub fn reviewer_standing_unread(
         &mut self,
         session_id: &str,
         epoch: u64,
@@ -343,7 +337,7 @@ impl HostState {
 
     /// An ended reviewer's report did not save. Report it again after the
     /// review's retry delay; the host holds no other record that it ended.
-    pub(super) fn reviewer_end_not_saved(&mut self, child: String, reason: String, error: String) {
+    pub fn reviewer_end_not_saved(&mut self, child: String, reason: String, error: String) {
         let Some(slot) = self.reviews.values_mut().find(|slot| {
             slot.state.active_group.as_ref().is_some_and(|group| {
                 group
@@ -366,7 +360,7 @@ impl HostState {
         });
     }
 
-    pub(super) fn close_reviewer_child(&mut self, session_id: &str) {
+    pub fn close_reviewer_child(&mut self, session_id: &str) {
         let children: Vec<_> = self
             .reviews
             .get(session_id)
@@ -380,7 +374,7 @@ impl HostState {
         }
     }
 
-    pub(super) fn close_reviewer_role(&mut self, session_id: &str, role: &str) {
+    pub fn close_reviewer_role(&mut self, session_id: &str, role: &str) {
         if let Some(child) = self
             .reviews
             .get(session_id)
@@ -393,7 +387,7 @@ impl HostState {
     }
 
     /// Starts the close of the next child the restart sweep queued, if any.
-    pub(super) fn close_next_swept_child(&mut self) {
+    pub fn close_next_swept_child(&mut self) {
         while let Some(child) = self.sweep_queue.pop_front() {
             if self
                 .child_closure_owners
@@ -414,7 +408,7 @@ impl HostState {
         }
     }
 
-    pub(super) fn close_child(&mut self, child: String) {
+    pub fn close_child(&mut self, child: String) {
         if self
             .child_closure_owners
             .values()
@@ -441,7 +435,7 @@ impl HostState {
             .insert(task.id(), (child, attempts));
     }
 
-    pub(super) fn child_closed(
+    pub fn child_closed(
         &mut self,
         result: Result<(tokio::task::Id, Result<(), String>), tokio::task::JoinError>,
     ) {
@@ -477,7 +471,7 @@ impl HostState {
         self.spawn_child_close(child, delay, attempts);
     }
 
-    pub(super) fn role_failed(
+    pub fn role_failed(
         &mut self,
         session_id: &str,
         epoch: u64,
@@ -528,7 +522,7 @@ impl HostState {
     /// outcome; without one its role fails, through [`Self::reviewer_finished`]
     /// like every other reviewer outcome, so the group resolves like any other
     /// reviewer failure.
-    pub(super) fn child_ended(&mut self, child: &str, reason: String) {
+    pub fn child_ended(&mut self, child: &str, reason: String) {
         let Some((session_id, epoch, role, command_id)) =
             self.reviews.iter().find_map(|(session_id, slot)| {
                 let group = slot.state.active_group.as_ref()?;
@@ -537,7 +531,7 @@ impl HostState {
                     .iter()
                     .find(|item| item.child_session_id.as_deref() == Some(child))?;
                 let command_id =
-                    mj_controller::database::startup_step_id(&registration.request_key, "prompt");
+                    mj_store::database::startup_step_id(&registration.request_key, "prompt");
                 Some((
                     session_id.clone(),
                     slot.epoch,
@@ -589,7 +583,7 @@ impl HostState {
         });
     }
 
-    pub(super) fn reviewer_finished(
+    pub fn reviewer_finished(
         &mut self,
         session_id: String,
         child_session_id: String,
@@ -668,7 +662,7 @@ impl HostState {
                     )
                 );
                 if settled {
-                    reports.push(mj_controller::database::AcceptedReport {
+                    reports.push(mj_store::database::AcceptedReport {
                         role: role.clone(),
                         text: answer,
                     });
@@ -720,7 +714,7 @@ impl HostState {
         }
     }
 
-    pub(super) fn reviewer_outcome_saved(
+    pub fn reviewer_outcome_saved(
         &mut self,
         session_id: String,
         epoch: u64,

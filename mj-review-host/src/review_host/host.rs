@@ -3,15 +3,15 @@ use super::*;
 /// A handle on the review host. Cheap to clone; every method is a message.
 #[derive(Clone)]
 pub struct TurnReviewHost {
-    pub(super) events: mpsc::UnboundedSender<HostEvent>,
-    pub(super) shared: Arc<HostShared>,
+    pub events: mpsc::UnboundedSender<HostEvent>,
+    pub shared: Arc<HostShared>,
 }
 
 /// What surfaces read without waiting for the host's task.
-pub(super) struct HostShared {
-    pub(super) views: Mutex<BTreeMap<String, RuntimeReviewView>>,
-    pub(super) changed: Arc<dyn Fn() + Send + Sync>,
-    pub(super) shutdown: tokio::sync::OnceCell<Result<(), String>>,
+pub struct HostShared {
+    pub views: Mutex<BTreeMap<String, RuntimeReviewView>>,
+    pub changed: Arc<dyn Fn() + Send + Sync>,
+    pub shutdown: tokio::sync::OnceCell<Result<(), String>>,
 }
 
 impl std::fmt::Debug for TurnReviewHost {
@@ -21,36 +21,6 @@ impl std::fmt::Debug for TurnReviewHost {
 }
 
 impl TurnReviewHost {
-    /// Starts the host's task, reviewing through the real controller.
-    #[must_use]
-    pub fn spawn(control: SessionManagerControl, config: ReviewConfigSource) -> Self {
-        Self::spawn_notifying(control, config, Arc::new(|| {}), None, Default::default())
-    }
-
-    /// Starts the production host and calls `changed` whenever a surface view
-    /// is added, changed, or removed. A review waits behind the background
-    /// work `background` coordinates, such as a recovery copy, rather than
-    /// racing it for the session.
-    #[must_use]
-    pub(crate) fn spawn_notifying(
-        control: SessionManagerControl,
-        config: ReviewConfigSource,
-        changed: Arc<dyn Fn() + Send + Sync>,
-        background: Option<Arc<mj_controller::recovery_gate::RecoveryGate>>,
-        runtime: super::environment::SharedReviewerRuntime,
-    ) -> Self {
-        Self::spawn_in_notifying(
-            control.clone(),
-            config,
-            Arc::new(ControllerEnvironment {
-                manager: Some(control),
-                runtime,
-                background,
-            }),
-            changed,
-        )
-    }
-
     /// The same, against a caller-supplied environment. `config` is read at
     /// each trigger decision.
     #[must_use]
@@ -63,7 +33,7 @@ impl TurnReviewHost {
     }
 
     #[must_use]
-    pub(super) fn spawn_in_notifying(
+    pub fn spawn_in_notifying(
         control: SessionManagerControl,
         config: ReviewConfigSource,
         environment: Arc<dyn ReviewEnvironment>,
@@ -204,10 +174,7 @@ impl TurnReviewHost {
     /// Whether `session_id` has a review open. The host's own slots answer, so
     /// callers never infer this from a copy of the review views. A session
     /// with an open review is waiting for its verdict.
-    pub(crate) async fn has_open_review(
-        &self,
-        session_id: &str,
-    ) -> Result<bool, OpenReviewUnknown> {
+    pub async fn has_open_review(&self, session_id: &str) -> Result<bool, OpenReviewUnknown> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::HasOpenReview {
@@ -219,8 +186,10 @@ impl TurnReviewHost {
     }
 
     /// Puts the host in the state a failed startup recovery leaves it in.
-    #[cfg(test)]
-    pub(crate) fn fail_startup_recovery(&self, error: &str) {
+    // For tests. Compiled always, so that mj-daemon's tests reach it without a
+    // Cargo feature that would give this crate a second build.
+    #[doc(hidden)]
+    pub fn fail_startup_recovery(&self, error: &str) {
         let _ = self
             .events
             .send(HostEvent::StartupRecoveryFailed(error.to_owned()));
@@ -229,7 +198,7 @@ impl TurnReviewHost {
     /// Hands a finished reviewer child to the host's closer. The host retries
     /// the close with backoff until it succeeds; callers must not close the
     /// child again themselves.
-    pub(crate) fn close_child(&self, child_session_id: String) {
+    pub fn close_child(&self, child_session_id: String) {
         let _ = self.events.send(HostEvent::CloseChild { child_session_id });
     }
 
@@ -237,14 +206,14 @@ impl TurnReviewHost {
     /// failed). The daemon's record owner calls this once per such transition.
     /// A role that already has an outcome, and a child no open group tracks,
     /// are left alone.
-    pub(crate) fn child_ended(&self, child_session_id: String, reason: String) {
+    pub fn child_ended(&self, child_session_id: String, reason: String) {
         let _ = self.events.send(HostEvent::ChildEnded {
             child_session_id,
             reason,
         });
     }
 
-    pub(crate) async fn reviewer_finished(
+    pub async fn reviewer_finished(
         &self,
         session_id: String,
         child_session_id: String,
@@ -261,7 +230,7 @@ impl TurnReviewHost {
     /// Reports that a reviewer's turn ended with no handback and says how the
     /// turn ended. A turn that was interrupted or rejected is not a reviewer
     /// that forgot to hand back, so the caller words the reason from the turn.
-    pub(crate) async fn reviewer_ended_without_handback(
+    pub async fn reviewer_ended_without_handback(
         &self,
         session_id: String,
         child_session_id: String,
@@ -347,7 +316,7 @@ impl TurnReviewHost {
             .cloned()
     }
 
-    pub(crate) async fn question_target(
+    pub async fn question_target(
         &self,
         session_id: &str,
         elicitation_id: &str,
@@ -368,7 +337,7 @@ impl TurnReviewHost {
 
 /// Why the host could not say whether a session has an open review.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OpenReviewUnknown {
+pub enum OpenReviewUnknown {
     /// Its startup recovery failed and it did not restore this session.
     RecoveryFailed(String),
     /// Its startup sweep has not finished restoring reviews yet.

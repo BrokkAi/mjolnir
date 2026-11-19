@@ -1,13 +1,13 @@
 use super::*;
 
 impl ReviewSlot {
-    pub(super) fn sync_group(&mut self) {
+    pub fn sync_group(&mut self) {
         if let Some(group) = self.state.active_group.as_mut() {
             group.driver = self.driver.snapshot();
         }
     }
 
-    pub(super) fn view(&self, session_id: &str) -> RuntimeReviewView {
+    pub fn view(&self, session_id: &str) -> RuntimeReviewView {
         let verdict = self.driver.last_verdict().map(|v| VerdictView {
             kind: match v {
                 ReviewVerdict::Clean => VerdictKind::Clean,
@@ -60,7 +60,7 @@ impl ReviewSlot {
     }
 }
 
-pub(super) fn answer(
+pub fn answer(
     reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     result: Result<(), StartRefusal>,
 ) {
@@ -69,7 +69,7 @@ pub(super) fn answer(
     }
 }
 
-pub(super) fn unexpected(outcome: Result<ReviewerOutcome, String>) -> String {
+pub fn unexpected(outcome: Result<ReviewerOutcome, String>) -> String {
     match outcome {
         Ok(other) => format!("unexpected reviewer response {other:?}"),
         Err(error) => error,

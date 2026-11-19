@@ -1,7 +1,7 @@
 use super::*;
 
 /// What the host's task processes, in order.
-pub(super) enum HostEvent {
+pub enum HostEvent {
     View {
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
@@ -153,7 +153,7 @@ pub(super) enum HostEvent {
 /// Why a reviewer's standing is being read, which decides what happens once
 /// a read answers after failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum StandingRead {
+pub enum StandingRead {
     /// Launching a reviewer restored after a restart.
     Restored,
     /// The reviewer's session ended; a handback it saved is its outcome.
@@ -164,14 +164,14 @@ pub(super) enum StandingRead {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PersistenceCompletion {
+pub enum PersistenceCompletion {
     Open,
     Captured,
-    Close(mj_controller::database::FinishedReviewResolution),
+    Close(mj_store::database::FinishedReviewResolution),
     LaunchChild { role: String },
 }
 
-pub(super) enum PersistenceRequest {
+pub enum PersistenceRequest {
     SweepInterrupted,
     Load {
         session_id: String,
@@ -189,7 +189,7 @@ pub(super) enum PersistenceRequest {
         state: Box<TurnReviewState>,
         /// The text the host settled this save's roles from, which the store
         /// writes verbatim instead of reading the child's mutable handback.
-        reports: Vec<mj_controller::database::AcceptedReport>,
+        reports: Vec<mj_store::database::AcceptedReport>,
         requests: Vec<ReviewRequest>,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -208,7 +208,7 @@ pub(super) enum PersistenceRequest {
 }
 
 /// One asynchronous step's result, belonging to exactly one review.
-pub(super) enum ReviewStep {
+pub enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
     PushDelivered(Result<(Box<TurnReviewState>, ReviewVerdict), String>),
     /// Delivery failed and the requesting session still exists, or could not
@@ -220,131 +220,131 @@ pub(super) enum ReviewStep {
 }
 
 /// Everything one blocking preparation gathered before a review can start.
-pub(super) struct Prepared {
+pub struct Prepared {
     pub seed: TurnReviewSeed,
-    pub(super) state: TurnReviewState,
-    pub(super) reviewers: Vec<ReviewerIdentity>,
+    pub state: TurnReviewState,
+    pub reviewers: Vec<ReviewerIdentity>,
     /// The brief writer, when the settings enable one and it resolved.
-    pub(super) brief_writer: Option<ReviewerIdentity>,
+    pub brief_writer: Option<ReviewerIdentity>,
     /// Why a configured brief writer will not run, for the requester.
-    pub(super) brief_skipped: Option<String>,
+    pub brief_skipped: Option<String>,
     /// Committed work captured before choosing reviewers.
-    pub(super) captured: Vec<mj_core::relay::RepoDelta>,
+    pub captured: Vec<mj_core::relay::RepoDelta>,
     /// Keeps recovery copies and worker upgrades off the session from
     /// preparation until the review closes; moved into the review's slot.
-    pub(super) background: Option<BackgroundHold>,
+    pub background: Option<BackgroundHold>,
 }
 
-pub(super) struct PendingOpen {
-    pub(super) epoch: u64,
-    pub(super) reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    pub(super) prepared: Prepared,
-    pub(super) driver: TurnReviewDriver,
-    pub(super) requests: Vec<ReviewRequest>,
+pub struct PendingOpen {
+    pub epoch: u64,
+    pub reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
+    pub prepared: Prepared,
+    pub driver: TurnReviewDriver,
+    pub requests: Vec<ReviewRequest>,
 }
 
-pub(super) type ReviewerIdentity = mj_core::review::settings::ResolvedReviewSettings;
+pub type ReviewerIdentity = mj_core::review::settings::ResolvedReviewSettings;
 
 /// What a reviewer child gave the host. Handbacks and ended sessions both
 /// arrive as reports, so [`HostState::reviewer_finished`] decides every
 /// reviewer outcome and failure one at a time, behind a saving outcome.
-pub(super) enum ReviewerReport {
+pub enum ReviewerReport {
     /// The text of its handback.
     Answer(String),
     /// It ended without one; the reason says why.
     Failed(String),
 }
 
-pub(super) struct ReviewerHandback {
-    pub(super) child_session_id: String,
-    pub(super) report: ReviewerReport,
-    pub(super) reply: oneshot::Sender<Result<(), String>>,
+pub struct ReviewerHandback {
+    pub child_session_id: String,
+    pub report: ReviewerReport,
+    pub reply: oneshot::Sender<Result<(), String>>,
 }
 
 /// One open review and its execution context.
-pub(super) struct ReviewSlot {
+pub struct ReviewSlot {
     /// Which review this is. Asynchronous results name it, and results that
     /// name another are dropped.
-    pub(super) epoch: u64,
-    pub(super) driver: TurnReviewDriver,
-    pub(super) reviewers: Vec<ReviewerIdentity>,
-    pub(super) state: TurnReviewState,
+    pub epoch: u64,
+    pub driver: TurnReviewDriver,
+    pub reviewers: Vec<ReviewerIdentity>,
+    pub state: TurnReviewState,
     /// Released when the slot is removed, which is how every review ends.
-    pub(super) _background: Option<BackgroundHold>,
-    pub(super) finishing: bool,
-    pub(super) delivery: Arc<super::resolve::Delivery>,
-    pub(super) retry_delay: std::time::Duration,
-    pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    pub(super) pending_outcome: Option<PendingOutcome>,
-    pub(super) queued_outcomes: Vec<ReviewerHandback>,
+    pub _background: Option<BackgroundHold>,
+    pub finishing: bool,
+    pub delivery: Arc<super::resolve::Delivery>,
+    pub retry_delay: std::time::Duration,
+    pub start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
+    pub pending_outcome: Option<PendingOutcome>,
+    pub queued_outcomes: Vec<ReviewerHandback>,
     /// Reviewers that ended while their handback waited in
     /// `queued_outcomes`, with the reason. That handback is their outcome, so
     /// no standing read is made yet; the entry moves to the save of that
     /// handback, which reports the end again if the save fails.
-    pub(super) ended_while_queued: BTreeMap<String, String>,
+    pub ended_while_queued: BTreeMap<String, String>,
 }
 
 /// The outcome being saved: the state to return to if the save fails, and the
 /// reviewer end that save is the only record of.
-pub(super) struct PendingOutcome {
-    pub(super) prior: TurnReviewState,
+pub struct PendingOutcome {
+    pub prior: TurnReviewState,
     /// The child and reason of an end noted while this handback was queued.
-    pub(super) ended: Option<(String, String)>,
+    pub ended: Option<(String, String)>,
 }
 
 impl ReviewSlot {
     /// The wait before the next retry of anything this review retries
     /// (push delivery, a restored reviewer's standing read); each call
     /// doubles the next wait up to 30 s.
-    pub(super) fn take_retry_delay(&mut self) -> std::time::Duration {
+    pub fn take_retry_delay(&mut self) -> std::time::Duration {
         let delay = self.retry_delay;
         self.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
         delay
     }
 }
 
-pub(super) struct HostState {
-    pub(super) control: SessionManagerControl,
-    pub(super) config: ReviewConfigSource,
-    pub(super) environment: Arc<dyn ReviewEnvironment>,
-    pub(super) shared: Arc<HostShared>,
-    pub(super) events: mpsc::UnboundedSender<HostEvent>,
-    pub(super) persistence: Option<mpsc::UnboundedSender<PersistenceRequest>>,
-    pub(super) persistence_task: Option<tokio::task::JoinHandle<()>>,
-    pub(super) child_closures: tokio::task::JoinSet<Result<(), String>>,
-    pub(super) child_closure_owners:
+pub struct HostState {
+    pub control: SessionManagerControl,
+    pub config: ReviewConfigSource,
+    pub environment: Arc<dyn ReviewEnvironment>,
+    pub shared: Arc<HostShared>,
+    pub events: mpsc::UnboundedSender<HostEvent>,
+    pub persistence: Option<mpsc::UnboundedSender<PersistenceRequest>>,
+    pub persistence_task: Option<tokio::task::JoinHandle<()>>,
+    pub child_closures: tokio::task::JoinSet<Result<(), String>>,
+    pub child_closure_owners:
         BTreeMap<tokio::task::Id, (String, super::reviewer_child::CloseAttempts)>,
     /// Reviewer children a restart found finished, closed [`SWEEP_CLOSE_WIDTH`]
     /// at a time. An old store holds tens of thousands (19,196 in the live
     /// one). A close that fails retries on its own, outside this queue.
-    pub(super) sweep_queue: std::collections::VecDeque<String>,
-    pub(super) reviews: BTreeMap<String, ReviewSlot>,
+    pub sweep_queue: std::collections::VecDeque<String>,
+    pub reviews: BTreeMap<String, ReviewSlot>,
     /// Sessions whose review is being prepared. Preparation is asynchronous,
     /// so without this an automatic trigger and a manual `/review` racing each
     /// other would both create a review and the second would overwrite the
     /// first.
-    pub(super) preparing: BTreeMap<String, PreparingOperation>,
+    pub preparing: BTreeMap<String, PreparingOperation>,
     /// Reviews whose durable active marker is being written. They are not
     /// visible and start no agents until that write succeeds.
-    pub(super) pending_open: BTreeMap<String, PendingOpen>,
+    pub pending_open: BTreeMap<String, PendingOpen>,
     /// Reviews whose durable active marker is being cleared. Their resolved
     /// view remains until the ordered write completes.
-    pub(super) closing: BTreeSet<String>,
-    pub(super) awaiting_capture_persistence: BTreeMap<String, Vec<ReviewRequest>>,
+    pub closing: BTreeSet<String>,
+    pub awaiting_capture_persistence: BTreeMap<String, Vec<ReviewRequest>>,
     /// Distinguishes reviews. Every asynchronous step carries the epoch of the
     /// review that asked for it, so a late result cannot land on its
     /// successor.
-    pub(super) next_epoch: u64,
+    pub next_epoch: u64,
     /// The last view seen per session: its execution state, for the
     /// Running→Idle edge, and its materialized transcript, for the seed.
-    pub(super) sessions: BTreeMap<String, SessionWatch>,
-    pub(super) startup_ready: bool,
-    pub(super) startup_failure: Option<String>,
-    pub(super) deferred_handbacks: Vec<(String, ReviewerHandback)>,
-    pub(super) deferred_admissions: Vec<HostEvent>,
+    pub sessions: BTreeMap<String, SessionWatch>,
+    pub startup_ready: bool,
+    pub startup_failure: Option<String>,
+    pub deferred_handbacks: Vec<(String, ReviewerHandback)>,
+    pub deferred_admissions: Vec<HostEvent>,
 }
 
-pub(super) enum PreparingOperation {
+pub enum PreparingOperation {
     Review {
         /// The one record of whether the review was cancelled before it
         /// opened. Preparation races it, so cancelling stops whichever
@@ -358,14 +358,11 @@ pub(super) enum PreparingOperation {
     },
 }
 
-pub(super) struct SessionWatch {
-    pub(super) materialized: Option<Box<MaterializedSession>>,
+pub struct SessionWatch {
+    pub materialized: Option<Box<MaterializedSession>>,
 }
 
-pub(super) async fn host_loop(
-    mut state: HostState,
-    mut events: mpsc::UnboundedReceiver<HostEvent>,
-) {
+pub async fn host_loop(mut state: HostState, mut events: mpsc::UnboundedReceiver<HostEvent>) {
     loop {
         tokio::select! {
             event = events.recv() => {
@@ -379,7 +376,7 @@ pub(super) async fn host_loop(
     }
 }
 
-pub(super) async fn persistence_loop(
+pub async fn persistence_loop(
     environment: Arc<dyn ReviewEnvironment>,
     events: mpsc::UnboundedSender<HostEvent>,
     mut requests: mpsc::UnboundedReceiver<PersistenceRequest>,
@@ -431,7 +428,7 @@ pub(super) async fn persistence_loop(
                 reply,
             } => {
                 // Only local persistence holds admission, never worker queues.
-                let admission = match mj_controller::upgrade::activity_unless_draining(operation) {
+                let admission = match mj_store::upgrade::activity_unless_draining(operation) {
                     Ok(admission) => admission,
                     Err(error) => {
                         let _ = reply.send(Err(format!("review state save deferred for daemon handoff: {error}; repeat the request after restart")));
@@ -605,13 +602,13 @@ pub(super) async fn persistence_loop(
     }
 }
 
-pub(super) struct PushCompletion {
-    pub(super) session_id: String,
-    pub(super) epoch: u64,
-    pub(super) review_id: String,
-    pub(super) control: SessionManagerControl,
-    pub(super) state: TurnReviewState,
-    pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
-    pub(super) verdict: ReviewVerdict,
-    pub(super) delivery: Arc<super::resolve::Delivery>,
+pub struct PushCompletion {
+    pub session_id: String,
+    pub epoch: u64,
+    pub review_id: String,
+    pub control: SessionManagerControl,
+    pub state: TurnReviewState,
+    pub deltas: Vec<mj_core::relay::RepoDelta>,
+    pub verdict: ReviewVerdict,
+    pub delivery: Arc<super::resolve::Delivery>,
 }

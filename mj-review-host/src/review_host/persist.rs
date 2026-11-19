@@ -1,12 +1,12 @@
 use super::*;
 
 /// What the requester is told when the reviewers run without a brief.
-pub(super) fn brief_skipped_notice(reason: &str) -> String {
+pub fn brief_skipped_notice(reason: &str) -> String {
     format!("Review started without a relation brief: {reason}")
 }
 
 impl HostState {
-    pub(super) fn prepared(
+    pub fn prepared(
         &mut self,
         session_id: String,
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
@@ -157,7 +157,7 @@ impl HostState {
         }
     }
 
-    pub(super) fn state_saved(
+    pub fn state_saved(
         &mut self,
         session_id: String,
         completion: PersistenceCompletion,
@@ -283,7 +283,7 @@ impl HostState {
         }
     }
 
-    pub(super) fn persist(
+    pub fn persist(
         &self,
         session_id: String,
         state: TurnReviewState,

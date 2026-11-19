@@ -3,7 +3,7 @@ use super::*;
 impl HostState {
     /// Returns true once shutdown has drained persistence and the host loop may
     /// stop.
-    pub(super) async fn handle(&mut self, event: HostEvent) -> bool {
+    pub async fn handle(&mut self, event: HostEvent) -> bool {
         if let Some(reason) = &self.startup_failure {
             // A group restored before recovery failed still runs: its events,
             // and questions about whether it is open, are answered as usual.
@@ -317,7 +317,7 @@ impl HostState {
     }
 
     /// Applies one asynchronous result to the review that asked for it.
-    pub(super) fn step(&mut self, session_id: String, epoch: u64, step: ReviewStep) {
+    pub fn step(&mut self, session_id: String, epoch: u64, step: ReviewStep) {
         // A result from a review that has since been cancelled, resolved, or
         // replaced is not this review's business.
         if self.reviews.get(&session_id).map(|slot| slot.epoch) != Some(epoch) {
@@ -410,7 +410,7 @@ impl HostState {
     /// the review through [`ReviewStep::OwnerGone`]; otherwise, including when
     /// the lookup fails, `otherwise` is applied and the caller's own retry
     /// stands. The lookup runs off the host loop.
-    pub(super) fn drop_review_if_owner_gone(
+    pub fn drop_review_if_owner_gone(
         &self,
         session_id: &str,
         epoch: u64,
@@ -457,7 +457,7 @@ impl HostState {
     /// set, so a stopped or destroyed session's `MaterializedSession` (its full
     /// transcript) does not linger. The in-flight review state in `reviews`/
     /// `closing` is separate and keeps its own lifetime.
-    pub(super) fn retain_sessions(&mut self, live: &std::collections::BTreeSet<String>) {
+    pub fn retain_sessions(&mut self, live: &std::collections::BTreeSet<String>) {
         let removed: Vec<_> = self
             .reviews
             .keys()

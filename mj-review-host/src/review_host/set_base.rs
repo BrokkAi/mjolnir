@@ -1,7 +1,7 @@
 use super::*;
 
 impl HostState {
-    pub(super) fn set_push_base(
+    pub fn set_push_base(
         &mut self,
         session_id: String,
         commit: String,

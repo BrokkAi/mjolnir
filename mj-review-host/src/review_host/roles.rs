@@ -1,7 +1,7 @@
 use super::*;
 
 impl HostState {
-    pub(super) fn run_one(&mut self, session_id: &str, request: ReviewRequest) {
+    pub fn run_one(&mut self, session_id: &str, request: ReviewRequest) {
         match request {
             ReviewRequest::CaptureDelta => {
                 self.review_step(
@@ -54,15 +54,15 @@ impl HostState {
                     };
                     let resolution = match slot.driver.phase() {
                         TurnReviewPhase::Resolved(Resolution::Cancelled) => {
-                            mj_controller::database::FinishedReviewResolution::Cancelled
+                            mj_store::database::FinishedReviewResolution::Cancelled
                         }
                         _ => match slot.driver.last_verdict() {
                             Some(ReviewVerdict::Failed { .. }) => {
-                                mj_controller::database::FinishedReviewResolution::Failed
+                                mj_store::database::FinishedReviewResolution::Failed
                             }
-                            Some(_) => mj_controller::database::FinishedReviewResolution::Completed,
+                            Some(_) => mj_store::database::FinishedReviewResolution::Completed,
                             // A cleared review without a verdict was cancelled.
-                            None => mj_controller::database::FinishedReviewResolution::Cancelled,
+                            None => mj_store::database::FinishedReviewResolution::Cancelled,
                         },
                     };
                     answer(slot.start_reply.take(), outcome);

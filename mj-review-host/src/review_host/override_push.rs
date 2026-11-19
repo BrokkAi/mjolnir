@@ -40,7 +40,7 @@ fn validated_overrides(
 }
 
 impl HostState {
-    pub(super) fn override_push(
+    pub fn override_push(
         &mut self,
         session_id: String,
         overrides: Vec<ReviewOverride>,
@@ -68,10 +68,11 @@ impl HostState {
     }
 
     /// Why a push-review state change cannot start now, with how to proceed.
-    pub(super) fn push_operation_refusal(&self, session_id: &str) -> Option<&'static str> {
+    pub fn push_operation_refusal(&self, session_id: &str) -> Option<&'static str> {
         if !(self.config)(session_id).is_push() {
             Some("this session's review trigger is not push; this tool only works for push review")
-        } else if mj_controller::controller::move_session::move_owns_session(session_id) {
+        } else if mj_session_runtime::session_manager::move_ownership::move_owns_session(session_id)
+        {
             Some("session is moving; try again after the move finishes")
         } else if self.reviews.contains_key(session_id) || self.preparing.contains_key(session_id) {
             Some("a review is open; wait for its verdict or cancel it, then try again")
@@ -82,7 +83,7 @@ impl HostState {
 
     /// Runs one push-review operation that changes recorded review state in a
     /// task, holding the session's `preparing` slot until it finishes.
-    pub(super) fn spawn_operation<F>(
+    pub fn spawn_operation<F>(
         &mut self,
         session_id: String,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
@@ -143,7 +144,7 @@ impl HostState {
         self.publish(&session_id);
     }
 
-    pub(super) fn override_finished(&mut self, session_id: &str) {
+    pub fn override_finished(&mut self, session_id: &str) {
         if let Some(PreparingOperation::Override {
             mut result, reply, ..
         }) = self.preparing.remove(session_id)

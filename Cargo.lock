@@ -856,6 +856,7 @@ dependencies = [
  "brokk-mj-core",
  "brokk-mj-github-relevance",
  "brokk-mj-review",
+ "brokk-mj-review-host",
  "brokk-mj-server",
  "brokk-mj-setup",
  "brokk-mj-transcript",
@@ -968,6 +969,27 @@ version = "2.72.0"
 dependencies = [
  "brokk-mj-core",
  "serde_json",
+]
+
+[[package]]
+name = "brokk-mj-review-host"
+version = "2.72.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-accounts",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-review",
+ "brokk-mj-session-runtime",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "futures",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

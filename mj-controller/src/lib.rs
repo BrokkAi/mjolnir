@@ -8,9 +8,9 @@
     allow(dead_code, unused_imports)
 )]
 
-pub mod backoff;
 pub use mj_accounts::claude_usage;
 pub use mj_accounts::login_terminal;
+pub use mj_core::backoff;
 pub use mj_worker_launch::launch_timing;
 pub use mj_worker_launch::local_profile_homes;
 
