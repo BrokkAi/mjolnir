@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Cold index and warm-restart re-index cost of Bifrost on candidate Rust repos.
+"""Cold index and warm-restart re-index cost of Bifrost on candidate Rust repos (EC2 only).
 
-Usage: measure_index.py REPOS.txt CLONES_DIR BIFROST_BIN OUT_DIR
+Usage: measure_index.py PINS.txt CLONES_DIR BIFROST_BIN OUT_DIR
 
-For each owner__repo: clone it from /nfs/morannon (read only) into CLONES_DIR if absent,
-add a detached worktree at HEAD~50 (first-parent), start a resident `bifrost --mcp` with a
-fresh cache root, and poll get_active_workspace until analyzer, usage index and semantic
-packs are ready and the workspace build has completed (the readiness rule of the
-incremental-acceptance bench, bench.py). Then stop it, move the worktree to HEAD, start
-again on the same cache root, and time readiness again. Records wall, CPU (server process
-tree, from RUSAGE_CHILDREN after it exits), peak RSS and cache bytes per phase, one JSON
-line per repo, resuming past repos already written.
+PINS.txt lines are `owner__repo <sha> <origin url>`. For each repo: clone it from its origin
+into CLONES_DIR, add a detached worktree at <sha>~50 (first parent), and start a resident
+`bifrost --mcp` in its own memory-capped systemd scope with a fresh cache root. Poll
+get_active_workspace until analyzer, usage index and semantic packs are ready and the workspace
+build has completed (the incremental-acceptance bench's readiness rule). Then stop it, move the
+worktree to <sha>, start again on the same cache, and time readiness again. Per phase it records
+wall time, the scope's CPU up to the ready reply (cpu_to_ready_usec, used for ranking), the
+scope's whole-tree peak memory, the scope's result (oom-kill) and cache size: one JSON line per
+repo, resuming past matching records.
 """
 import json
 import os
@@ -23,7 +24,6 @@ import sys
 import threading
 import time
 
-SRC = pathlib.Path("/nfs/morannon/nvme/repo-clones")
 ENV = {"BIFROST_OPEN_PACKS_DISABLE": "1", "BIFROST_SEMANTIC_PACK_DOWNLOAD": "off",
        "GIT_NO_LAZY_FETCH": "1", "GIT_LFS_SKIP_SMUDGE": "1"}  # mjolnir-warm-tools.json
 
@@ -38,6 +38,16 @@ READINESS_SECONDS = 3600
 MEMORY_MAX = os.environ.get("RQL_INDEX_MEMORY_MAX", "48G")
 REQUEST_SECONDS = 600
 STOP_SECONDS = 120
+
+
+# SIGTERM/SIGINT never raise into the driver: they set CANCEL, which the request and readiness
+# waits poll, so cancellation always runs through the ordinary teardown path (one owner, no
+# window between launching a server and protecting it).
+CANCEL = threading.Event()
+
+
+class Cancelled(RuntimeError):
+    """The operator cancelled the batch; the current server is torn down normally."""
 
 
 class TeardownUnconfirmed(RuntimeError):
@@ -126,9 +136,13 @@ class Server:
         self.proc.stdin.flush()
         deadline = min(time.monotonic() + REQUEST_SECONDS, deadline or float("inf"))
         while True:
+            if CANCEL.is_set():
+                raise Cancelled("cancelled while waiting for a reply")
             try:
-                line = self.lines.get(timeout=max(0, deadline - time.monotonic()))
+                line = self.lines.get(timeout=max(0, min(1.0, deadline - time.monotonic())))
             except queue.Empty:
+                if time.monotonic() < deadline:
+                    continue
                 raise TimeoutError(f"no reply to {method} before its deadline (request {REQUEST_SECONDS} s, "
                                    f"readiness {READINESS_SECONDS} s)")
             if not line:
@@ -155,7 +169,8 @@ class Server:
             if err:
                 incomplete = (err.get("data") or {}).get("io.bifrost/workspace-incomplete") or {}
                 if incomplete.get("reason") == "busy":
-                    time.sleep(1)
+                    if CANCEL.wait(1):
+                        raise Cancelled("cancelled while waiting for readiness")
                     continue
                 raise RuntimeError(f"readiness error: {json.dumps(err)[:1000]}")
             result = msg["result"]
@@ -168,28 +183,17 @@ class Server:
             if all(payload.get(k) is True for k in ("analyzer_ready", "usage_index_ready", "semantic_packs_ready")) \
                     and status in ("ready", "complete", "completed"):
                 return payload, polls
-            time.sleep(1)
+            if CANCEL.wait(1):
+                raise Cancelled("cancelled while waiting for readiness")
 
 
     def stop(self):
-        # Teardown is bounded (each wait is STOP_SECONDS) and must finish: defer SIGTERM/SIGINT
-        # until the scope is proven gone, then honor them.
-        import signal
-        pending = []
-        handlers = {sig: signal.signal(sig, lambda signum, _f: pending.append(signum))
-                    for sig in (signal.SIGTERM, signal.SIGINT)}
         try:
-            rc = self._stop()
+            return self._stop()
         except TeardownUnconfirmed:
             raise
         except BaseException as e:  # any failure before the proof leaves the tree unaccounted for
             raise TeardownUnconfirmed(f"{self.unit}.scope: teardown failed before confirmation: {e!r}") from e
-        finally:
-            for sig, handler in handlers.items():
-                signal.signal(sig, handler)
-        if pending:  # the tree is proven gone; now honor the deferred signal
-            sys.exit(128 + pending[0])
-        return rc
 
     def _stop(self):
         try:
@@ -203,7 +207,7 @@ class Server:
         scope = f"{self.unit}.scope"
         # Stop the scope in every case: it kills the whole process tree (Bifrost and anything it
         # started). Then verify the tree is gone before the caller touches the worktree or cache.
-        stopped = subprocess.run(["systemctl", "--user", "stop", scope], capture_output=True, text=True)
+        stopped = run_bounded(["systemctl", "--user", "stop", scope], capture_output=True, text=True)
         if rc is None:
             try:
                 rc = self.proc.wait(timeout=STOP_SECONDS)
@@ -217,7 +221,7 @@ class Server:
         # neither), and its cgroup holds no process. Anything else stops the batch for this repo.
         deadline = time.monotonic() + STOP_SECONDS
         while True:
-            state = subprocess.run(["systemctl", "--user", "show", scope, "-p", "ActiveState", "--value"],
+            state = run_bounded(["systemctl", "--user", "show", scope, "-p", "ActiveState", "--value"],
                                    capture_output=True, text=True).stdout.strip()
             procs = ""
             if self.cgroup:
@@ -238,10 +242,16 @@ class Server:
                                    f"stop exit {stopped.returncode}: {stopped.stderr.strip()[-200:]}); "
                                    "refusing to touch its worktree")
             time.sleep(1)
-        subprocess.run(["systemctl", "--user", "reset-failed", scope], capture_output=True)
+        run_bounded(["systemctl", "--user", "reset-failed", scope], capture_output=True)
         self.sampling = False
         self.log.close()
         return rc
+
+
+def run_bounded(cmd, **kw):
+    """A systemctl call that can't stall teardown: it raises TimeoutExpired after STOP_SECONDS,
+    which teardown turns into TeardownUnconfirmed and the reaper into an exit."""
+    return subprocess.run(cmd, timeout=STOP_SECONDS, **kw)
 
 
 def du(path):
@@ -270,12 +280,12 @@ def phase(binary, root, cache, log):
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
     except Exception as e:
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
-    except BaseException:
-        # Interrupted (Ctrl-C, or SIGTERM from stopping the driver unit, which doesn't reach the
-        # server's separate scope): tear the tree down before propagating.
-        server.stop()
-        raise
     rec["exit"] = server.stop()
+    if rec.get("ready") and rec["exit"] != 0:
+        # A crash or kill after the ready reply can leave the cache half-persisted: the pair
+        # isn't a valid cold/warm measurement.
+        rec["ready"] = False
+        rec["error"] = f"unclean shutdown after ready (exit {rec['exit']})"
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
     if rec.get("scope_result") == "oom-kill" or rec.get("oom_kill"):
         # Hitting the cap at any point, even after a ready reply, invalidates the phase.
@@ -310,9 +320,9 @@ def require_ec2():
     probe = f"rql-cap-probe-{os.getpid()}"
     subprocess.run(["systemd-run", "--user", "--scope", "--quiet", f"--unit={probe}", "-p", "MemoryMax=64M",
                     "-p", "MemorySwapMax=0", sys.executable, "-c", "x = bytearray(256 * 2**20)"], capture_output=True)
-    result = subprocess.run(["systemctl", "--user", "show", f"{probe}.scope", "-p", "Result", "--value"],
+    result = run_bounded(["systemctl", "--user", "show", f"{probe}.scope", "-p", "Result", "--value"],
                             capture_output=True, text=True).stdout.strip()
-    subprocess.run(["systemctl", "--user", "reset-failed", f"{probe}.scope"], capture_output=True)
+    run_bounded(["systemctl", "--user", "reset-failed", f"{probe}.scope"], capture_output=True)
     if result != "oom-kill":
         sys.exit(f"the user manager doesn't enforce MemoryMax (probe result {result!r}); refusing to index")
 
@@ -322,15 +332,15 @@ def reap_leftover_scopes():
     The driver runs one server at a time, so any live rql-bifrost scope at startup belongs to an
     earlier invocation whose stop couldn't be confirmed. If one survives, exit without touching
     any worktree or cache."""
-    units = subprocess.run(["systemctl", "--user", "list-units", "--all", "--type=scope", "--no-legend", "--plain"],
+    units = run_bounded(["systemctl", "--user", "list-units", "--all", "--type=scope", "--no-legend", "--plain"],
                            capture_output=True, text=True, check=True).stdout.split("\n")
     for unit in [u.split()[0] for u in units if u.strip().startswith("rql-bifrost-")]:
-        subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True)
+        run_bounded(["systemctl", "--user", "stop", unit], capture_output=True)
         deadline = time.monotonic() + STOP_SECONDS
         while True:
-            state = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"],
+            state = run_bounded(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"],
                                    capture_output=True, text=True).stdout.strip()
-            cg = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ControlGroup", "--value"],
+            cg = run_bounded(["systemctl", "--user", "show", unit, "-p", "ControlGroup", "--value"],
                                 capture_output=True, text=True).stdout.strip()
             try:
                 procs = open(f"/sys/fs/cgroup{cg}/cgroup.procs").read().strip() if cg else ""
@@ -338,7 +348,7 @@ def reap_leftover_scopes():
                 procs = ""
             # "failed" can follow a stop timeout with a process still alive: require an empty cgroup.
             if state in ("inactive", "failed") and not procs:
-                subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True)
+                run_bounded(["systemctl", "--user", "reset-failed", unit], capture_output=True)
                 break
             if time.monotonic() > deadline:
                 sys.exit(f"leftover {unit} won't stop (state={state!r}); refusing to clean up any worktree")
@@ -347,7 +357,8 @@ def reap_leftover_scopes():
 
 def main():
     import signal
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: CANCEL.set())
     require_ec2()
     # One driver per host: a second invocation would reap the first's live scopes and race on
     # its worktrees. The lock is held for the process lifetime.
@@ -358,10 +369,13 @@ def main():
     except BlockingIOError:
         sys.exit("another measure_index.py is running on this host")
     reap_leftover_scopes()
-    # Each line is `owner__repo`, or `owner__repo <pinned sha> <origin url>`. The pinned form
-    # clones from the origin (for hosts without /nfs/morannon) and measures at that commit.
+    # Each line is `owner__repo <pinned sha> <origin url>`: the repo is cloned from its origin
+    # and measured at that commit, so a reused record always matches its revision.
     entries = [l.split() for l in open(sys.argv[1]) if l.strip()]
-    pins = {e[0]: (e[1], e[2]) for e in entries if len(e) >= 3}
+    bad = [e for e in entries if len(e) < 3]
+    if bad:
+        sys.exit(f"every line needs `owner__repo <pinned sha> <origin url>`; unpinned: {bad[:3]}")
+    pins = {e[0]: (e[1], e[2]) for e in entries}
     repos = [e[0] for e in entries]
     clones, binary, out = pathlib.Path(sys.argv[2]).resolve(), str(pathlib.Path(sys.argv[3]).resolve()), pathlib.Path(sys.argv[4]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -380,28 +394,25 @@ def main():
     done = {repo for repo, r in latest.items()
             if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))
             and r.get("binary_sha256") == binary_sha and r.get("memory_max") == MEMORY_MAX
-            and (repo not in pins or r.get("head") == pins[repo][0])}
+            and r.get("head") == pins[repo][0]}
     for repo in repos:
+        if CANCEL.is_set():
+            sys.exit("cancelled; the last server's scope was torn down")
         if repo in done:
             continue
         rec = {"repo": repo}
         try:
             clone = clones / repo
-            if repo in pins:
-                sha, url = pins[repo]
-                url = url.replace("git@github.com:", "https://github.com/")
-                if not clone.exists():
-                    git("clone", "-q", "--no-checkout", url, str(clone))
-                try:
-                    head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
-                except subprocess.CalledProcessError:
-                    # A revised pin can name a commit newer than this clone: fetch it, then retry.
-                    git("fetch", "-q", "origin", sha, cwd=clone)
-                    head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
-            else:
-                if not clone.exists():
-                    git("clone", "-q", "--no-hardlinks", str(SRC / repo), str(clone))
-                head = git("rev-parse", "HEAD", cwd=clone)
+            sha, url = pins[repo]
+            url = url.replace("git@github.com:", "https://github.com/")
+            if not clone.exists():
+                git("clone", "-q", "--no-checkout", url, str(clone))
+            try:
+                head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
+            except subprocess.CalledProcessError:
+                # A revised pin can name a commit newer than this clone: fetch it, then retry.
+                git("fetch", "-q", "origin", sha, cwd=clone)
+                head = git("rev-parse", f"{sha}^{{commit}}", cwd=clone)
             base = git("rev-parse", f"{head}~50", cwd=clone)  # first parent
             wt = out / "wt" / repo
             # A previous run may have left this worktree (registered or not). Its server scope is
