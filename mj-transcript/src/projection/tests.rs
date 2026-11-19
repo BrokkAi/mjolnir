@@ -3877,3 +3877,56 @@ fn an_autonomous_turn_settlement_carries_its_work_facts_into_the_outcome() {
     let outcome = session.last_turn_outcome.as_ref().unwrap();
     assert_eq!(outcome.work_facts.as_ref(), Some(&facts));
 }
+
+// Hard-won: 5c9e20e: live recovery replaced a provider's selectable replacement with a withdrawn accepted model.
+#[test]
+fn live_recovery_prefers_a_selectable_provider_model_over_the_previous_selection() {
+    use mj_core::relay::{LiveSessionBaseline, RelaySnapshot, apply_relay_event};
+    for (current, offered, expected) in [
+        ("replacement", vec!["replacement"], "replacement"),
+        (
+            "replacement",
+            vec!["previous", "replacement"],
+            "replacement",
+        ),
+        ("unselectable-transcript-id", vec!["previous"], "previous"),
+    ] {
+        let mut replay = MaterializedSession::empty("model-recovery");
+        replay
+            .configuration
+            .values
+            .insert("model".into(), json!("previous"));
+        let mut worker = RelaySnapshot::new("model-recovery".into());
+        worker.config.insert("model".into(), "previous".into());
+        let next = event(&replay, RelayObservation::SessionUpdate {
+            update: Box::new(serde_json::from_value(json!({
+                "sessionUpdate":"config_option_update", "configOptions":[{
+                    "id":"model", "name":"Model", "type":"select", "currentValue":current,
+                    "options":offered.iter().map(|value| json!({"value":value,"name":value})).collect::<Vec<_>>()
+                }]
+            })).unwrap()),
+        });
+        apply_relay_event(&mut worker, &next).unwrap();
+        apply(&mut replay, next);
+        let baseline = LiveSessionBaseline {
+            state: worker.operational_state(),
+            queue: vec![],
+            questions: vec![],
+            unavailable_questions: 0,
+            native_agent_replay: None,
+            native_use_evidence: None,
+            delivered_initial_prompts: vec![],
+        };
+        let recovered = materialized_session_from_live_baseline(&baseline).unwrap();
+        assert_eq!(recovered.configuration.values["model"], json!(expected));
+        if current == "replacement" {
+            assert_eq!(
+                recovered.configuration.values["model"],
+                replay.configuration.values["model"]
+            );
+        }
+        let canonical = canonical_session_from_materialized(&recovered).unwrap();
+        let restored = materialized_session_from_canonical("model-recovery", &canonical).unwrap();
+        assert_eq!(restored.configuration.values["model"], json!(expected));
+    }
+}

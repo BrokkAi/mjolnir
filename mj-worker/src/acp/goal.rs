@@ -28,11 +28,14 @@ async fn record_resume_rejection(
     resume_id: Option<u64>,
     error: &agent_client_protocol::Error,
 ) -> Result<()> {
-    // SDK failed sends and lost response channels use INTERNAL_ERROR, never
-    // these remote method/parameter rejections (jsonrpc PreparedRequest/block_task).
+    // SDK outgoing _session/goal publication and lost response failures use
+    // INTERNAL_ERROR (5.0.0 jsonrpc PreparedRequest/block_task). Its local
+    // INVALID_REQUEST constructors handle initialize rewriting/incoming batches,
+    // not this object-valued goal request; these rejections came from the peer.
     if matches!(
         error.code,
-        agent_client_protocol::ErrorCode::INVALID_PARAMS
+        agent_client_protocol::ErrorCode::INVALID_REQUEST
+            | agent_client_protocol::ErrorCode::INVALID_PARAMS
             | agent_client_protocol::ErrorCode::METHOD_NOT_FOUND
     ) && let Some(resume_id) = resume_id
     {
@@ -541,6 +544,7 @@ pub(super) async fn resolve(
 mod tests {
     use super::*;
 
+    // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
         for (asking, running, answer, expected_resumes, status, decision, timed_out, reject_code) in [
@@ -556,6 +560,7 @@ mod tests {
             (false, false, None, 1, "paused", true, false, None),
             (false, false, None, 1, "active", false, true, None),
             // Hard-won: 655be2b: only proven peer rejection releases its own resume.
+            (false, false, None, 1, "active", false, false, Some(-32600)),
             (false, false, None, 1, "active", false, false, Some(-32602)),
             (false, false, None, 1, "active", false, false, Some(-32601)),
             (false, false, None, 1, "active", false, false, Some(-32603)),

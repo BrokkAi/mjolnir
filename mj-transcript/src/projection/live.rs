@@ -30,9 +30,13 @@ pub fn materialized_session_from_live_baseline(
                 .get(&option.id.to_string())
                 .cloned()
         {
-            // A catalogue may report a transcript model ID that is not a
-            // selectable picker value. Preserve the owner's accepted selector.
-            let value = if canonical == "model" {
+            // A provider restart may select a replacement for a withdrawn
+            // model. Only an unselectable transcript ID needs the previously
+            // accepted picker value instead of the catalogue's current value.
+            let selectable = value
+                .as_str()
+                .is_some_and(|current| mj_core::acp::select_contains(&option.kind, current));
+            let value = if canonical == "model" && !selectable {
                 mj_core::acp::AcceptedSessionConfig::from_configuration(
                     &state.config,
                     &state.config_options,
