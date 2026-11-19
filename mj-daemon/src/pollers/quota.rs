@@ -372,16 +372,18 @@ pub(super) fn spawn_claude_grant_refresher(
     });
 }
 
-/// One profile's renewal loop. Nothing is cached between wakes: each one reads
-/// the login file again through [`mj_controller::quota::refresh_claude_grant`]. It
-/// ends when the profile leaves the batch or is configured differently.
-async fn renew_claude_grant_when_due(
+/// One profile's renewal loop. Each wake reads the login file again through
+/// [`mj_controller::quota::refresh_claude_grant`], remembering its previous due
+/// time to detect a login changed by another process. It ends when the profile
+/// leaves the batch or is configured differently.
+pub(super) async fn renew_claude_grant_when_due(
     request: QuotaRefreshRequest,
     mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
     recheck: Duration,
     renewal: GrantRenewal,
     updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
+    let mut previous_due_at_ms = None;
     loop {
         let (current, rejected_logins) = {
             let batch = batches.borrow_and_update();
@@ -412,6 +414,17 @@ async fn renew_claude_grant_when_due(
             &rejected_logins,
         )
         .await;
+        let due_at_ms = match check {
+            mj_controller::quota::ClaudeGrantCheck::Waiting { due_at_ms }
+            | mj_controller::quota::ClaudeGrantCheck::Renewed { due_at_ms } => due_at_ms,
+            _ => None,
+        };
+        let login_changed = due_at_ms
+            .zip(previous_due_at_ms)
+            .is_some_and(|(current, previous)| current != previous);
+        if due_at_ms.is_some() {
+            previous_due_at_ms = due_at_ms;
+        }
         if let Some(updates) = &updates
             && !matches!(
                 check,
@@ -419,6 +432,7 @@ async fn renew_claude_grant_when_due(
                     | mj_controller::quota::ClaudeGrantCheck::Deferred
             )
             && (!rejected_logins.is_empty()
+                || login_changed
                 || matches!(
                     check,
                     mj_controller::quota::ClaudeGrantCheck::Renewed { .. }
@@ -427,6 +441,7 @@ async fn renew_claude_grant_when_due(
                 .send(QuotaUpdate::ClaudeGrant {
                     request: request.clone(),
                     check,
+                    login_changed,
                     rejected_logins: rejected_logins.clone(),
                 })
                 .await

@@ -31,6 +31,7 @@ pub enum QuotaUpdate {
     ClaudeGrant {
         request: QuotaRefreshRequest,
         check: mj_controller::quota::ClaudeGrantCheck,
+        login_changed: bool,
         rejected_logins: std::collections::BTreeSet<String>,
     },
     Refreshing {

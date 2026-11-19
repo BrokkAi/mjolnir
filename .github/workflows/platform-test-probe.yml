@@ -33,6 +33,10 @@ on:
         description: Seconds before a still-running test is inspected and stopped
         required: true
         default: '120'
+      repeat:
+        description: Times to run the tests, stopping at the first failure (for a failure that does not happen every time)
+        required: true
+        default: '1'
 
 permissions:
   contents: read
@@ -68,19 +72,27 @@ jobs:
         FILTER: ${{ inputs.filter }}
         SKIP: ${{ inputs.skip }}
         HANG_SECONDS: ${{ inputs.hang_seconds }}
+        REPEAT: ${{ inputs.repeat }}
         RUST_BACKTRACE: '1'
       run: |
         arguments=("$FILTER" --nocapture)
         if [ -n "$SKIP" ]; then arguments+=(--skip "$SKIP"); fi
-        cargo test --locked --no-fail-fast -p "$PACKAGE" -- "${arguments[@]}" &
-        tests=$!
-        for _ in $(seq "$HANG_SECONDS"); do
-          if ! kill -0 "$tests" 2>/dev/null; then
-            wait "$tests"
-            exit $?
-          fi
-          sleep 1
+        for attempt in $(seq "$REPEAT"); do
+          echo "probe attempt $attempt of $REPEAT"
+          cargo test --locked --no-fail-fast -p "$PACKAGE" -- "${arguments[@]}" &
+          tests=$!
+          finished=
+          for _ in $(seq "$HANG_SECONDS"); do
+            if ! kill -0 "$tests" 2>/dev/null; then
+              wait "$tests" || exit $?
+              finished=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$finished" ]; then break; fi
         done
+        if [ -n "$finished" ]; then exit 0; fi
         echo "::error::the tests were still running after ${HANG_SECONDS}s"
         # Every process of this user, zombies included, then where each test
         # process is blocked (`sample` on macOS).
