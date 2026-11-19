@@ -1087,6 +1087,7 @@ impl DashboardState {
     pub fn apply_quota(&mut self, quota: ProfileQuota) {
         self.quota_refreshing.remove(&quota.profile_id);
         self.quotas.insert(quota.profile_id.clone(), quota);
+        self.clamp_selections();
         self.refresh_review_choices();
     }
 

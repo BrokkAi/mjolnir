@@ -33,7 +33,7 @@
 │                                                   ││  local         localhost [G], podman, sandbox (unavailable)  unavailable                                │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                   ││           Harness  Weekly Resets  5H Resets                                                             │
+│                                                   ││Add an agent profile in Settings.                                                                        │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Notifications (0) ─────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││Nothing needs you                                                                                        │
@@ -60,7 +60,6 @@
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
 │                                      ││No live session in this workspace.                                            │
@@ -71,10 +70,11 @@
 │                                      ││  local         podman, mac-container  37%  75%                               │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -88,7 +88,6 @@
 │ Create   Open   Filter: _____________││                                                          │
 │No sessions yet                       ││                                                          │
 │Create new work or open a session.    ││                                                          │
-│                                      ││                                                          │
 │                                      ││                     ✦  M J O L N I R                     │
 │                                      ││                                                          │
 │                                      ││            Create a session to start building.           │
@@ -105,31 +104,31 @@
 │                                      │╭ No live session ─────────────────────────────────────────╮
 │                                      ││No live session in this workspace.                        │
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find    │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets                CPU  RAM           │
-│                                      ││  local         podman, mac-container  37%  75%           │
-│                                      ││                stale: probe timed out after twenty secon…│
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets                CPU  RAM                                                   │
+│  local         podman, mac-container  37%  75%                                                   │
+│                stale: probe timed out after twenty seconds                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                         │
+│  claude-1: refreshing…                                                                           │
+│OPENAI                                                                                            │
+│  codex-1: refreshing…                                                                            │
+│  codex-2: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                      Create a session to start building.                     │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
+│No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -141,10 +140,11 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        unavailable                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -153,12 +153,11 @@
 === expired login quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                      Create a session to start building.                     │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
+│No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -170,10 +169,11 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly        Resets  5H Resets                      │
-│                                      ││  claude-1  Claude Code  login expired                                        │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: login expired                                                     │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -182,12 +182,11 @@
 === usage-priced API quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                      Create a session to start building.                     │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
+│No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -199,10 +198,11 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││                  Harness      Weekly       Resets  5H Resets                 │
-│                                      ││  bedrock-claude  Claude Code  ▕   API    ▏                                   │
-│                                      ││  codex-1         Codex        ▕   API    ▏                                   │
-│                                      ││  codex-2         Codex        refreshing…                                    │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  bedrock-claude: pay-per-use                                                 │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: pay-per-use                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -226,12 +226,12 @@
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││              Harness      Weekly       Resets  5H Resets                     │
-│                                      ││  claude-1    Claude Code  refreshing…                                        │
-│                                      ││  codex-1     Codex        refreshing…                                        │
-│                                      ││  codex-2     Codex        refreshing…                                        │
-│                                      ││  opencode-1  OpenCode     ▕   n/a    ▏                                       │
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││ANTHROPIC                                                                     ▐
+│                                      ││  claude-1: refreshing…                                                       ▐
+│                                      ││OPENAI                                                                        ▐
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -256,11 +256,11 @@
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly                Resets  5H              Resets               │
-│                                            ││  claude-1  Claude Code  ▕██▏       ▏21% (17%) 2d 0h   ▕████      ▏40% 1h 0m                │
-│                                            ││  claude-2  Claude Code  ▕██▏       ▏21%       2d 0h   ▕████      ▏40% 1h 0m                │
-│                                            ││  codex-1   Codex                                                                           │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││ +                                    ↻2d0h                                    ↻2d0h avg 21%│
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: unavailable                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -269,12 +269,11 @@
 === weekly and five-hour quota columns (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                      ✦  M J O L N I R                                      │
-│ Create   Open   Filter: ___________________││                                                                                            │
-│No sessions yet                             ││                             Create a session to start building.                            │
+╰────────────────────────────────────────────╯│                                      ✦  M J O L N I R                                      │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                             Create a session to start building.                            │
+│No sessions yet                             ││                                                                                            │
 │Create new work or open a session.          ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -285,11 +284,12 @@
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly          Resets  5H              Resets                     │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        ▕███████▎  ▏73% 2d 0h   ▕███████   ▏70% 1h 5m                      │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                            ││ANTHROPIC                                                                                   ▐
+│                                            ││  claude-1: refreshing…                                                                     ▐
+│                                            ││OPENAI                                                                                      ▐
+│                                            ││ +                                                                            ↻2d0h avg 73%*▐
+│                                            ││  1 profile not reporting                                                                   │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -298,12 +298,11 @@
 === weekly and five-hour quota at 80 columns (80x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ≡ ││                                      │
-╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▄ ╮│           ✦  M J O L N I R           │
-│ Create   Open   Filter: _____________││                                      │
-│No sessions yet                       ││  Create a session to start building. │
+╰──────────────────────────────────────╯│           ✦  M J O L N I R           │
+╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
+│ Create   Open   Filter: _____________││  Create a session to start building. │
+│No sessions yet                       ││                                      │
 │Create new work or open a session.    ││                                      │
-│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      │╰──────────────────────────────────────╯
@@ -314,11 +313,12 @@
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly          Resets     5H              Resets    │
-│  claude-1  Claude Code  refreshing…                                          │
-│  codex-1   Codex        ▕███████▎  ▏73% 2d 0h [1]  ▕███████   ▏70% 1h 5m     │
-│  codex-2   Codex        refreshing…                                          │
+╭ Profiles ▾ (refreshed unknown)──────────────────────────────────── ▁   ▄   □ ╮
+│ANTHROPIC                                                                     ▐
+│  claude-1: refreshing…                                                       ▐
+│OPENAI                                                                        ▐
+│ +                                                           ↻2d0h ⟲1 avg 73%*▐
+│  1 profile not reporting                                                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -343,13 +343,13 @@
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (refreshed 0s ago)─────────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                            ││            Harness      Weekly          Resets  5H              Resets                     ▐
-│                                            ││  agy (Ge)  Antigravity  ▕███████▎  ▏73%         ▕████▊     ▏48%                            ▐
-│                                            ││› agy (Cl)  Antigravity  ▕          ▏0%                                                     ▐
-│                                            ││  claude-1  Claude Code  refreshing…                                                        ▐
-│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      ▐
+│                                            ││  codex-2: refreshing…                                                                      ▐
+│                                            ││GOOGLE                                                                                      ▐
+│                                            ││>+ Gemini                                                                         ↻? avg 73%│
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
+Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette

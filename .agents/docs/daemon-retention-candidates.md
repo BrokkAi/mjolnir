@@ -64,7 +64,7 @@ The store's idle reader pool is bounded to eight connections per database path. 
 
 ## Measured heap owners and fixes, 2026-11-12
 
-jemalloc is now built with `stats` and `profiling` (inactive by default; `_RJEM_MALLOC_CONF` on `mj daemon restart` enables them for one daemon). Live heap profiles of the production daemon (60 running sessions, ~25,500 session records) measured:
+jemalloc is now built with `stats` and `profiling` (inactive by default; `_RJEM_MALLOC_CONF`, `MALLOC_CONF` since 2026-11-19, on `mj daemon restart` enables them for one daemon). Live heap profiles of the production daemon (60 running sessions, ~25,500 session records) measured:
 
 | Owner | Live bytes | Outcome |
 | --- | ---: | --- |

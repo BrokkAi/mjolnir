@@ -11,16 +11,16 @@ action: None
 │                 │                                                                                  │                 │
 │                 │ Choose or type a directory on the controller.                                    │                 │
 │                 │                                                                                  │                 │
-│                 │ Source:                                                                          │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │ Destinatio                                                                       │  ───────────────╮
+│                 │ Source:                                                                          │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │ Destinatio                                                                       │                 │
 │                 │                                                                                  │                 │
-│                 │ Access:   ro · read-only ▾                                                       │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │ Recent on this host:                                                             │  ──────── ▁   ▄ ╮
-│                 │ /opt/recent-3                                                                    │                 │
-│                 │ /opt/recent-4                                                                    │  ───────────────╯
-│                 │ /opt/recent-5                                                                    │  ──────── ▁   ▄ ╮
+│                 │ Access:   ro · read-only ▾                                                       │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │ Recent on this host:                                                             │                 │
+│                 │ /opt/recent-3                                                                    │  ───────────────╯
+│                 │ /opt/recent-4                                                                    │  ──────── ▁   ▄ ╮
+│                 │ /opt/recent-5                                                                    │                 │
 │                 │ /opt/recent-6                                                                    │                 │
 │                 │ /opt/recent-7                                                                    │                 │
 │                 │                                                                                  │                 │
@@ -72,16 +72,16 @@ action: None
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
 │                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╮
+│                 │ 1a-0123456789ab/bifrost                                                          │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -103,16 +103,16 @@ action: None
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
 │                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╮
+│                 │ 1a-0123456789ab/bifrost                                                          │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -134,16 +134,16 @@ action: None
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
 │                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╮
+│                 │ 1a-0123456789ab/bifrost                                                          │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -165,8 +165,7 @@ action: None
 │                 │                                                                                  │                 │
 │                 │ No recent projects yet. Choose GitHub or URL or path above to get started.       │                 │
 │                 │                                                                                  │                 │
-│                 │ ☐ Use several repositories together                                              │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │ ☐ Use several repositories together                                              │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -175,6 +174,7 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -196,16 +196,16 @@ action: None
 │                 │ bifrost2 · 2 repositories                                                        │                 │
 │                 │                                                                                  │                 │
 │                 │   BrokkAi/bifrost-dev  (primary)                                                 │                 │
-│                 │                                                                                  │                 │
-│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╯
-│                 │ 1a-0123456789ab/bifrost                                                          │  ───────────────╮
-│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d             │  ───────────────╮
+│                 │ 1a-0123456789ab/bifrost                                                          │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -230,23 +230,23 @@ action: None
 │       │ Compute: 4 CPU / 8.0G                                                            │       │
 │       │                                                                                  │       │
 │       │ Attached directories: 0                                                          │       │
-│       │                                                                                  │       │
 │       │                                                                                  │  ─────╯
-│       │ Delegation Native ▾                                                              │  ─────╮
-│       │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │       │
-│       │                                                                                  │  d    │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Add directory…     Create                                  │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+│       │                                                                                  │  ─────╮
+│       │ Delegation Native ▾                                                              │       │
+│       │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │  d    │
+╰─────  │ subagents on all targets")                                                       │  ─────╯
+╭ Targ  │                                                                                  │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Add directory…     Create                                  │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 Selected project hel.
 action: None
@@ -262,23 +262,23 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
-│       │ ☒ Use several repositories together                                              │       │
-│       │                                                                                  │  ─────╯
-│       │ Main  owner/main                                                                 │  ─────╮
-│       │ Also  owner/remove                                                               │       │
-│       │ Also  owner/shared                                                               │  d    │
-│       │                                                                                  │  ─────╯
-│       │   Add repository     Make main     Remove                                        │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Use 3 repositories                                         │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+│       │ ☒ Use several repositories together                                              │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │ Main  owner/main                                                                 │       │
+│       │ Also  owner/remove                                                               │  d    │
+╰─────  │ Also  owner/shared                                                               │  ─────╯
+╭ Targ  │                                                                                  │     ▄ ╮
+│  Hos  │   Add repository     Make main     Remove                                        │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Use 3 repositories                                         │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === project_picker_multiple_sources_wait_for_submit_and_remove_selected (100x30) ===
@@ -293,23 +293,23 @@ action: None
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
-│       │ ☒ Use several repositories together                                              │       │
-│       │                                                                                  │  ─────╯
-│       │ Main  owner/main                                                                 │  ─────╮
-│       │ Also  owner/shared                                                               │       │
-│       │                                                                                  │  d    │
-│       │   Add repository     Make main     Remove                                        │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Use 2 repositories                                         │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+│       │ ☒ Use several repositories together                                              │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │ Main  owner/main                                                                 │       │
+│       │ Also  owner/shared                                                               │  d    │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │   Add repository     Make main     Remove                                        │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Use 2 repositories                                         │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateBundle { sources: ["owner/main", "owner/shared"] }
@@ -358,23 +358,23 @@ project request: Github { query: "" }
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
-│       │   Search                                                                         │       │
-│       │                                                                                  │  ─────╯
-│       │ ✓ app  owner/app                                                                 │  ─────╮
-│       │   shared  owner/shared                                                           │       │
-│       │                                                                                  │  d    │
-│       │ ☒ Use several repositories together                                              │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │ Main  owner/app                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │   Add repository     Make main     Remove                                        │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Use 1 repository                                           │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+│       │   Search                                                                         │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │ ✓ app  owner/app                                                                 │       │
+│       │   shared  owner/shared                                                           │  d    │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │ ☒ Use several repositories together                                              │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │ Main  owner/app                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │   Add repository     Make main     Remove                                        │       │
+│  cla  │                                                                                  │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Use 1 repository                                           │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary (100x30) ===
@@ -389,23 +389,23 @@ project request: Github { query: "" }
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
-│       │   Search                                                                         │       │
-│       │                                                                                  │  ─────╯
-│       │ ✓ app  owner/app                                                                 │  ─────╮
-│       │ ✓ shared  owner/shared                                                           │       │
-│       │                                                                                  │  d    │
-│       │ ☒ Use several repositories together                                              │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │ Main  owner/shared                                                               │       │
-│       │ Also  owner/app                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │   Add repository     Make main     Remove                                        │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Use 2 repositories                                         │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+│       │   Search                                                                         │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │ ✓ app  owner/app                                                                 │       │
+│       │ ✓ shared  owner/shared                                                           │  d    │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │ ☒ Use several repositories together                                              │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │ Main  owner/shared                                                               │  ─────╯
+╭ Prof  │ Also  owner/app                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │   Add repository     Make main     Remove                                        │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Use 2 repositories                                         │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: CreateBundle { sources: ["owner/shared", "owner/app"] }
@@ -1449,23 +1449,23 @@ action: None
 │       │                                                                                  │       │
 │       │ Source:   /opt/                                                                  │       │
 │       │           ╭ matches ─────────────────────────────────────────────────────────╮   │       │
-│       │ Destinatio│/opt/directory-0/                                                 │   │       │
-│       │           │/opt/directory-1/                                                 │   │  ─────╯
-│       │ Access:   │/opt/directory-2/                                                 │   │  ─────╮
-│       │           │/opt/directory-3/                                                 │   │       │
-│       │           │/opt/directory-4/                                                 │   │  d    │
-│       │           │/opt/directory-5/                                                 │   │  ─────╯
-│       │           │/opt/directory-6/                                                 │   │     ▄ ╮
-│       │           │/opt/directory-7/                                                 │   │       │
-│       │           ╰──────────────────────────────────────────────────────────────────╯   │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Add directory                                              │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+│       │ Destinatio│/opt/directory-0/                                                 │   │  ─────╯
+│       │           │/opt/directory-1/                                                 │   │  ─────╮
+│       │ Access:   │/opt/directory-2/                                                 │   │       │
+│       │           │/opt/directory-3/                                                 │   │  d    │
+╰─────  │           │/opt/directory-4/                                                 │   │  ─────╯
+╭ Targ  │           │/opt/directory-5/                                                 │   │     ▄ ╮
+│  Hos  │           │/opt/directory-6/                                                 │   │       │
+╰─────  │           │/opt/directory-7/                                                 │   │  ─────╯
+╭ Prof  │           ╰──────────────────────────────────────────────────────────────────╯   │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Add directory                                              │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
@@ -1480,23 +1480,23 @@ action: None
 │       │                                                                                  │       │
 │       │ Source:   /opt/directory-1/                                                      │       │
 │       │                                                                                  │       │
-│       │ Destinatio                                                                       │       │
-│       │                                                                                  │  ─────╯
-│       │ Access:   ro · read-only ▾                                                       │  ─────╮
-│       │                                                                                  │       │
+│       │ Destinatio                                                                       │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │ Access:   ro · read-only ▾                                                       │       │
 │       │                                                                                  │  d    │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │       │
-│       │                                                                                  │  ─────╯
-│       │                                                                                  │     ▄ ╮
-│       │                                                                                  │  s    │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │                                                                                  │       │
-│       │   Cancel     Back     Add directory                                              │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
-│                                                                                                  │
+╰─────  │                                                                                  │  ─────╯
+╭ Targ  │                                                                                  │     ▄ ╮
+│  Hos  │                                                                                  │       │
+╰─────  │                                                                                  │  ─────╯
+╭ Prof  │                                                                                  │     ▄ ╮
+│ANTHR  │                                                                                  │       │
+│  cla  │                                                                                  │       │
+│OPENA  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+│  cod  │                                                                                  │       │
+╰─────  │   Cancel     Back     Add directory                                              │  ─────╯
+╭ Noti  ╰──────────────────────────────────────────────────────────────────────────────────╯     ▄ ╮
+│Nothi                                                                                             │
 ╰─────                                                                                        ─────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 action: None
@@ -1522,7 +1522,6 @@ action: None
 │                           │ › /work/newer                                                                    │                           │
 │                           │   /work/older                                                                    │                           │
 │                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
 │                           │                                                                                  │                           │
@@ -1531,11 +1530,12 @@ action: None
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1563,7 +1563,6 @@ action: None
 │                           │ › /work/newer                                                                    │                           │
 │                           │   /work/older                                                                    │                           │
 │                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
 │                           │                                                                                  │                           │
@@ -1572,11 +1571,12 @@ action: None
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -1604,7 +1604,6 @@ action: None
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
 │                           │                                                                                  │                           │
@@ -1613,11 +1612,12 @@ action: None
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
-│                           │   Cancel     Back     Next                                                       │  ────────────────── ▁   ▄ ╮
+│                           │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                           │   Cancel     Back     Next                                                       │                           │
 │                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            ││  codex-2: refreshing…                                                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │

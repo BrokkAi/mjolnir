@@ -60,6 +60,9 @@ fn resolve(
         return Ok(rows.remove(position));
     }
     match rows.len() {
+        0 if ownership.is_known_top_level(id) => {
+            bail!("session {id:?} exists but is not in the index")
+        }
         0 => bail!("session {id:?} was not found in the index"),
         1 => Ok(rows.remove(0)),
         _ => bail!("session prefix {id:?} is ambiguous; use an id from search results"),
@@ -438,6 +441,14 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("not found")
+        );
+        let known = super::super::top_level::Snapshot::for_test_top_level("fresh");
+        assert_eq!(
+            resolve(&connection, "fresh", &known, &cache)
+                .err()
+                .unwrap()
+                .to_string(),
+            "session \"fresh\" exists but is not in the index"
         );
         let evidence = mj_core::history::BlameEvidence {
             repository: "/src/project".into(),

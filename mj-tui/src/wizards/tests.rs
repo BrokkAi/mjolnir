@@ -592,9 +592,14 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
             .any(|line| line.contains("missingpath") && line.contains("(unavailable")),
         "{text}"
     );
+    // Read the dialog column: surrounding pane borders can sit between
+    // wrapped words in the full dashboard capture.
     let joined = lines
         .iter()
-        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .filter_map(|line| line.split('│').nth(2))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     assert!(

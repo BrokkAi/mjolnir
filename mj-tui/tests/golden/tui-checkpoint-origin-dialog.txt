@@ -9,19 +9,19 @@
 │  Stopped  │                                                                          │  ─────────╮
 │  │ No me  │The configured source does not contain checkpoint base b41dc78.           │           │
 │  │        │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │  open.    │
-│           │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╯
-│           │                                                                          │  ── ▁   ▄ ╮
-│           │Enter a GitHub origin or absolute local path that contains this history:  │           │
-│           │Source:                                                                   │  ─────────╯
-│           │                                                                          │  ── ▁   ▄ ╮
-│           │Type or paste into Source · Tab moves · Enter checks                      │  esets    │
-│           │                                                                          │           │
-│           │  Cancel     Check origin                                                 │           │
-│           ╰──────────────────────────────────────────────────────────────────────────╯           │
-│                                                                                         ─────────╯
-│                                                                                         ── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╰─────────  │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╯
+╭ Targets   │                                                                          │  ── ▁   ▄ ╮
+│  Host /   │Enter a GitHub origin or absolute local path that contains this history:  │           │
+╰─────────  │Source:                                                                   │  ─────────╯
+╭ Profiles  │                                                                          │     ▄   □ ╮
+│ANTHROPIC  │Type or paste into Source · Tab moves · Enter checks                      │           ▐
+│  claude-  │                                                                          │           ▐
+│OPENAI     │  Cancel     Check origin                                                 │           ▐
+│  codex-1  ╰──────────────────────────────────────────────────────────────────────────╯           │
+╰─────────                                                                                ─────────╯
+╭ Notifica                                                                                ── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 cursor: (21, 13)
 source field focused: true
@@ -39,19 +39,19 @@ Cancel action focused: false
 │  Stopped  │                                                                          │  ─────────╮
 │  │ No me  │The configured source does not contain checkpoint base b41dc78.           │           │
 │  │        │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │  open.    │
-│           │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╯
-│           │                                                                          │  ── ▁   ▄ ╮
-│           │Enter a GitHub origin or absolute local path that contains this history:  │           │
-│           │Source:                                                                   │  ─────────╯
-│           │                                                                          │  ── ▁   ▄ ╮
-│           │Type or paste into Source · Tab moves · Enter checks                      │  esets    │
-│           │                                                                          │           │
-│           │  Cancel     Check origin                                                 │           │
-│           ╰──────────────────────────────────────────────────────────────────────────╯           │
-│                                                                                         ─────────╯
-│                                                                                         ── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╰─────────  │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╯
+╭ Targets   │                                                                          │  ── ▁   ▄ ╮
+│  Host /   │Enter a GitHub origin or absolute local path that contains this history:  │           │
+╰─────────  │Source:                                                                   │  ─────────╯
+╭ Profiles  │                                                                          │     ▄   □ ╮
+│ANTHROPIC  │Type or paste into Source · Tab moves · Enter checks                      │           ▐
+│  claude-  │                                                                          │           ▐
+│OPENAI     │  Cancel     Check origin                                                 │           ▐
+│  codex-1  ╰──────────────────────────────────────────────────────────────────────────╯           │
+╰─────────                                                                                ─────────╯
+╭ Notifica                                                                                ── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 cursor: hidden
 source field focused: false

@@ -1,0 +1,641 @@
+{"repo": "01mf02__jaq", "roots": ["bb9bc1192cf9c289818cf9cacb7a291ae8bfbdfe"], "error": null}
+{"repo": "0xPlaygrounds__rig", "roots": ["9b21570871966c8ebab58af43735f6c893a0200d"], "error": null}
+{"repo": "1Password__typeshare", "roots": ["fbf5aea145b7895f3a998db050bd972a9af79e05"], "error": null}
+{"repo": "Amanieu__parking_lot", "roots": ["5cc3a5dd403424e9963c77925ed60def755d037c"], "error": null}
+{"repo": "AG064__argentum", "roots": ["81297b14fdbd606a9480df54e650ec90dcc17d09"], "error": null}
+{"repo": "Achilng__floral-notepaper", "roots": ["5f697e750b73de9ac914ed02bb13b2893cebf30b"], "error": null}
+{"repo": "Alexhuszagh__rust-lexical", "roots": ["41c9b8a0952e7929dca33fbb16d3997b6b65edef", "c099976b75d47a64ce81fe9b4a9638b4a4b894db"], "error": null}
+{"repo": "AprilNEA__OpenLogi", "roots": ["63d5c82b03e82b87f6052cca21556ba72b32ee1f"], "error": null}
+{"repo": "ArroyoSystems__arroyo", "roots": ["a0e39f804a9da2e77bf88ef71e6edaa174599cc6"], "error": null}
+{"repo": "ArthurBrussee__brush", "roots": ["6ca1c3d482982cfb68ce6b3b5109b818a4574516"], "error": null}
+{"repo": "1jehuang__jcode", "roots": ["b848fe1614c16be09c016348d693ef5b7082458f"], "error": null}
+{"repo": "Ataraxy-Labs__sem", "roots": ["01edf1f061d4f1d256e8073d2f4337418cab71b7"], "error": null}
+{"repo": "AmbientRun__Ambient", "roots": ["6920d5314f64149ff0ddb1ae3d82c08e36350869", "c5ee0b1c95e75f004ea8ead0fb987e3d1505b68e", "e3e7635b860e764c911fb82740898ab5070487d8", "eeb275f5fb4113489d75970876890550647ebed8"], "error": null}
+{"repo": "AtalayaLabs__OxiCloud", "roots": ["fe19bc85057b45d02fff1e1d2030b4e9200d14cb"], "error": null}
+{"repo": "Apich-Organization__bincode", "roots": ["865a008dd755afeebda33841f343ed7bc9f1ebfe"], "error": null}
+{"repo": "Barre__ZeroFS", "roots": ["8b80d6034a8c3f751c67b273e58c100a0e51007e"], "error": null}
+{"repo": "BurntSushi__quickcheck", "roots": ["c9eb2884d6a620b90b9986c65916eebc57084e89"], "error": null}
+{"repo": "Automattic__harper", "roots": ["56bc902e5e6f18ec82fcee23fe0b7a7e7bf1e75f", "57b90e330aa0559bce54df36ef7b156d62b670e0"], "error": null}
+{"repo": "Byron__dua-cli", "roots": ["e9a447250ba9ffd10f94f6f7d970c6da141c185d"], "error": null}
+{"repo": "DefGuard__defguard", "roots": ["2550885c794c7ce71bf815d8382f433cc0dab37f"], "error": null}
+{"repo": "BigPizzaV3__CodexPlusPlus", "roots": ["ea2beffd64db4c3bee185ceb42029ae7d5187332"], "error": null}
+{"repo": "BurntSushi__ripgrep", "roots": ["9d1e619ff359b6e609b02f01e36952e603104bc6"], "error": null}
+{"repo": "DioxusLabs__blitz", "roots": ["38e191211ec08e6c70ba9d5a47e72377dd7782a2"], "error": null}
+{"repo": "Devolutions__IronRDP", "roots": ["1c903fa086da8d577b1423ba37403da5ab8c2ea9"], "error": null}
+{"repo": "DioxusLabs__taffy", "roots": ["bd78e4a192d77d56ec577a1e5a707be4f4cf08f7"], "error": null}
+{"repo": "Frommi__miniz_oxide", "roots": ["97bfcfa2f40d8a9b4e8d0bfbc01aa88e846fb098"], "error": null}
+{"repo": "EasyTier__EasyTier", "roots": ["9779923b87d1f01517e0ce599a6288a815f6d1f5"], "error": null}
+{"repo": "FuelLabs__fuel-core", "roots": ["8e7e782221c9bba07e2a87257ad14677f702ab9b"], "error": null}
+{"repo": "FuelLabs__fuels-rs", "roots": ["f1b8f6f996fdb56c72f7d787c8dbf4411502ea1a"], "error": null}
+{"repo": "Eventual-Inc__Daft", "roots": ["56b143be31e1e5ea5e9220f8e42e3aa594486e5d"], "error": null}
+{"repo": "DioxusLabs__dioxus", "roots": ["2b9c8d09d926ff6b5ad8a7e7b7b0b6f93bb8eb36", "aebf6678a8ea81ef48ac24c0a259130d9ab9e42e", "e3171e8303700d6829880951dbc7184413df371b"], "error": null}
+{"repo": "Geal__nom", "roots": ["38010665593e33d1f8d5ee83fa0b18cd899b8734"], "error": null}
+{"repo": "GuillaumeGomez__sysinfo", "roots": ["7f2a4e71799110bd758738fb4c77ed2656b4a1d3"], "error": null}
+{"repo": "FyroxEngine__Fyrox", "roots": ["1f1443c30e0595b5a50123c78e1588326c65688d", "48c714f106c927fc57ccf769c7138d1009748652", "4fa1af68d6c56dd2cb1bb7714ac719cd5993f956", "737373369aa559feba2aa5051d8221cb974dd3e3", "f59710d25715bb0bcc996bc395eec0f86e5fe2bf", "fc7f84a1280626b6d887c92a67602bb7e288d78f"], "error": null}
+{"repo": "HigherOrderCO__Bend", "roots": ["c2eaa8502dd13b1aaaa3d0013f7a8f523b4391ef"], "error": null}
+{"repo": "Helvesec__rmux", "roots": ["d0b957c927cf7bc9194895c2f015da56d9543eb0"], "error": null}
+{"repo": "HelixDB__helix-db", "roots": ["923710c5207cab83414463c337fd1b00f889a7fe"], "error": null}
+{"repo": "GraphiteEditor__Graphite", "roots": ["b30ee294a6e3d56bf727ae8a7eb08f9e116b62fc"], "error": null}
+{"repo": "FuelLabs__sway", "roots": ["c50d24fd13ea063eea1ac72657999c98e7326b8a"], "error": null}
+{"repo": "GreptimeTeam__greptimedb", "roots": ["4ca5387bb84460bf393347a32fa259390e3e9fe6"], "error": null}
+{"repo": "Keats__tera", "roots": ["8820ed6e56195d3c1cc6bf443f759bc32fcfd6c5"], "error": null}
+{"repo": "JSorngard__lambert_w", "roots": ["41e1ebd99d7cacaf0018b699654ebc374b930c92"], "error": null}
+{"repo": "LaurentMazare__tch-rs", "roots": ["4331a34d1c8e527dbed9b0f34b107025759006d0"], "error": null}
+{"repo": "LatticeArc__latticearc", "roots": ["2f5f844eea55ece6da8e0f6ea9e43ee5fb2c07f0"], "error": null}
+{"repo": "LukeMathWalker__cargo-chef", "roots": ["04867aca64c86628761a3a4bc01b7ce9659f448e"], "error": null}
+{"repo": "LukeMathWalker__zero-to-production", "roots": ["7e63ca87bda65ef7f9f545d4b4d66ab22cd14982"], "error": null}
+{"repo": "LemmyNet__lemmy", "roots": ["8ece275d22f9f8edfce5ee3b1a867bea7363f4b9"], "error": null}
+{"repo": "Myriad-Dreamin__tinymist", "roots": ["ccd51eb19ab7e0e44117008c84a555319e5a0601"], "error": null}
+{"repo": "LibrePCB__LibrePCB", "roots": ["ac8192fd49b386d269a1136da6878c6ba5c15560"], "error": null}
+{"repo": "NVIDIA__OpenShell", "roots": ["b0a719df2d4fda4429a2f22af89d5e362c8147c1"], "error": null}
+{"repo": "Nukesor__pueue", "roots": ["c880884b1be7333166d5a38c6afc1fe6ca6de8b6"], "error": null}
+{"repo": "Open-Less__openless", "roots": ["f5a0c810fae2752847ae5d3f927de464df21545e"], "error": null}
+{"repo": "OpenPoolProject__stratum", "roots": ["0ebb670747e4cb595cd7b9adfe827e770607d855"], "error": null}
+{"repo": "Orange-OpenSource__hurl", "roots": ["d849e0d1b3e46a291813600892965428ad51f6e5"], "error": null}
+{"repo": "PSeitz__lz4_flex", "roots": ["fee6b98be60b09a7cc4fd944b330ef37544f031e"], "error": null}
+{"repo": "Hmbown__CodeWhale", "roots": ["6f1158a2d74d2a7a00c2cd98d8c796641a44f3e9"], "error": null}
+{"repo": "Pagefind__pagefind", "roots": ["48cd60589d38533e3857c0c0852da3d2a26bb122"], "error": null}
+{"repo": "PRQL__prql", "roots": ["8ddc6e0dcdbccf88465650571c25c7fb4ba13f28"], "error": null}
+{"repo": "Hmbown__DeepSeek-TUI", "roots": ["6f1158a2d74d2a7a00c2cd98d8c796641a44f3e9"], "error": null}
+{"repo": "Project-Navi__ordvec", "roots": ["c29e9053a48a80dcab166cb7ee9b4ea931c041a1"], "error": null}
+{"repo": "PyO3__maturin", "roots": ["17f3e72c25223216162e89266c2571de8e80a7bf"], "error": null}
+{"repo": "PerryTS__perry", "roots": ["a99230d0ac0b414bde139521316e6591fd960164"], "error": null}
+{"repo": "QuipNetwork__xquad", "roots": ["fb55712ba53827c7b4b1a5f1b34ff171ddefb455"], "error": null}
+{"repo": "ProvableHQ__snarkOS", "roots": ["0603c487025dd55fdf294238c8165900c078a0e8"], "error": null}
+{"repo": "QWED-AI__qwed-verification", "roots": ["192e4c77833f7bc587fb02d24e18ef5bb49c90f3"], "error": null}
+{"repo": "ReFirmLabs__binwalk", "roots": ["4001b759711ddb16b73006f4a3ee64ea1d85c2a3"], "error": null}
+{"repo": "ProvableHQ__leo", "roots": ["bc4c60712be15606e18352ddb7ecc359a556170f"], "error": null}
+{"repo": "RightNow-AI__openfang", "roots": ["5692c96494b2ab9d24d4e67653203a2898785144"], "error": null}
+{"repo": "RedisJSON__RedisJSON", "roots": ["398968ed06a66f517319a4b596d87bbcb27fad5f", "4e56466bd6a4a09d58507eaa9365faadf0c9f1bd", "6f638aca7df52e884f14b494168462add5366e7a"], "error": null}
+{"repo": "PyO3__pyo3", "roots": ["7ccf5c88f10f5cc063d37611ff85b7782fd5accf"], "error": null}
+{"repo": "ReagentX__imessage-exporter", "roots": ["9dac1f4bc1093d1078532855a214e55ef1629df3"], "error": null}
+{"repo": "Rullst__rullst-orm", "roots": ["bebdffca333e876fd89961c95a0ed62ec35f4895"], "error": null}
+{"repo": "Rullst__Rullst", "roots": ["4d921e6bb770da6e88fd57976d0bbc4908cf89cd"], "error": null}
+{"repo": "Rust-GPU__rust-cuda", "roots": ["2e719bc2bbe5a00db4470d3690ce6afff5395391"], "error": null}
+{"repo": "Rust-GPU__rust-gpu", "roots": ["9030ede7951c3e1470d1658dd2c39e32842ced10", "e8d788c60730b37c8a8825aa971c6027204485e1"], "error": null}
+{"repo": "TeXitoi__structopt", "roots": ["3ec065a12a4360400c17a99569515ee3d0e81be8"], "error": null}
+{"repo": "SaladDay__cc-switch-cli", "roots": ["e0a9c1ab4c46ecadf665dfb31dd967ce6f0019ac"], "error": null}
+{"repo": "RustPython__RustPython", "roots": ["4050ea2f9ac5b1b65658d53ec81554f89e8888a8", "c2ee9ca3e02810c76f82bfc32a6643f2b0af0b84"], "error": null}
+{"repo": "SuarezPM__apohara-trustlayer", "roots": ["b3bc7fd60423d678914b45f4bec263ded68a4116"], "error": null}
+{"repo": "TencentCloud__CubeSandbox", "roots": ["37cb5c6f067757c96a0632c6086ada28983ed462"], "error": null}
+{"repo": "SeaQL__sea-orm", "roots": ["af4fb2ab7df92131ebe140e53de7f15598b4bdf5"], "error": null}
+{"repo": "TheDan64__inkwell", "roots": ["9262ee40014806562c5aefbe1d9e3a50eb465c30"], "error": null}
+{"repo": "TimelyDataflow__timely-dataflow", "roots": ["99256e09b30e10139a9be1074f993ddcb1a0ac1b"], "error": null}
+{"repo": "TrustTunnel__TrustTunnel", "roots": ["c0005a6cf3a33490f27224e626a797cebfb70bbf"], "error": null}
+{"repo": "TraceMachina__nativelink", "roots": ["4bf788777db36f055a83c1b59e41102418e529c3"], "error": null}
+{"repo": "Y2Z__monolith", "roots": ["a6bf74293386fef9c8c5276ac0b5309bc35cd2fb"], "error": null}
+{"repo": "XAMPPRocky__tokei", "roots": ["dbd679fa2a7e82c27da26eafd3a266c9171a8482"], "error": null}
+{"repo": "WasmEdge__WasmEdge", "roots": ["33b28d4f236318d63f50f0ede1d26202d9a8e895"], "error": null}
+{"repo": "a-b-street__abstreet", "roots": ["1863289f6d6048101e63f6e36b35f7e351f3b006"], "error": null}
+{"repo": "actix__actix", "roots": ["3c251d18df23f7d494bf103e329979ebebc1ffb5"], "error": null}
+{"repo": "ada-url__ada", "roots": ["ae7becb7f866178993ca3167e2033fd4ce363802"], "error": null}
+{"repo": "aeoess__agent-passport-system", "roots": ["74c32dda99be74203d09c87e956718417b40bbee"], "error": null}
+{"repo": "MaterializeInc__materialize", "roots": ["3ceca306efafb9692a07a167b2cb211cc533b187", "7741c904ad05344f15998c9360950074b599544f", "e587f671ab809973cdfb1b0b40ec7c3f32dd4834"], "error": null}
+{"repo": "actix__actix-web", "roots": ["e317ea81817fb23139e14346dce096f820250fa9"], "error": null}
+{"repo": "aaif-goose__goose", "roots": ["dd126afa6c73fe01ad4991a6b45a6d027cb02b29"], "error": null}
+{"repo": "alexcrichton__tar-rs", "roots": ["e56e425e702d2eab46afeb918c6ea6a5e99bad5a"], "error": null}
+{"repo": "agersant__polaris", "roots": ["ec7169586f3f66852db51c331639bca530bf4ee5"], "error": null}
+{"repo": "agent-of-empires__agent-of-empires", "roots": ["dfdb22d60a4e0339a81d9bab838e5cec97421d0f"], "error": null}
+{"repo": "alexpasmantier__television", "roots": ["b514e7ce4382e47155a3f85740b5a22f07f16761"], "error": null}
+{"repo": "agentgateway__agentgateway", "roots": ["76f800b52bf444ef4f080957db28cddad7d88295", "9cfc661abdbdaf43fe857a920a6dce1897a9acae"], "error": null}
+{"repo": "amethyst__specs", "roots": ["f5b10cc7152661e94b177cc401dbd75fb011733b"], "error": null}
+{"repo": "altsem__gitu", "roots": ["cc0aa2ae94a92e689b6cb43321651a6aba38abf9"], "error": null}
+{"repo": "amber-lang__amber", "roots": ["cb493fe20fb7b63f53a01972a11d9c5d102b9a77"], "error": null}
+{"repo": "alacritty__alacritty", "roots": ["621776cd94890936b24f3abb8b7ec1f36dad9150"], "error": null}
+{"repo": "anulum__director-ai", "roots": ["dcfd5007d90af0e8193e062e1bf2efd498955db4"], "error": null}
+{"repo": "anulum__remanentia", "roots": ["9c8d7657e6a4b362df9880e459e8d85974caba25"], "error": null}
+{"repo": "anulum__scpn-mif-core", "roots": ["ee63e4dc5623a1a537c1ffc646ec9622d91856f1"], "error": null}
+{"repo": "anulum__scpn-control", "roots": ["5ddff22bc109354d4e143104c49a1fd772ab75ba"], "error": null}
+{"repo": "anulum__scpn-phase-orchestrator", "roots": ["8b9ae097287c5314614654d2fb73dec1d14c8786"], "error": null}
+{"repo": "anulum__sc-neurocore", "roots": ["834705e0104a4cc8b912772c77df653f690837df"], "error": null}
+{"repo": "anulum__scpn-quantum-control", "roots": ["18fae08e2456dc706c7c0922ec77fa82ea967c4d"], "error": null}
+{"repo": "apache__datafusion-sqlparser-rs", "roots": ["4a30441f172e13501f806d28a09d996bcf1afa50"], "error": null}
+{"repo": "apache__iggy", "roots": ["5fe989e5f854a17b541c8409924de9a92f489f40"], "error": null}
+{"repo": "Wilfred__difftastic", "roots": ["01d9100b8a21af2bae9b529811d73231659978c8", "0904dc56fbf4579559ccacb023e17a6c8eac8992", "0dae74a54a37d50d60559adaa7df7c2eda2a4e9f", "1324e9e4125e070946d2573f4389634891dcd7e1", "1c293d89fef067df606c7785e9785e663131fa0f", "1fea099237d85381ad99cf4cab63c75e341715a6", "236a8dc0e5116ca1aca483b1a90df07f4bf3177e", "2687e1ae90de5fa92249c8426e42087230de744f", "288359f6d0fcefdc5ca4b5191cc81d14298fdf86", "35556a3730991202f76dadb48c8092f155924743", "465997e9e42fccd1fea3ecbf43c862a78ac56fb7", "4e3a5f3cd374c37d7f108fcc9a11c66c4f0088d9", "58ac3dc57b20777416cc6100ac0dad700db2b936", "5acac3958fad96ce615692b07fe484c0ab74de58", "5f19460eae6b4f78ffe7f7b182020ebf48d6916e", "63ef0f268f1a419d86c0f5e318395ea493fd89f4", "6d799ab140277cb88791f273d600092c17d96a13", "7035d3f73c971436c189f32d7b6f6acb415136e7", "769b9f184fabdfb2ec718a6bcb92558aebbe6b0c", "77a801ebd26cfa06694f7dbbed310f5cf2c19b99", "793cae0a82d983a4e9d044ca09d2fb0d00f5aa70", "79f3003ca601783a6cff3c03fce75523298d64fa", "7a820c581f9608b92bcd94bd597ef4a96c528011", "8018c4b06a659867f87c60d344397d3199875f47", "82b585d3f22e4c6e882b5f322959dc3461e6ff86", "82dc36c8e9f47856dca394ec5bd0daefc1a12dc1", "8898e883761d843d2a3986ec9a1910799869c1a1", "89c1b30cde6f7eabd82d1650e8d95ef97ebc8165", "90592b25c371265ac7615f5e716d4ac146996e8e", "90cd9604a7db32fbec45a040a7bdb6aaa89b565c", "9219dcc834dffc777cdc318ad194aad081a17c82", "927a1d7b2f3bc4c28855605e7a55fdf570c2ed0b", "958033924a2dea78ccd85c93f4c6abdafa5dbf04", "9c6c6298cd5dd52227007ed15ad2525f52afa3b6", "9d2d19349cbc20f68823c81843662d7c78bc5785", "a360943e0f108b7d0935924a4eb772ce1a6aaec7", "a8b8b0e16c4f5552f5e85af3dec976a5d16af8b9", "aa06466fd6d418fc824afd9476cd19c6bc47cc9d", "ab1d553e1d5f3b733819c8a4a4597de5fc4d4b57", "ace19df944be606a46417c24fd03fbbb79d029b6", "ad139e0a3afc9b99d567004b829e6ec444765110", "af2904ca831cbb33cdc3bb7bacc2ed9840bd0a3c", "af9e5084f15bb23e7d300cfb27156a60eb03a442", "b4dbacce31231ac5172f93bf907253c6eaa5582d", "b8be648e7dfe715b6531d0a1ceda4126c21ff6c8", "c8f6a4300a5ee5ed4e9bb2a5575babf5515d7924", "cbc7722748d71a14154030c1fe8823c29851b45c", "cf9a439d5331d763a5a6e8f0227ca38c7bfa1038", "d29ad53a4310a943880ae40c7050f8562bf84f33", "d80c3da4f82d71ad2e5e1faa5ef6bce9eefb6472", "d8966822015417d060ffaafd95a71a49dd28ec99", "dc4c0d4963dd677d087345801d094664f1ab6eb8", "ddb19059de5707551fae5f62bc5251e0711f4d06", "e74d96c27b307860be340cfcfebf367114b0fd65", "eb2561f4e180954cc7827cf296eff93e0ac96c77", "eb7313534683093b9ae7811991561131d6824828", "ed59cb4a5e3effd2d97872b5d7a4ae10e5f3bd06", "ef6eca7f8abf174ff6f18f3bcc237ea7c1609b57", "f23c6d8af1456d0b4ec151f3383a3a9e5261d341", "f6e8b5d186f2f722d7c638878c726b1e55481e5d", "fd16d044816577ae10471a275b7623c9f89a8917", "fec0a2278dc81893279d494cd2b6cf4e048e3fb4"], "error": null}
+{"repo": "ankitects__anki", "roots": ["d477df8c28783c1d242b006473563f7cb2abc07d"], "error": null}
+{"repo": "apache__arrow-rs", "roots": ["d5aa7c46692474376a3c31704cfc4783c86338f2"], "error": null}
+{"repo": "apache__incubator-opendal", "roots": ["a84f9d13257c5de5502be83ef1513ab89716789a"], "error": null}
+{"repo": "arxanas__git-branchless", "roots": ["d0a1177a60f7cec9ef1e6f0e3dc845a002a09052"], "error": null}
+{"repo": "apache__opendal", "roots": ["a84f9d13257c5de5502be83ef1513ab89716789a"], "error": null}
+{"repo": "ariel-os__ariel-os", "roots": ["4a311e6d06672bcde6df375c983799bd6afde3b5", "6217e82476f1341ed5b26a77239c512b3623dd41"], "error": null}
+{"repo": "apache__thrift", "roots": ["c06bbbfe75a7181499388ed8a5f1d11b69d7cdd1"], "error": null}
+{"repo": "askama-rs__askama", "roots": ["e619345766e98578929061e566178010c171df48"], "error": null}
+{"repo": "assura-lang__assura", "roots": ["6f0708f521a31d6ad4199e4d4f16e0f9ee61f694"], "error": null}
+{"repo": "apache__datafusion", "roots": ["d5aa7c46692474376a3c31704cfc4783c86338f2"], "error": null}
+{"repo": "async-rs__async-std", "roots": ["5b0a6269a90b20307a430febc21fc6207f771102"], "error": null}
+{"repo": "asterinas__asterinas", "roots": ["17e53f9bba84afb81916ae16303b4028fe227af0"], "error": null}
+{"repo": "async-graphql__async-graphql", "roots": ["5030a28361dc9b5c7f974d47a5e7b338f7e20bc7"], "error": null}
+{"repo": "autozimu__LanguageClient-neovim", "roots": ["fd495cd55fbf2678889857be24ba0863c5adee24"], "error": null}
+{"repo": "ast-grep__ast-grep", "roots": ["790206e55da3b41c1f3023b9c775b1a3b51622f0"], "error": null}
+{"repo": "atuinsh__atuin", "roots": ["27b9a9430518c071a2a7de7f46dfd8aac3cead80", "8f9777ce7aecfe1a163a915e3245466b9dd9ac2e"], "error": null}
+{"repo": "aws__aws-lambda-web-adapter", "roots": ["7da8b53d4068961e7aeeb97158c5139c5113fdc8", "914fd53eb02f966c63d839ec4be3affa3bb04a33"], "error": null}
+{"repo": "avianphysics__avian", "roots": ["6e20726d2e9b114c26df67dd532ccfaf37ef7efa"], "error": null}
+{"repo": "axpnet__aeroftp", "roots": ["87b86016aae6f07a917d92ee1d5eb406a6444782"], "error": null}
+{"repo": "benfred__py-spy", "roots": ["0b741738b4bb120f1be41ef1431031f5e0f27dda"], "error": null}
+{"repo": "bastion-rs__bastion", "roots": ["be42fad8120e8e92f6a98133d054681950123cbf"], "error": null}
+{"repo": "aya-rs__aya", "roots": ["15be301f8c1c57df3b94a79bdb808cb9135013c8"], "error": null}
+{"repo": "awslabs__llrt", "roots": ["630ec79e3eaac1e021481021bd60d9b6dd370e38"], "error": null}
+{"repo": "bgreenwell__doxx", "roots": ["f7502bf0e6978dac41d4ecac2b60e32fd48ae32d"], "error": null}
+{"repo": "bee-san__Ciphey", "roots": ["54d0e36fd0230594254f19b618171f590b09ee43"], "error": null}
+{"repo": "bheisler__criterion.rs", "roots": ["34d8ef4be7a4d8ad1de89835f82de94f05536b36", "68b01741cb68ec93974af2c45c082203e88d0114", "8b8ed05c5fd483b983b7184b79e4e30a68137d4e"], "error": null}
+{"repo": "biliup__biliup", "roots": ["ae570bfad52a1bf4ff6ad987086562cae2f2f5e4"], "error": null}
+{"repo": "biomejs__gritql", "roots": ["4f06ca7349b0e7fa361e4c1961a4e7c8e0e5e502"], "error": null}
+{"repo": "astral-sh__uv", "roots": ["d226e0a2cd7e275e1a0403a880e76db38b79eb67"], "error": null}
+{"repo": "astral-sh__ruff", "roots": ["0d8e4bd6e9580a2484fa68c45cb3569e0815ac3f"], "error": null}
+{"repo": "bootandy__dust", "roots": ["88a8d19511053e5e2fa38a4e14c81e962c03744c"], "error": null}
+{"repo": "brave__adblock-rust", "roots": ["ccede17debb5d5515f6b6f72bb26e9da759133be"], "error": null}
+{"repo": "boa-dev__boa", "roots": ["f33c18d2b6e672ea1893bae06251390255f15dee"], "error": null}
+{"repo": "cachix__devenv", "roots": ["615774aa1ed8b719a5cbd20338174e1040933a2b"], "error": null}
+{"repo": "bytecodealliance__javy", "roots": ["8bf0c82486a86187c8129b8ca3408061addc3e06"], "error": null}
+{"repo": "carthage-software__mago", "roots": ["636ebde54be22d52413cef7bfcb05e59127fb31e"], "error": null}
+{"repo": "build-trust__ockam", "roots": ["352a3538aa07f5265385c6c6c4fdd4f3e4484b39"], "error": null}
+{"repo": "biomejs__biome", "roots": ["1a81dfc0be787039f91eb16dfd64aa6a53b6fe73"], "error": null}
+{"repo": "bottlerocket-os__bottlerocket", "roots": ["90b748b95000909a9dd84deeae96b20ef1646907"], "error": null}
+{"repo": "cberner__redb", "roots": ["8b4fe3425135e63d9fd76997832a9ffec32ca4b1"], "error": null}
+{"repo": "chaosprint__glicol", "roots": ["816b302fe76f5da8ecead6c96979d190841567dc", "bc9476dc3f7337c904571499dae54eefa64e9e71", "f03ddfe0ee297cd35adede1c9729c59b97c5c9e3"], "error": null}
+{"repo": "ccc-spdm-tools__spdm-rs", "roots": ["8a8c2c8ac7dfd7e427011afc5dbbc657ae81acb7"], "error": null}
+{"repo": "chmln__sd", "roots": ["db3fc2fcff319f1016e777a50d466240cb012aec"], "error": null}
+{"repo": "casey__just", "roots": ["8526f32eddc6d8dd1b999832a78ced13340b8a6f", "a0d5b83a8008c4fec292fbacde61240141554fc3"], "error": null}
+{"repo": "ccusage__ccusage", "roots": ["e5713ffe733b209c0048c1e6d453211e0b6a2acb"], "error": null}
+{"repo": "cljoly__rusqlite_migration", "roots": ["f195e718046f9f466dee609d37fb92a1651d75d0"], "error": null}
+{"repo": "chronotope__chrono", "roots": ["646b6c27b91dac07dbe171f66ccea7d4468832e9"], "error": null}
+{"repo": "clouatre-labs__aptu-coder", "roots": ["2843437d912b7161e021e7739181e8785004d822"], "error": null}
+{"repo": "bytecodealliance__wasmtime", "roots": ["154b35ecc17c48f252c5a07fb7b1a80588ca7002", "1a24dd0b02879f9e2c9d27ba9962eb29c3654f0f", "344fbed77a462804e4651954c81b234933936018", "399be07fcf00d0974d2a83d1af55f0bee9861d54", "6f6c6499c610537462830df96c03d0c05a867e30", "7d1182574dd6478e45ad912baedbb96cccdfc033", "c0e6457e224723c22e8b4d5ecfcbfc1bf9cd10db", "c3c806d1426982ba0570b7e72efcfa8be4be3e43", "cd39c1dfd894bc1e2e428a2cff9bbfe8cb21bc12"], "error": null}
+{"repo": "cloudflare__workers-rs", "roots": ["694b1bf99a3ab8fcd2506fc46ae88179492e80e0"], "error": null}
+{"repo": "cloudflare__quiche", "roots": ["f8cc6fe1dbc6d592109a819d911c3d6ed559fb8a"], "error": null}
+{"repo": "chroma-core__chroma", "roots": ["957b068dbe812dd5c6d52a2bc8b58ece7deb07a3"], "error": null}
+{"repo": "cmakefmt__cmakefmt", "roots": ["54a4876849bb6ebfd86090244aa0f9776e570c26"], "error": null}
+{"repo": "commit3296__adler", "roots": ["1b0e7fdcc0b8e01cd5aec62c93bd3a914322a306"], "error": null}
+{"repo": "console-rs__indicatif", "roots": ["9226a9f60f089ec05b961316e4c3ba72a1ffb3d3"], "error": null}
+{"repo": "confidential-containers__td-shim", "roots": ["9ce54b466a7dd7959f3ed016a14ea493550317dd"], "error": null}
+{"repo": "cozodb__cozo", "roots": ["660dd6c6f2b7f318184c6c9c6b0b8d91aaae8b1d"], "error": null}
+{"repo": "clap-rs__clap", "roots": ["3ec065a12a4360400c17a99569515ee3d0e81be8", "54a12e81783a5ae4d68e1970df75f5e99dee9fd1", "959b5e9437c36dd7fb68ccea4c714727e5433454", "c7d3c1112adaf80f3cdc73057e07e9bff5aa22ad", "d2baf8b70c1bb60ff4e8ca1bb6a7c61691820186", "e7b7555d1516d0b274e7269961fce9ec9b30bc98"], "error": null}
+{"repo": "cocoindex-io__cocoindex", "roots": ["278d74ea335b527dae3d33228f5327fd2859e3da"], "error": null}
+{"repo": "clockworklabs__SpacetimeDB", "roots": ["192d857e57d558a8dff7fbd72069a5e18d752f69", "271e8ce78c73e1f7a0635442c4f1912335ea497c", "44df6c6e7d985f17917979e95e950d7aaccd209e", "6731f294996436cc573afc9d9669806a0820ecf1", "8e5887d1a7e3b5dc3424384d0d9ca4c5f8664f2f"], "error": null}
+{"repo": "cross-rs__cross", "roots": ["531a8b8880178df2480a240ed4261263f78c51c0"], "error": null}
+{"repo": "curlpipe__ox", "roots": ["3cb41567269ede4785aa6166ca05235cd7d68506"], "error": null}
+{"repo": "crossbeam-rs__crossbeam", "roots": ["18ffc3268f8221368063deb3de10d65fbd04a4e1", "1c7e9068424716bafb0ecbb3673a4a8943db204f", "31c5732d9f494688796c5570d015c8c42fa15ee2", "438532ad48be7ac542f798b548145024919aaaae", "fa0fd15c38546d20fae54045dedc5ebb7c3ac308", "fe2c8e8b4dfa67c9e8be0fecf4aa02cb229ca4d8"], "error": null}
+{"repo": "dandavison__delta", "roots": ["4a3ebfa4d63b870c06db0d34f148bfc76651283e"], "error": null}
+{"repo": "dekobon__big-code-analysis", "roots": ["721e1396a202ff13b9a0f6b8c08ab4aa5a1ef040"], "error": null}
+{"repo": "cube-js__cube", "roots": ["809af46d4b02034847815b96cbc43cc5dc092830"], "error": null}
+{"repo": "deepcausality-rs__deep_causality", "roots": ["715886806565204f0e18721dde387990983ba2b8"], "error": null}
+{"repo": "delta-io__delta-rs", "roots": ["06b48c9706b228ec869a11c9a7768328ce8da770"], "error": null}
+{"repo": "dathere__qsv", "roots": ["5b3a44dcc4a5e9449a96782fe973599931865210"], "error": null}
+{"repo": "denoland__rusty_v8", "roots": ["fdfa52f4bfd92cd96c8b9e3df91ef562d01207d6"], "error": null}
+{"repo": "dbt-labs__dbt-core", "roots": ["fd7567fb4dd60530a512f3e6218050cb66f0dcea"], "error": null}
+{"repo": "deuxfleurs-org__garage", "roots": ["7102db1d544bec663a8492b24c455168d0b83f08"], "error": null}
+{"repo": "devflowinc__trieve", "roots": ["02cb018d3a39b5c74c6d6784bb9289859b3fc147"], "error": null}
+{"repo": "dimforge__nalgebra", "roots": ["8ecd37ebc82339a134ba3c263b291eaf674140dc"], "error": null}
+{"repo": "dmtrKovalenko__fff", "roots": ["198ab9430aabf48b9d22344db9d07a0c96b2cb5d"], "error": null}
+{"repo": "databendlabs__databend", "roots": ["977e540d3f54ac844176f5c2469ec89287c987fb"], "error": null}
+{"repo": "diem__diem", "roots": ["5e034dde19a5320d7e2bdc9da25114e816b4454d"], "error": null}
+{"repo": "dprint__dprint", "roots": ["057a6c391908b8a7533a6c1e7a395b56d9380556"], "error": null}
+{"repo": "diesel-rs__diesel", "roots": ["a6e2ed2817fa49a5b68b8acf695d90b9e0e1e8fc", "b4ed40324deec308fdf505c539a386b4bde7a351", "b6b65709ae0c4591713d286273afc293f4e36ca1"], "error": null}
+{"repo": "datafuselabs__databend", "roots": ["977e540d3f54ac844176f5c2469ec89287c987fb"], "error": null}
+{"repo": "denoland__deno", "roots": ["0d048b8704c0709506d3d14a26d540a4b8eb470e", "f7c5e19081920f59ce2006d3255a58fb611b6a17"], "error": null}
+{"repo": "dora-rs__dora", "roots": ["223c0e95d0d72853e99adb9eb51f29aef1c0d829", "8a307dd3339b056b0882182f80d1463a0a85a5ef"], "error": null}
+{"repo": "dropbox__rust-brotli", "roots": ["3c32e43b16ee0b2736685c2b6ebfdc0db0cd7dc7"], "error": null}
+{"repo": "dtolnay__anyhow", "roots": ["138ec41c16179d70350fd52e96575a74bf19724d"], "error": null}
+{"repo": "dtolnay__itoa", "roots": ["92e5b742e9f19db90dba7845f835fa7a9d8e5ae8"], "error": null}
+{"repo": "dragonflyoss__dragonfly", "roots": ["0af8817c1f7c03a6d6eef7143e46bc2961700635"], "error": null}
+{"repo": "dtolnay__unsafe-libyaml", "roots": ["390b04967ffea807c1c7a52b492a7be71fcf7000"], "error": null}
+{"repo": "dtolnay__serde-yaml", "roots": ["ae660118fbea9ed6f870e018cdaa077270c7314f"], "error": null}
+{"repo": "dtolnay__cxx", "roots": ["7db7369797538466d8abe3575010fafc13b8217b"], "error": null}
+{"repo": "ducaale__xh", "roots": ["f4332e23b5a425049c0f76d1e31136006262b683"], "error": null}
+{"repo": "enarx__enarx", "roots": ["54fa0e050f4436766b6de58cd95aa046caa4e8b5", "7d2748dceb3b1b2421aa2928d4a18a949c4ca052", "ca1ebf756ba6d93ff40c8241c00f5808903f592c"], "error": null}
+{"repo": "epi052__feroxbuster", "roots": ["b0f2065523df38f39b5e2de01e7be118aac3a7e8"], "error": null}
+{"repo": "eclipse-zenoh__zenoh", "roots": ["62432aaf1a607c7579f872475f5b7c5a77682002"], "error": null}
+{"repo": "emmett-framework__granian", "roots": ["3a3812c381521f9602c44f689b8e43806822984b"], "error": null}
+{"repo": "erg-lang__erg", "roots": ["96132b20f6efb8fab884195f7f5144dc87e20be1"], "error": null}
+{"repo": "extism__extism", "roots": ["e27fae9193079de19b25abad6513f15b632786f3"], "error": null}
+{"repo": "dtolnay__syn", "roots": ["18c754c5510a7588a6c0e617c95ea4abee0c9353", "35161fff39430bd1d41bf92f28cce10d0cfb5c0e"], "error": null}
+{"repo": "evcxr__evcxr", "roots": ["39f5a3154bc0ec3dd2e6730e88657726b40ca479"], "error": null}
+{"repo": "erikgrinaker__toydb", "roots": ["9cef4831cc973deca010e1265c8d14fefcd96bca"], "error": null}
+{"repo": "evilsocket__cake", "roots": ["29bf3b90a7836c9a39cdc45384bda101f120671b"], "error": null}
+{"repo": "eycorsican__leaf", "roots": ["897fc87ce86e940f3407424835cdcbd43cb53b50"], "error": null}
+{"repo": "embassy-rs__embassy", "roots": ["47e383545f4aac3bfaec0563429cc721540e665a", "72b0379125b87bcd274bdb81127dd5f0ab29d661", "9a57deef9b531b8dae9d98a5accf5aeb128ab86d", "cb5931d583d283dda3a1b5ed2014c086bb8f98ae", "e560415fde967483573d42f628e52501768584e0"], "error": null}
+{"repo": "eza-community__eza", "roots": ["dc9668c8d6a896d19cf714d290fb65cb71058d92"], "error": null}
+{"repo": "fallow-rs__fallow", "roots": ["9ee41568441123179eee590b2b6b8ba964b25c05"], "error": null}
+{"repo": "farion1231__cc-switch", "roots": ["e0a9c1ab4c46ecadf665dfb31dd967ce6f0019ac"], "error": null}
+{"repo": "facebookexperimental__starlark-rust", "roots": ["c8cfa5151b7109926edb02535233f629d5b94a52"], "error": null}
+{"repo": "facebook__relay", "roots": ["2a86be3e71cdc6511fa994e3de539f72070da1b4"], "error": null}
+{"repo": "feather-rs__feather", "roots": ["1dbd86533cf3e931b1851b26d879f1eaf58fe657", "2ed085f3de0014edef3cdf6dfbc9e413b1e1824d", "c0e1a4862a6722c62c869c383fde9061a4bb0773"], "error": null}
+{"repo": "ferrumio__pydynox", "roots": ["5d687c51cc6d1884a4573e63c273b6d580f3af2f"], "error": null}
+{"repo": "farm-fe__farm", "roots": ["b1305014260f131b190b3751550730539b6dafc7"], "error": null}
+{"repo": "facebook__pyrefly", "roots": ["9cbec8a62c4490b816190dfc55ff5ba84e243a4a"], "error": null}
+{"repo": "facebook__flow", "roots": ["49820636495b6e36752079117b9e7c34e5c4fc7b"], "error": null}
+{"repo": "fluvio-community__fluvio", "roots": ["9e0fff8fee77bc76efcce33bd990087b628291fa"], "error": null}
+{"repo": "finos__perspective", "roots": ["617dc2213131f78eb6e09221a6d3e3a84b333432"], "error": null}
+{"repo": "flox__flox", "roots": ["6b3de6ce6985bdea24077107240dee336a9ae95c"], "error": null}
+{"repo": "foobarto__stado", "roots": ["a0a0902aae5a4e15580861bb536e624e91c99731"], "error": null}
+{"repo": "firecracker-microvm__firecracker", "roots": ["6f5c3be86e045f24e65ea1ea7959dd9b9653d34f"], "error": null}
+{"repo": "freenet__freenet-core", "roots": ["c58ed0e86fa1a4f0389d85ded8c861ee6efa96c5"], "error": null}
+{"repo": "getnora-io__nora", "roots": ["586420a476cd813f6b2b04984e761838a22da0df"], "error": null}
+{"repo": "foundry-rs__foundry", "roots": ["f1d339a0f1694fb775494ea64ff3621868f9923a"], "error": null}
+{"repo": "getzola__zola", "roots": ["021b8ea21f224033060895981e5ff00ad80f55c7"], "error": null}
+{"repo": "gfx-rs__naga", "roots": ["d39bb42f9aa74aca49278aac972a5e58a4f56e4a"], "error": null}
+{"repo": "fschutt__azul", "roots": ["6d30439e451c0b1606b6098c50351b6722e77f99"], "error": null}
+{"repo": "fwupd__fwupd", "roots": ["863067a465d859c842b817f07f2c43b85ce10c68"], "error": null}
+{"repo": "ggez__ggez", "roots": ["aa9ff72de1940d2f89e66de7823780148b22762c"], "error": null}
+{"repo": "gimli-rs__gimli", "roots": ["aac6746ea48b8c507fe491d89f3c39549551cbd2"], "error": null}
+{"repo": "glium__glium", "roots": ["3df5241ddd40db67e9e9e2929969640987d5278e"], "error": null}
+{"repo": "fish-shell__fish-shell", "roots": ["149594f974350bb364a76c73b91b1d5ffddaa1fa"], "error": null}
+{"repo": "gluesql__gluesql", "roots": ["dedfe688036a3ed0a53d3001c40edb391e199196"], "error": null}
+{"repo": "google__magika", "roots": ["cf15dfc78e8baddbd337fb7ec322f06e00e4f5b0"], "error": null}
+{"repo": "godot-rust__gdext", "roots": ["c631dc163188d1fa19118d32b474550ef3196423"], "error": null}
+{"repo": "gfx-rs__wgpu", "roots": ["0597949ff5336bb787561a7a836b7bd1c067f1a8", "b1d6410c7d5e46344cebb576fb36ad78806afca2", "d39bb42f9aa74aca49278aac972a5e58a4f56e4a", "d47f7e5bde03db4fdb36a2270dfabbcaa0792385"], "error": null}
+{"repo": "gluon-lang__gluon", "roots": ["f22d81f02b1659bdd341315189560e1a13cf6ee8"], "error": null}
+{"repo": "gleam-lang__gleam", "roots": ["4d791cbf8e7ef93f9174103e4a547f1262cb7ace", "a77f832f734c47c32caa44f5c5c853d498cd6c06"], "error": null}
+{"repo": "google__tarpc", "roots": ["4b0180d17f1d11493c46659e798bdb4653c95651"], "error": null}
+{"repo": "google__wasefire", "roots": ["00eccdd9e4953b2c5d4978b2d938523f3d9b1c70"], "error": null}
+{"repo": "gosub-io__gosub-engine", "roots": ["9b59cad2b63ca21d317a379854fcd6495fc0a586"], "error": null}
+{"repo": "googlefonts__fontations", "roots": ["41842b9f2417bf5d91180b298821411750bcbf55"], "error": null}
+{"repo": "graphql-rust__juniper", "roots": ["94d689fa820f3c7ecafc59c580106c43684644be"], "error": null}
+{"repo": "graphprotocol__graph-node", "roots": ["4e1ab60998f33b128860c364838f171281a974eb"], "error": null}
+{"repo": "guillaume-be__rust-bert", "roots": ["a0516a0ac99cf2282bc100457f08a1e2c65e7abf"], "error": null}
+{"repo": "grpc__grpc-rust", "roots": ["b827fdd95041f110ce86ca6a0af25ee01ba0d460"], "error": null}
+{"repo": "greenbone__openvas-scanner", "roots": ["366905e40bfe94314580d76a24c2ab0d79f8e6b4"], "error": null}
+{"repo": "gtema__openstack", "roots": ["94f97186376d565ec0e06e5455b56167d2bd3edb"], "error": null}
+{"repo": "gyscos__zstd-rs", "roots": ["0bec16b5af5434b1ae9c7a8867bad74bce901e7e"], "error": null}
+{"repo": "gyscos__cursive", "roots": ["13c4e86779d0a9fd60eafbe6aaed2490446fd9e0"], "error": null}
+{"repo": "h4ckf0r0day__obscura", "roots": ["2e5d63cc353e1f018addd2722cb8539b618f66c5"], "error": null}
+{"repo": "hahwul__dalfox", "roots": ["a4bf84f6e895f07646036e9095ea40710de7aced"], "error": null}
+{"repo": "hatoo__oha", "roots": ["f146e858322cbbc5a2689cd00542da8604005cf0"], "error": null}
+{"repo": "harfbuzz__harfrust", "roots": ["1aec64f5f75005b0e4bb210e9188f89299e6ec79"], "error": null}
+{"repo": "gitbutlerapp__gitbutler", "roots": ["9aa96f488fbdb8f7b15151d9d2e47690d3b21b46"], "error": null}
+{"repo": "http-rs__tide", "roots": ["9da9a1ed0ad00c762168c909a9400b25197e78ca"], "error": null}
+{"repo": "huggingface__candle", "roots": ["fe7a5f53a1471bd083c244aaca10ccb56d99908b"], "error": null}
+{"repo": "hickory-dns__hickory-dns", "roots": ["a3496cebf37c5e88bfbd4d7c5f036afe1d61cf6d", "a438d7c5e12f41323101d3f326d854bcb565c41e"], "error": null}
+{"repo": "huggingface__tokenizers", "roots": ["b9b519c84a43d03d58f0552d1d0f340fd5526b2a"], "error": null}
+{"repo": "hyperium__hyper", "roots": ["886551681629de812a87555bb4ecd41515e4dee6"], "error": null}
+{"repo": "helix-editor__helix", "roots": ["240e5f4e3d27415b792776dd126d15302d53e83b"], "error": null}
+{"repo": "habitat-sh__habitat", "roots": ["02c1d2553f7da1d7f33ae24bc06b58752520ce3e", "05225f2b130e431d50aeec984303adea1bd3da5c", "07b6471616dafd23ebcf35aba26441e8968617f2", "1929670444b504e80bf4f40293e9328264578d4b", "294cf274b44ee8edbde340e169f7800de2bed3c8", "a33f6fe614e5f55986f276ed728bfac32becda68", "b866cd9045b700ca377c769d9ec9e9cea8bb69c8"], "error": null}
+{"repo": "ia0__data-encoding", "roots": ["179a63811c336ca9627cd438e16fe0750db563d1"], "error": null}
+{"repo": "hyperlight-dev__hyperlight", "roots": ["4c3741834af7d8511299f19f725ef88b68c6d6bf", "667589ab525fef0f2ce16815084fb22196a35c73"], "error": null}
+{"repo": "hyperledger__indy-node", "roots": ["560cb82c95dcb8e360776f56a5d4accae4ceae2f"], "error": null}
+{"repo": "image-rs__image-png", "roots": ["c92a90d7630a71eff88daa60cef325513fb3d682"], "error": null}
+{"repo": "image-rs__image", "roots": ["d936e032e74915eb60a664af6aa78753c54da42c"], "error": null}
+{"repo": "facebook__sapling", "roots": ["01bddec68dab48693af40968567ce4cff535f269", "26387ef0c1c2f281353f91356cd46edbeb14a6f1", "27b02c73680e1a60afbc80ef0f88468944424ab7", "2b6af6b94136da022ab72fa634cd4a6443e7c163", "414bb4df85e8bb89b484809e2ef30b6b075bb6bd", "5ad7767a8bbd80449b14b8a74f1d9bf34cfe7f2e", "6f00967e51233a7d69d589d69d9d57f7b4453e05", "7321a5e34379ba032c8bd6f90e82067687e43348", "7b76bdbc023b655c532c8cd6f97c5909778db670", "8b90b1afda1ff2a159c096c37a54b9f17d6fa84e", "c13fb9b5846eff76d8803c37a348a19983e31d60", "ca8cb8ba674ff8cde8c26d59e05372fe55857c6e", "cedf7a6d6eb27c4e2d8a7e7c3eebb3b14138f4c8"], "error": null}
+{"repo": "iii-hq__iii", "roots": ["fca92c21530b5400679508abe4635b9849b0f4b3"], "error": null}
+{"repo": "imgui-rs__imgui-rs", "roots": ["ad10dff1cf1cbcf7dd97346f8778157d5119cde4"], "error": null}
+{"repo": "imazen__imageflow", "roots": ["6300718b478920cc17bf255aeb10759c5c8f9c7f"], "error": null}
+{"repo": "imsnif__bandwhich", "roots": ["ef4adfa50447028330867ad40a9e261c16a94a1f"], "error": null}
+{"repo": "imsnif__diskonaut", "roots": ["4a0e7b5e71adbca33d9beeb5c961168447b813cd"], "error": null}
+{"repo": "iced-rs__iced", "roots": ["eefdcbe06cce97b452ee71ccb6fcd1a423d29075"], "error": null}
+{"repo": "iron__iron", "roots": ["44c678a19490c4e868e9b90bb5205330f1c477fa", "46a98742ac4ef16f679e51f257b2b261e31fb353", "794cd357e42b5c7f5405aa32aa7d282de01437ee", "875f8d000a97da349f71c29335a12ff8c024b2d1", "a9832b74abae50504473467cba205896cc38c60b"], "error": null}
+{"repo": "intel__tsffs", "roots": ["6d2db48430d659351b1c4bf7381cb2d08402872c", "93651599c9536fc7c73df6d00c0c0266457925d2", "c99f09e4637e82edf9892ca9d7bed3d7b93894c9"], "error": null}
+{"repo": "immunant__c2rust", "roots": ["2103e7cb75a941db8bf337859e4f071cf2e39dcf", "2a5b47192d4c733e3ba2895676a708db2ae813b3", "5809b5ac5f38c54e99d70ecfec1325cda909897d", "b13e640ed53973e1b89edb432c4e9210ccfc75d5", "bb0d06106b55b9cf3c5988464fa9ac45f662b48b"], "error": null}
+{"repo": "ironcalc__IronCalc", "roots": ["c5b8efd83d87d6d442c8576b3fe2509a6fbbe19d"], "error": null}
+{"repo": "ivanceras__svgbob", "roots": ["5c661e810569732d30b66463087d0e8c5efbeac3"], "error": null}
+{"repo": "istio__ztunnel", "roots": ["d2a35b90b03ab26185bb9ae35c12ee5ff259fb3d"], "error": null}
+{"repo": "jacksonpradolima__gsp-py", "roots": ["fe23f69ccc8fc3600be87a5e993730a65f332528"], "error": null}
+{"repo": "jehna__humanify", "roots": ["122aeba5b4e55b34948d0fea094234489f26ae57", "e9770a63461835aac2e23fe0b0761610046cc634"], "error": null}
+{"repo": "j178__prek", "roots": ["b14310e72daa0db98d71a360cef2865d358adcb3"], "error": null}
+{"repo": "jely2002__youtube-dl-gui", "roots": ["f184d5a8e75b688344e7ea53296c1410e95bd8ec"], "error": null}
+{"repo": "jonasbb__serde_with", "roots": ["525a3d9f1d595232bc3c80a757d348edd641b173"], "error": null}
+{"repo": "jtroo__kanata", "roots": ["844a7cb83e2a3a2b37437461e790e410e2c9b44c"], "error": null}
+{"repo": "juhaku__utoipa", "roots": ["b5a538e9aa81314f44f020153a201720f4607f07", "c5ec3d1bcfcd8053fb735d68da06133b61f8020b"], "error": null}
+{"repo": "jfolcini__agaric", "roots": ["6322410f165708366f4128bc2407c97deeb0f664"], "error": null}
+{"repo": "junhoyeo__tokscale", "roots": ["73db7c1cf6d305b994a656dd579333d4e1c76822"], "error": null}
+{"repo": "kaleidawave__ezno", "roots": ["7ad1c8babe751c05db6b3ba47327bf59efdf5174"], "error": null}
+{"repo": "crablang__crab", "roots": ["37226273a7a5b2119daaab06d253f93b6813b881", "3e0c1c8e0cdeab8871f96b1703f6b8a852d51568", "4d615dba0e913d807b38e893ec51e2bf6ea40287", "507dc2b7ec30cf94554b441d4fcb1ce113f98a16", "5caf49ff63ef84961f0b489706d6fcf3bcc0c6f0", "89df25f400844092e2f667f954e84f839e3731bc", "8ee9cbaf607f7077d7ccc6b7d288f75cf55cf9b8", "a63222cd240d9b5405826783603f3b391c90885d", "afae271d5d3719eeb92c18bc004bb6d1965a5f3f", "c01efc669f09508b55eced32d3c88702578a7c3e", "cf49d6b080bb685304c63379a3e101dc7df4ab14"], "error": null}
+{"repo": "katanemo__plano", "roots": ["100114f6d028ea0ae19707563b50be2de631d31b"], "error": null}
+{"repo": "kanidm__kanidm", "roots": ["31afcabd8354a910395bc1c7fabb6bbd3a793319"], "error": null}
+{"repo": "kcl-lang__kcl", "roots": ["68d51038011602e0649f7865fbe22a4fc74b1c98"], "error": null}
+{"repo": "juspay__hyperswitch", "roots": ["430dcd1967d09866ed4c94fd1386561de21daaf0"], "error": null}
+{"repo": "killercup__cargo-edit", "roots": ["9e7a76fb8bc678eebd5ee6d88d79de9f59ea32f7"], "error": null}
+{"repo": "krustlet__krustlet", "roots": ["fbd970e76c01fb6f79a44d498ab23e1ae1fc72ad"], "error": null}
+{"repo": "kivikakk__comrak", "roots": ["280de0d358d6f0b26bab4954f52b5cc73261ee79"], "error": null}
+{"repo": "influxdata__influxdb", "roots": ["2bb37643603faece3ba36c1db40caab2027a1c20", "2ed11585554de3f08822ad50f479cd287756346b", "8e82c1a348cbbb7497d2a9ff87b89c5e64ef48e5", "b1ccb6a7e8993f7dd24d9eb64a20c976f11a7773", "b9b5a815b7a6e1bfa909ccf40a04a65e6696e7b1", "c91885e5afc16d843f20b82c6f8ffbf30a6117ae"], "error": null}
+{"repo": "kgateway-dev__kgateway", "roots": ["68f091e58125110221cbfe8a2009a6a4c5f83b23"], "error": null}
+{"repo": "kube-rs__kube", "roots": ["a79615ee8f5b8e4aeb3e84a9b69fd3a3aec84ddd", "f48ab8b7924b22a7b8a9abeb216b5f2a37805aa3"], "error": null}
+{"repo": "jj-vcs__jj", "roots": ["01f53f6d9b35c95e8c675077fc9041a14aa9019b", "11fec680039c06fb5d6c6b1a0c609ba43ac2403c", "25caaa0081223508c45b1dfe9feeac60c925eb45"], "error": null}
+{"repo": "lalrpop__lalrpop", "roots": ["ce6a58de6549479e870e594eff286d98619ca84a"], "error": null}
+{"repo": "kata-containers__kata-containers", "roots": ["20fbb5a72108b3222d82d972d14a93b5a9cd6267", "344aa22bd2ed2204f2763b6f4f01e3872e60458b", "53901abe10027ded041a97edea7d99648b957548", "6d07e2cddb3128db885295a0e8a0ce9196cf1dc8", "b3404d58f602a8a6979c638bbff3859cefdcf7cf", "f09756ee81790ae4efecfa7d8e145cc988ea0479"], "error": null}
+{"repo": "kubewarden__policy-server", "roots": ["520a8d59e30e7473a6a87fab5f94c56f3bea37b6"], "error": null}
+{"repo": "kubewarden__kwctl", "roots": ["0f20e8c398cffb9abc9f59146c10011cff4316b9"], "error": null}
+{"repo": "lapce__floem", "roots": ["a88d89c56f3f66555446faeab1aefb997fa52f02"], "error": null}
+{"repo": "kubewarden__adm-controller", "roots": ["362a54741e9a2fe7673ce9ce633774eb8b40b9d7", "44e8ab4ebfeb35ec099c3c7f6ec04ec32133e3be", "634fbd122dd00bd89343349f46c26fed720dfd92", "6ba66fa878b53497faf29a17b4602341e2846a5b", "971ea4269e4f385067a86be20acdd7c4c8975767", "b99ca6d36a1d37b9b13ebc8b895490f2dbb0c04a", "d49476b1064f2a7c4ab0107a3f93548c07f7bf04"], "error": null}
+{"repo": "librespot-org__librespot", "roots": ["a993b60ffa962d86ca79f51197e41dd9f69c05c7"], "error": null}
+{"repo": "linebender__resvg", "roots": ["81645877a26eae9dce26978b2a862793c026db9e"], "error": null}
+{"repo": "lance-format__lance", "roots": ["298b3b862b7de48e2421523a8e1b7b00eb1b7ab8"], "error": null}
+{"repo": "leptos-rs__leptos", "roots": ["e587d985e09d0090c3e1f59e2df3942aeb9ab4d5"], "error": null}
+{"repo": "linebender__xilem", "roots": ["26432cebf88e0c2c677480ade543b7231ad43497"], "error": null}
+{"repo": "kreuzberg-dev__kreuzberg", "roots": ["26caf9ab828474fae57349ac2bc8d8ba44da8508"], "error": null}
+{"repo": "loco-rs__loco", "roots": ["7a804f404f4a02e752e4ea8ffd8497e84e254fe8"], "error": null}
+{"repo": "libra__libra", "roots": ["5e034dde19a5320d7e2bdc9da25114e816b4454d"], "error": null}
+{"repo": "lsd-rs__lsd", "roots": ["1ca2645bc6833bca3f21e5f7873451d7e37bf5b6"], "error": null}
+{"repo": "loro-dev__loro", "roots": ["2c7e2de7639b14b3be1dbb8caeec21d4615bd792"], "error": null}
+{"repo": "lucasgelfond__zerobrew", "roots": ["e36130561f82d2a7fc261b76c451174119508504"], "error": null}
+{"repo": "linkerd__linkerd2-proxy", "roots": ["d2c54b65dea3eb79e5bd8ab9e58ea87919de9302"], "error": null}
+{"repo": "linera-io__linera-protocol", "roots": ["7367c57a1ce08a3dc578ec99cdd0373f2660d685"], "error": null}
+{"repo": "lunatic-solutions__lunatic", "roots": ["6664eaa6637ffb3939a3573dff0eab644cb108c6", "6c9871a576a3efed08ed94478f291cd17d54e21d"], "error": null}
+{"repo": "luminal-ai__luminal", "roots": ["71130d3aa938ec656aed7815bb16ed1aaa476509"], "error": null}
+{"repo": "lumina-ai-inc__chunkr", "roots": ["237c26378ec9dfa7fc45b5222abdab010638ac7b", "5d0d25f77b9c3951447b5d7d49a494528c253dbf"], "error": null}
+{"repo": "maciejhirsz__logos", "roots": ["bf92ab03c70220b2c22ac42b99bdd21d7b217e79"], "error": null}
+{"repo": "lycheeverse__lychee", "roots": ["2a93ce8093da4ac03eb696f6b603b571ce23259d"], "error": null}
+{"repo": "maestro-os__maestro", "roots": ["6a2a1a5c7736c47ad9d02877ad1c8feed1467b71"], "error": null}
+{"repo": "makepad__makepad", "roots": ["ff9048cc37985632c96a114a7ad602c41aef2aa1"], "error": null}
+{"repo": "linkerd__linkerd2", "roots": ["b104bd0676091740b48ca7490596a7cd12327284"], "error": null}
+{"repo": "maplibre__martin", "roots": ["acc1a456154ae3964e096c5e5fc9553e8d19eb71", "f08d524e26614b1a69a530e13dd43ff0c4af9437"], "error": null}
+{"repo": "marc2332__freya", "roots": ["56d3213809b0b3cd5fec50bc1f3fe3a847fb38f7"], "error": null}
+{"repo": "maxlambrecht__rust-spiffe", "roots": ["a4ac7becedb6da2317bbaf67a91b67e9fb22e7b0"], "error": null}
+{"repo": "massalabs__massa", "roots": ["583019cab16c2d55ff715d6517b29b54d0d61b23", "e850fe7bb02450407a59a130b44d67a8454c38b9"], "error": null}
+{"repo": "mayocream__koharu", "roots": ["df3093cc9332396692d1138f518ed6f89da2d95a"], "error": null}
+{"repo": "matter-labs__zksync-era", "roots": ["f5a36684b8c2088d36308bad86643bc7ab3d6a78"], "error": null}
+{"repo": "matter-labs__zksync", "roots": ["717a1bca346bce0f5ee130fbce7d7741f091d57b", "f635e252c26b1c4d3b8e913ecb96e24fb58bc28d"], "error": null}
+{"repo": "microsoft__litebox", "roots": ["21f9b807573ac8e1f95c4e9716d661b85f2bcb39"], "error": null}
+{"repo": "max-sixty__worktrunk", "roots": ["85a1ce7c7182540f9c02453441cb3e8bf0ced214"], "error": null}
+{"repo": "medialab__xan", "roots": ["5b3a44dcc4a5e9449a96782fe973599931865210"], "error": null}
+{"repo": "metalbear-co__mirrord", "roots": ["4ee2bd530c16a6fba5548ea95a3eddfd5ecf9039"], "error": null}
+{"repo": "mierak__rmpc", "roots": ["db09563fd93e822566486b7806dc1d7b403d70c7"], "error": null}
+{"repo": "mikeyobrien__ralph-orchestrator", "roots": ["fd8164ef8f6ee323c131e58be1060cee87bae4ed"], "error": null}
+{"repo": "mikaelmello__inquire", "roots": ["11e6f3b961477fbc19adc3c5322ff159c1f606f5"], "error": null}
+{"repo": "misprit7__computerraria", "roots": ["048deb04ebcb20c4fa0215e1904f0391a11fd478", "f9d21a1fa834853b931e9086c99939b07d6d3bb4"], "error": null}
+{"repo": "mimblewimble__grin", "roots": ["f73a308bf3c9c3a621f8b08d5dfd2e8d87c8a840"], "error": null}
+{"repo": "microsoft__windows-rs", "roots": ["c407f9a9e86a2aafa34f43da11bf0cdac8b1dd5b"], "error": null}
+{"repo": "mitsuhiko__insta", "roots": ["929eed8acdee8ff4534dbbfb74753ccd99ad157b"], "error": null}
+{"repo": "mitsuhiko__minijinja", "roots": ["f6fd8084d6a3ac4618e693e13950393ff5310464"], "error": null}
+{"repo": "mlua-rs__mlua", "roots": ["065c69894a08dc52e7a1baba9154681d6c0fa834"], "error": null}
+{"repo": "moka-rs__moka", "roots": ["60d68e124592bf316c596c476720b221a36621ac"], "error": null}
+{"repo": "mit-pdos__noria", "roots": ["89878a92a299f73e6d9a4bfe8f4b8866eac53952", "e26b34560b857af6be3a8261dd72c846c72a69c9", "f0689ed4fc57bce2a8ce27ab16b10226b628db6a"], "error": null}
+{"repo": "modelcontextprotocol__rust-sdk", "roots": ["91e8ba6363e21eb1189a0dc61fcb85b882a42a52"], "error": null}
+{"repo": "monoio-rs__monoio", "roots": ["9df6a26f2f51aba824ceeee21179fbff4dd42d49"], "error": null}
+{"repo": "model-checking__kani", "roots": ["ec08e43ba23ff9bf300760976e93aad258e21ccf"], "error": null}
+{"repo": "meilisearch__meilisearch", "roots": ["4573f00a0d3e767eb0864f1748da5503242de411", "820f38bd8a5731272999bbe8a6df5fcee311d743", "8c0ab106c70f99ba44088af71d2d196125b15c1c", "905bc5c1a6d9c204be34a0a4ede890f93051c415"], "error": null}
+{"repo": "moltis-org__moltis", "roots": ["292506a8e279e25916494d7ced3e3e23a4eff9a6", "8266047af55db619eaf77d25b42f4ad458b97f09"], "error": null}
+{"repo": "mozilla__cbindgen", "roots": ["215d3a987b223d4a1a878e2385c8677d5ae3a80b"], "error": null}
+{"repo": "mongodb__bson-rust", "roots": ["1ca4ef43fdd35b44419ec15750c41da895fd0b93"], "error": null}
+{"repo": "mootable__decimal-scaled", "roots": ["4644352ef4655e8c82d259414804678add1e7e54"], "error": null}
+{"repo": "moonrepo__moon", "roots": ["62267e3ccda7a45c2e9355fcbddba577ae54403d"], "error": null}
+{"repo": "mozilla__mp4parse-rust", "roots": ["cdebc187f6be1387aa332a0e8a276add3e7d2477"], "error": null}
+{"repo": "mozilla__neqo", "roots": ["24dbd0b792bebdffbe0ec4baad66ed1e3d5a613c"], "error": null}
+{"repo": "mtshiba__pylyzer", "roots": ["20472bfb3cbca72d9b2fb507847c0090113384fa"], "error": null}
+{"repo": "mozilla__uniffi-rs", "roots": ["577eb3f20e9c425189884141de28af45c802dad9", "9586a37b5295d3cde3a4dfe93ddf59e3dd99a42d"], "error": null}
+{"repo": "mozilla__sccache", "roots": ["115016e0a83b290dc2dbb366127499fb09168707", "16d74015a9133912e20345817f7a31d11c86016c"], "error": null}
+{"repo": "mstange__samply", "roots": ["03de8c1a6be4ed4c53ef7805a28cb29b859d784a", "6d05be8279f9a382d375bfe7e56f9fce92c6ff3d", "8f30070dc34214a538374b34ea98843a9cdc0448", "933f2dd4870f6d084e7ca200e2ab88bd6e261a68", "d0cd24a011862150cc31d32cb892558fe47e822c"], "error": null}
+{"repo": "mufeedvh__code2prompt", "roots": ["10282ba7bc3a9cf0cdc8892783d060d5cabc0712"], "error": null}
+{"repo": "mulhamna__jira-commands", "roots": ["0acfc0e055d3212361f6706c559bc77cddbf504f"], "error": null}
+{"repo": "napi-rs__napi-rs", "roots": ["c05ab719b317cf39b7cdeec37f4074986bb5f463"], "error": null}
+{"repo": "nearai__ironclaw", "roots": ["8c385663789441f27552e1b5481e349edc7b0642"], "error": null}
+{"repo": "neon-bindings__neon", "roots": ["58e2de8456f3839b866a1e16953112c7c0a6781b", "68c96910af69e58801e372d0e530fa3c98dc68b7", "aa090b52ba842a846dbb4b36e338dc9232c5f134"], "error": null}
+{"repo": "nexus-xyz__nexus-zkvm", "roots": ["81c6c1ad655a57c2369fec93fbb80fd4fa40ff2c", "ae7da135bdae89e6375f5e17b262e358702408e2", "c816066d8004bba768a6b10a425b4878568ab12c", "d96dfd52b2291b9002f1125ab2ca49dfc6d378f4"], "error": null}
+{"repo": "n0-computer__iroh", "roots": ["59fc6c84c355b9080cd698c0d0b1110eafb51782"], "error": null}
+{"repo": "nkaz001__hftbacktest", "roots": ["a5ea696308c96d8f120d0f1d98af38eeb31bd298"], "error": null}
+{"repo": "nolabs-ai__nono", "roots": ["a7bcc76bc30370074d8b1bceeaa340c98ba3d6e8"], "error": null}
+{"repo": "neondatabase__neon", "roots": ["56aaf3afdc41a5b87624cc047a56237c59b45143"], "error": null}
+{"repo": "nix-rust__nix", "roots": ["4adc7244c5abf1e18a6b7e094d83c72837b588ff"], "error": null}
+{"repo": "nickel-lang__nickel", "roots": ["713a3dc5972372b37ced19c75e6674eb9ebab7a5"], "error": null}
+{"repo": "nmstate__nmstate", "roots": ["eab7ab08ef6edea0e0a56133c904c1a61d27e27e"], "error": null}
+{"repo": "nautechsystems__nautilus_trader", "roots": ["1b83d676828df1dd496363be4e0dfc5812576703"], "error": null}
+{"repo": "not-fl3__macroquad", "roots": ["13c14848ff31f480a364bb50e089fa9c325d7818"], "error": null}
+{"repo": "notify-rs__notify", "roots": ["4184abff84ee68d21e89d1b0c5e671579fd43921"], "error": null}
+{"repo": "nubjs__nub", "roots": ["fb1e33f24577d2496765dc6689929d9c63c581c2"], "error": null}
+{"repo": "numaproj__numaflow", "roots": ["34e2dfc0fc62df54e4927157b50bb0b961e76206"], "error": null}
+{"repo": "ogham__exa", "roots": ["dc9668c8d6a896d19cf714d290fb65cb71058d92"], "error": null}
+{"repo": "obi1kenobi__trustfall", "roots": ["7bb7ccb183b4ed3024c6103d72180db68bbfb276"], "error": null}
+{"repo": "ogulcancelik__herdr", "roots": ["a57b97285c3308fbdcc167ab3da9ae1dd78767b6"], "error": null}
+{"repo": "open-telemetry__opentelemetry-rust", "roots": ["ea368ea965aa035f46728d75e1be3b096b6cd6ec"], "error": null}
+{"repo": "mullvad__mullvadvpn-app", "roots": ["cc4362f9f0edb702ed85820addaf13d7ee758423", "f86d9b587e3d415059ad5c4ccff1102b1092bb07"], "error": null}
+{"repo": "open-telemetry__weaver", "roots": ["e2a8bee3d37ce30ae0acf0fc8a7db8b0a3b95be8"], "error": null}
+{"repo": "openebs__mayastor", "roots": ["e2fa2d4c91d2386243dbd3093bd4611d49ba6434"], "error": null}
+{"repo": "ordinals__ord", "roots": ["4ee262e3456b82120f20474ee89eab22930ac0fe"], "error": null}
+{"repo": "nushell__nushell", "roots": ["29d2449fb3b9b1afe5b7efb12ef5ad16d9f72c4b", "8f3b273337b53bd86d5594d5edc9d4ad7242bd4c"], "error": null}
+{"repo": "osohq__oso", "roots": ["6001d0a038a5028e89a1e3bedc6441b4a5193ba2"], "error": null}
+{"repo": "ordian__toml_edit", "roots": ["11115f13a3499420cd09b745a298ef071755b24b", "d54708b49821b894f9973e32e3e784b73af475dc", "e7b7555d1516d0b274e7269961fce9ec9b30bc98"], "error": null}
+{"repo": "ornlneutronimaging__bm3dornl", "roots": ["d41f17ae8827bcee0de9cfc84d65e3630d606880"], "error": null}
+{"repo": "ouch-org__ouch", "roots": ["08489b028c8e85176bf5d55576f75c1817df9019"], "error": null}
+{"repo": "otter-sec__anchor", "roots": ["736c4912e17e8b084cba87d38f04afe8ea4ada8b"], "error": null}
+{"repo": "oxipng__oxipng", "roots": ["7d3a6016867f56dfaa752191639834f12581e106"], "error": null}
+{"repo": "parallaxsecond__parsec", "roots": ["047e395ee5edbad82d52738e275f756e7bd0480b"], "error": null}
+{"repo": "openai__codex", "roots": ["59a180ddec4adaf9760972cdb1eb89f06a81be8b"], "error": null}
+{"repo": "paradedb__paradedb", "roots": ["0adc42f29fd6ab3455da4e7afd7118930af4981b", "894635bb3873d82f5b97195d3f30b77ee40b12cd"], "error": null}
+{"repo": "pemistahl__grex", "roots": ["3b4f6d3a0ac99e31053a158538f4d026d09b0a16"], "error": null}
+{"repo": "patchloom__patchloom", "roots": ["89f413a07a580cf43d129f0ad006c22071d43508"], "error": null}
+{"repo": "pest-parser__pest", "roots": ["74706a75477fca7bc3ed252fd862c464415804c4"], "error": null}
+{"repo": "oven-sh__bun", "roots": ["025fe36defe2468ca1ed224855aa1effa09001ca"], "error": null}
+{"repo": "paradigmxyz__reth", "roots": ["978527367f159ff3d9f90723e73cf2560c8f54b8"], "error": null}
+{"repo": "oss-review-toolkit__ort", "roots": ["0b17041c9e6c38fb7af1d3d51232de2869610ac7"], "error": null}
+{"repo": "petgraph__petgraph", "roots": ["6fdf817363b5555a91a3a9012cff5d317c590590"], "error": null}
+{"repo": "pgcentralfoundation__pgrx", "roots": ["62031da526db13b767e667ea1db8b2ee2815fa7e"], "error": null}
+{"repo": "pingcap__talent-plan", "roots": ["2d764b93dc96e40ff363bd474b25b5b3de4bdc91", "e2f4d68af6227c90a1fba2a06f7a80c501ef7257"], "error": null}
+{"repo": "pgdogdev__pgdog", "roots": ["8b51793c16d7930fd9b641258a5070fff12d3b12"], "error": null}
+{"repo": "plotters-rs__plotters", "roots": ["4c68b8b33f2d1e51942229d68582fa2e81cfe73c", "bd3a517541e42ae1f566a584e0091d1e41e27e2c", "bfee3e425ed69e60a8009b55c8b84c3994177b28", "f42b2a94eb1f7af33d07fab55f129140c9f71a7b"], "error": null}
+{"repo": "pkgxdev__pkgx", "roots": ["26300eb4d182e7086ef27b321258df6c2111aa8f"], "error": null}
+{"repo": "oxc-project__oxc", "roots": ["e987f90c99d0d45f34ff80a15d1760470e9d97c6"], "error": null}
+{"repo": "poem-web__poem", "roots": ["eda29e62199124fe11ade98f1f899a30525d6ff6"], "error": null}
+{"repo": "postgresml__postgresml", "roots": ["db086dddd448659be99c4ff4ecea34cf333a73c6"], "error": null}
+{"repo": "pola-rs__polars", "roots": ["2714893dd8061644a7aa0fe0e983c2faf17d18c1", "ff0941eab2d609a6c1052c80f14e2d877c399265"], "error": null}
+{"repo": "prisma-risk__tsoracle", "roots": ["b5bf58e22df8df180475694ed1cae58141af1c0f"], "error": null}
+{"repo": "paritytech__polkadot-sdk", "roots": ["6ea877f04ade7a72a076fb10927931b60e8e4835", "72dba98250a6267c61772cd55f8caf193141050f", "944c64dcd6f955bd88480e09ecc8589946ec5e02", "aa67fe378157ef00d4cc2c2e117a4348a9ba5436", "e5bed7ac380b6adb54b60a2a72a2a8f07f50d6c1"], "error": null}
+{"repo": "psastras__sarif-rs", "roots": ["bdf1c66d48bdc61f241bcaf4d3aaca01db4314a1"], "error": null}
+{"repo": "prefix-dev__pixi", "roots": ["ca203cc81b02618d88b2fc082e6afd8bbf0accd2"], "error": null}
+{"repo": "probe-rs__probe-rs", "roots": ["1d433e9526640cd07521ac6b3f350d5f5d9784be", "58631d8b3415d0cdd6b1e4088990f5ac44d32876", "687f80a0c29b94bda5186b4d280b80c0c0ca23a5", "f534ea784c51079d7db28f63601fbf39476173cb"], "error": null}
+{"repo": "pulldown-cmark__pulldown-cmark", "roots": ["f11e936b6b96a8cad2150334f87a56a88ecc5662"], "error": null}
+{"repo": "qnbs__CannaGuide-2025", "roots": ["639e8fcf8bb061df8bbddbca31c7f74449b7f80f"], "error": null}
+{"repo": "pydantic__monty", "roots": ["35cd1dcd83123f9bd63605d09b897ad7ee4f1423"], "error": null}
+{"repo": "project-oak__oak", "roots": ["23368a4c617bc43cd9401335ceb2dc44a9626388"], "error": null}
+{"repo": "pnpm__pnpm", "roots": ["0bccc6e33a66f3b32e1e7c0ff8532f67fb5b8905", "307bd951f06e22ae766bc8aab5977aa9f2dc29bd", "4b42e5fcc402310d028ac54ba8fe979f7c4470af", "542153404104312e795e4740c48ba66c5b848b3f", "5b7b8ac6350987565f9f489d87dd36a8bee552df", "7cdcd487157a4bb850bcf3ef04b4c53d5f650ba9", "8c986b508237730fa1e27c9db1f66be36b266406", "957424f25bd53a76d5183ad490e0fefeae10f992", "96209e72426c85decf0580fa62252e240a063872", "b0977cab000857dabe616dcdfb8d7a1e78961cd1", "ba507c4bc2ec65d4a28f3b9c1654719033079a13", "cb5ff5318eea96d61a306c6bdde42a506fb5e6aa", "d24fb23f7570d041d65bd7f5ba88bab6496535f2", "d6eea20ceb520f82d51d79e9790ded6f6a5375d2", "e74d7c21773b03dbf77a2e7c5d96c2afc0088756", "e8fcad3f028fd4f9caeb53de03b29f77e973cf77", "f37129027e10e59c29f62c31e15eb73bb9d20b58"], "error": null}
+{"repo": "quinn-rs__quinn", "roots": ["b919cc7100a1807413d5ee562231694df5a54831", "e9c255ac1b24197dc2a14e4b1ef0e1e3990ec3b3"], "error": null}
+{"repo": "racer-rust__racer", "roots": ["89239027e41c96b58e78f27b960caa151e5fbca3"], "error": null}
+{"repo": "railwayapp__nixpacks", "roots": ["6196107920afa8e69fd50294a98ddacb4523cb5c"], "error": null}
+{"repo": "qxcnm__Codex-Manager", "roots": ["42afc71163be7a975d3c60dce357fdcb08f2ccf8"], "error": null}
+{"repo": "quickwit-oss__tantivy", "roots": ["3f09ec75dfdae94c32bacbbf59577628f2d6ccff", "9d071c8d4610aa61f4b1f7dd489210415a05cfc0", "f07ccd6e4fbc5bbfeb94d40e0f14bc527a7d5439"], "error": null}
+{"repo": "quickwit-oss__quickwit", "roots": ["c8f03d4fb7d777d253b4a1abf40da1d312ab1abd"], "error": null}
+{"repo": "rathole-org__rathole", "roots": ["8f3bf5c7c7109821d737a6a67a7fd51fdf3b0917"], "error": null}
+{"repo": "rcore-os__rCore", "roots": ["0d7a2bb0709f3181a2f77157f564da249ab810f0"], "error": null}
+{"repo": "reacherhq__check-if-email-exists", "roots": ["b5b298da342480de619c45adc098bad8ea7dab01"], "error": null}
+{"repo": "raphamorim__rio", "roots": ["94d055d16ecf1115a0b469faf4ee24a8fc8a02d2"], "error": null}
+{"repo": "ratatui__ratatui", "roots": ["459201bc6531e62ae4decc62cca1b50d12b9adcb", "50af9a5d80ed5446f3e6cc554911f606580edde9"], "error": null}
+{"repo": "redox-os__tfs", "roots": ["2efecc7af29cad015082019cc5f6dc175938a5a8"], "error": null}
+{"repo": "rayon-rs__rayon", "roots": ["1610798ae825bd7d4d83e8021e987d902c25ddc5"], "error": null}
+{"repo": "redbadger__crux", "roots": ["e9dbe2f07542665590c2ae65f7cb3eb095f537cc"], "error": null}
+{"repo": "redis-rs__redis-rs", "roots": ["a764899eeaa6b14eddab86fc3fa0ac184568a2c0"], "error": null}
+{"repo": "registrystack__registry-stack", "roots": ["06249002c07ba2674fc3637bf2a8076d461edc4f", "37196599d15ae264906bc78a6c7252bc8a0b2f29", "83f719d255bb884b32f49d8007ef9dd8e1cc00c0", "8c682c5f71215ac52d37f09f5463256eae86875d", "aa45f9dab22f6e861750a304cc9d230c70c7eaad", "c26b9b7d2ef6546683f79446689998910223845b", "c60b08ac3758dd36e708af98d852f8cb8f76f941", "fb4bc79ab1051da86afac8bbdf7dcfe30cc34ef8"], "error": null}
+{"repo": "readysettech__readyset", "roots": ["278f7119a04308c5b0f760a9dcf75dad9bf11060", "2b2bd67045a47bd0f880e0e1c0163796a8eb6199", "3dda2b8371b86b80c2b674843267ea56d6344c5d", "864a58c79a1f5a3f0d8c25e975b2737c302b0531", "88b16ff851f36d3bbf3db2472c44373032b0d78b", "89878a92a299f73e6d9a4bfe8f4b8866eac53952", "97f7c5a31617efeab65b6a1b11f0b8bca7bd40fc", "9ce9733b6c6ad6aef3787506d74ebb4299f2dbd7", "db5767e21ee90d838d7af56a35b513a02073d783", "f5b278114b771df4295a89c74120164d9c15de7b"], "error": null}
+{"repo": "restatedev__restate", "roots": ["019f1e079cc200a2afb7d8071c5651866a2d5a8e", "3566d3261aeee4ff8bd147795e0b006db6517ad6", "a660ef9ce3dbc84944b6afdd056ddc2640b42a97"], "error": null}
+{"repo": "rhaiscript__rhai", "roots": ["6739706b64bf2565bfae3e006f5f54f48d69d23e"], "error": null}
+{"repo": "rivet-dev__agentos", "roots": ["31ef43b512301a2a2bb1bbf983d17bc42f4a0ac2"], "error": null}
+{"repo": "rkyv__rkyv", "roots": ["2c993d7ccefcef284484ebcbf6b8082b97d8ecf2"], "error": null}
+{"repo": "rizsotto__Bear", "roots": ["f116508c5f59355de6645d5160dea3be05c922a0"], "error": null}
+{"repo": "robbert-vdh__nih-plug", "roots": ["d748bd62ff91180f23d81c80a078d0efc68df9bc"], "error": null}
+{"repo": "rome__tools", "roots": ["1a81dfc0be787039f91eb16dfd64aa6a53b6fe73"], "error": null}
+{"repo": "rivet-dev__rivet", "roots": ["f8ff424491ad52445825808d04dbef299aef735e"], "error": null}
+{"repo": "ron-rs__ron", "roots": ["ad3498af2bda7132d091e8d7ecddac7ea67c307a"], "error": null}
+{"repo": "rslint__rslint", "roots": ["2e1a0ce0d771b7bd0ebe8d60cad207d8f2dff29f"], "error": null}
+{"repo": "risingwavelabs__risingwave", "roots": ["cb527ae81e9d9f51010da4b16ad9101447b7670b"], "error": null}
+{"repo": "rtk-ai__rtk", "roots": ["daab79cca4d74b16754b870c398ead1f078cf399"], "error": null}
+{"repo": "run-llama__liteparse", "roots": ["497ded7ef10bc448b8d59ca3e34a4455f99bff54"], "error": null}
+{"repo": "rusoto__rusoto", "roots": ["6d7a92e2dd09c6ec62a504ca7f163c185ab8ae0f"], "error": null}
+{"repo": "rolldown__rolldown", "roots": ["4758f7cc42e96f58868fb2d7d176227654731a94"], "error": null}
+{"repo": "rusqlite__rusqlite", "roots": ["ca3a0f058008cff7993d092a022686c64d1a37ce"], "error": null}
+{"repo": "rust-bakery__nom", "roots": ["38010665593e33d1f8d5ee83fa0b18cd899b8734"], "error": null}
+{"repo": "rust-cli__config-rs", "roots": ["40a44a459fde4c4042d5188faedea718a34e2b96", "e7b7555d1516d0b274e7269961fce9ec9b30bc98"], "error": null}
+{"repo": "roseteromeo56-cb-id__DeBankChain", "roots": ["515f04bd6337ede36de7bdd44a20570425ff1bab", "528f57f727952b07dcf3582de0b8a331f3589b55", "df4643e8ed0e5840e4f5b0d28197f74cae6c90fb"], "error": null}
+{"repo": "rust-headless-chrome__rust-headless-chrome", "roots": ["2e058d10d99b52efbccbe92e7509de0849bd5571"], "error": null}
+{"repo": "rust-itertools__itertools", "roots": ["3f329b629b9d2a2db0d09f5b896db898984fef87"], "error": null}
+{"repo": "ruffle-rs__ruffle", "roots": ["8d4ce5af8af82db8c730f96c56bd8ede1c76bf60", "b979ac26a9dad77ca66c3f9171efac4acfa8c19d"], "error": null}
+{"repo": "roseteromeo56-cb-id__next.js", "roots": ["04578072ec60eb9e5c5e1b6787ed695a16e4529e", "e7c2d1e932928a497c826f568af0e69c6002f825"], "error": null}
+{"repo": "rust-lang__flate2-rs", "roots": ["01c8e0dfa6b81d24df54d890deb2a18dbf0ce8e3"], "error": null}
+{"repo": "rust-lang__hashbrown", "roots": ["2e2e8275381912bab7776ea1e31d2b3b4d810589"], "error": null}
+{"repo": "rust-lang__futures-rs", "roots": ["471df298645198f78fdd2761f8a2b2c8fc96479b", "fc205d54f91b1451ca8914c9f7cdeb6c742449f9"], "error": null}
+{"repo": "rust-bitcoin__rust-bitcoin", "roots": ["c9ad7c0b58393dc088ec6535c684ad9029888bde"], "error": null}
+{"repo": "rust-lang__mdBook", "roots": ["d5a8d7f3a182ba754952f50209595a2485739fa2"], "error": null}
+{"repo": "rust-lang__regex", "roots": ["63c6c541fc39f9b77605e47cace087ea398bb101"], "error": null}
+{"repo": "rust-lang__rust-bindgen", "roots": ["9fe92b0cfd48d5ebd1c82af8b1ff041f8c416a65"], "error": null}
+{"repo": "rust-lang__rustfmt", "roots": ["5caf49ff63ef84961f0b489706d6fcf3bcc0c6f0", "d0762f032b4a5ed636a1ebae0b82647f2cce2998"], "error": null}
+{"repo": "rust-lang__crates.io", "roots": ["254cc861d8fccc52f2a1c6fdb95d911fd7e1ae0a", "334cd97b733d61a0d0c96744d9c071889754c48f", "54cfc8d8c4747ccf7a179396b543e0c9724acdbc", "67e13e897223015ba89c3225f4125c12075fd0b0", "7b358785d251e5d6383ea3cbafc5c82bc22460ca", "c9cd54cf2a42fbf77e481d69d82bd1ef747264e5", "dce58afb908a53988550f72046a2fcdfd9735f2e", "e6230e023d01cdc96e43d0249e8b34eb4dd5f3a1", "f7edbe88c10c854ac7ec5b9aabca4e5835b646a7"], "error": null}
+{"repo": "rust-lang__cargo", "roots": ["227d4e83effb41d5f02341afdb8a06cff2e028e8", "25592d9a5c005fd5bf8c7976ca47a221ad7ea603", "5448ed7d68b9d2df1958b96549ffd7fd6ba46999", "562cfa8409b6edd32621f1b9493e279f4ddabbb3"], "error": null}
+{"repo": "rust-lang__rustup", "roots": ["38c282b9094575cd3062fbe8e503dce045dd06d5"], "error": null}
+{"repo": "rust-ml__linfa", "roots": ["87cac0656099e060134d698f8a2c9bf9df352022"], "error": null}
+{"repo": "rust-ndarray__ndarray", "roots": ["becc1f9cd07c1167a262329f311d0619c47e95d6"], "error": null}
+{"repo": "rusterlium__rustler", "roots": ["0146cbbdb562c037b836ad5ee06b460b26670405", "1899ba2cc560c82faec25021543fccab867b21c6"], "error": null}
+{"repo": "rust-postgres__rust-postgres", "roots": ["a3085a559f10c7b8a82163077c190953adcb8a08"], "error": null}
+{"repo": "rust-lang__miri", "roots": ["cf49d6b080bb685304c63379a3e101dc7df4ab14"], "error": null}
+{"repo": "rustviz__rustviz", "roots": ["34273be0d085afa1fa5f9d3d92ac0110a14484b7", "ac78d6978af49305787fce8efe3e50bbef1002ec"], "error": null}
+{"repo": "ruvnet__RuVector", "roots": ["ea3e70aaa82c02a47860d7a17647d7bdab624cd0"], "error": null}
+{"repo": "rustfs__rustfs", "roots": ["a9be4502222da39fee8f1e70579eb9051cd421b2"], "error": null}
+{"repo": "rustls__rustls", "roots": ["4460bbe15b4df1f6e6efea4f9f06fbd0fb278077"], "error": null}
+{"repo": "ruvnet__RuView", "roots": ["6cab23090863ac1fa178debb749ab77818c785ce", "d803bfe2b1fe7f5e219e50ac20d6801a0a58ac75"], "error": null}
+{"repo": "rust-lang__rust-clippy", "roots": ["37226273a7a5b2119daaab06d253f93b6813b881", "507dc2b7ec30cf94554b441d4fcb1ce113f98a16"], "error": null}
+{"repo": "rwf2__Rocket", "roots": ["967fcd26b2a21457224509aecb074004075cddc1"], "error": null}
+{"repo": "safetensors__safetensors", "roots": ["a1e3fe5c6f3073575f6ebe6bd5af29cfe3c8406b"], "error": null}
+{"repo": "s0undt3ch__ToolR", "roots": ["1b3837db23f8d6f950a8a5986f8d08360e24ece5"], "error": null}
+{"repo": "salsa-rs__salsa", "roots": ["b26f0c17eab132767a123cc916b2fbd338393638"], "error": null}
+{"repo": "sayanarijit__xplr", "roots": ["f9c3edee06081ca1403c274e8a15bcabb27f5553"], "error": null}
+{"repo": "sagiegurari__cargo-make", "roots": ["f720301479693ee5a530c12a071005b051e4a980"], "error": null}
+{"repo": "salvo-rs__salvo", "roots": ["4a9a0f84cb4b9c164e16c879609177e5a76b4f7b"], "error": null}
+{"repo": "sbom-tool__sbom-tools", "roots": ["86c530fd217ff64041b1b0debc622be45de306a4"], "error": null}
+{"repo": "seanmonstar__warp", "roots": ["557ddefdfee84f725c1006f61d3c73bbf2702ece"], "error": null}
+{"repo": "sebastienrousseau__hsh", "roots": ["2a1bf42ab8fcfd86ea92b6eb9da4731f0ade16d0"], "error": null}
+{"repo": "seanmonstar__reqwest", "roots": ["9bfdcec052631301b90998267a4dd0931160c146"], "error": null}
+{"repo": "scanopy__scanopy", "roots": ["2045c2fea37178f4e731057204a8eab6da4817f7", "7baef26ddf6a242d8a45d14d73280c39bd9d5f66"], "error": null}
+{"repo": "rust-lang__rust-analyzer", "roots": ["378968b9fcd2cc7a91127302e8b70ed5fa18d534", "89682556085c8e80a15e92a019c2c975a20e663e", "a63222cd240d9b5405826783603f3b391c90885d", "ae32cac38827bf3e921410703a01f38c670ce3cc"], "error": null}
+{"repo": "serde-rs__json", "roots": ["c79213f8a200b1abdbc83c56387bacc5a2418ce2"], "error": null}
+{"repo": "servo__pathfinder", "roots": ["34cd1ef9b0659c2a525b5297d442d6b19c43114f"], "error": null}
+{"repo": "sfu-db__connector-x", "roots": ["421e6e53561711f96cd6db891fff3eccb8bc72bc"], "error": null}
+{"repo": "serde-rs__serde", "roots": ["9bd57645748cff5ad12fb03b46ea234728066ce6"], "error": null}
+{"repo": "sharkdp__hyperfine", "roots": ["a658ab8cca1f219b5e106ee72ce45bdb8d9e25e8"], "error": null}
+{"repo": "servo__webrender", "roots": ["4f67edd2c390d4ff7c1e83ea41364bafe7e46b09", "52db2faad72433a220459433bfe972e7d9055b7f", "8a16bd768ba9c876354ca825d6d383bf82d2ae81", "bdd8985d30683d04d755eedfc6d19f414a6ed4cd", "c92d60b2709ab4f0bf029c6865c5b64f86d8b5f1"], "error": null}
+{"repo": "sharkdp__bat", "roots": ["8f5a80ea07e0dc98792c259b03d1d7f7678f87fa"], "error": null}
+{"repo": "shadowsocks__shadowsocks-rust", "roots": ["17c72b9175f0b8103a50ae90cf830905ef2b99fc"], "error": null}
+{"repo": "sigoden__dufs", "roots": ["1c97c010969ea80c771be31a7a99a4a80b9aff8c"], "error": null}
+{"repo": "sharkdp__fd", "roots": ["21459731eeb2f2fcc27d7b51709064cee484fe93"], "error": null}
+{"repo": "shrec__UltrafastSecp256k1", "roots": ["cc7900073522fec49896ff4f7010e03752372762"], "error": null}
+{"repo": "signalapp__libsignal", "roots": ["3bd6d58de2ae9c5fbf8bbcf26bc242bd4a7d9625", "845ffe4e820e14b0196a7b210e3ddf0bfc41f775", "b158ff7ab6470211ee041591c6264d8f2112d26f", "e0bc82fa003b2b2286dbeff276282ba3d038cf1f", "fdf3e954e047d593e8a91808540b1c3fe408a3b5"], "error": null}
+{"repo": "skyzh__mini-lsm", "roots": ["68303e99b8e4506bf96f091f0222858bd61b159c"], "error": null}
+{"repo": "skytable__skytable", "roots": ["e98bc39a469986f08fe2bc3c945a075652a8577e"], "error": null}
+{"repo": "skim-rs__skim", "roots": ["cd3ef3c36e53eab9ca5887fa9160f66bebb8b12b"], "error": null}
+{"repo": "slatedb__slatedb", "roots": ["d3c56a43611e8748c008087c0149578ccaffaeb0"], "error": null}
+{"repo": "sinelaw__fresh", "roots": ["58dc712bb633706d8661e632f48929dec1da80e6"], "error": null}
+{"repo": "smol-rs__smol", "roots": ["6ae620ac3a38f72dcc0d38eb02dc39a048ec83ae"], "error": null}
+{"repo": "sigp__lighthouse", "roots": ["7db81b167f992c8fd96b4f02c4de774940ef7282"], "error": null}
+{"repo": "smoltcp-rs__smoltcp", "roots": ["bc8b038fd16ad1522749ba724f7be1e6ac7251c4"], "error": null}
+{"repo": "sozu-proxy__sozu", "roots": ["685739c2b020e36d923a2ba54171fa1a5c6ea804"], "error": null}
+{"repo": "spaceandtimefdn__sxt-proof-of-sql", "roots": ["b1eec9e63f594512fa0f3468039a24a47dedb264"], "error": null}
+{"repo": "spacejam__sled", "roots": ["f4ebe44d5df8403108cff3013815cd5f895c358a"], "error": null}
+{"repo": "spacedriveapp__spacedrive", "roots": ["dd5a38821d98ae1956e0425ae7b8f09bded7f8fa"], "error": null}
+{"repo": "sonos__tract", "roots": ["9f342efea0430362c7abba9913389875af4bbcc6"], "error": null}
+{"repo": "spkenv__spk", "roots": ["50d18d36bff5215317f9bede2dfcc2d975d7a0aa", "d56ef4fcaf810c3ba1da8f0dcce4877b7bf1ebd5"], "error": null}
+{"repo": "slint-ui__slint", "roots": ["c6553d007e5e9b45d0ae280763911580539e8d7e", "f7c864b0e6e27e1037c7858ca4b480e150f953b0"], "error": null}
+{"repo": "stalwartlabs__stalwart", "roots": ["ca889365c538047a36384ed77e1b74e849c60474"], "error": null}
+{"repo": "spinframework__spin", "roots": ["308c266925fc0b3980bb29e0830a4456b285f952"], "error": null}
+{"repo": "spiceai__spiceai", "roots": ["5d68acd257fc2ad761d34f433767cdf40d4caa1d"], "error": null}
+{"repo": "stepancheg__rust-protobuf", "roots": ["c8f9d7659d1f0ec698dedd711881c4ee22df6a4a"], "error": null}
+{"repo": "supabase-community__postgres-language-server", "roots": ["f0bd45f5878dd4e6af6cb3054dc73dc639f9e210"], "error": null}
+{"repo": "superradcompany__microsandbox", "roots": ["a0d92fc6504321da070002eb04c81363485e99f9"], "error": null}
+{"repo": "starship__starship", "roots": ["ca3f439012f3d1125e1863d383bb155f9f1f59d5"], "error": null}
+{"repo": "svenstaro__miniserve", "roots": ["0938d69f9aa8565a002921a7b54e3ee90688ccc5"], "error": null}
+{"repo": "svix__svix-webhooks", "roots": ["c8ba52b56d3c8050d53169213a07dd41dcfe1ef7"], "error": null}
+{"repo": "sycamore-rs__sycamore", "roots": ["81251b780de0aea5a3f53cd10121e90804d3eb57"], "error": null}
+{"repo": "surrealdb__surrealdb", "roots": ["281df6e274649df5fa82ac4ecf326d1dccc368a3"], "error": null}
+{"repo": "tach-org__tach", "roots": ["d999d88b955877efa766915c1c498a49dc347ca8"], "error": null}
+{"repo": "tafia__quick-xml", "roots": ["8f7662cf2ab3440e6683469e7b28b903ec76bfc8"], "error": null}
+{"repo": "t8y2__dbx", "roots": ["b2e6dfad7e1d3f065571c996a58659c135ba75fb"], "error": null}
+{"repo": "stacks-network__stacks-core", "roots": ["49e75ddc58ab6a0862832decd8ea4d11267dd473", "6a82dfd11d098b97922325c3c3d43dff715f72dc", "90a07f63f6f5094e61f23b72783c2139b93397af", "93fc92c1a5f6e30cab20ed9c20a0233a926f94fb", "b958090d4772052e9139438fc6a24708a3daea2e", "c439df1a7b7cae804e2365842c2ccb72a58fc8ad", "cce923850a0016fd5bc734e7df17034b22f7fe32", "d270bc296603021569775357ad38db37d068c9c2", "d63b150ac9876ca1a0a2a13d78678e77ff0c71af", "e5a683a39b7e75ed08ba2559222eaa85c47525ad", "f04527398898fbbfcde894271299d536b4b83741", "f5c91a5d796f8eb2eee2d2c5d08b122ad04cb347"], "error": null}
+{"repo": "servo__servo", "roots": ["10827f160ba43f6b66e859325fca07db242f1d7d", "903dce08ca9a46378ea64628e10b4d83ceb03e87", "b77286417dfbaf8bc64b1527990a0369cd0cb82b", "ce30d4520d67f2c6ef960571a9b3e450c5dcbebe"], "error": null}
+{"repo": "tealdeer-rs__tealdeer", "roots": ["ba0283a1e7dbdec88fabc67bd49f1bdf3aca14d0"], "error": null}
+{"repo": "taikoxyz__taiko-mono", "roots": ["8144dd1beda6d0c8ec75354c01fea392428c6561"], "error": null}
+{"repo": "telemt__telemt", "roots": ["44169441b4ad0df17dff06681e56e7fa09157cd2"], "error": null}
+{"repo": "tailcallhq__forgecode", "roots": ["bd433947fd486ece74fa0c6020ee94e495f002f9"], "error": null}
+{"repo": "swc-project__swc", "roots": ["0f9532dd5d379292cc2d67777a108d88803bad91"], "error": null}
+{"repo": "tikv__raft-rs", "roots": ["2275ab007270c8f286d86d51feb259602aeca897"], "error": null}
+{"repo": "teloxide__teloxide", "roots": ["1ae1b6f2acc085825ad5ccba65f8dc154a781de7", "4b683d7c90b5a5d1c6d73ee3ed7dfefe3bf65e16", "c6e22c3f8a7583c87ff8d74c8bf754555376fc45"], "error": null}
+{"repo": "theseus-os__Theseus", "roots": ["3cf34608d62e52466d9b5e916dba9d9256cb2b53"], "error": null}
+{"repo": "tokio-rs__loom", "roots": ["2b37a358aba5d98ab9a3846c4ed2ea6e00c2c5ba"], "error": null}
+{"repo": "tauri-apps__tauri", "roots": ["5801b6f5fae89a4b2534385841f6e39136281712"], "error": null}
+{"repo": "tikv__tikv", "roots": ["b56dbe686b83ef6fda592b46c0d03245559a39e7"], "error": null}
+{"repo": "tokio-rs__mio", "roots": ["0e711c4cc5e61c55223e33fe78fad0e9f1b372e5"], "error": null}
+{"repo": "tokio-rs__toasty", "roots": ["116d2b751dcee5c71ba27825a9ecca29e5156a1e"], "error": null}
+{"repo": "tokio-rs__axum", "roots": ["07294378b39f439d7fdcd528a6339733a9280006"], "error": null}
+{"repo": "tokio-rs__prost", "roots": ["e9d7d15bbf6b7c08e50c7bccfa206a32356702ab"], "error": null}
+{"repo": "tinyhumansai__openhuman", "roots": ["577ffcd27c9f03f154d194e2648fb17231734458"], "error": null}
+{"repo": "tock__tock", "roots": ["a14379b850bf47e89cd2945226cbf9bcbab5f43f"], "error": null}
+{"repo": "tower-rs__tower", "roots": ["6faead4e6342eeb35556e5594dd23ba17d4fa670"], "error": null}
+{"repo": "tokio-rs__tracing", "roots": ["6a99b1093c07ccd9a6968baa3979af028142f002"], "error": null}
+{"repo": "tonkonozhenko-mi__ai_private_workspace", "roots": ["89c8aeb8d6bcd8cf50eb07f8b14cd0920c32b5bc"], "error": null}
+{"repo": "touchHLE__touchHLE", "roots": ["4e4f05f41813d4bf26817c87451797aa75e2189b"], "error": null}
+{"repo": "trailbaseio__trailbase", "roots": ["bdb373584009836b854861c96df617dd13655d09"], "error": null}
+{"repo": "transact-rs__sqlx", "roots": ["d29b24abf0f491d912333f34d7b5187e4c30bb08"], "error": null}
+{"repo": "tokio-rs__tokio", "roots": ["97508096fa5671d64eece96b974cd8d989e4a752", "bc64194be17bc9711b4a56364e677d823c7cc3d1", "eca7f0760f3f8ea9ecdf9e16e5226959da12d564"], "error": null}
+{"repo": "trifectatechfoundation__sudo-rs", "roots": ["c5df0c2e799bcd0c21e6ed52c09a7bf84e99f292"], "error": null}
+{"repo": "triwinds__ns-emu-tools", "roots": ["48b096988dd433ca6f69c761a8e1e208fa1989a1"], "error": null}
+{"repo": "tracel-ai__burn", "roots": ["ebea760c54da5a2f3f299e46e710efde029df8e6"], "error": null}
+{"repo": "trunk-rs__trunk", "roots": ["b46ff7ec9607dcf138bf3d3d998917007f90de33"], "error": null}
+{"repo": "tursodatabase__agentfs", "roots": ["6d72c9216557ef879bb2abdc9673a1ee5a202d23"], "error": null}
+{"repo": "tree-sitter__tree-sitter", "roots": ["6e4115548c1982a764ca22f819544455ca9f7807", "84c5bceb818127fd7728655fb209a1be92e53fde", "a4c4b85a16ce0ecbb550d6de47801d2e387e629b"], "error": null}
+{"repo": "tw93__Kaku", "roots": ["823aaf4f29c6e6821c39b555a151bb323cb19e13"], "error": null}
+{"repo": "unhappychoice__gitlogue", "roots": ["7e8e4b5c2a0e920f4b4ec9dee6d5cb6395bac8e8"], "error": null}
+{"repo": "tw93__Pake", "roots": ["cabf8dfe74962757de2e8ce0050c03a6fbe1c6c6"], "error": null}
+{"repo": "ultraworkers__claw-code", "roots": ["507c2460b92b73d6671688a38c68c0e26da0e958", "6b5331576e8f2d2246205cc6587e22e3ea2fbd8e"], "error": null}
+{"repo": "unicity-astrid__astrid", "roots": ["c802083061c9764b170abbb2d415eb8224b68e86"], "error": null}
+{"repo": "typedb__typedb", "roots": ["54cc4f8f6ea63fa71b8cd5c9de4be6575465c473", "6cecca002eed3419b4e5c77d54db2ec657954845", "bcf1b14ce9533a189aa738dacb351816c432a0c5"], "error": null}
+{"repo": "typst__typst", "roots": ["5a600eb354c65ec008cbf020e45705c2f401d669"], "error": null}
+{"repo": "unkos-dev__reverie", "roots": ["b8a5288a42d266a41c5febd1260f1bd7866b1cc4"], "error": null}
+{"repo": "us__crw", "roots": ["052295511c2ef71e2fc3ca12af23514a7a6ae9b5"], "error": null}
+{"repo": "vadimcn__codelldb", "roots": ["01e2d1c09e15c1fc2dc423376cc83204a76ef587"], "error": null}
+{"repo": "valence-rs__valence", "roots": ["30fa1b175cbbc3eeffc17f34e16c9987c29ec446"], "error": null}
+{"repo": "tursodatabase__turso", "roots": ["7a173a8ae2f000235f40c0e748b9c33339dba87e", "fb72f9688bd1626b89c897c4ad88b28a785ad76d"], "error": null}
+{"repo": "valeriansaliou__sonic", "roots": ["49c9fb182efaf5b2e8dd9eb45b0ec7869dcafede"], "error": null}
+{"repo": "vercel-labs__agent-browser", "roots": ["2d0520b770789b9a52bcee0041d93578503d8231"], "error": null}
+{"repo": "vlcn-io__cr-sqlite", "roots": ["2b1c8f2d6e330c305ba906f293d85acc885f867f"], "error": null}
+{"repo": "verus-lang__verus", "roots": ["112613e0331ef4cef66c80573cb027f1b0152642", "81df2309c33243755a4be8ea4c9babc626b8bd6e", "9ddf388a2ce13015840b55131b3b3af337928b21", "eaa340bced222cb79ed55b5b7150ad6ded64bba0"], "error": null}
+{"repo": "volta-cli__volta", "roots": ["e28798e77e2d5e737a88a115a116e8398b0e6520"], "error": null}
+{"repo": "voidzero-dev__vite-plus", "roots": ["e1d1fda71c45a13899d235c272ba1bfa63114df8"], "error": null}
+{"repo": "vv-bogdanov__jscpd-rs", "roots": ["4756fb028e25baea4157390bea49d43a43c07df6"], "error": null}
+{"repo": "waditu__czsc", "roots": ["bbb8dff9d8b23d0456b42baace84dedc017b68e0"], "error": null}
+{"repo": "wasm-bindgen__wasm-pack", "roots": ["125431f97eecb6f3ca5122f8b345ba5b7eee94c7"], "error": null}
+{"repo": "warp-tech__warpgate", "roots": ["4ccf2b0437413732db352a4a0e00c02c97eb74d9"], "error": null}
+{"repo": "rust-lang__rust", "roots": ["37226273a7a5b2119daaab06d253f93b6813b881", "3e0c1c8e0cdeab8871f96b1703f6b8a852d51568", "4800f55d10d8223c35b54ea3c4ee774f17de4d2e", "4d615dba0e913d807b38e893ec51e2bf6ea40287", "507dc2b7ec30cf94554b441d4fcb1ce113f98a16", "5caf49ff63ef84961f0b489706d6fcf3bcc0c6f0", "6bdc5f7a2eeb83375539a20f49166462d2764562", "773fd1a707f5abff63c4fd47b73580faba65d468", "88ea40b8836b438e1649fa5c9661daae7191dd39", "89df25f400844092e2f667f954e84f839e3731bc", "8e271704ef5f758ceaf505af3a7da69b2666f819", "8ee9cbaf607f7077d7ccc6b7d288f75cf55cf9b8", "a63222cd240d9b5405826783603f3b391c90885d", "abe1abd26d07b656b0f7e96b20350368412739d7", "afae271d5d3719eeb92c18bc004bb6d1965a5f3f", "c01efc669f09508b55eced32d3c88702578a7c3e", "c62142ad99e63a50a67519db65714cda4180d5e6", "cf49d6b080bb685304c63379a3e101dc7df4ab14", "d0762f032b4a5ed636a1ebae0b82647f2cce2998"], "error": null}
+{"repo": "uutils__coreutils", "roots": ["7a5087832c5c4647802de4163c6d24dc08c309de", "d4e96b33e343733992fad55ac840c9649cd72ede"], "error": null}
+{"repo": "wasm-bindgen__wasm-bindgen", "roots": ["2926e6e9f4cfe1b8c5fae9ff2693afa6c9608114"], "error": null}
+{"repo": "vortex-data__vortex", "roots": ["1f78f94f295b7d2902f6419446b135825f43ca2b"], "error": null}
+{"repo": "watchexec__watchexec", "roots": ["5cf5ce73ca890a941a100ad7998a828ef1644af5"], "error": null}
+{"repo": "wasmi-labs__wasmi", "roots": ["49347a63ee6a93f7774a53c1650197f496ff10ae"], "error": null}
+{"repo": "vercel__turborepo", "roots": ["3d64ec78aef49c1d0c1e651c525578304f8cc808", "6077c5e4894f4fa0a95b01d5cc8f3f103a227b8b", "eb27309e0e33e8f274efb5c321723ca42a241824"], "error": null}
+{"repo": "wasmCloud__wasmCloud", "roots": ["566101c9f5083ff381e1bd685a484a186c222ef9", "f07bfbd12a6047f5aaf7b488ddd0d32d7f49f01e", "fe0edaf35d02b78fbb653514ebd0dcb2eb23736a"], "error": null}
+{"repo": "weld-project__weld", "roots": ["e4a272d1dfa7d25ffb0eb9c8805a4d883f9681d8"], "error": null}
+{"repo": "webrtc-rs__webrtc", "roots": ["02a187ef0b7151e2a11342caace77c76fbe4d0b6", "03de81789f2963fc197b1c961740d05cffd305c1", "061c0068c19c792872993bfa99caaff1858d4f70", "0f7ddd65f1a665b62252dc83f3913c0c35ce9ef1", "2cb2a9c14edab8adfaa8ecb578e08043b2c6f754", "2fb66dc9d693b6fe7cb8b213e58db3c3e4e3f007", "32219943d4327bb3582eed350fe0babbd8f995e7", "40a543312d5a8de56458a91ea30198b6eef8cad3", "686bc4dd77134249c3f2e6de342399cf1f8b7279", "6f639ca6835bac4e0d84bb6fdd10b5da50672450", "751208b081053bd571c03cb94045cca8ac6eaf88", "9e36c2835a4ba82dd42f41e00c70de4392eb919a", "ad67828df0f98ebd4fe70521d17c7d9c32c5d042", "c3e85f97e8dbe8accd42d19c9e386987fb9f8106", "ee4e8e83809937594d26b5feb3e070431fb2f4cc", "fd03455909282a8a9af1cf1e11456e3ffa446283"], "error": null}
+{"repo": "willcrichton__flowistry", "roots": ["da2b732579cec6623719b910a16cdd535dfae2cd"], "error": null}
+{"repo": "wild-linker__wild", "roots": ["fb7da7841ad9e64e2cd1128a62d23d488dae921d"], "error": null}
+{"repo": "wealthfolio__wealthfolio", "roots": ["3d9914200035cf51bea6b23a4c5f0349f0672295"], "error": null}
+{"repo": "xacrimon__dashmap", "roots": ["ef5a92c420e772009815cf0f588d70fdba3a9047"], "error": null}
+{"repo": "withcoral__coral", "roots": ["0b4e846764359af760c5567e4aa130e33e85c8f0"], "error": null}
+{"repo": "xi-editor__xi-editor", "roots": ["fb66c8be9e481cff4027c39c1177b3e05f532897"], "error": null}
+{"repo": "xd009642__tarpaulin", "roots": ["4863801ea1663baee138062caffcbe89ce81e249", "c9dae4414186b5891054a084043032290758b07c"], "error": null}
+{"repo": "xingkongliang__skills-manager", "roots": ["0ddfa7af5813726108c003365399dd97fd709f7c"], "error": null}
+{"repo": "wasmerio__wasmer", "roots": ["571bfb0bee8a2ef14c871912304938768ceb4e96", "9bca6940b3130ec55105694578171f57246b0487", "bc376544cf1ea8dcff406f9d621f390a668183ea", "eb9cfbd839e911218b48def9680afdf51a3d1077"], "error": null}
+{"repo": "web-infra-dev__rspack", "roots": ["de7751f97363075e452f5d6bf3e4606787ee843e"], "error": null}
+{"repo": "xybrid-ai__xybrid", "roots": ["fe6aaf61d1d99d94a7e9806e9ad7b1ea9a4d43e3"], "error": null}
+{"repo": "yoav-lavi__melody", "roots": ["e49994e5ba802585598dc952dc2f92dcba73abbc"], "error": null}
+{"repo": "yewstack__yew", "roots": ["6a0067838a60debaab6c22e41322cf9ed84545a3", "b336704fcc55bcc3e4755a1f6e6089a40c8f346b"], "error": null}
+{"repo": "zensical__zensical", "roots": ["a09c1439a815fe717080f6dd4a79449f64ecb620"], "error": null}
+{"repo": "windmill-labs__windmill", "roots": ["2e132878e466dd8c5a58a15455919312490f8707"], "error": null}
+{"repo": "yvgude__lean-ctx", "roots": ["6eb5eb2f07162ea666f83aac3416a7dfcf64e5c2"], "error": null}
+{"repo": "youki-dev__youki", "roots": ["a08887d59a8c5a9bc19761320c4eb2832dd6ad8f"], "error": null}
+{"repo": "zesterer__flume", "roots": ["d60c90460414b135f523f68f0a19efb347d9b4e3"], "error": null}
+{"repo": "zellij-org__zellij", "roots": ["115bc83b8ebf4bf0cc338106d708ffcc9d20d2b5", "22f109e8cf6df7e99025c9ffe551101592b90b9b", "2ecf8bd5db43e02f7b9b2d1e99721b9f1dd54a28", "eb7a3fdf6034aa7119dea4e803136c44cfe7609e"], "error": null}
+{"repo": "zizmorcore__zizmor", "roots": ["658b559b3d91114cbd9da7c2a31d7e48f90d5d56"], "error": null}
+{"repo": "xberg-io__xberg", "roots": ["1fef2cf3c23972882e08965ffbdfcf6b634a80ba", "26caf9ab828474fae57349ac2bc8d8ba44da8508", "8fa538556ecc83fbdab4cb33bc006861992cdb29", "a43d26b8420336771bf298d0eed09263cb024e00", "bda34d53ec602787773f42efb01caf8c25e28443", "ebe4a8396b676e30b3b940333325cdb887672a82", "f6601111dc6c0ec5fa381e19663f43b8a4a63230", "f70414118507311ba78f380881e7aa5dbd9bccee"], "error": null}
+{"repo": "zeroclaw-labs__zeroclaw", "roots": ["05cb353f7f5318e58bd229c03c8577216b30b231"], "error": null}
+{"repo": "zed-industries__zed", "roots": ["b400449a58507cca1fa007197929c2cfd6beabbe"], "error": null}
