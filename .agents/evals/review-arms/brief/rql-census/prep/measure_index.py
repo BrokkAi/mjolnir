@@ -392,6 +392,10 @@ def git(*args, cwd=None):
                 try:
                     stopped = run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"],
                                           capture_output=True, text=True)
+                    # The scope may not exist yet if systemd-run is still registering it: kill the
+                    # launcher too. With --scope it execs in place, so this pid is the launcher
+                    # before exec and git after it; either way nothing starts later.
+                    proc.kill()
                     proc.communicate(timeout=STOP_SECONDS)
                     deadline = time.monotonic() + STOP_SECONDS
                     while True:  # the same proof as a server's teardown
@@ -513,6 +517,9 @@ def main():
     environment = {
         "instance_type": open("/sys/devices/virtual/dmi/id/product_name").read().strip(),
         "nproc": os.cpu_count(),
+        # What Bifrost actually gets: CPU affinity and the driver's cgroup CPU quota.
+        "cpu_affinity": len(os.sched_getaffinity(0)),
+        "cpu_max": read_cpu_max(),
         "bifrost_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("BIFROST_")},
     }
     latest = latest_records(results)  # the record readers use; resume follows it too
@@ -566,9 +573,11 @@ def main():
             shutil.rmtree(cache, ignore_errors=True)
             cache.mkdir(parents=True)
             rec["cold"] = phase(binary, wt, cache, out / f"{repo}.cold.log")
-            git("checkout", "-q", "--detach", head, cwd=wt)
-            rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
             if rec["cold"].get("ready"):
+                # The head checkout serves only the warm phase: after a measured cold failure it's
+                # skipped, so a checkout problem can't turn that result into "unmeasured".
+                git("checkout", "-q", "--detach", head, cwd=wt)
+                rec["changed_files"] = len(git("diff", "--name-only", base, head, cwd=clone).splitlines())
                 rec["warm_restart"] = phase(binary, wt, cache, out / f"{repo}.warm.log")
             else:  # a warm restart on a failed cold cache measures nothing usable
                 rec["warm_restart"] = {"ready": False, "skipped": "cold index failed"}
@@ -610,6 +619,16 @@ def main():
         sys.exit(f"{len(unmeasured)} pinned repos never reached measurement: {unmeasured[:5]}")
     if not usable:
         sys.exit("no repository produced a usable cold/warm pair; see the per-repo records")
+
+
+def read_cpu_max():
+    """The driver cgroup's CPU quota ("max" when unlimited); "no cpu controller" when the
+    controller isn't enabled there. Servers' scopes inherit any ancestor quota."""
+    try:
+        cg = open("/proc/self/cgroup").read().split("::", 1)[1].strip()
+        return open(f"/sys/fs/cgroup{cg}/cpu.max").read().strip()
+    except FileNotFoundError:
+        return "no cpu controller"
 
 
 def latest_records(results):
