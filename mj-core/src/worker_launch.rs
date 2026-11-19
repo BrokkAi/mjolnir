@@ -6,7 +6,6 @@
 //! carry no process, network, or worker-runtime behaviour, so both sides of
 //! the relay can depend on them without depending on each other.
 
-use crate::hex::lower_hex;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -595,26 +594,10 @@ impl WorkerLaunchConfig {
 ///
 /// One definition, because both sides of the upgrade decision compare it: the
 /// worker reports the digest of the file serving it, and the controller
-/// computes the digest of the file it would install. Streamed, because a
-/// worker binary is tens of megabytes.
+/// computes the digest of the file it would install. The digest and build
+/// stamp share a streaming read and are memoized by executable identity on Unix.
 pub fn worker_executable_digest(path: &Path) -> Result<String> {
-    use sha2::Digest;
-    use std::io::Read as _;
-
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("open worker executable {}", path.display()))?;
-    let mut digest = sha2::Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("hash worker executable {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(lower_hex(digest.finalize()))
+    crate::worker_build::executable_digest(path)
 }
 
 /// Content address of the executable running this process, or `None` when it

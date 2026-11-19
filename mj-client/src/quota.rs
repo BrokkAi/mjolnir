@@ -14,6 +14,11 @@ pub const API_LABEL: &str = "API";
 /// is no reading to take and none is missing.
 pub const NOT_REPORTED_LABEL: &str = "n/a";
 
+/// Label used when the subscription is active but no usage window is open and
+/// the provider reports no usage at all until the next request opens one, so
+/// even the long window is unknown. Muse's quota endpoint does this.
+pub const IDLE_LABEL: &str = "idle";
+
 pub fn antigravity_pool_of_window(window: &QuotaWindow) -> Option<AntigravityQuotaPool> {
     AntigravityQuotaPool::ALL
         .into_iter()
@@ -258,13 +263,23 @@ impl ProfileQuota {
             && self.extra.as_deref() == Some(NOT_REPORTED_LABEL)
     }
 
+    /// Whether the report says the subscription is idle with nothing to read:
+    /// no window is open, and the provider withholds every window until the
+    /// next request opens one.
+    pub fn is_idle_without_reading(&self) -> bool {
+        self.error.is_none() && self.windows.is_empty() && self.extra.as_deref() == Some(IDLE_LABEL)
+    }
+
     /// What a report without windows shows in place of a reading: `API` for a
-    /// usage-priced profile, `n/a` for a harness that never shares its quota.
+    /// usage-priced profile, `n/a` for a harness that never shares its quota,
+    /// `idle` for a subscription whose provider reports nothing while idle.
     pub fn windowless_label(&self) -> Option<&'static str> {
         if self.is_usage_priced() {
             Some(API_LABEL)
         } else if self.is_not_reported() {
             Some(NOT_REPORTED_LABEL)
+        } else if self.is_idle_without_reading() {
+            Some(IDLE_LABEL)
         } else {
             None
         }

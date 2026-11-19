@@ -1572,7 +1572,7 @@ fn profile_archive_entries(
             );
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
-            let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
+            let digest = mj_core::hex::file_sha256(&absolute)?;
             Some(if header.mode()? & 0o100 != 0 {
                 format!("{digest}.x")
             } else {

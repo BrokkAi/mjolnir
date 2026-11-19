@@ -1983,6 +1983,45 @@ mod tests {
                 22,
             );
         });
+        // Muse while no five-hour window is open: Meta reports nothing, so one
+        // profile shows the weekly figure carried from its earlier probes and
+        // the other, with none to carry, says it is idle.
+        theme::with_symbols(SymbolSet::Unicode, || {
+            let (mut dashboard, now) = fixture();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| matches!(id.as_str(), "muse2" | "muse3"));
+            let carried = dashboard.quotas.get_mut("muse2").unwrap();
+            carried.extra = None;
+            carried.windows = vec![mj_client::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(78),
+                duration_seconds: Some(604800),
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(now as i64 + 3 * 86400),
+            }];
+            let idle = dashboard.quotas.get_mut("muse3").unwrap();
+            idle.windows.clear();
+            idle.extra = Some(mj_client::quota::IDLE_LABEL.into());
+            dashboard.quota_expanded = dashboard
+                .quota_pools()
+                .into_iter()
+                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .collect();
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "idle Muse with and without a weekly reading",
+                &mut dashboard,
+                now,
+                100,
+                10,
+            );
+        });
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "quota-provider-pools", &output);
     }
 }

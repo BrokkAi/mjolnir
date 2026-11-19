@@ -442,6 +442,8 @@ pub(crate) fn provider_pools(
             Some("pay-per-use".into())
         } else if quota.is_not_reported() || quota.extra.as_deref() == Some("n/a") {
             Some("not reported".into())
+        } else if quota.is_idle_without_reading() {
+            Some("idle; usage shows after the next request".into())
         } else if quota.error.is_some() {
             Some(
                 quota
@@ -456,7 +458,9 @@ pub(crate) fn provider_pools(
             group.text.push((
                 id.into(),
                 match &quota.extra {
-                    Some(extra) if !quota.is_usage_priced() => format!("{label} · {extra}"),
+                    Some(extra) if !quota.is_usage_priced() && !quota.is_idle_without_reading() => {
+                        format!("{label} · {extra}")
+                    }
                     _ => label,
                 },
             ));
@@ -546,9 +550,10 @@ pub(crate) fn provider_pools(
                                 && quota.refreshed_at_epoch_seconds < reset as u64
                         })
                     }),
-                    // Claude omits the short window until first use; other adapters
-                    // do not define an absent window as idle.
-                    five_hour_idle: profile.kind == HarnessKind::Claude,
+                    // Claude omits the short window until first use, and Muse
+                    // while none is open; other adapters do not define an
+                    // absent window as idle.
+                    five_hour_idle: matches!(profile.kind, HarnessKind::Claude | HarnessKind::Muse),
                     fable: quota
                         .fable_weekly_window()
                         .and_then(quota_remaining_percent),

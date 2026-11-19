@@ -19,7 +19,7 @@ use mj_core::credentials::{
 };
 
 pub use mj_client::quota::{
-    API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
+    API_LABEL, IDLE_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
 };
 
 /// Clone a daemon report for a user-facing quota surface, retaining only
@@ -984,34 +984,50 @@ async fn refresh_profile_with_cache_root(
                 })
                 .map_err(|error| anyhow::anyhow!(error.to_string()))
         }
-        HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
-            .await
-            .map(|report| ProfileQuota {
-                paid_credits: None,
-                monthly_price_usd: None,
-                banked_resets: None,
-                profile_id: profile_id.clone(),
-                harness,
-                windows: report
-                    .windows
-                    .into_iter()
-                    .map(|window| QuotaWindow {
-                        label: window.label,
-                        remaining_percent: Some(window.remaining_percent),
-                        duration_seconds: window.duration_seconds,
-                        model_scope: None,
-                        used: None,
-                        limit: None,
-                        resets: window.resets_at.and_then(format_reset_local_seconds),
-                        resets_at_epoch_seconds: window.resets_at,
-                    })
-                    .collect(),
-                extra: report.note,
-                error: None,
-                refreshed_at_epoch_seconds,
-                rate_limited_until_epoch_seconds: None,
-                next_check_at_epoch_seconds: None,
-            }),
+        HarnessKind::Muse => match crate::muse_usage::query(&source_home, &environment).await {
+            Ok(report) => {
+                let windows = match report.usage {
+                    crate::muse_usage::MuseUsage::Open(windows) => windows
+                        .into_iter()
+                        .map(|window| QuotaWindow {
+                            label: window.label,
+                            remaining_percent: Some(window.remaining_percent),
+                            duration_seconds: window.duration_seconds,
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: window.resets_at.and_then(format_reset_local_seconds),
+                            resets_at_epoch_seconds: window.resets_at,
+                        })
+                        .collect(),
+                    crate::muse_usage::MuseUsage::Idle => {
+                        let history = recent_quota_history(
+                            &cache_identity,
+                            &profile_id,
+                            crate::muse_usage::idle_history_since(refreshed_at_epoch_seconds),
+                        )
+                        .await;
+                        crate::muse_usage::idle_windows(&history, refreshed_at_epoch_seconds)
+                    }
+                };
+                Ok(ProfileQuota {
+                    paid_credits: None,
+                    monthly_price_usd: None,
+                    banked_resets: None,
+                    profile_id: profile_id.clone(),
+                    extra: report
+                        .note
+                        .or_else(|| windows.is_empty().then(|| IDLE_LABEL.to_owned())),
+                    harness,
+                    windows,
+                    error: None,
+                    refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
+                    next_check_at_epoch_seconds: None,
+                })
+            }
+            Err(error) => Err(error),
+        },
         // OpenCode reads no allowance from any provider: rate-limit headers
         // reach it only on failed requests. A profile signed in through an
         // environment-supplied provider key (OpenRouter and the like) is
@@ -1104,6 +1120,32 @@ async fn refresh_profile_with_cache_root(
         },
         codex_client,
     )
+}
+
+/// This profile's probes saved since `since`, newest first. Only the process
+/// that saves probes reads them back: elsewhere there is no history, and a
+/// failed read is logged and treated as none, which shows less rather than
+/// something stale.
+async fn recent_quota_history(identity: &str, profile_id: &str, since: u64) -> Vec<ProfileQuota> {
+    if !crate::database::database_writer_installed() {
+        return Vec::new();
+    }
+    let (identity, profile) = (identity.to_owned(), profile_id.to_owned());
+    match mj_core::runtime::spawn_blocking(move || {
+        crate::database::load_quota_history_since(&identity, &profile, since)
+    })
+    .await
+    {
+        Ok(Ok(history)) => history,
+        Ok(Err(error)) => {
+            tracing::warn!(profile_id, error = %format!("{error:#}"), "could not read the stored quota probes");
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(profile_id, %error, "stored quota probe read task failed");
+            Vec::new()
+        }
+    }
 }
 
 /// Shortest gap to expiry Hel will leave a Codex login sitting at. A token with

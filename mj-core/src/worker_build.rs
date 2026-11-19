@@ -1,7 +1,19 @@
 //! Daemon and worker compatibility identities shared by the workspace.
 
-use std::io::Read;
+#[cfg(unix)]
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::Path;
+use std::sync::Arc;
+#[cfg(unix)]
+use std::{
+    fs::Metadata,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
+
+use sha2::{Digest, Sha256};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -190,46 +202,196 @@ pub fn worker_build_from_bytes(bytes: &[u8]) -> Result<&str> {
     found.context("missing worker build stamp (legacy or invalid worker)")
 }
 
-fn worker_build_from_reader(input: &mut impl Read) -> Result<String> {
-    // Keep only one I/O chunk and enough overlap to recognize a stamp split
-    // across reads. Worker executables can be hundreds of megabytes.
-    let overlap = PREFIX.len() + STAMP_BYTES;
-    let mut bytes = Vec::with_capacity(READ_BYTES + overlap);
-    let mut found: Option<String> = None;
-    loop {
-        let read = input
-            .by_ref()
-            .take(READ_BYTES as u64)
-            .read_to_end(&mut bytes)
-            .context("read worker build stamp")?;
-        if read == 0 {
-            break;
+#[cfg(unix)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[cfg(unix)]
+impl ExecutableIdentity {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         }
-        for build in worker_build_stamps(&bytes) {
-            ensure!(
-                found.as_deref().is_none_or(|previous| previous == build),
-                "conflicting worker build stamps"
-            );
-            if found.is_none() {
-                found = Some(build.to_owned());
-            }
-        }
-        let keep_from = bytes.len().saturating_sub(overlap);
-        bytes.drain(..keep_from);
     }
-    found.context("missing worker build stamp (legacy or invalid worker)")
+}
+
+struct ExecutableContents {
+    /// None only for a stamp-only read of an unpublished file.
+    digest: Option<String>,
+    stamp: std::result::Result<String, &'static str>,
+}
+
+impl ExecutableContents {
+    fn read(input: &mut File, hash: bool) -> io::Result<Self> {
+        // Read each byte once for both the digest and build stamp. Only the
+        // stamp parser needs to see bytes from the previous chunk again.
+        let overlap = PREFIX.len() + STAMP_BYTES;
+        let mut bytes = Vec::with_capacity(READ_BYTES + overlap);
+        let mut digest = Sha256::new();
+        let mut stamp = Ok(None::<String>);
+        loop {
+            let previous_len = bytes.len();
+            input
+                .by_ref()
+                .take(READ_BYTES as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() == previous_len {
+                break;
+            }
+            if hash {
+                digest.update(&bytes[previous_len..]);
+            }
+            if let Ok(found) = &mut stamp {
+                for build in worker_build_stamps(&bytes) {
+                    match found.as_deref() {
+                        None => *found = Some(build.to_owned()),
+                        Some(previous) if previous != build => {
+                            stamp = Err("conflicting worker build stamps");
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            let keep_from = bytes.len().saturating_sub(overlap);
+            bytes.drain(..keep_from);
+        }
+        Ok(Self {
+            digest: hash.then(|| crate::hex::lower_hex(digest.finalize())),
+            stamp: stamp.and_then(|found| {
+                found.ok_or("missing worker build stamp (legacy or invalid worker)")
+            }),
+        })
+    }
+}
+
+#[cfg(unix)]
+type ExecutableRead = Arc<Mutex<Option<Arc<ExecutableContents>>>>;
+
+#[cfg(unix)]
+#[derive(Default)]
+struct MemoizedExecutable {
+    read: ExecutableRead,
+    paths: usize,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ExecutableMemo {
+    by_identity: HashMap<ExecutableIdentity, MemoizedExecutable>,
+    by_path: HashMap<PathBuf, ExecutableIdentity>,
+}
+
+#[cfg(unix)]
+impl ExecutableMemo {
+    fn lookup(&mut self, path: &Path, identity: &ExecutableIdentity) -> ExecutableRead {
+        if self.by_path.get(path) != Some(identity) {
+            if let Some(previous) = self.by_path.insert(path.to_owned(), identity.clone()) {
+                let entry = self
+                    .by_identity
+                    .get_mut(&previous)
+                    .expect("indexed executable");
+                entry.paths -= 1;
+                if entry.paths == 0 {
+                    self.by_identity.remove(&previous);
+                }
+            }
+            self.by_identity.entry(identity.clone()).or_default().paths += 1;
+        }
+        Arc::clone(&self.by_identity[identity].read)
+    }
+}
+
+fn executable_contents(path: &Path) -> Result<Arc<ExecutableContents>> {
+    let mut input =
+        File::open(path).with_context(|| format!("open worker executable {}", path.display()))?;
+
+    #[cfg(unix)]
+    let result = memoized_executable_contents(path, &mut input);
+    // Path, size and mtime cannot distinguish same-size replacements with
+    // preserved timestamps on Windows. Read the file each time there.
+    #[cfg(not(unix))]
+    let result = ExecutableContents::read(&mut input, true).map(Arc::new);
+
+    result.with_context(|| format!("read worker executable {}", path.display()))
+}
+
+#[cfg(unix)]
+fn memoized_executable_contents(path: &Path, input: &mut File) -> Result<Arc<ExecutableContents>> {
+    static MEMO: LazyLock<Mutex<ExecutableMemo>> = LazyLock::new(Mutex::default);
+
+    // Stat the open file we will read. Publication by rename supplies a new
+    // inode. An in-place write updates ctime even if the writer restores mtime.
+    // Keep both timestamps at their full nanosecond resolution.
+    let identity = ExecutableIdentity::from_metadata(&input.metadata()?);
+    let read = MEMO
+        .lock()
+        .expect("worker executable memo")
+        .lookup(path, &identity);
+    // Concurrent launches of this file share the read. Other binaries
+    // can be opened and read independently.
+    let mut contents = read.lock().expect("worker executable read");
+    if let Some(contents) = contents.as_ref() {
+        return Ok(Arc::clone(contents));
+    }
+    let scanned = ExecutableContents::read(input, true)?;
+    ensure!(
+        identity == ExecutableIdentity::from_metadata(&input.metadata()?),
+        "worker executable changed while being read"
+    );
+    let scanned = Arc::new(scanned);
+    *contents = Some(Arc::clone(&scanned));
+    Ok(scanned)
+}
+
+pub(crate) fn executable_digest(path: &Path) -> Result<String> {
+    executable_contents(path)?
+        .digest
+        .clone()
+        .context("worker executable was read without its digest")
 }
 
 pub fn verify_worker_build(path: &Path) -> Result<()> {
-    let mut input = std::fs::File::open(path)
-        .with_context(|| format!("read worker build from {}", path.display()))?;
-    let found = worker_build_from_reader(&mut input).with_context(|| {
-        format!(
-            "worker {}; expected build {}",
-            path.display(),
-            worker_build_id()
-        )
-    })?;
+    check_worker_stamp(path, &executable_contents(path)?.stamp)
+}
+
+/// [`verify_worker_build`] for a file that is about to be published under
+/// another name, such as a download's temporary file: one stamp-only scan,
+/// outside the memo, so one-off paths are never recorded there.
+pub fn verify_unpublished_worker_build(path: &Path) -> Result<()> {
+    let mut input =
+        File::open(path).with_context(|| format!("open worker executable {}", path.display()))?;
+    let contents = ExecutableContents::read(&mut input, false)
+        .with_context(|| format!("read worker executable {}", path.display()))?;
+    check_worker_stamp(path, &contents.stamp)
+}
+
+fn check_worker_stamp(
+    path: &Path,
+    stamp: &std::result::Result<String, &'static str>,
+) -> Result<()> {
+    let found = stamp
+        .as_deref()
+        .map_err(|message| anyhow::Error::msg(*message))
+        .with_context(|| {
+            format!(
+                "worker {}; expected build {}",
+                path.display(),
+                worker_build_id()
+            )
+        })?;
     if found != worker_build_id() {
         bail!(
             "worker {} has build {found}; expected build {}",
@@ -349,6 +511,81 @@ mod tests {
             std::fs::write(&path, &bytes).unwrap();
             assert_eq!(worker_build_from_bytes(&bytes).unwrap(), worker_build_id());
             verify_worker_build(&path).unwrap();
+        }
+    }
+
+    // Hard-won: b93657092: same-size rewrites with restored mtime kept the old digest and stamp.
+    #[test]
+    fn worker_executable_memo_refreshes_after_rename_and_rewrite() {
+        use crate::worker_launch::worker_executable_digest;
+        use std::fs::{FileTimes, OpenOptions};
+        use std::time::{Duration, SystemTime};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("worker");
+        let replacement = directory.path().join("replacement");
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let write = |path: &Path, bytes: &[u8], modified| {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .unwrap();
+            std::io::Write::write_all(&mut file, bytes).unwrap();
+            file.set_times(FileTimes::new().set_modified(modified))
+                .unwrap();
+        };
+
+        let mut bytes = vec![0xff; READ_BYTES - PREFIX.len()];
+        bytes.extend_from_slice(worker_build_stamp().as_bytes());
+        write(&path, &bytes, modified);
+        verify_worker_build(&path).unwrap();
+        #[cfg(unix)]
+        let original = executable_contents(&path).unwrap();
+        assert_eq!(
+            worker_executable_digest(&path).unwrap(),
+            crate::hex::lower_hex(Sha256::digest(&bytes))
+        );
+        #[cfg(unix)]
+        assert!(Arc::ptr_eq(&original, &executable_contents(&path).unwrap()));
+
+        let mut stale = bytes.clone();
+        let last_digit = stale.len() - 2;
+        stale[last_digit] = b'a';
+        write(&replacement, &stale, modified);
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            worker_executable_digest(&path).unwrap(),
+            crate::hex::lower_hex(Sha256::digest(&stale))
+        );
+        assert!(verify_worker_build(&path).is_err());
+
+        // Rewrite the existing file with the same size and a new mtime.
+        bytes[0] = 0xee;
+        write(&path, &bytes, modified + Duration::from_secs(4));
+        verify_worker_build(&path).unwrap();
+        assert_eq!(
+            worker_executable_digest(&path).unwrap(),
+            crate::hex::lower_hex(Sha256::digest(&bytes))
+        );
+
+        #[cfg(unix)]
+        {
+            // Let ctime tick even on filesystems whose clock advances at
+            // scheduler tick granularity.
+            std::thread::sleep(Duration::from_millis(20));
+            let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+            write(&path, &stale, original_mtime);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                original_mtime
+            );
+            assert!(verify_worker_build(&path).is_err());
+            assert_eq!(
+                worker_executable_digest(&path).unwrap(),
+                crate::hex::lower_hex(Sha256::digest(&stale))
+            );
         }
     }
 
