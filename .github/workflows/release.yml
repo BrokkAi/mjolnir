@@ -369,14 +369,17 @@ jobs:
             brokk-mjolnir-*.tar.gz.sha256
           if-no-files-found: error
 
-  # One job for each architecture, so the two release builds run side by side
-  # on runners of their own. As one job that built them in turn, this was the
-  # longest job of a release: 69 minutes for v2.72.0.
+  # One job for each architecture, run one after the other. The organisation
+  # has five macOS runners in all, and a release already holds one for the
+  # macOS test lane, so `max-parallel: 1` keeps a release to two at a time.
+  # Building both in turn is the longest part of a release (69 minutes for
+  # v2.72.0); shorten it by making each build cheaper, not by removing this.
   build-macos:
     name: Build macOS (${{ matrix.target }})
     needs: verify-version
     runs-on: macos-latest
     strategy:
+      max-parallel: 1
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     env:
