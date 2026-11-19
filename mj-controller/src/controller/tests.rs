@@ -3919,25 +3919,30 @@ fn profile_rename_holds_configuration_through_reference_migration() {
     const NAME: &str = "profile_rename_holds_configuration_through_reference_migration";
     const CHILD: &str = "MJ_PROFILE_RENAME_LOCK_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let root = tempfile::tempdir().unwrap();
-        let hooks = root.path().join("hooks");
-        std::fs::create_dir(&hooks).unwrap();
-        IsolatedTest::new(test_name(module_path!(), NAME))
-            .env(CHILD, "1")
-            .isolated_store(root.path())
-            .env(
-                "MJ_TEST_HOOK",
-                "config_replacement_before_reference_migration",
-            )
-            .env("MJ_TEST_HOOK_DIR", &hooks)
-            .env("MJ_CHAOS_ISOLATED", "1")
-            .run();
+        for kind in ["profile", "target"] {
+            let root = tempfile::tempdir().unwrap();
+            let hooks = root.path().join("hooks");
+            std::fs::create_dir(&hooks).unwrap();
+            IsolatedTest::new(test_name(module_path!(), NAME))
+                .env(CHILD, "1")
+                .env("MJ_RENAME_LOCK_KIND", kind)
+                .isolated_store(root.path())
+                .env(
+                    "MJ_TEST_HOOK",
+                    "config_replacement_before_reference_migration",
+                )
+                .env("MJ_TEST_HOOK_DIR", &hooks)
+                .env("MJ_CHAOS_ISOLATED", "1")
+                .run();
+        }
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let config = registration_config();
     config.save().unwrap();
-    let record = super::test_support::checkpoint_test_session("renaming-session");
+    let profile = std::env::var("MJ_RENAME_LOCK_KIND").as_deref() == Ok("profile");
+    let mut record = super::test_support::checkpoint_test_session("renaming-session");
+    record.target_template_id = "podman".into();
     crate::database::save_session(&record).unwrap();
     let mut controller = Controller {
         config,
@@ -3946,7 +3951,13 @@ fn profile_rename_holds_configuration_through_reference_migration() {
     let hooks = std::path::PathBuf::from(std::env::var_os("MJ_TEST_HOOK_DIR").unwrap());
     let reached = hooks.join("config_replacement_before_reference_migration.reached");
     let continuation = hooks.join("config_replacement_before_reference_migration.continue");
-    let renaming = std::thread::spawn(move || controller.rename_profile_id("codex", "renamed"));
+    let renaming = std::thread::spawn(move || {
+        if profile {
+            controller.rename_profile_id("codex", "renamed")
+        } else {
+            controller.rename_target_id("podman", "renamed")
+        }
+    });
     let observed = (0..1000).any(|_| {
         if reached.exists() {
             return true;
@@ -3962,12 +3973,18 @@ fn profile_rename_holds_configuration_through_reference_migration() {
         let record = crate::database::read_durable_session_record("renaming-session")
             .unwrap()
             .unwrap();
-        result
-            .send((
+        let observation = if profile {
+            (
                 config.profiles.contains_key(&record.last_profile),
                 record.last_profile,
-            ))
-            .unwrap();
+            )
+        } else {
+            (
+                config.targets.contains_key(&record.target_template_id),
+                record.target_template_id,
+            )
+        };
+        result.send(observation).unwrap();
     });
     started.recv().unwrap();
     let premature = received.recv_timeout(std::time::Duration::from_millis(100));

@@ -10041,3 +10041,64 @@ fn later_acknowledgements_collect_legacy_rewrite_duplicates_without_restarting()
     let relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
     assert_eq!(relay.events_after(frontier, &digest).unwrap().len(), 1);
 }
+
+// Hard-won: b4985a8: SessionOpened discarded a new bridge's still-live startup form.
+#[test]
+fn forms_opened_during_bridge_startup_survive_session_open_and_ack_pruning() {
+    for resumed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        let question = |id: &str| {
+            mj_core::elicitation::ElicitationRequest::from_acp_params(id,
+            serde_json::json!({"mode":"form", "sessionId":SESSION, "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}})).unwrap()
+        };
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: question("old-runtime"),
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+        let live = question("new-opening-runtime");
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: live.clone(),
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "new-native".into(),
+                resumed,
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        let mut projection = mj_core::state::MaterializedSession::empty(SESSION);
+        for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
+            let mutation = mj_transcript::projection::project_relay_event(&projection, &event)
+                .unwrap()
+                .mutation;
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut projection,
+                &event,
+                mutation,
+            )
+            .unwrap();
+        }
+        assert_eq!(projection.pending_elicitations, vec![live.clone()]);
+        assert_eq!(
+            relay.live_session_baseline().unwrap().questions,
+            vec![live.clone()]
+        );
+        let frontier = relay.latest_ordinal();
+        acknowledge_relay(&mut relay, "collect-startup", frontier);
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
+        assert_eq!(relay.live_session_baseline().unwrap().questions, vec![live]);
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+        assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+    }
+}

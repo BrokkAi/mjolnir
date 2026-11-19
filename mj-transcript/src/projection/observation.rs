@@ -86,7 +86,6 @@ pub(super) fn project_observation(
         }
         RelayObservation::AgentInitialized { .. } => {}
         RelayObservation::SessionOpened { resumed, .. } => {
-            mutation.pending_elicitations = Some(Vec::new());
             if !resumed {
                 push_system(mutation, event, "harness session started");
             }

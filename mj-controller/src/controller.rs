@@ -1333,13 +1333,14 @@ impl Controller {
             );
             return Ok(());
         }
+        let (_, config_owner) = Config::load_locked()?;
         let journal = ConfigRenameJournal {
             kind: ConfigRenameKind::Target,
             old_id: old_id.to_owned(),
             new_id: new_id.to_owned(),
         };
         write_config_rename_journal(&journal)?;
-        let (config, ()) = match Config::update(|config| {
+        let (config, ()) = match Config::update_locked(&config_owner, |config| {
             ensure!(
                 config.targets.contains_key(old_id),
                 "unknown target {old_id:?}"
@@ -1369,7 +1370,7 @@ impl Controller {
         self.config = config;
         mj_core::test_hooks::reach_test_hook("config_replacement_before_reference_migration")?;
         if let Err(error) = crate::database::rename_target_references(old_id, new_id) {
-            let restore = Config::update(|config| {
+            let restore = Config::update_locked(&config_owner, |config| {
                 let target = config
                     .targets
                     .remove(new_id)

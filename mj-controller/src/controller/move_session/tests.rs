@@ -7408,6 +7408,7 @@ enum AdoptionProbe {
     PreparingFails,
     PublicationRejected,
     ProfileRenamed,
+    TargetRenamed,
     InstallInterrupted,
     Unusable(&'static str),
 }
@@ -7477,7 +7478,10 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
     drop(relay);
     if matches!(
         disposition,
-        AdoptionProbe::Drain | AdoptionProbe::Disconnect | AdoptionProbe::ProfileRenamed
+        AdoptionProbe::Drain
+            | AdoptionProbe::Disconnect
+            | AdoptionProbe::ProfileRenamed
+            | AdoptionProbe::TargetRenamed
     ) {
         fs::write(root.join("block-install-status"), b"1").unwrap();
     }
@@ -7807,11 +7811,20 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 .iter()
                 .any(|label| label.contains("adoption"))
         );
-        if matches!(disposition, AdoptionProbe::ProfileRenamed) {
+        if matches!(
+            disposition,
+            AdoptionProbe::ProfileRenamed | AdoptionProbe::TargetRenamed
+        ) {
             // The orphan has no row for rename's reference migration to find.
             crate::database::delete_session(MOVE_QUEUE_SESSION_ID).unwrap();
             let mut renaming = Controller::load().unwrap();
-            renaming.rename_profile_id("codex", "renamed").unwrap();
+            if matches!(disposition, AdoptionProbe::TargetRenamed) {
+                renaming
+                    .rename_target_id("local-bare", "renamed-target")
+                    .unwrap();
+            } else {
+                renaming.rename_profile_id("codex", "renamed").unwrap();
+            }
             fs::write(root.join("release-install-status"), b"1").unwrap();
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
                 .await
@@ -8145,5 +8158,16 @@ fn interrupted_adoption_install_releases_configuration_and_retries() {
         true,
         AdoptionProbe::InstallInterrupted,
         "interrupted_adoption_install_releases_configuration_and_retries",
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: b4985a8: target rename missed the rowless orphan waiting to install its old target ID.
+#[test]
+fn adoption_revalidates_a_target_renamed_before_install() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::TargetRenamed,
+        "adoption_revalidates_a_target_renamed_before_install",
     );
 }

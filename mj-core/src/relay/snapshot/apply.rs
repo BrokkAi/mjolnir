@@ -496,10 +496,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             resumed,
             replaced_unused_native_session_id,
         } => {
-            // ACP request responders belong to the runtime that opened them.
-            // A new native open retires those forms, matching normal projection.
-            snapshot.assessment_questions.clear();
-            snapshot.pending_elicitations.clear();
+            // This bridge may have opened live forms before session/open
+            // completed. Bridge exit/restart retires old responders, not open.
             snapshot.continuation.suppressed = true;
             if *native_continuity_lost {
                 snapshot.continuation.quota_recovery = None;

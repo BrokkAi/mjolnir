@@ -511,6 +511,13 @@ impl Controller {
             "profile {:?} is no longer configured; worker continues running; retry recover adopt with --profile selecting a configured profile",
             record.last_profile
         );
+        anyhow::ensure!(
+            current_config
+                .targets
+                .contains_key(&record.target_template_id),
+            "target template {:?} is no longer configured; worker continues running; retry recover adopt selecting its current target template",
+            record.target_template_id
+        );
         let guard = AdoptionInstall {
             _session: install_owner,
             _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
