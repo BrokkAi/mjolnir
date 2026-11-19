@@ -424,6 +424,7 @@ impl DurableRelay {
         resume_id: u64,
         goal: Option<mj_core::goal::GoalSnapshot>,
     ) {
+        let goal = goal.or_else(|| self.snapshot.goal.snapshot.clone());
         self.pending_native_resumes
             .push(PendingNativeResume { resume_id, goal });
     }
@@ -1980,12 +1981,11 @@ impl DurableRelay {
         };
         self.pending_native_resumes.retain(|pending| {
             let settled = goal_reported
-                && native_after.snapshot.as_ref().is_none_or(|goal| {
-                    !goal.active()
-                        || pending
-                            .goal
-                            .as_ref()
-                            .is_some_and(|expected| !goal.same_goal(expected))
+                && pending.goal.as_ref().is_some_and(|expected| {
+                    native_after.snapshot.as_ref().is_none_or(|goal| {
+                        !goal.same_goal(expected)
+                            || (expected.status != goal.status && !goal.active())
+                    })
                 });
             !(settled
                 || (resumed_native

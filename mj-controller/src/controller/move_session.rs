@@ -2912,13 +2912,6 @@ impl Controller {
         operation.queue_admission_finished = true;
         crate::database::save_move_operation(operation)?;
         restore_move_queue_hold(operation);
-        relay
-            .update_command_retention(
-                Some(operation.operation_id.clone()),
-                Default::default(),
-                false,
-            )
-            .await?;
         let queue_sentence = if operation.queue == ResumeQueueDisposition::Discard {
             "Queued work was discarded; ready and idle."
         } else {
@@ -2949,6 +2942,19 @@ impl Controller {
                 RelayCommand::RecordNotice { text },
             )
             .await?;
+        // Queue completion is already durable. Pin release is cleanup, retried
+        // by ordinary attachment from this operation's finished record.
+        if let Err(error) = relay
+            .update_command_retention(
+                Some(operation.operation_id.clone()),
+                Default::default(),
+                false,
+            )
+            .await
+        {
+            tracing::warn!(operation_id = operation.operation_id, session_id = operation.selection.session_id,
+                %error, "Move completed; receipt-pin cleanup will retry on attachment");
+        }
         Ok(())
     }
 

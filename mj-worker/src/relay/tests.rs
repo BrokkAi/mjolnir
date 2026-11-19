@@ -2503,6 +2503,74 @@ fn a_proven_replay_cursor_does_not_reread_its_old_segment() {
     );
 }
 
+// Hard-won: 0c505b8: ACK GC copied the entire live suffix under the relay owner lock.
+#[test]
+fn acknowledgement_collects_only_covered_files_and_preserves_live_segments() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    record_paged_history(&mut relay, 80);
+    let spans = relay.journal_spans.clone();
+    assert!(spans.len() >= 4);
+    let through = spans[0].file_last_ordinal;
+    let digest = relay.digest_at(through).unwrap().unwrap();
+    let frontier = relay.latest_ordinal();
+    let partial = spans[0].file_first_ordinal + 1;
+    assert!(partial < through);
+    let partial_digest = relay.digest_at(partial).unwrap().unwrap();
+    let deferred = relay
+        .take_deferred_attach(&attach_envelope(&relay, "before-partial-ack", 0))
+        .unwrap();
+    let generation = deferred.journal_generation();
+
+    let live = &spans[2].path;
+    let saved = fs::read(live).unwrap();
+    // A later unreadable segment cannot prevent collection of the covered prefix.
+    fs::write(live, b"unreadable live segment").unwrap();
+    let response = relay.handle(relay_request(
+        "collect-boundary-prefix",
+        RelayRequest::Acknowledge {
+            through_ordinal: partial,
+            through_digest: partial_digest,
+        },
+    ));
+    assert!(
+        matches!(response.body, RelayResponseBody::Ok { .. }),
+        "{response:?}"
+    );
+    assert!(
+        spans[0].path.exists(),
+        "a straddling file is retained until completely covered"
+    );
+    assert_eq!(relay.journal_spans[0].after_ordinal, partial);
+    assert_ne!(
+        relay.journal_generation(),
+        generation,
+        "logical collection invalidates prepared reads"
+    );
+    let response = relay.handle(relay_request(
+        "collect-prefix",
+        RelayRequest::Acknowledge {
+            through_ordinal: through,
+            through_digest: digest.clone(),
+        },
+    ));
+    assert!(
+        matches!(response.body, RelayResponseBody::Ok { .. }),
+        "{response:?}"
+    );
+    assert!(!spans[0].path.exists());
+    for span in &spans[1..] {
+        assert!(span.path.exists(), "a fully live segment was replaced");
+    }
+    assert_eq!(fs::read(live).unwrap(), b"unreadable live segment");
+    fs::write(live, saved).unwrap();
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
+    let events = relay.events_after(through, &digest).unwrap();
+    assert_eq!(events.first().unwrap().ordinal, through + 1);
+    assert_eq!(events.last().unwrap().ordinal, frontier);
+}
+
 #[test]
 fn a_deferred_attach_refuses_a_page_from_a_collected_journal() {
     let temp = tempfile::tempdir().unwrap();
@@ -9730,6 +9798,14 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         assert!(!relay.pending_native_resumes.is_empty());
         assert!(cut.try_recv().is_err());
     }
+    // Hard-won: 0c505b8: repeated paused metadata was mistaken for resume settlement.
+    for tokens_used in [0, 10] {
+        relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+            "sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"resume this goal", "createdAt":1, "status":"paused", "tokensUsed":tokens_used}}
+        })).unwrap()).unwrap();
+        assert!(!relay.observe().unwrap().pending_native_resumes.is_empty());
+        assert!(cut.try_recv().is_err());
+    }
     relay
         .lock()
         .unwrap()
@@ -9790,6 +9866,24 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
     assert!(refused_cut.try_recv().is_err());
     relay.lock().unwrap().native_goal_resume_rejected(4);
     assert!(refused_cut.try_recv().unwrap().is_ok());
+    relay.lock().unwrap().native_goal_resume_sent(
+        6,
+        Some(
+            serde_json::from_value(serde_json::json!({
+                "objective":"new goal", "createdAt":2, "status":"paused"
+            }))
+            .unwrap(),
+        ),
+    );
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"new goal", "createdAt":2, "status":"paused"}}
+    })).unwrap()).unwrap();
+    let mut deactivated_cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(deactivated_cut.try_recv().is_err());
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"new goal", "createdAt":2, "status":"complete"}}
+    })).unwrap()).unwrap();
+    assert!(deactivated_cut.try_recv().unwrap().is_ok());
     relay.lock().unwrap().native_goal_resume_sent(5, None);
     let mut exited_cut = relay.lock().unwrap().reserve_live_baseline();
     assert!(exited_cut.try_recv().is_err());

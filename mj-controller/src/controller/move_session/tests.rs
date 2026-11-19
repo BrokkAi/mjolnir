@@ -296,6 +296,13 @@ fn move_queue_relay_child() {
                 fs::write(root.join("native-identity-polled"), b"1").unwrap();
             }
         }
+        if matches!(&request.request, RelayRequest::UpdateCommandRetention { operation_id: Some(id), command_ids, reconcile_legacy: false }
+            if id == "move-queue-replay" && command_ids.is_empty())
+            && root.join("drop-pin-release").exists()
+        {
+            fs::write(root.join("pin-release-interrupted"), b"1").unwrap();
+            return;
+        }
         if let RelayRequest::Submit {
             command_id,
             command,
@@ -1262,9 +1269,42 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     }
     fs::write(&archive_path, archive).unwrap();
 
+    // Hard-won: 0c505b8: pin cleanup failure reported an already completed queue transfer as failed.
+    fs::write(worker_root.join("drop-pin-release"), b"1").unwrap();
     runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
         .unwrap();
+    assert!(worker_root.join("pin-release-interrupted").exists());
+    assert!(
+        crate::database::load_move_operation(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .queue_admission_finished
+    );
+    let pinned: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    assert!(
+        pinned
+            .command_retention
+            .contains_key(&operation.operation_id)
+    );
+    fs::remove_file(worker_root.join("drop-pin-release")).unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        connection.detach().await.unwrap();
+    });
+    let cleaned: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    assert!(
+        !cleaned
+            .command_retention
+            .contains_key(&operation.operation_id)
+    );
     assert!(operation.queue_admission_finished);
     assert!(!move_owns_session(MOVE_QUEUE_SESSION_ID));
     let accepted_commands = |log: &str| {
