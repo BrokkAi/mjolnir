@@ -963,6 +963,9 @@ pub struct DashboardState {
     pub(crate) served_attention:
         Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
+    /// A press on a question's answer control is both the form's pending click
+    /// and a selection candidate; see route_question_press.
+    question_press: Option<(u16, u16)>,
     pending_welcome: Option<welcome::WelcomeDialog>,
     operator_presence: operator_away::OperatorPresence,
     #[cfg(test)]
@@ -1174,9 +1177,8 @@ pub struct DashboardState {
     /// means expanded, so a project that appears later starts expanded without
     /// any extra bookkeeping.
     pub(crate) collapsed_project_keys: Tracked<BTreeSet<String>>,
-    /// The sessions currently needing a person and whether each has been
-    /// reported, for [`DashboardState::notification_events`].
-    pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
+    pub(crate) alert_sequence: Option<u64>,
+    pub(crate) pending_alerts: Vec<crate::notify::PendingAlert>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
     pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
@@ -1345,6 +1347,7 @@ impl DashboardState {
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
             paste_revision: 0,
+            question_press: None,
             profile_login_generation: 0,
             pending_setup_login: None,
             profile_hydration_requests: Default::default(),
@@ -1450,7 +1453,8 @@ impl DashboardState {
             pane_size_control_areas: Vec::new(),
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: Default::default(),
-            attention_episodes: BTreeMap::new(),
+            alert_sequence: None,
+            pending_alerts: Vec::new(),
             attention_navigation: None,
             rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,

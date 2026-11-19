@@ -117,9 +117,9 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
+                "help": "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation.",
                 "control": "page",
-                "summary": "Auto · container when available"
+                "summary": "Host"
               },
               {
                 "path": [
@@ -516,9 +516,9 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
+                "help": "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation.",
                 "control": "page",
-                "summary": "Auto · container when available"
+                "summary": "Host"
               },
               {
                 "path": [
@@ -974,9 +974,9 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
+                "help": "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation.",
                 "control": "page",
-                "summary": "Auto · container when available"
+                "summary": "Host"
               },
               {
                 "path": [

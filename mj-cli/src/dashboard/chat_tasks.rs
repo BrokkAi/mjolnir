@@ -83,7 +83,7 @@ impl DashboardContext {
         {
             let updates = self.import_updates_tx.clone();
             let cache = self.native_scan_cache.clone();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 let completed = crate::import::discover_client_import_profile(
                     profile_id,
                     profile,

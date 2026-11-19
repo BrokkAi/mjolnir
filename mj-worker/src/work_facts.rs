@@ -537,7 +537,7 @@ pub async fn capture(observer: &WorkObserver) -> WorkFacts {
     let scan = {
         let observer = observer.clone();
         async move {
-            tokio::task::spawn_blocking(move || scan_processes(&observer))
+            mj_core::runtime::spawn_blocking(move || scan_processes(&observer))
                 .await
                 .unwrap_or_else(|error| {
                     Observed::unavailable(format!("process scan failed: {error}"))
@@ -616,7 +616,7 @@ pub async fn watch_liveness(
         tokio::time::sleep(interval).await;
         let counted = {
             let observer = observer.clone();
-            tokio::task::spawn_blocking(move || count_alive(&observer, &identities)).await
+            mj_core::runtime::spawn_blocking(move || count_alive(&observer, &identities)).await
         };
         let alive = match counted {
             Ok(Observed::Known(alive)) => {
@@ -942,7 +942,7 @@ mod tests {
         };
         let observed = {
             let observer = observer.clone();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 for _ in 0..100 {
                     if let Observed::Known(facts) = scan_processes(&observer)
                         && facts.running == 2
@@ -988,7 +988,7 @@ mod tests {
         let completed = relay.operational_state().work_liveness.unwrap();
         assert_eq!(completed.alive, 3);
         let relay = Arc::new(RelayCell::new(relay));
-        let watcher = tokio::spawn(watch_liveness(
+        let watcher = mj_core::runtime::spawn(watch_liveness(
             relay.clone(),
             observer,
             std::time::Duration::from_millis(50),

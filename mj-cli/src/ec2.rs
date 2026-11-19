@@ -418,7 +418,7 @@ fn records(root: &Path) -> Result<Vec<Record>> {
 }
 
 pub(crate) async fn run(args: Ec2Args) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let root = config_dir().join("ec2");
         match args.command {
             Ec2Command::Create(args) => create(args, &root),
@@ -1959,6 +1959,15 @@ else:
         )
         .unwrap();
         fs::set_permissions(&chmod, fs::Permissions::from_mode(0o700)).unwrap();
+        // The host's scripts lock with util-linux `flock`, which a Mac lacks.
+        // This fake host has one installer at a time, so there it only has to exist.
+        let flock = remote_bin.join("flock");
+        fs::write(
+            &flock,
+            "#!/bin/sh\n[ ! -x /usr/bin/flock ] || exec /usr/bin/flock \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&flock, fs::Permissions::from_mode(0o700)).unwrap();
         let mbx_version = mj_controller::controller::MBX_VERSION;
         let cached_mbx = directory
             .path()

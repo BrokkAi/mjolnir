@@ -22,7 +22,7 @@ impl UpgradeResume {
         let Some(path) = std::env::var_os(RESUME_ENV) else {
             return Ok(None);
         };
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             let path = PathBuf::from(path);
             let resume: Self = serde_json::from_slice(&std::fs::read(&path)?)
                 .context("read terminal upgrade handoff")?;
@@ -156,7 +156,7 @@ impl DashboardContext {
         // Only discard the handoff after its contents have reached the new
         // context. A startup error before this point leaves it recoverable.
         if let Some(path) = std::env::var_os(RESUME_ENV) {
-            let result = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+            let result = mj_core::runtime::spawn_blocking(move || std::fs::remove_file(path)).await;
             if !matches!(&result, Ok(Ok(()))) {
                 tracing::warn!(
                     ?result,

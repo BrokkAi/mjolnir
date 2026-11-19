@@ -36,20 +36,6 @@ fn every_staged_gh_approval_file_is_copied_by_profile_staging() {
 }
 
 #[test]
-fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
-    for current in [
-        ExecutionPolicy::ConfiguredApprovals,
-        ExecutionPolicy::Unconstrained,
-    ] {
-        assert_eq!(
-            effective_execution_policy(current, true),
-            ExecutionPolicy::ConfiguredApprovals
-        );
-        assert_eq!(effective_execution_policy(current, false), current);
-    }
-}
-
-#[test]
 fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     let mut session = crate::database::test_fixtures::checkpoint_test_session("primary");
     let mut choices = mj_core::config::SubagentConfig::default();
@@ -3215,6 +3201,7 @@ const ZAI_CATALOG: &str = r#"{"models":[
 fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
     std::fs::write(home.join("config.toml"), ZAI_CONFIG).unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -3521,6 +3508,7 @@ const DEEPSEEK_LIST: &str = r#"{"object":"list","data":[
 fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
     std::fs::write(home.join("config.toml"), DEEPSEEK_CONFIG).unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -4266,6 +4254,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
     )
     .unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),

@@ -76,6 +76,19 @@ pub(super) async fn handle_action(
         DaemonAction::Configuration => Ok(DaemonReply::Configuration(Box::new(
             state.with_config(Clone::clone),
         ))),
+        DaemonAction::FirstRunSetupDue => {
+            // Not `blocking`: this only reads the setup marker and the
+            // configuration, so it takes no upgrade admission.
+            let due = mj_core::runtime::spawn_blocking(|| {
+                mj_setup::setup::automatic_setup_due(
+                    &mj_core::config::config_path(),
+                    &mj_core::config::data_dir(),
+                )
+            })
+            .await
+            .context("daemon first-run check task panicked")??;
+            Ok(DaemonReply::FirstRunSetupDue(due))
+        }
         DaemonAction::RunFirstRunSetup => {
             let report = blocking(|| {
                 let executor = mj_controller::targets::ProcessExecutor;
@@ -101,7 +114,7 @@ pub(super) async fn handle_action(
         DaemonAction::RunDoctor => {
             // Not `blocking`: the doctor only reads, so it takes no upgrade
             // admission, and a handoff abandons it instead of waiting for it.
-            let errors = tokio::task::spawn_blocking(|| {
+            let errors = mj_core::runtime::spawn_blocking(|| {
                 let executor = mj_setup::doctor::probe_executor();
                 let checks = mj_setup::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
@@ -177,17 +190,19 @@ pub(super) async fn handle_action(
         // Git runs in the daemon's environment, which is the one its
         // sessions inherit; a client's environment may differ.
         DaemonAction::GitIdentity => {
-            tokio::task::spawn_blocking(mj_controller::controller::controller_git_identity)
+            mj_core::runtime::spawn_blocking(mj_controller::controller::controller_git_identity)
                 .await
                 .context("Git identity read panicked")?
                 .map(DaemonReply::GitIdentity)
         }
-        DaemonAction::SetGitIdentity { name, email } => tokio::task::spawn_blocking(move || {
-            mj_controller::controller::set_controller_git_identity(&name, &email)
-        })
-        .await
-        .context("Git identity save panicked")?
-        .map(DaemonReply::GitIdentity),
+        DaemonAction::SetGitIdentity { name, email } => {
+            mj_core::runtime::spawn_blocking(move || {
+                mj_controller::controller::set_controller_git_identity(&name, &email)
+            })
+            .await
+            .context("Git identity save panicked")?
+            .map(DaemonReply::GitIdentity)
+        }
         DaemonAction::SubagentOptions {
             profile,
             model,
@@ -1293,7 +1308,7 @@ pub(super) async fn handle_action(
             // (#1191). The reply does not wait.
             if mj_controller::upgrade::gate().destroys_hold_the_stop() {
                 let cancellation = cancellation.clone();
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     while mj_controller::upgrade::gate().destroys_hold_the_stop() {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
@@ -1364,6 +1379,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::ImportSession { .. }
             // Read-only and repeatable; the client reports an interrupted run.
             | DaemonAction::RunDoctor
+            | DaemonAction::FirstRunSetupDue
     ) {
         Ok(None)
     } else {

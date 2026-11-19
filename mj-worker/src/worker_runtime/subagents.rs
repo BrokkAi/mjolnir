@@ -2855,7 +2855,7 @@ enabled = false
             message: "x".repeat(128 * 1024),
         };
         let (client, server) = UnixStream::pair().unwrap();
-        let served = tokio::spawn(serve_one(server, endpoint.clone()));
+        let served = mj_core::runtime::spawn(serve_one(server, endpoint.clone()));
         let (read, mut write) = client.into_split();
         write
             .write_all(format!("{}\n", serde_json::to_string(&input).unwrap()).as_bytes())
@@ -2899,7 +2899,7 @@ enabled = false
         let directory = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
         let (mut client, server) = UnixStream::pair().unwrap();
-        let served = tokio::spawn(serve_one(server, endpoint.clone()));
+        let served = mj_core::runtime::spawn(serve_one(server, endpoint.clone()));
         let mut body = serde_json::to_vec(&request("r1")).unwrap();
         body.push(b'\n');
         client.write_all(&body).await.unwrap();
@@ -2949,7 +2949,7 @@ enabled = false
             endpoint.record_collection();
             let socket = directory.path().join("test.sock");
             let listener = UnixListener::bind(&socket).unwrap();
-            let served = tokio::spawn({
+            let served = mj_core::runtime::spawn({
                 let endpoint = endpoint.clone();
                 async move {
                     let (stream, _) = listener.accept().await.unwrap();

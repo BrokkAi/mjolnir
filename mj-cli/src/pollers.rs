@@ -107,9 +107,9 @@ pub(crate) fn spawn_worker_diagnosis(
         config: controller.config.clone(),
         state: controller.state.clone(),
     };
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let task_session_id = session_id.clone();
-        let joined = tokio::task::spawn_blocking(move || {
+        let joined = mj_core::runtime::spawn_blocking(move || {
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(WORKER_DIAGNOSIS_TIMEOUT);
             diagnostic_controller.diagnose_worker_controlled(&task_session_id, &executor)

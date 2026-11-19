@@ -23,7 +23,7 @@ pub(super) async fn options(State(state): State<ServerState>) -> Json<LaunchOpti
     let checks = state.engine_checks.clone();
     // The probes run commands, so they stay off the async runtime. A failed
     // join leaves every engine unchecked, which reads as the host reading alone.
-    let engines = tokio::task::spawn_blocking(move || checks.readiness(kinds))
+    let engines = mj_core::runtime::spawn_blocking(move || checks.readiness(kinds))
         .await
         .unwrap_or_default();
     Json(launch_options(&snapshot, &state.preferences_path, &engines))

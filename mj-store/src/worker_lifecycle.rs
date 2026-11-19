@@ -330,7 +330,7 @@ mod tests {
         drop(admission);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let executing = tokio::task::spawn_blocking(move || {
+        let executing = mj_core::runtime::spawn_blocking(move || {
             owner.scope_blocking(|| {
                 started_tx.send(()).unwrap();
                 release_rx

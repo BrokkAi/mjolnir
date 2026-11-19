@@ -737,7 +737,7 @@ pub(super) fn spawn_capacity_service(
     if state.capacity.set(feed).is_err() {
         tracing::error!("the daemon capacity service was started twice");
     }
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut revisions = state.revisions();
         let mut storage = mj_controller::target_storage::subscribe();
         let mut full_hosts = BTreeSet::new();
@@ -1106,7 +1106,7 @@ mod tests {
             .await
             .unwrap();
         let control = LifecycleControl::default();
-        let pending = tokio::spawn({
+        let pending = mj_core::runtime::spawn({
             let state = state.clone();
             let control = control.clone();
             let request = serde_json::from_value(serde_json::json!({

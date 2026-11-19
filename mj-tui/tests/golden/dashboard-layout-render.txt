@@ -40,7 +40,7 @@
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (1)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (1)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll │ ctrl+b then : / ? palette
 === multi-entry question notification card (120x44) ===
@@ -85,7 +85,7 @@ Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · A
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (1)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (1)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+n next · Alt+s skip · Alt+c all ! · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · : / ? palette
 notification header color: Rgb(158, 194, 238)

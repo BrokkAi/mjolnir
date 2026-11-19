@@ -18,46 +18,18 @@ use sha2::{Digest, Sha256};
 
 use super::lifecycle::SourceTargetDisposition;
 use super::{Controller, SessionResumeOptions, now};
+use crate::session_manager::move_ownership::set_move_queue_hold;
+pub use crate::session_manager::move_ownership::{
+    MoveMutationGuard, move_has_pending_queue, move_owns_session, move_refuses_command,
+    release_move_queue_hold, worker_subagent_queue_enabled,
+};
 
 /// Static Move safety refusals that may be written to the worker's quota journal.
 pub const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
 
-/// Execution and retained queue admission are phases of one ownership record.
-#[derive(Clone, Copy)]
-enum MoveOwnership {
-    Executing,
-    ExecutingQueue,
-    PendingQueue,
-}
-
 pub(in crate::controller) enum SubagentMutationDrain {
     Drained,
     UnsupportedWorkerProtocol(u32),
-}
-
-fn move_ownership() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, MoveOwnership>>
-{
-    static OWNER: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, MoveOwnership>>,
-    > = std::sync::OnceLock::new();
-    OWNER.get_or_init(Default::default)
-}
-
-pub fn move_owns_session(session_id: &str) -> bool {
-    move_ownership()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains_key(session_id)
-}
-
-pub fn move_has_pending_queue(session_id: &str) -> bool {
-    matches!(
-        move_ownership()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(session_id),
-        Some(MoveOwnership::ExecutingQueue | MoveOwnership::PendingQueue)
-    )
 }
 
 /// Preserve a restored destination's readiness when close replaces Running
@@ -82,31 +54,6 @@ pub fn move_destination_before_close(
     operation.destination_native_session_id = session.native_session_id.clone();
     operation.updated_at = now();
     Ok(Some(operation))
-}
-
-pub fn release_move_queue_hold(session_id: &str) {
-    set_move_queue_hold(session_id, false);
-}
-
-fn set_move_queue_hold(session_id: &str, pending: bool) {
-    let mut owner = move_ownership()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let next = match (owner.get(session_id), pending) {
-        (Some(MoveOwnership::Executing | MoveOwnership::ExecutingQueue), true) => {
-            Some(MoveOwnership::ExecutingQueue)
-        }
-        (Some(MoveOwnership::Executing | MoveOwnership::ExecutingQueue), false) => {
-            Some(MoveOwnership::Executing)
-        }
-        (_, true) => Some(MoveOwnership::PendingQueue),
-        (_, false) => None,
-    };
-    if let Some(next) = next {
-        owner.insert(session_id.to_owned(), next);
-    } else {
-        owner.remove(session_id);
-    }
 }
 
 pub fn restore_move_queue_hold(operation: &MoveOperation) {
@@ -470,62 +417,6 @@ fn sealed_selection_difference(retained: &MoveSelection, requested: &MoveSelecti
     )
 }
 
-pub struct MoveMutationGuard(String);
-
-impl MoveMutationGuard {
-    pub fn reserve(session_id: &str) -> Result<Self> {
-        let mut owner = move_ownership()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ensure!(
-            !matches!(
-                owner.get(session_id),
-                Some(MoveOwnership::Executing | MoveOwnership::ExecutingQueue)
-            ),
-            "session already has a move owner"
-        );
-        let next = if owner.contains_key(session_id) {
-            MoveOwnership::ExecutingQueue
-        } else {
-            MoveOwnership::Executing
-        };
-        owner.insert(session_id.to_owned(), next);
-        Ok(Self(session_id.to_owned()))
-    }
-}
-
-impl Drop for MoveMutationGuard {
-    fn drop(&mut self) {
-        let mut owner = move_ownership()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match owner.get(&self.0) {
-            Some(MoveOwnership::ExecutingQueue) => {
-                owner.insert(self.0.clone(), MoveOwnership::PendingQueue);
-            }
-            Some(MoveOwnership::Executing) => {
-                owner.remove(&self.0);
-            }
-            _ => {}
-        }
-    }
-}
-
-pub fn move_refuses_command(session_id: &str, command: &RelayCommand) -> bool {
-    move_owns_session(session_id)
-        && matches!(
-            command,
-            RelayCommand::Prompt { .. }
-                | RelayCommand::SetConfig { .. }
-                | RelayCommand::SetSessionMode { .. }
-                | RelayCommand::RestoreExecutionMode
-                | RelayCommand::RunUserShell { .. }
-                | RelayCommand::CancelUserShell { .. }
-                | RelayCommand::Cancel
-                | RelayCommand::RemoveQueuedPrompt { .. }
-                | RelayCommand::ClearQueuedPrompts
-        )
-}
 use crate::session_manager::{SessionManagerControl, StandaloneSession, new_command_id};
 use mj_checkpoint::archive::{CanonicalQueuedCommandKind, verify_archive_streaming};
 use mj_core::state::{
@@ -757,7 +648,7 @@ impl MoveSourceRelay {
                     continue;
                 }
                 let parent = id.to_owned();
-                let effects_pending = tokio::task::spawn_blocking(move || {
+                let effects_pending = mj_core::runtime::spawn_blocking(move || {
                     crate::database::has_pending_mutating_delegations(&parent)
                 })
                 .await??;
@@ -3041,27 +2932,6 @@ pub(crate) fn parent_tools_enabled(
     harness: mj_core::config::HarnessKind,
 ) -> bool {
     policy.for_launch(harness, false).parent_role().is_some()
-}
-
-/// Whether this launch exposes the worker's durable sub-agent request queue.
-/// Top-level launches stage the message-only marker; child launches instead
-/// depend on the recorded handback choice.
-pub(crate) fn worker_subagent_queue_enabled(
-    policy: &mj_core::subagent::SubagentPolicy,
-    harness: mj_core::config::HarnessKind,
-    subagent: Option<bool>,
-    agent_mailboxes_enabled: bool,
-) -> bool {
-    let managed_subagent = subagent.is_some();
-    let launch_policy = policy.for_launch(harness, managed_subagent);
-    mj_core::worker_launch::resolve_subagent_mcp_role(
-        &launch_policy,
-        managed_subagent,
-        subagent.unwrap_or(false),
-        agent_mailboxes_enabled,
-        !managed_subagent,
-    )
-    .is_some()
 }
 
 pub(in crate::controller) fn move_children(

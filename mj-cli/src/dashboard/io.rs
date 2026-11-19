@@ -2102,7 +2102,7 @@ mod tests {
         let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
         let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
         let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
             assert!(matches!(
@@ -2690,7 +2690,7 @@ mod tests {
                     );
                 }
                 // Attachment renewal and chat preparation need this pool too.
-                tokio::task::spawn_blocking(|| ()).await.unwrap();
+                mj_core::runtime::spawn_blocking(|| ()).await.unwrap();
             })
             .await
         });
@@ -2724,7 +2724,7 @@ mod tests {
                     Duration::from_secs(2),
                     async move {
                         // The real connection needs a blocking metadata read.
-                        tokio::task::spawn_blocking(|| ()).await?;
+                        mj_core::runtime::spawn_blocking(|| ()).await?;
                         let released = release.notified();
                         tokio::pin!(released);
                         released.as_mut().enable();
@@ -2745,7 +2745,9 @@ mod tests {
                 }
                 // Chat preparation and other UI work can still use the pool.
                 assert_eq!(
-                    tokio::task::spawn_blocking(|| "chat ready").await.unwrap(),
+                    mj_core::runtime::spawn_blocking(|| "chat ready")
+                        .await
+                        .unwrap(),
                     "chat ready"
                 );
             })

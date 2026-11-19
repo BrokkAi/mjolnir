@@ -190,7 +190,7 @@ impl DaemonProgressMonitor {
             })
             .context("start daemon progress reporter")?;
         let heartbeat_progress = progress.clone();
-        let heartbeat = tokio::spawn(async move {
+        let heartbeat = mj_core::runtime::spawn(async move {
             let result: std::result::Result<(), _> = std::panic::AssertUnwindSafe(async move {
                 let mut interval = tokio::time::interval(tick);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

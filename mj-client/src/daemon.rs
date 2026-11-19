@@ -683,6 +683,9 @@ pub struct CreateSessionRequest {
     /// Withhold GitHub credentials; inherited by children.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_credentials: bool,
+    /// Start with notifications ignored; see `SessionRecord::notifications_ignored`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_ignored: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -873,6 +876,10 @@ pub enum DaemonAction {
     /// The configuration the daemon serves. Clients read it here instead of
     /// opening `config.toml`, which belongs to the daemon.
     Configuration,
+    /// Whether first-run setup has work to do: a new installation, or one
+    /// whose setup did not finish. A dashboard asks before it shows the
+    /// first-run welcome, which takes the keyboard.
+    FirstRunSetupDue,
     /// Discover and persist the first-run configuration in the daemon's own
     /// environment. A client in another placement asks its daemon instead of
     /// writing the client's `config.toml`.
@@ -1419,6 +1426,7 @@ pub enum DaemonReply {
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
     Configuration(Box<Config>),
+    FirstRunSetupDue(bool),
     FirstRunSetup(Option<FirstRunSetupReport>),
     DoctorErrors(Vec<String>),
     RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
@@ -1930,9 +1938,10 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
         }
         response = read_frame(stream).await?;
     }
-    let reply: DaemonReply = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
-        .await
-        .context("reply decoder task failed")??;
+    let reply: DaemonReply =
+        mj_core::runtime::spawn_blocking(move || serde_json::from_slice(&body))
+            .await
+            .context("reply decoder task failed")??;
     ensure!(
         reply.is_chunked(),
         "daemon chunked a reply that is never chunked"
@@ -2262,6 +2271,13 @@ impl DaemonClient {
         match self.request(DaemonAction::Configuration).await? {
             DaemonReply::Configuration(config) => Ok(*config),
             reply => bail!("unexpected daemon configuration reply {reply:?}"),
+        }
+    }
+
+    pub async fn first_run_setup_due(&mut self) -> Result<bool> {
+        match self.request(DaemonAction::FirstRunSetupDue).await? {
+            DaemonReply::FirstRunSetupDue(due) => Ok(due),
+            reply => bail!("unexpected first-run setup reply {reply:?}"),
         }
     }
 
@@ -3791,8 +3807,12 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unchunked.
 /// The first protocol with notification cards and completion-bound transcript reads.
 pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
+/// The first protocol with daemon-owned notify-once alert events.
+pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 // Version 107: explicit SessionWiki sync generations and progress watches.
-pub const PROTOCOL_VERSION: u32 = 107;
+// Version 109: the daemon answers whether first-run setup is due, so a
+// dashboard shows the first-run welcome only for an installation that needs it.
+pub const PROTOCOL_VERSION: u32 = ALERT_EVENTS_PROTOCOL;
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -4049,7 +4069,7 @@ mod tests {
             let metadata = cancellation_metadata(listener.local_addr().unwrap());
             let (received, waiting) = tokio::sync::oneshot::channel();
             let (release, released) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(async move {
+            let server = mj_core::runtime::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                 write_frame(
@@ -4121,7 +4141,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let metadata = cancellation_metadata(listener.local_addr().unwrap());
         let (received, waiting) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut total = 0;
             while total < 128 * 1024 {
@@ -4180,7 +4200,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
             write_frame(
@@ -4225,7 +4245,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut byte = [0_u8; 1];
             assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
@@ -4257,7 +4277,7 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
             assert_eq!(request.protocol_version, PROTOCOL_VERSION);
@@ -4329,7 +4349,7 @@ mod tests {
             .unwrap(),
         );
         let expected_draft = serde_json::to_value(&draft).unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             for (index, model) in [
                 None,
@@ -4416,7 +4436,7 @@ mod tests {
             },
         };
         let expected = serde_json::to_value(&action).unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             for reply in [
                 Some(DaemonReply::UpgradePending),
                 Some(DaemonReply::Done),
@@ -4473,7 +4493,7 @@ mod tests {
         };
         let bytes = vec![42; 192 * 1024];
         let expected = bytes.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let mut accepted = 0;
             for attempt in 0..4 {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -4653,7 +4673,7 @@ mod tests {
             session_id: "observed-session".into(),
             operation_id: "accepted-operation".into(),
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             for phase in 0..5 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();

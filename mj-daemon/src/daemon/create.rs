@@ -470,6 +470,7 @@ impl RuntimeState {
                     no_project_memory: request.no_project_memory,
                     no_github_events: request.no_github_events,
                     no_github_credentials: request.no_github_credentials,
+                    notifications_ignored: request.notifications_ignored,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
@@ -692,7 +693,7 @@ impl RuntimeState {
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
         let loading =
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
-        let mut controller = tokio::task::spawn_blocking(Controller::load)
+        let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon create task")??;
         drop(loading);
@@ -1029,6 +1030,7 @@ mod delegation_replay_tests {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 initial_prompt: None,
                 workspace_id: workspace.id.clone(),
                 profile_id: "codex".into(),
@@ -1205,6 +1207,7 @@ mod delegation_replay_tests {
             no_project_memory: false,
             no_github_events: false,
             no_github_credentials: false,
+            notifications_ignored: false,
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),

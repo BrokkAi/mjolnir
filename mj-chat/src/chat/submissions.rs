@@ -241,7 +241,7 @@ impl ChatState {
         let command_id = id.to_owned();
         let session_id = session_id.to_owned();
         let updates = self.composer_runtime.tx.clone();
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             let result = async {
                 for image in &mut payload.images {
                     if image.image.reference.is_none() {

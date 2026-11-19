@@ -35,7 +35,7 @@ pub(crate) async fn handle_request(
     for _ in 0..REPLAN_ATTEMPTS {
         deferred.set_harness_preparation(harness_preparation.clone());
         let generation = deferred.journal_generation();
-        let response = tokio::task::spawn_blocking(move || deferred.finish())
+        let response = mj_core::runtime::spawn_blocking(move || deferred.finish())
             .await
             .context("assemble relay replay page")?;
         if !matches!(response.body, RelayResponseBody::Error { .. }) {
@@ -264,7 +264,7 @@ pub(crate) async fn credential_response(
                 }
                 request => {
                     let request = request.clone();
-                    tokio::task::spawn_blocking(move || {
+                    mj_core::runtime::spawn_blocking(move || {
                         apply_credential_request_at(&endpoint, &github_token_path, &request)
                     })
                     .await
@@ -320,7 +320,7 @@ async fn apply_install_credentials(
     let written = if endpoint.harness.keeps_logins_in_database() {
         let marker = endpoint.marker.clone();
         let harness = endpoint.harness;
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_core::credentials::write_credential_file(harness, &marker, &bytes)
         })
         .await
@@ -349,7 +349,7 @@ async fn read_held_login(
 ) -> Result<mj_core::credentials::CredentialSnapshot> {
     let marker = endpoint.marker.clone();
     let kind = endpoint.harness;
-    let read = tokio::task::spawn_blocking(move || {
+    let read = mj_core::runtime::spawn_blocking(move || {
         mj_core::credentials::read_credential_file(kind, &marker)
     })
     .await
@@ -403,7 +403,7 @@ where
     // checkpoint barrier is the true filesystem state, not something to time out.
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let span = tracing::Span::current();
-    let mut work = tokio::task::spawn_blocking(move || {
+    let mut work = mj_core::runtime::spawn_blocking(move || {
         tracing::dispatcher::with_default(&dispatch, || {
             span.in_scope(|| {
                 let _permit = permit;
@@ -421,7 +421,7 @@ where
             () = cancel.cancelled() => {
                 // Teardown need not wait for a read, but its completion still
                 // has an observer that reports task failures and panics.
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     match work.await {
                         Ok(Ok(_)) => {}
                         Ok(Err(error)) => tracing::warn!(error = format!("{error:#}"), "cancelled project-memory read failed"),
@@ -1119,7 +1119,7 @@ mod tests {
         let identity = relay.login_identity.clone();
         identity.observe_file(Some(mj_core::credentials::credential_fingerprint(&initial)));
         let worker_identity = identity.clone();
-        let mut install = tokio::spawn(async move {
+        let mut install = mj_core::runtime::spawn(async move {
             credential_response(
                 RelayRequestEnvelope {
                     request_id: "credential-lock-race".into(),

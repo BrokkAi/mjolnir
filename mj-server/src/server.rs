@@ -270,7 +270,7 @@ impl ServerOptions {
 
     /// Load the signing key and durable logout records off the async runtime.
     pub async fn load_cookie_credentials(&mut self, path: PathBuf) -> AnyResult<()> {
-        let (key, revocations) = tokio::task::spawn_blocking(move || {
+        let (key, revocations) = mj_core::runtime::spawn_blocking(move || {
             let key = load_or_create_cookie_key(&path)?;
             let revocations =
                 ViewerRevocations::load(path.with_file_name("phone-cookie-revocations.json"))?;

@@ -138,7 +138,6 @@ fn open_writable(path: &Path) -> Result<Connection> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA journal_mode = WAL;
          PRAGMA synchronous = FULL;",
     )?;
     verify_schema_once(path, &connection)?;
@@ -353,6 +352,11 @@ fn verify_schema_once(path: &Path, connection: &Connection) -> Result<()> {
     let mut verified = verified_schemas()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // Converting a fresh file to WAL fails at once with SQLITE_BUSY, without
+    // the busy handler, while another connection is migrating it. This lock
+    // is what keeps first opens from overlapping, so the conversion belongs
+    // under it. Once the file is WAL the pragma only reads the mode.
+    connection.execute_batch("PRAGMA journal_mode = WAL;")?;
     let state = read_schema_state(connection)?;
     if state.revision > SCHEMA_VERSION
         || (state.revision == SCHEMA_VERSION && verified.contains(&key))
@@ -2660,6 +2664,75 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         ))?;
     }
+    // Compatible: older readers and writers leave the independent alert ledger intact.
+    if version < 139 {
+        connection.execute_batch(concat!(
+            "BEGIN IMMEDIATE;",
+            include_str!("alert_events.sql"),
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (139, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 139;
+             COMMIT;",
+        ))?;
+    }
+    // Compatible: older session deletion also runs this trigger; the indexes only speed
+    // its lookups, and no existing data shape changes.
+    if version < 140 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE INDEX IF NOT EXISTS push_entries_session ON push_entries(session);
+            CREATE TRIGGER IF NOT EXISTS alert_events_session_destroyed AFTER DELETE ON sessions BEGIN
+                DELETE FROM alert_events WHERE destination=OLD.session_id OR identity IN
+                    (SELECT identity FROM push_entries WHERE session=OLD.session_id);
+            END;
+            INSERT INTO schema_migrations(version,applied_at) VALUES(140,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+            PRAGMA user_version=140;
+            COMMIT;")?;
+    }
+    // Compatible: these non-unique indexes change only access paths. Older
+    // daemons do not name the replaced index, and SQLite maintains the new
+    // indexes on their writes. Constraints and stored data are unchanged.
+    if version < 141 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE INDEX IF NOT EXISTS environment_workers_environment
+                 ON environment_workers(environment_id, worker_session_id, lease_id);
+
+             -- Session deletion also runs environment and watch cleanup.
+             CREATE INDEX IF NOT EXISTS api_idempotency_session
+                 ON api_idempotency(session_id);
+             CREATE INDEX IF NOT EXISTS environments_owner
+                 ON environments(owner_session_id, phase);
+             CREATE INDEX IF NOT EXISTS environments_target_lease
+                 ON environments(target_lease_id) WHERE target_lease_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS environment_bindings_environment
+                 ON environment_bindings(environment_id);
+             CREATE INDEX IF NOT EXISTS retained_move_sources_environment
+                 ON retained_move_sources(environment_id) WHERE environment_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS session_moves_source_environment
+                 ON session_moves(source_environment_id) WHERE source_environment_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS github_watch_items_creator
+                 ON github_watch_items(creator_session_id);
+             CREATE INDEX IF NOT EXISTS github_watch_classifications_session
+                 ON github_watch_classifications(session_id);
+             CREATE INDEX IF NOT EXISTS github_watch_classification_failures_session
+                 ON github_watch_classification_failures(session_id);
+
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_subagent_messages
+                 ON mailbox_outbox(target_session_id) WHERE event_key LIKE 'subagent-message-%';
+             -- Only unaccepted rows are polled, in per-target delivery order.
+             DROP INDEX IF EXISTS mailbox_outbox_pending;
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_pending_target
+                 ON mailbox_outbox(target_session_id, created_at, event_key)
+                 WHERE accepted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS materialized_sessions_pending_elicitations
+                 ON materialized_sessions(session_id) WHERE pending_elicitations_json != '[]';
+
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (141, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 141;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3371,12 +3444,17 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
     forget_verified_schema(path);
 }
 
-/// Revision 121's triggers name tables that historical fixtures drop or
-/// reshape, so a fixture older than 121 removes them first.
+/// Rewind environment ownership and remove indexes on the columns it added.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn drop_environment_schema(connection: &Connection) {
     // These historical fixtures also predate removal of the size columns.
     legacy_schema::ensure_session_container_override_columns(connection).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS session_moves_source_environment;
+             DROP INDEX IF EXISTS retained_move_sources_environment;",
+        )
+        .unwrap();
     for (table, column) in [
         ("session_moves", "source_environment_id"),
         ("retained_move_sources", "environment_id"),

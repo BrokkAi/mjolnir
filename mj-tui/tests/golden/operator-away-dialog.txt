@@ -16,10 +16,10 @@
 ╰───────  │  told that you are away and asked to do other useful work first. If it asks  │  ───────╯
 ╭ Profil  │               the same thing again, the request waits for you.               │   ▁   ▄ ╮
 │ANTHROP  │                                                                              │         │
-│  claud  │                               Waiting for you:                               │         │
-│OPENAI   │                       Explicit question (default / hel)                      │         │
-│  codex  │                      Classifier failure (default / hel)                      │         │
-│  codex  │                       Classifier question (other / hel)                      │         │
+│  claud  │                             Waiting for you:                                 │         │
+│OPENAI   │                               Explicit question                              │         │
+│  codex  │                               Classifier failure                             │         │
+│  codex  │                               Classifier question                            │         │
 ╰───────  │                                                                              │  ───────╯
 ╭ Notifi  │                        Close this window to come back.                       │   ▄   □ ╮
 │? Class  │                                                                              │         │
@@ -28,7 +28,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │Quick reply:                                                                                 Send │
-│ Go to Session   Clear & Next   Skip   Clear all ! (0)                                            │
+│ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK classifier intervention only (100x32) ===
@@ -49,9 +49,9 @@
 ╰───────  │  told that you are away and asked to do other useful work first. If it asks  │  ───────╯
 ╭ Profil  │               the same thing again, the request waits for you.               │   ▁   ▄ ╮
 │ANTHROP  │                                                                              │         │
-│  claud  │                               Waiting for you:                               │         │
-│OPENAI   │                      Classifier failure (default / hel)                      │         │
-│  codex  │                       Classifier question (other / hel)                      │         │
+│  claud  │                             Waiting for you:                                 │         │
+│OPENAI   │                               Classifier failure                             │         │
+│  codex  │                               Classifier question                            │         │
 │  codex  │                                                                              │         │
 ╰───────  │                        Close this window to come back.                       │  ───────╯
 ╭ Notifi  │                                                                              │   ▄   □ ╮
@@ -61,7 +61,7 @@
 │                                                                                                  │
 │                                                                                                  │
 │Quick reply:                                                                                 Send │
-│ Go to Session   Clear & Next   Skip   Clear all ! (0)                                            │
+│ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK waiting requests cleared (100x32) ===
@@ -115,10 +115,10 @@
 +-------  |  told that you are away and asked to do other useful work first. If it asks  |  -------+
 + Profil  |               the same thing again, the request waits for you.               |   -   = +
 |ANTHROP  |                                                                              |         |
-|  claud  |                               Waiting for you:                               |         |
-|OPENAI   |                       Explicit question (default / hel)                      |         |
-|  codex  |                      Classifier failure (default / hel)                      |         |
-|  codex  |                       Classifier question (other / hel)                      |         |
+|  claud  |                             Waiting for you:                                 |         |
+|OPENAI   |                               Explicit question                              |         |
+|  codex  |                               Classifier failure                             |         |
+|  codex  |                               Classifier question                            |         |
 +-------  |                                                                              |  -------+
 + Notifi  |                        Close this window to come back.                       |   =   + +
 |? Class  |                                                                              |         |
@@ -127,7 +127,7 @@
 |                                                                                                  |
 |                                                                                                  |
 |Quick reply:                                                                                 Send |
-| Go to Session   Clear & Next   Skip   Clear all ! (0)                                            |
+| Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                           |
 +--------------------------------------------------------------------------------------------------+
 / search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - a read - : / ? palette
 === AFK small (32x12) ===
@@ -147,9 +147,9 @@
 
 
    ╭ ×  AFK  ──────────────╮
-   │   Waiting for you:    │
-   │ Explicit question (d… │
-   │      and 2 more       │
+   │  Waiting for you:     │
+   │    Explicit question  │
+   │    and 2 more         │
    │                       │
    │ Close this window to  │
    │      come back.       │
@@ -172,10 +172,10 @@
       │  useful work first. If it asks the same  │
       │  thing again, the request waits for you. │
       │                                          │
-      │             Waiting for you:             │
-      │     Explicit question (default / hel)    │
-      │    Classifier failure (default / hel)    │
-      │     Classifier question (other / hel)    │
+      │           Waiting for you:               │
+      │             Explicit question            │
+      │             Classifier failure           │
+      │             Classifier question          │
       │                                          │
       │      Close this window to come back.     │
       │                                          │

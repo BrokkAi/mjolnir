@@ -189,7 +189,7 @@ pub(super) async fn prepare_selected(
     // The owner chooses once before loading ORT. A later preference change
     // cannot replace a process-global native library underneath live sessions.
     if SELECTION.get().is_none() {
-        let choice = tokio::task::spawn_blocking(move || select(use_gpu)).await??;
+        let choice = mj_core::runtime::spawn_blocking(move || select(use_gpu)).await??;
         if SELECTION.set(choice).is_ok()
             && let Some(choice) = SELECTION.get()
             && !choice.missing.is_empty()
@@ -225,11 +225,11 @@ async fn prepare_platform(
     let destination = root.join(key);
     let check = destination.clone();
     let expected = files(&platform);
-    if tokio::task::spawn_blocking(move || assets::verified(&check, &expected))
+    if mj_core::runtime::spawn_blocking(move || assets::verified(&check, &expected))
         .await?
         .is_ok()
     {
-        return tokio::task::spawn_blocking(move || {
+        return mj_core::runtime::spawn_blocking(move || {
             destination
                 .join(&platform.library)
                 .canonicalize()
@@ -243,7 +243,7 @@ async fn prepare_platform(
         async move { assets::download(&archive.url, &path, client, cancellation).await }
     }))
     .await?;
-    tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+    mj_core::runtime::spawn_blocking(move || -> Result<PathBuf> {
         for (i, archive) in platform.archives.iter().enumerate() {
             let path = staging.path().join(format!("download-{i}"));
             assets::verify_file(&path, archive.bytes, &archive.sha256).map_err(|e| {

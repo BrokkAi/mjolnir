@@ -877,6 +877,71 @@ mv "$CLAUDE_CONFIG_DIR/.credentials.json.new" "$CLAUDE_CONFIG_DIR/.credentials.j
     (request, credentials)
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn another_daemons_claude_login_change_is_forwarded_to_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let (batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        grants: vec![request.clone()],
+        ..Default::default()
+    });
+    let (sender, mut updates) = tokio::sync::mpsc::channel(4);
+    let loop_task = mj_core::runtime::spawn(renew_claude_grant_when_due(
+        request.clone(),
+        receiver,
+        QUOTA_REFRESH_INTERVAL,
+        open_gate_renewal(directory.path()),
+        Some(sender),
+    ));
+
+    // The login starts due, so the loop's first check renews it. That update
+    // proves the loop has observed its baseline before the file changes.
+    let first = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            first,
+            QuotaUpdate::ClaudeGrant {
+                check: mj_controller::quota::ClaudeGrantCheck::Renewed { .. },
+                login_changed: false,
+                ..
+            }
+        ),
+        "{first:?}"
+    );
+    let expires_at_ms = mj_core::clock::epoch_millis() + 9 * ONE_HOUR_MS;
+    std::fs::write(
+        credentials,
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"external-login","refreshToken":"external-refresh","expiresAt":{expires_at_ms},"scopes":["user:inference"]}}}}"#
+        ),
+    )
+    .unwrap();
+    batches.send_modify(|_| {});
+
+    let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            update,
+            QuotaUpdate::ClaudeGrant {
+                check: mj_controller::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) },
+                login_changed: true,
+                ..
+            }
+        ),
+        "{update:?}"
+    );
+    batches.send_modify(|batch| batch.grants.clear());
+    loop_task.await.unwrap();
+}
+
 // Hard-won: #1529: an unexpired refused login waited hours for its scheduled renewal.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
@@ -1193,7 +1258,7 @@ printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","e
     let started = credentials.with_file_name("started");
     let launcher = fake_claude(directory.path());
     let gate = mj_controller::upgrade::gate().clone();
-    let caller = tokio::spawn(async move {
+    let caller = mj_core::runtime::spawn(async move {
         mj_controller::quota::refresh_claude_grant(
             &request,
             mj_core::clock::epoch_millis(),
@@ -1786,7 +1851,7 @@ echo sampled
 async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (finish_tx, finish_rx) = std::sync::mpsc::channel();
-    let sample = tokio::spawn(collect_local_capacity_with(move || {
+    let sample = mj_core::runtime::spawn(collect_local_capacity_with(move || {
         started_tx.send(()).unwrap();
         // Dropping finish_tx on a test failure also releases this thread.
         finish_rx.recv().context("test sample was cancelled")?;
@@ -2212,9 +2277,8 @@ fn github_tokens_sync_to_every_session_target() {
     assert!(!target_syncs_github_token(None));
 }
 
-// Hard-won: c94c68c0: the shared Claude refresh grant could expire during a long-running session
 #[test]
-fn a_refused_claude_login_offers_the_long_lived_token() {
+fn a_stale_login_stays_quiet_and_every_other_auth_failure_reaches_the_person() {
     use mj_core::config::{HarnessKind, HarnessProfile};
     use mj_core::credentials::{
         CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, RejectedLogins,
@@ -2246,32 +2310,42 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
         registry.accept(&result.profile_id, result.trigger.as_ref().unwrap());
         let verdict = registry.conclude(result, Some(&profile));
         CredentialSyncNotices::default()
-            .leveled_notice(result, Some(harness), &State::default(), verdict.as_ref())
-            .unwrap()
-            .text
+            .leveled_notice(result, &State::default(), verdict.as_ref())
+            .map(|notice| notice.text)
     };
-    let claude = notice(&result, HarnessKind::Claude);
+    let claude = notice(&result, HarnessKind::Claude).unwrap();
     assert!(
-        claude.ends_with(
-            "Run `mj login --profile claude-max`, or store a long-lived token with `mj login --profile claude-max --setup-token`."
-        ),
+        claude.ends_with("Run `mj login --profile claude-max`."),
         "{claude}"
     );
+    assert!(!claude.contains("setup-token"), "{claude}");
 
-    // Only Claude can rotate ahead of expiry this way.
-    let codex = notice(&result, HarnessKind::Codex);
+    let codex = notice(&result, HarnessKind::Codex).unwrap();
     assert!(
         codex.ends_with("Run `mj login --profile claude-max`."),
         "{codex}"
     );
 
+    // A stale login that the renewed one replaces needs nothing from the person.
     let mut stale = result.clone();
     stale.outcomes[0].current_access_token = Some("renewed-token".into());
-    let stale = notice(&stale, HarnessKind::Claude);
-    assert!(
-        stale.contains("stale login") && !stale.contains("mj login"),
-        "{stale}"
-    );
+    assert_eq!(notice(&stale, HarnessKind::Claude), None);
+
+    // A cause that stays unknown always reaches the person, whatever was
+    // pushed (nothing, the login, or only AWS credentials): no refusal was
+    // established, and nothing here knows the worker will retry.
+    let mut unidentified = result.clone();
+    unidentified.outcomes[0].current_access_token = None;
+    for pushed in [
+        Vec::new(),
+        vec![mj_core::credentials::CredentialSyncAction::Pushed],
+        vec![mj_core::credentials::CredentialSyncAction::AwsCredentialsPushed],
+    ] {
+        unidentified.outcomes[0].outcome = Ok(pushed);
+        let unknown = notice(&unidentified, HarnessKind::Claude).unwrap();
+        assert!(unknown.contains("was not established"), "{unknown}");
+        assert!(!unknown.contains("mj login"), "{unknown}");
+    }
 
     // A failed check cannot establish that signing in again will help.
     let failed = CredentialSyncResult {
@@ -2285,7 +2359,7 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
         partial: false,
         ..result
     };
-    let claude_failure = notice(&failed, HarnessKind::Claude);
+    let claude_failure = notice(&failed, HarnessKind::Claude).unwrap();
     assert!(!claude_failure.contains("mj login"), "{claude_failure}");
 }
 
@@ -2317,6 +2391,17 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
     assert!(notice.contains("returned no response"), "{notice}");
     assert!(notice.contains("were pushed"), "{notice}");
     assert!(!notice.contains("Auth failure"), "{notice}");
+
+    // Replacing only AWS credentials is also worth a retry.
+    let mut aws_only = result.clone();
+    aws_only.outcomes[0].outcome = Ok(vec![CredentialSyncAction::AwsCredentialsPushed]);
+    let notice = CredentialSyncNotices::default()
+        .notice(&aws_only, None, &State::default())
+        .unwrap();
+    assert!(
+        notice.contains("were pushed") && notice.contains("Retry the prompt"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -2336,7 +2421,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         partial: false,
     };
     let leveled = CredentialSyncNotices::default()
-        .leveled_notice(&result, None, &State::default(), None)
+        .leveled_notice(&result, &State::default(), None)
         .unwrap();
     assert!(!leveled.routine, "a failed sync stays a warning");
     let notice = leveled.text;
@@ -3112,9 +3197,8 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
         let notice = CredentialSyncNotices::default()
             .leveled_notice(
                 result,
-                None,
                 &state,
-                Some(&mj_core::credentials::LoginFailureVerdict::Renewed),
+                Some(&mj_core::credentials::LoginFailureVerdict::Refused),
             )
             .unwrap()
             .text;
@@ -3253,7 +3337,7 @@ async fn only_the_apple_container_refresh_waits_for_its_startup() {
     let settled = tokio_util::sync::CancellationToken::new();
     let cancellation = tokio_util::sync::CancellationToken::new();
     let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
-    let apple = tokio::spawn(refresh_host_after_startup(
+    let apple = mj_core::runtime::spawn(refresh_host_after_startup(
         refresh(mj_controller::targets::ImageHost::AppleContainer),
         settled.clone(),
         cancellation.clone(),

@@ -520,7 +520,7 @@ impl Catalog {
             let cancelled = Arc::new(AtomicBool::new(false));
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(120));
-            let mut task = tokio::task::spawn_blocking(move || refresh(&executor, retry));
+            let mut task = mj_core::runtime::spawn_blocking(move || refresh(&executor, retry));
             let result = tokio::select! {
                 result=&mut task=>result.context("project discovery task panicked").and_then(|result|result),
                 _=shutdown.cancelled()=>{
@@ -531,7 +531,7 @@ impl Catalog {
                         Ok(Err(error)) => tracing::warn!(%error,"project discovery cancellation failed"),
                         Err(_) => {
                             tracing::warn!("project discovery cleanup exceeded two seconds; unfinished discovery will resume at startup");
-                            tokio::spawn(async move {
+                            mj_core::runtime::spawn(async move {
                                 match task.await {
                                     Ok(Ok(_)) => {}
                                     Ok(Err(error)) => tracing::warn!(%error,"cancelled project discovery failed"),
@@ -728,7 +728,7 @@ mod tests {
         runtime.block_on(async {
             let catalog = Arc::new(Catalog::default());
             let shutdown = CancellationToken::new();
-            let task = tokio::spawn(catalog.clone().run(shutdown.clone()));
+            let task = mj_core::runtime::spawn(catalog.clone().run(shutdown.clone()));
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     tokio::time::sleep(Duration::from_millis(25)).await;

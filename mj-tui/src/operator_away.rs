@@ -286,29 +286,37 @@ pub(crate) fn render(
             theme::muted(),
         ));
     } else {
-        lines.push(Line::styled("Waiting for you:", theme::muted()));
+        // Left-align the list within itself, then let the centered paragraph
+        // center the block: pad every row to the widest row's width.
+        let mut block = vec![Line::styled("Waiting for you:", theme::muted())];
         let limit = usize::from(inner.height / 4).clamp(1, 5);
         for session in waiting.iter().take(limit) {
-            let workspace = dashboard
-                .workspace_names
-                .get(&session.workspace_id)
-                .map(String::as_str)
-                .unwrap_or(&session.workspace_id);
-            let label = format!(
-                "{} ({workspace} / {})",
-                session.listed_title(),
-                session.project_name(&dashboard.config)
-            );
-            lines.push(Line::styled(
-                truncate_to_cells(&label, usize::from(inner.width), Truncate::PLAIN),
+            block.push(Line::styled(
+                truncate_to_cells(
+                    &format!("  {}", session.listed_title()),
+                    usize::from(inner.width),
+                    Truncate::PLAIN,
+                ),
                 theme::muted(),
             ));
         }
         if waiting.len() > limit {
-            lines.push(Line::styled(
-                format!("and {} more", waiting.len() - limit),
+            block.push(Line::styled(
+                format!("  and {} more", waiting.len() - limit),
                 theme::muted(),
             ));
+        }
+        // Padding past the body width would wrap a short row onto a blank line.
+        let block_width = block
+            .iter()
+            .map(Line::width)
+            .max()
+            .unwrap_or(0)
+            .min(usize::from(inner.width));
+        for mut line in block {
+            let padding = block_width.saturating_sub(line.width());
+            line.spans.push(Span::raw(" ".repeat(padding)));
+            lines.push(line);
         }
     }
     lines.push(Line::raw(""));

@@ -28,6 +28,7 @@ pub enum CommandId {
     NotificationDefault,
     NotificationClear,
     NotificationSkip,
+    NotificationIgnoreSession,
     NotificationPreviousMessage,
     NotificationNextMessage,
     NotificationClearImportant,
@@ -678,6 +679,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         pane_keys: &[KeyHint::alt(KeyCode::Char('s'), "Alt+s")],
         action: None,
         footer: footer_word!("skip"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationIgnoreSession,
+        label: "Ignore Session",
+        description: "Skip this card and ignore all notifications from its session.",
+        scope: Scope::Notifications,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: notification_available,
@@ -2169,6 +2182,9 @@ impl DashboardState {
             | CommandId::NotificationNextMessage => self.notification_action(id),
             CommandId::NotificationClear => self.notification_clear(),
             CommandId::NotificationSkip => self.notification_skip(),
+            CommandId::NotificationIgnoreSession => {
+                self.notification_action(CommandId::NotificationIgnoreSession)
+            }
             CommandId::NotificationClearImportant => self.notification_clear_important(),
             CommandId::NotificationScrollUp => {
                 self.scroll_notification(-1);

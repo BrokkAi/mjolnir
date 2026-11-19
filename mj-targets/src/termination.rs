@@ -83,7 +83,7 @@ impl Coordinator {
             // by the initialized streams instead of bypassing coordination.
             let (ctrl_c, ctrl_break) = install_windows_signals();
             let listener = coordinator.clone();
-            tokio::spawn(async move { listener.listen(ctrl_c, ctrl_break).await });
+            mj_core::runtime::spawn(async move { listener.listen(ctrl_c, ctrl_break).await });
             if login {
                 install_login_close_handler(coordinator.token.clone());
             }

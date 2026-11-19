@@ -6,10 +6,8 @@ use mj_controller::session_manager::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(unix)]
 use mj_controller::controller::test_support::{IsolatedTest, test_name};
 
-#[cfg(unix)]
 // Hard-won: ec2-m8id16-b move stall: slow durable replies must finish once without a delivery deadline.
 #[tokio::test]
 async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {

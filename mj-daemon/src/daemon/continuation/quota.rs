@@ -160,7 +160,7 @@ pub(super) async fn prepare(
     };
     let harness = profile.kind;
     let profile_name = profile_id.clone();
-    let request = tokio::task::spawn_blocking(move || {
+    let request = mj_core::runtime::spawn_blocking(move || {
         QuotaRefreshRequest::for_profile(
             &profile_name,
             &profile,
@@ -174,10 +174,11 @@ pub(super) async fn prepare(
         .quota_report_backend()
         .context("quota report service is unavailable")
         .and_then(|backend| backend.quota_report(&profile_id, &identity));
-    let cached =
-        tokio::task::spawn_blocking(move || mj_controller::database::load_quota_cache(&identity))
-            .await
-            .context("read cached quota resets")?;
+    let cached = mj_core::runtime::spawn_blocking(move || {
+        mj_controller::database::load_quota_cache(&identity)
+    })
+    .await
+    .context("read cached quota resets")?;
     let (observed, wait) = match observed {
         Ok(QuotaRead::Ready(report)) => {
             (Some(report).filter(|report| report.error.is_none()), None)

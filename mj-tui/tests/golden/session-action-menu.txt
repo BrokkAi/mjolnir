@@ -496,7 +496,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 workspace clear notifications: DismissNotifications { dismissals: [("session-1", Question(InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 }))] }
@@ -539,7 +539,7 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === active prose question (120x40) ===
@@ -580,7 +580,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                      │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 dismiss exact question: DismissNotification { session_id: "session-1", target: Question(InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 }) }
@@ -707,7 +707,7 @@ unread dismissed: Some("Notification dismissed.")
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === sub-agent question menu (120x40) ===
@@ -748,7 +748,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                      │
 │                                      ││                                                                              │
 │                                      ││Quick reply:                                                             Send │
-│                                      ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                        │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 open sub-agent question action: Open { session_id: "child-session" }

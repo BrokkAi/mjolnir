@@ -1923,7 +1923,7 @@ mod startup_tests {
                     },
                 );
             }
-            let coordinator = tokio::spawn(run_relay_coordinator(
+            let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
                 relay.clone(),
                 received,
                 wakes,
