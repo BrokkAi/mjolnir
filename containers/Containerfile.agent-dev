@@ -44,6 +44,8 @@ COPY mj-import/ mj-import/
 COPY mj-sessionwiki/ mj-sessionwiki/
 COPY mj-build-cache/ mj-build-cache/
 COPY mj-worker-staging/ mj-worker-staging/
+COPY mj-session-runtime/ mj-session-runtime/
+COPY mj-profile-catalog/ mj-profile-catalog/
 COPY mj-github-relevance/ mj-github-relevance/
 COPY mj-controller/ mj-controller/
 COPY mj-setup/ mj-setup/

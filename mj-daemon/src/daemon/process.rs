@@ -172,9 +172,13 @@ pub(super) async fn run_daemon_runtime(
     // Start the primary manager after store preparation. Bootstrap failures
     // below have an awaited epilogue just like failures in the serving loop.
     let (delegation_tx, delegation_updates) = mj_controller::session_manager::delegation_channel();
-    let manager =
-        mj_controller::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
-    manager.control.update_model_policies(&controller);
+    let manager = mj_controller::session_manager::spawn_session_manager_observed(
+        Some(delegation_tx),
+        Arc::new(mj_controller::controller::DurableRecoveryPlanner),
+    )?;
+    manager
+        .control
+        .update_model_policies(&controller.config, &controller.state);
     let manager_targets = manager.targets;
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
@@ -1301,7 +1305,7 @@ pub(super) fn spawn_manager_target_refresher(
                 owner.pollable_worker_inputs()
             };
             let controller = inputs.controller();
-            state.session_manager.update_model_policies(&controller);
+            state.session_manager.update_model_policies(&controller.config, &controller.state);
             let config = controller.config;
             if auth_profiles.as_ref() != Some(&config.profiles) {
                 let mut cache = auth.clone();

@@ -27,6 +27,8 @@
 !mj-sessionwiki/
 !mj-build-cache/
 !mj-worker-staging/
+!mj-session-runtime/
+!mj-profile-catalog/
 !mj-github-relevance/
 !mj-controller/
 !mj-setup/

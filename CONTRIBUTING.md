@@ -163,6 +163,17 @@ it or introduce a dependency between sibling branches.
   and restart a staged worker. It fills in the plans of the session types
   crate and builds on the targets, store and accounts crates.
   The methods on `Controller` that orchestrate it stay in the controller.
+- `brokk-mj-session-runtime` (`mj-session-runtime/`, library
+  `mj_session_runtime`) is the daemon's side of a running session: the
+  session manager's relay actors, the relay client and credential sync,
+  worker recovery, checkpoint transfer, and GitHub credentials. It builds on
+  worker staging and asks the controller above it only through traits
+  (`RecoveryPlanner`, `CredentialSyncRuntime`). `mj_controller` re-exports
+  its modules under their old names.
+- `brokk-mj-profile-catalog` (`mj-profile-catalog/`, library
+  `mj_profile_catalog`) discovers what each profile's harness offers (models
+  and options), caches the answers and keeps them current. It builds on
+  worker staging and is a sibling of the session runtime.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.

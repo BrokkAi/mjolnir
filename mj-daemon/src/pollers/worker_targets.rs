@@ -60,10 +60,10 @@ pub fn dashboard_worker_targets_excluding(
 }
 
 #[cfg(test)]
-pub(crate) use mj_controller::worker_client::target_syncs_github_token;
-pub use mj_controller::worker_client::{
+pub(crate) use mj_controller::controller::credential_targets::target_syncs_github_token;
+pub use mj_controller::controller::credential_targets::{
     credential_sync_target_is_current, credential_sync_targets,
 };
-pub(crate) use mj_controller::worker_client::{
+pub(crate) use mj_controller::controller::credential_targets::{
     credential_sync_targets_from_sources, staged_credential_sessions,
 };
