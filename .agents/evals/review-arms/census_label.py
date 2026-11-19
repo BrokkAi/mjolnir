@@ -9,7 +9,6 @@ import json
 import posixpath
 from pathlib import Path
 import re
-import shutil
 import sys
 import subprocess
 from tempfile import mkdtemp
@@ -123,6 +122,34 @@ def labeller_item(row, split):
             "fix_test": row.get("fix_test") or row.get("regression_test") or row.get("marker")}
 
 
+def input_documents():
+    return {name: (CENSUS / name).read_bytes()
+            for name in ("label-SPEC.md", "rql-documented-steps.md")}
+
+
+def inputs_sha(item, documents):
+    encoded_item = json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256()
+    for part in (*documents.values(), encoded_item):
+        # Frame each input so a document boundary is part of the hash.
+        digest.update(len(part).to_bytes(8, "big"))
+        digest.update(part)
+    return digest.hexdigest()
+
+
+def read_current_labels(path, expected_hashes):
+    current, stale = {}, Counter()
+    for row in rows(path) if path.exists() else ():
+        key = row["repo"], row["id"]
+        if key not in expected_hashes or row.get("inputs_sha") != expected_hashes[key]:
+            stale[key[0]] += 1
+            continue
+        if key in current:
+            raise ValueError(f"{path}: duplicate current repo/id {key}")
+        current[key] = row
+    return current, stale
+
+
 def git(repo, *args):
     return subprocess.check_output(["git", "--no-replace-objects", "-C", str(repo), *args],
                                    stderr=subprocess.PIPE)
@@ -137,10 +164,11 @@ def line_count(repo, revision, path):
     return blob.count(b"\n") + bool(blob and not blob.endswith(b"\n"))
 
 
-def vocabulary():
+def vocabulary(reference=None):
     """Load spellings, row signatures and option requirements from the catalogue."""
     forms = {}
-    reference = (CENSUS / "rql-documented-steps.md").read_text()
+    if reference is None:
+        reference = (CENSUS / "rql-documented-steps.md").read_text()
     for line in reference.splitlines():
         if not line.startswith("| `"):
             continue
@@ -621,7 +649,24 @@ def run_turn(sid, prompt, phase, title):
     return waited
 
 
-def run_batch(args, split, role, repo, batch, pins, allowed):
+def fetch_output(sid, path):
+    # These retry delays are a judgment call, not a measured service limit.
+    for delay in (0, 30, 60, 120):
+        if delay:
+            time.sleep(delay)
+        try:
+            fetch = subprocess.run([str(driver.MJX), "fetch", "--session", sid, "--path", path, "--stdout"],
+                                   capture_output=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            problem = str(error)
+        else:
+            if fetch.returncode == 0:
+                return fetch.stdout.decode(errors="replace")
+            problem = fetch.stderr.decode(errors="replace").strip() or f"exit status {fetch.returncode}"
+    raise RuntimeError(problem)
+
+
+def run_batch(args, split, role, repo, batch, pins, allowed, documents):
     profile, model, _ = ROLES[role]
     ids = [item["id"] for item in batch]
     if not args.work_dir.is_absolute():
@@ -634,8 +679,8 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
             git(work, "cat-file", "-e", item[field] + "^{commit}")
     inputs = unit / "inputs"
     inputs.mkdir()
-    for filename in ("label-SPEC.md", "rql-documented-steps.md"):
-        shutil.copyfile(CENSUS / filename, inputs / filename)
+    for filename, content in documents.items():
+        (inputs / filename).write_bytes(content)
     save(inputs / "batch.json", {"labeller": role, "output": "labels.jsonl", "items": batch})
     prompt = unit / "prompt.txt"
     prompt.write_text(
@@ -660,8 +705,8 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
                     "--review", "off", "--no-project-memory", "--no-github-events",
                     "--no-github-credentials", "--subagents", "none", "--title", title,
                     timeout=900)["session_id"]
-    # Every exit after launch suspends the session, so a failed batch leaves no worker running
-    # a turn while a rerun starts another one for the same items.
+    # A session with inaccessible output stays available for manual fetch.
+    recover_output = False
     try:
         log(args.labels_dir, "launched", title=title, session=sid)
         driver.wait_idle(sid)
@@ -686,21 +731,30 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
         errors = {}
         for attempt, filename in enumerate(("labels.jsonl", "repaired.jsonl"), 1):
             turn = run_turn(sid, prompt, attempt, title)
+            actual_profile = driver.session(sid)["profile_id"]
+            if actual_profile != profile:
+                log(args.labels_dir, "profile-moved", title=title, session=sid, attempt=attempt,
+                    expected_profile=profile, actual_profile=actual_profile)
+                raise RuntimeError(f"{title}: profile moved from {profile} to {actual_profile}")
             log(args.labels_dir, "turn-finished", title=title, attempt=attempt,
                 turn=turn.get("turn_id"), outcome=turn.get("outcome"))
-            fetch = subprocess.run([str(driver.MJX), "fetch", "--session", sid, "--path",
-                                    f".rql-census/{filename}", "--stdout"],
-                                   capture_output=True, timeout=300)
-            raw = fetch.stdout.decode(errors="replace")
-            if fetch.returncode:
-                problem = fetch.stderr.decode(errors="replace").strip()
-                log(args.labels_dir, "fetch-failed", title=title, attempt=attempt, error=problem)
-                if not any(word in problem.lower() for word in ("not found", "no such file", "does not exist")):
-                    raise RuntimeError(problem)
+            output_path = f".rql-census/{filename}"
+            try:
+                raw = fetch_output(sid, output_path)
+            except RuntimeError as error:
+                recover_output = True
+                recovery = {"session": sid, "title": title, "path": output_path, "unit": str(unit),
+                            "repo": repo, "census": split, "labeller": role, "ids": list(expected),
+                            "attempt": attempt, "turn": turn.get("turn_id"), "error": str(error)}
+                append(args.labels_dir / "recover.jsonl",
+                       {"time": datetime.now(timezone.utc).isoformat(), **recovery})
+                log(args.labels_dir, "fetch-failed", **recovery)
+                raise
             (unit / f"attempt-{attempt}.jsonl").write_text(raw)
             valid, errors = collect(raw, expected, role, work, allowed)
             if valid:
-                append_rows(destination, valid.values())
+                append_rows(destination, (dict(row, inputs_sha=inputs_sha(expected[bug], documents))
+                                          for bug, row in valid.items()))
             log(args.labels_dir, "validated", title=title, attempt=attempt, ids=list(valid), errors=errors)
             if not errors:
                 break
@@ -721,17 +775,18 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
                 for bug, problems in errors.items()
             ])
     finally:
-        # The host unit retains the input and output evidence after suspension.
-        try:
-            driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
-            waited = driver.mj("wait", "--session", sid, "--timeout", 900, timeout=930)
-            session = waited["session"]
-            if (waited["outcome"] != "stopped" or session["lifecycle"] != "suspended"
-                    or session.get("error") is not None):
-                raise RuntimeError(f"{title}: suspension did not complete: {waited}")
-        except Exception as error:
-            log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
-            raise
+        if not recover_output:
+            # The host unit retains the input and output evidence after suspension.
+            try:
+                driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+                waited = driver.mj("wait", "--session", sid, "--timeout", 900, timeout=930)
+                session = waited["session"]
+                if (waited["outcome"] != "stopped" or session["lifecycle"] != "suspended"
+                        or session.get("error") is not None):
+                    raise RuntimeError(f"{title}: suspension did not complete: {waited}")
+            except Exception as error:
+                log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
+                raise
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
@@ -758,7 +813,8 @@ def main():
     items, pins, unconfirmed_dev = item_sets()
     excluded = exclude_families(items, args.check_clones)
     counts = {split: dict(Counter(item["repo"] for item in rows)) for split, rows in items.items()}
-    allowed = vocabulary()
+    documents = input_documents()
+    allowed = vocabulary(documents["rql-documented-steps.md"].decode("utf-8"))
     query_forms = [output for use, _, output, _, _ in allowed.values() if use not in ("operand", "relation")]
     checked_forms = sorted(name for name, (_, _, _, required, selectors) in allowed.items()
                            if required or selectors)
@@ -781,7 +837,8 @@ def main():
         if not selected:
             parser.error("no items match this selection")
         destination = args.labels_dir / f"{args.split}-{args.labeller}.jsonl"
-        done = {(row["repo"], row["id"]) for row in rows(destination)} if destination.exists() else set()
+        expected_hashes = {(item["repo"], item["id"]): inputs_sha(item, documents) for item in selected}
+        done, _ = read_current_labels(destination, expected_hashes)
         by_repo = defaultdict(list)
         for item in selected:
             if (item["repo"], item["id"]) not in done:
@@ -790,14 +847,14 @@ def main():
             indexed(subset, f"{args.split}/{repo}")
             for batch in batches(subset, args.batch_size):
                 try:
-                    run_batch(args, args.split, args.labeller, repo, batch, pins, allowed)
+                    run_batch(args, args.split, args.labeller, repo, batch, pins, allowed, documents)
                 except Exception as error:
                     log(args.labels_dir, "batch-failed", split=args.split, role=args.labeller,
                         repo=repo, ids=[item["id"] for item in batch], error=str(error))
                     raise
         # A run is complete only when every selected item has a valid label. Items that still
         # fail after the repair turn are in invalid.jsonl; report them as an unsuccessful run.
-        labelled = {(row["repo"], row["id"]) for row in rows(destination)} if destination.exists() else set()
+        labelled, _ = read_current_labels(destination, expected_hashes)
         unresolved = [item["id"] for item in selected if (item["repo"], item["id"]) not in labelled]
         if unresolved:
             print(f"{len(unresolved)} selected items have no valid label: {', '.join(unresolved[:20])}",

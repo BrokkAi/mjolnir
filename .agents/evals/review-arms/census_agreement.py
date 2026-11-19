@@ -8,7 +8,10 @@ from collections import defaultdict
 import json
 from pathlib import Path
 
-from census_label import LABELS, RUST, canonical_site, exclude_families, item_sets, rows
+from census_label import (
+    LABELS, RUST, canonical_site, exclude_families, input_documents, inputs_sha, item_sets, labeller_item,
+    read_current_labels,
+)
 
 
 def match_facts(primary, replication):
@@ -146,29 +149,17 @@ def comparison(pairs):
     }
 
 
-def read_role(directory, split, role):
-    path = directory / f"{split}-{role}.jsonl"
-    result = {}
-    for item in rows(path) if path.exists() else ():
-        key = item["repo"], item["id"]
-        if key in result:
-            raise ValueError(f"{path}: duplicate repo/id {key}")
-        result[key] = item
-    return result
-
-
-def compare_split(directory, split, cohort):
-    first = read_role(directory, split, "primary")
-    second = read_role(directory, split, "replication")
+def compare_split(directory, split, cohort, documents):
+    expected_hashes = {(item["repo"], item["id"]): inputs_sha(labeller_item(item, split), documents)
+                       for item in cohort}
+    first, stale_primary = read_current_labels(directory / f"{split}-primary.jsonl", expected_hashes)
+    second, stale_replication = read_current_labels(directory / f"{split}-replication.jsonl", expected_hashes)
     groups = defaultdict(set)
-    all_keys = {(item["repo"], item["id"]) for item in cohort}
+    all_keys = expected_hashes.keys()
     for key in all_keys:
         groups[key[0]].add(key)
-    outside = (first.keys() | second.keys()) - all_keys
-    if outside:
-        raise ValueError(f"{split}: labels outside the cohort: {sorted(outside)}")
 
-    def summary(keys):
+    def summary(keys, repo=None):
         primary = keys & first.keys()
         replication = keys & second.keys()
         both = primary & replication
@@ -176,10 +167,12 @@ def compare_split(directory, split, cohort):
         return {**comparison(pairs), "paired": len(both),
                 "missing_both": len(keys - (primary | replication)),
                 "missing_primary_only": len(replication - primary),
-                "missing_replication_only": len(primary - replication)}
+                "missing_replication_only": len(primary - replication),
+                "stale_rows": {"primary": sum(stale_primary.values()) if repo is None else stale_primary[repo],
+                               "replication": sum(stale_replication.values()) if repo is None else stale_replication[repo]}}
 
     return {"overall": summary(all_keys),
-            "by_repo": {repo: summary(keys) for repo, keys in sorted(groups.items())}}
+            "by_repo": {repo: summary(keys, repo) for repo, keys in sorted(groups.items())}}
 
 
 def main():
@@ -189,15 +182,17 @@ def main():
     args = parser.parse_args()
     cohorts, _, _ = item_sets()
     exclude_families(cohorts, args.check_clones)
+    documents = input_documents()
     report = {
         "field_descriptions": {
+            "stale_rows": "Saved rows with missing or mismatched input hashes or outside the current cohort.",
             "rql.locator_present": "Agreement on whether a locator query was supplied, "
                                    "among matched facts both labellers marked outside the diff.",
             "decisive_set_site_overlap": "Facts match by their cited sites. This measures whether "
                                          "labellers point at the same code. Comparing claim text "
                                          "would require a judge.",
         },
-        **{split: compare_split(args.labels_dir, split, cohort) for split, cohort in cohorts.items()},
+        **{split: compare_split(args.labels_dir, split, cohort, documents) for split, cohort in cohorts.items()},
     }
     print(json.dumps(report, indent=2))
 
