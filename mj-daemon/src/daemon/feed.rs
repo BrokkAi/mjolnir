@@ -443,10 +443,27 @@ impl RuntimeState {
             // A frozen frame can receive a newer alert frontier, never an older
             // frontier paired with a newer runtime cursor. Subscribe before both.
             let after = cursor.as_ref().map(|cursor| cursor.alert_sequence);
-            let (high, events) = mj_controller::web_push::blocking(move || {
+            let read = mj_controller::web_push::blocking(move || {
                 mj_controller::database::alert_events_since(after)
             })
-            .await?;
+            .await;
+            // An unreadable alert ledger must not stop runtime updates. A client
+            // that already holds a frontier keeps it, with no events, and gets
+            // them on a later request once the ledger reads again. A fresh
+            // attach has no frontier to keep, and its read touches only the
+            // sequence, so a failure there means the store itself is unreadable.
+            let (high, events) = match (read, after) {
+                (Ok(read), _) => read,
+                (Err(error), Some(after)) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        after,
+                        "alert events could not be read; serving runtime updates without them"
+                    );
+                    (after, Vec::new())
+                }
+                (Err(error), None) => return Err(error),
+            };
             if may_wait && same_runtime && after == Some(high) {
                 let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
                 may_wait = false;
