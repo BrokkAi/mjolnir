@@ -70,6 +70,8 @@ pub(crate) struct ProviderDiscovery {
     tasks: BTreeMap<String, ProviderTask>,
     generation: u64,
     refresh_requested: bool,
+    /// Profiles whose discovery thread could not be started, reported on the next poll.
+    spawn_failures: Vec<String>,
 }
 
 impl std::fmt::Debug for ProviderDiscovery {
@@ -116,14 +118,34 @@ impl ProviderDiscovery {
                 continue;
             }
             let owned = profile.clone();
-            self.tasks.insert(
-                id.to_owned(),
-                ProviderTask {
-                    profile: profile.clone(),
-                    generation: self.generation,
-                    handle: std::thread::spawn(move || owned.quota_provider()),
-                },
-            );
+            let spawned = std::thread::Builder::new()
+                .name(format!("quota-provider-{id}"))
+                .spawn(move || owned.quota_provider());
+            match spawned {
+                Ok(handle) => {
+                    self.tasks.insert(
+                        id.to_owned(),
+                        ProviderTask {
+                            profile: profile.clone(),
+                            generation: self.generation,
+                            handle,
+                        },
+                    );
+                }
+                // The OS refused a thread: record this profile as unresolved and
+                // report it; a profile refresh retries.
+                Err(_) => {
+                    self.resolved.insert(
+                        id.to_owned(),
+                        (
+                            profile.clone(),
+                            provider_unavailable(profile),
+                            self.generation,
+                        ),
+                    );
+                    self.spawn_failures.push(id.to_owned());
+                }
+            }
         }
     }
 
@@ -167,7 +189,7 @@ impl ProviderDiscovery {
             .filter(|(_, task)| task.handle.is_finished())
             .map(|(id, _)| id.clone())
             .collect();
-        let mut failed = Vec::new();
+        let mut failed = std::mem::take(&mut self.spawn_failures);
         for id in finished {
             let task = self.tasks.remove(&id).expect("finished task");
             if self.finish(id.clone(), task) {
@@ -175,6 +197,7 @@ impl ProviderDiscovery {
             }
         }
         self.spawn_missing(config);
+        failed.append(&mut self.spawn_failures);
         (!failed.is_empty()).then(|| {
             format!(
                 "Quota provider discovery failed for {}; refresh profiles to retry.",
