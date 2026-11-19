@@ -61,7 +61,11 @@ class Server:
         threading.Thread(target=self._read, daemon=True).start()
         # The scope's cgroup vanishes when the tree exits, so sample it while it lives: the
         # last memory.peak, OOM kills and tree CPU survive a timeout or an OOM kill.
-        self.sample = {"peak_tree_kib": None, "oom_kill": 0, "tree_cpu_usec": None}
+        # The sampler reads once a second, so a peak in the last second before exit can be
+        # missed; the record says so (sample_interval_s). An OOM kill is still caught through
+        # systemd's Result. Ranking uses getrusage CPU (exact for the waited tree), not cpu.stat.
+        self.sample = {"peak_tree_kib": None, "oom_kill": 0, "tree_cpu_usec": None, "sample_interval_s": 1}
+        self.cgroup = None
         self.sampling = True
         threading.Thread(target=self._sample, daemon=True).start()
 
@@ -74,6 +78,8 @@ class Server:
     def _sample(self):
         while self.sampling and self.proc.poll() is None:
             d = self._cgroup_dir()
+            if d:
+                self.cgroup = d
             if d:  # each file on its own, so one unreadable file can't hide the others
                 try:
                     self.sample["peak_tree_kib"] = int(open(f"{d}/memory.peak").read()) // 1024
@@ -163,17 +169,31 @@ class Server:
         self.sample["scope_result"] = dict(l.split("=", 1) for l in show.split() if "=" in l).get("Result")
         # Stop the scope in every case: it kills the whole process tree (Bifrost and anything it
         # started). Then verify the tree is gone before the caller touches the worktree or cache.
-        subprocess.run(["systemctl", "--user", "stop", scope], capture_output=True)
+        stopped = subprocess.run(["systemctl", "--user", "stop", scope], capture_output=True, text=True)
         if rc is None:
             try:
                 rc = self.proc.wait(timeout=STOP_SECONDS)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 rc = self.proc.wait(timeout=STOP_SECONDS)
+        # Proof the tree is gone: systemd reports the scope inactive or failed (a bus error gives
+        # neither), and its cgroup holds no process. Anything else stops the batch for this repo.
         deadline = time.monotonic() + STOP_SECONDS
-        while subprocess.run(["systemctl", "--user", "is-active", "--quiet", scope]).returncode == 0:
+        while True:
+            state = subprocess.run(["systemctl", "--user", "show", scope, "-p", "ActiveState", "--value"],
+                                   capture_output=True, text=True).stdout.strip()
+            procs = ""
+            if self.cgroup:
+                try:
+                    procs = open(f"{self.cgroup}/cgroup.procs").read().strip()
+                except FileNotFoundError:
+                    procs = ""
+            if state in ("inactive", "failed") and not procs:
+                break
             if time.monotonic() > deadline:
-                raise RuntimeError(f"{scope} still active after stop; refusing to touch its worktree")
+                raise RuntimeError(f"{scope} not confirmed stopped (state={state!r}, procs={procs[:80]!r}, "
+                                   f"stop exit {stopped.returncode}: {stopped.stderr.strip()[-200:]}); "
+                                   "refusing to touch its worktree")
             time.sleep(1)
         subprocess.run(["systemctl", "--user", "reset-failed", scope], capture_output=True)
         self.sampling = False
@@ -200,6 +220,10 @@ def phase(binary, root, cache, log):
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
     rec["exit"] = server.stop()
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
+    if rec.get("scope_result") == "oom-kill" or rec.get("oom_kill"):
+        # Hitting the cap at any point, even after a ready reply, invalidates the phase.
+        rec["ready"] = False
+        rec.setdefault("error", f"memory cap {MEMORY_MAX} reached (scope_result={rec.get('scope_result')})")
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     rec.update(cpu_user=after.ru_utime - before.ru_utime, cpu_sys=after.ru_stime - before.ru_stime,
                cache_bytes=du(cache))
@@ -291,7 +315,9 @@ def main():
             rec["traceback"] = traceback.format_exc()[-2000:]
         with open(results, "a") as f:
             f.write(json.dumps(rec) + "\n")
-        print(json.dumps({k: rec.get(k) for k in ("repo", "error")}), flush=True)
+        print(json.dumps({"repo": repo, "error": rec.get("error"), **{
+            ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
+            for ph in ("cold", "warm_restart")}}), flush=True)
 
 
 if __name__ == "__main__":
