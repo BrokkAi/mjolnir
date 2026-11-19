@@ -286,9 +286,11 @@ fn move_queue_relay_child() {
                 request.request,
                 RelayRequest::Status | RelayRequest::Attach { .. }
             )
-            && relay.operational_state().native_session_id.is_none()
         {
             fs::write(root.join("native-readiness-polled"), b"1").unwrap();
+            if relay.operational_state().native_session_id.is_some() {
+                fs::write(root.join("native-identity-polled"), b"1").unwrap();
+            }
         }
         if let RelayRequest::Submit {
             command_id,
@@ -354,11 +356,12 @@ fn move_queue_relay_child() {
                 },
             });
         }
-        if root.join("test-native-ready").exists() {
+        if root.join("test-native-ready").exists() || root.join("watch-native-readiness").exists() {
+            let ready = root.join("test-native-ready").exists();
             match &mut response.body {
                 RelayResponseBody::Ok {
                     payload: RelayResponsePayload::Status(state),
-                } => state.acp_ready = Some(true),
+                } => state.acp_ready = Some(ready),
                 RelayResponseBody::Ok {
                     payload:
                         RelayResponsePayload::Attached {
@@ -367,7 +370,7 @@ fn move_queue_relay_child() {
                             ..
                         },
                 } => {
-                    state.acp_ready = Some(true);
+                    state.acp_ready = Some(ready);
                     *state_digest = Some(mj_core::relay::relay_state_digest(state).unwrap());
                 }
                 _ => {}
@@ -7522,6 +7525,30 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 fs::write(root.join("unusable-worker"), b"failed").unwrap();
             } else {
                 fs::write(root.join("release-native-identity"), b"1").unwrap();
+                // Hard-won: b4038cc: the native ID alone does not mean ACP is configured.
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !root.join("native-identity-polled").exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(
+                    !work.is_finished(),
+                    "an unconfigured ACP bridge is not connected"
+                );
+                let current = crate::database::read_durable_session_record(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.state, SessionState::Disconnected);
+                drop(
+                    gate.try_start(
+                        MOVE_QUEUE_SESSION_ID,
+                        crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                    )
+                    .expect("ACP readiness wait owns no admission"),
+                );
+                fs::write(root.join("test-native-ready"), b"1").unwrap();
             }
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
                 .await

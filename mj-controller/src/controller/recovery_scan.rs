@@ -538,7 +538,7 @@ impl Controller {
                 let mut connection = StandaloneSession::connect_command(spec, &session_id).await?;
                 loop {
                     ensure_adoptable_worker(connection.operational())?;
-                    if connection.operational().native_session_id.is_some() {
+                    if connection.operational().native_session_is_ready() {
                         return Ok::<_, anyhow::Error>(connection);
                     }
                     // Startup is worker-owned; wait without lifecycle admission,

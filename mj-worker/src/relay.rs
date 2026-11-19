@@ -128,6 +128,7 @@ pub(crate) struct PendingLiveBaseline {
 }
 
 struct PendingNativeResume {
+    #[cfg(any(unix, test))]
     resume_id: u64,
     goal: Option<mj_core::goal::GoalSnapshot>,
 }
@@ -366,6 +367,7 @@ pub struct DurableRelay {
 
 impl DurableRelay {
     /// The connection owns this queue hold until its cut or disconnection.
+    #[cfg(any(unix, test))]
     pub(crate) fn reserve_live_baseline(
         &mut self,
     ) -> tokio::sync::oneshot::Receiver<
@@ -378,6 +380,7 @@ impl DurableRelay {
         receiver
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn resume_after_adoption_wait(&mut self) -> Result<()> {
         self.promote_next_queued_command()?;
         Ok(())
@@ -415,6 +418,7 @@ impl DurableRelay {
         }
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_sent(
         &mut self,
         resume_id: u64,
@@ -424,6 +428,7 @@ impl DurableRelay {
             .push(PendingNativeResume { resume_id, goal });
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
         self.pending_native_resumes
             .retain(|pending| pending.resume_id != resume_id);

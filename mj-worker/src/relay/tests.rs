@@ -6682,6 +6682,10 @@ fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
         relay.operational_state().native_session_id.as_deref(),
         Some("original")
     );
+    // Hard-won: b4038cc: /clear left an ambiguous resume owned by the dead bridge.
+    relay.native_goal_resume_sent(99, None);
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
     relay
         .record_command_completed(
             "clear-request",
@@ -6691,6 +6695,8 @@ fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
             },
         )
         .unwrap();
+    assert!(relay.pending_native_resumes.is_empty());
+    assert!(cut.try_recv().unwrap().is_ok());
     let ordinal = relay.operational_state().latest_ordinal;
     assert!(!relay.native_session_may_have_history());
     assert!(relay.snapshot.pending_prompt_context.is_none());
