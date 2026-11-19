@@ -2539,7 +2539,7 @@ fn validate_worktree_relative_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn slash_path(path: &Path) -> Result<String> {
+pub(crate) fn slash_path(path: &Path) -> Result<String> {
     validate_archive_relative_path(path)?;
     let parts = path
         .components()

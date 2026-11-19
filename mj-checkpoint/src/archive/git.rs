@@ -589,24 +589,6 @@ pub fn push_review_base_ref(scope: &str) -> String {
     format!("refs/mj/push-base/{}", digest_bytes(scope.as_bytes()))
 }
 
-/// Durable refs whose names explicitly belong to this linked worktree.
-pub(crate) fn worktree_durable_ref(reference: &str, scope: &str) -> bool {
-    let scope_hash = digest_bytes(scope.as_bytes());
-    reference == push_review_base_ref(scope)
-        || scope
-            .strip_prefix(WORKTREE_REVIEW_SCOPES)
-            .and_then(|_| scope.strip_suffix("/review-baseline"))
-            .is_some_and(|prefix| {
-                reference
-                    .strip_prefix(prefix)
-                    .is_some_and(|tail| tail.starts_with('/'))
-            })
-        || reference
-            .strip_prefix("refs/mj/session-start/")
-            .and_then(|tail| tail.split_once('/'))
-            .is_some_and(|(_, worktree)| worktree == scope_hash)
-}
-
 /// Move a legacy session-start ref without overwriting a concurrent
 /// initializer or deleting a legacy value that changed after it was read.
 pub fn migrate_review_ref(

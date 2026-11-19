@@ -68,6 +68,7 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub untracked: Vec<PathBuf>,
     pub hidden_tracked_edits: Vec<PathBuf>,
     pub remote_refs_stale: bool,
+    pub local_work: Vec<String>,
 }
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
@@ -277,6 +278,17 @@ fn inspect_checkout(
                     .push(named.join(mj_core::path_input::from_git_bytes(path)?));
             }
         }
+        if let Some(snapshot) = snapshot.as_deref_mut() {
+            let evidence = origin_evidence
+                .as_ref()
+                .context("missing submodule origin evidence")?;
+            snapshot.local_work.extend(unpublished_local_work(
+                runner,
+                &submodule,
+                &named,
+                &evidence.objects,
+            )?);
+        }
         let status = if snapshot.is_some() {
             submodule_git(
                 runner,
@@ -339,6 +351,89 @@ fn inspect_checkout(
         )?;
     }
     Ok(())
+}
+
+fn unpublished_local_work(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    named: &Path,
+    witnesses: &[String],
+) -> Result<Vec<String>> {
+    let listed = submodule_git(
+        runner,
+        repository,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)%00%(refname)%00%(objecttype)",
+            "refs/heads",
+            "refs/tags",
+            "refs/notes",
+        ],
+    )?;
+    let active = runner.run(
+        repository,
+        &git_command(&["symbolic-ref", "--quiet", "HEAD"]),
+    )?;
+    let active = std::str::from_utf8(&active.stdout)?.trim();
+    let mut refs = Vec::new();
+    for line in std::str::from_utf8(&listed)?.lines() {
+        let mut fields = line.split('\0');
+        let oid = fields.next().context("missing submodule ref object")?;
+        let name = fields.next().context("missing submodule ref name")?;
+        let kind = fields.next().context("missing submodule ref type")?;
+        // The active branch's position is already checked by the gitlink guard.
+        if name != active {
+            refs.push((oid.to_owned(), name.to_owned(), kind.to_owned()));
+        }
+    }
+    let stashes = submodule_git(runner, repository, &["stash", "list", "--format=%H%x00%gd"])?;
+    for line in std::str::from_utf8(&stashes)?.lines() {
+        let (oid, name) = line.split_once('\0').context("malformed submodule stash")?;
+        refs.push((oid.to_owned(), name.to_owned(), "commit".to_owned()));
+    }
+    let mut lost = Vec::new();
+    for (oid, name, kind) in refs {
+        let mut published = witnesses.contains(&oid);
+        if kind == "commit" {
+            for witness in witnesses {
+                if published {
+                    break;
+                }
+                published = runner
+                    .run(
+                        repository,
+                        &git_command(&["merge-base", "--is-ancestor", &oid, witness]),
+                    )?
+                    .status
+                    == 0;
+            }
+        } else if !published && !witnesses.is_empty() {
+            let mut arguments = vec![
+                "rev-list".into(),
+                "--objects".into(),
+                "--no-object-names".into(),
+            ];
+            if kind == "tag" {
+                arguments.push("--filter=tree:0".into());
+            }
+            arguments.extend(witnesses.iter().map(Into::into));
+            let graph = runner.run(
+                repository,
+                &GitCommand {
+                    arguments,
+                    ..Default::default()
+                },
+            )?;
+            ensure_inspected(&graph)?;
+            published = std::str::from_utf8(&graph.stdout)?
+                .lines()
+                .any(|object| object == oid);
+        }
+        if !published {
+            lost.push(format!("submodule {} {name} ({oid})", named.display()));
+        }
+    }
+    Ok(lost)
 }
 
 fn uninitialized_gitlink_available(
