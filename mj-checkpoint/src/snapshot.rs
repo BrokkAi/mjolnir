@@ -350,7 +350,7 @@ impl std::fmt::Display for SnapshotRefused {
             ),
             Self::DirtySubmodule(path) => write!(
                 f,
-                "submodule {}:{}:{} has tracked changes or an unpublished checkout; commit and push inside the submodule, or discard the change; if uninitialized, run `git submodule update --init {}` or unstage the pointer change, then suspend again",
+                "submodule {}:{}:{} has tracked changes or an unpublished checkout; commit and push inside the submodule, or discard the change; if uninitialized, run `git submodule update --init {}` or unstage the pointer change; when origin is absent and its .gitmodules URL is relative, initialize the module or change that URL to an absolute one, then suspend again",
                 path.checkout.repository_id,
                 path.checkout.checkout_path.display(),
                 path.value.display(),
@@ -1731,6 +1731,24 @@ pub(crate) fn resolve_submodule_url(
 }
 /// Git treats the superproject URL as a directory when resolving ../sub.git.
 fn relative_submodule_url(base: &str, relative: &str, checkout: &Path) -> Result<String> {
+    if let Some((scheme, address)) = base.split_once("://")
+        && scheme.eq_ignore_ascii_case("file")
+    {
+        // Git resolves relative file URLs as literal slash-separated text,
+        // before decoding path bytes. Queries and fragments are path names.
+        let mut parts = address.trim_end_matches('/').split('/').collect::<Vec<_>>();
+        for part in relative.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    ensure!(parts.len() > 1, "relative submodule URL escapes its remote");
+                    parts.pop();
+                }
+                part => parts.push(part),
+            }
+        }
+        return Ok(format!("{scheme}://{}", parts.join("/")));
+    }
     if let Ok(mut base) = url::Url::parse(base)
         && !base.cannot_be_a_base()
         && !Path::new(base.as_str()).is_absolute()
@@ -4456,7 +4474,12 @@ fn restore_submodules(
                     "submodule {} is missing {oid}; origin fetching is disabled",
                     submodule.path.display()
                 );
-                git_text(runner, &directory, ["fetch", "origin", &oid])?;
+                let output = restore_object_fetch(runner, &directory, "origin", &oid)?;
+                ensure!(
+                    output.status == 0,
+                    "{}",
+                    git_failure("fetch missing submodule object", &output)
+                );
             }
             require_object(
                 runner,
@@ -4615,6 +4638,46 @@ fn install_snapshot_pack(reader: &mut impl Read, path: &Path) -> Result<()> {
         .context("publish snapshot pack into clone")?;
     Ok(())
 }
+fn restore_fetch(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Result<crate::archive::GitOutput> {
+    // Child modules are restored separately, after installing their own
+    // recorded remotes.
+    let mut args = ["fetch", "--no-recurse-submodules"]
+        .map(OsString::from)
+        .to_vec();
+    args.extend(arguments.into_iter().map(|arg| arg.as_ref().to_owned()));
+    runner.run(
+        checkout,
+        &GitCommand {
+            arguments: args,
+            ..Default::default()
+        },
+    )
+}
+fn restore_object_fetch(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    remote: &str,
+    oid: &str,
+) -> Result<crate::archive::GitOutput> {
+    // Recovery can run after saved refs are installed. Fetch objects without
+    // pruning them, following tags, or applying destination ref mappings.
+    restore_fetch(
+        runner,
+        checkout,
+        [
+            "--no-prune",
+            "--no-prune-tags",
+            "--no-tags",
+            "--refmap=",
+            remote,
+            oid,
+        ],
+    )
+}
 fn fetch_missing_object(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -4628,7 +4691,7 @@ fn fetch_missing_object(
             failures.push(format!("origin fetch is disabled for missing object {oid}"));
             return Ok(());
         };
-        match run_git(runner, checkout, ["fetch", remote, oid], &[]) {
+        match restore_object_fetch(runner, checkout, remote, oid) {
             Ok(output) if output.status == 0 => {}
             Ok(output) => {
                 failures.push(git_failure("fetch missing snapshot object", &output).to_string())
@@ -4784,12 +4847,17 @@ fn configure_remote_lists(
     Ok(())
 }
 fn fetch_origin(runner: &dyn GitCommandRunner, destination: &Path) -> Result<()> {
-    git_text(
-        runner,
-        destination,
-        ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"],
-    )?;
-    git_text(runner, destination, ["fetch", "--tags", "origin"])?;
+    for arguments in [
+        &["origin", "+refs/heads/*:refs/remotes/origin/*"][..],
+        &["--tags", "origin"][..],
+    ] {
+        let output = restore_fetch(runner, destination, arguments)?;
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure("fetch origin", &output)
+        );
+    }
     let default_head = run_git(
         runner,
         destination,
@@ -5138,8 +5206,40 @@ pub fn restore_workspace_snapshot(
     // Provisioned restore may retry after a later step needs local provisioning.
     // Rebuild the saved list rather than appending another copy on each attempt.
     git_text(runner, destination, ["update-ref", "-d", "refs/stash"])?;
+    let mut previous_stash: Option<&str> = None;
     for entry in snapshot.stash.iter().rev() {
         require_object(runner, destination, "stash", &entry.commit)?;
+        let repeated = previous_stash == Some(entry.commit.as_str());
+        if repeated {
+            // update-ref and stash store both elide unchanged OIDs. Force a
+            // real transition, then remove its temporary reflog entry below.
+            let parent = git_text(
+                runner,
+                destination,
+                ["rev-parse", &format!("{}^1", entry.commit)],
+            )?;
+            let output = runner.run(
+                destination,
+                &GitCommand {
+                    arguments: [
+                        "update-ref",
+                        "-m",
+                        "snapshot repeated stash transition",
+                        "refs/stash",
+                        &parent,
+                    ]
+                    .map(OsString::from)
+                    .to_vec(),
+                    env: synthetic_git_identity(),
+                    ..Default::default()
+                },
+            )?;
+            ensure!(
+                output.status == 0,
+                "{}",
+                git_failure("prepare repeated stash entry", &output)
+            );
+        }
         let output = runner.run(
             destination,
             &GitCommand {
@@ -5159,6 +5259,14 @@ pub fn restore_workspace_snapshot(
             "{}",
             git_failure("restore stash list", &output)
         );
+        if repeated {
+            git_text(
+                runner,
+                destination,
+                ["reflog", "delete", "--rewrite", "refs/stash@{1}"],
+            )?;
+        }
+        previous_stash = Some(&entry.commit);
     }
     checkout_head(runner, destination, &snapshot.head)?;
     if let Some(state) = &snapshot.working_state {
@@ -7056,6 +7164,7 @@ mod tests {
             git(&r.checkout, &["rev-parse", "HEAD"])
         );
     }
+    // Hard-won: 1d7cc60a7: missing-parent recovery obeyed destination tag pruning after saved refs were installed.
     #[test]
     fn deleted_origin_branch_recovers_missing_tip_or_parent_by_sha() {
         for child in [false, true] {
@@ -7074,10 +7183,42 @@ mod tests {
             if child {
                 r.commit("unpublished child\n");
             }
+            git(&r.checkout, &["tag", "saved-local-only"]);
+            git(&r.checkout, &["tag", "saved-conflict"]);
+            git(
+                &r.origin,
+                &["update-ref", "refs/tags/saved-conflict", "refs/heads/main"],
+            );
             let snapshot = r.capture(&CheckoutOwnership::Managed);
             assert_eq!(snapshot.pack.is_some(), child);
             git(&r.origin, &["update-ref", "-d", "refs/heads/feature"]);
-            let restored = r.restore(&snapshot, None);
+            let host = host_git(r.temp.path(), "pruning-host");
+            git(
+                r.temp.path(),
+                &[
+                    "config",
+                    "--file",
+                    host.global.to_str().unwrap(),
+                    "fetch.prune",
+                    "true",
+                ],
+            );
+            git(
+                r.temp.path(),
+                &[
+                    "config",
+                    "--file",
+                    host.global.to_str().unwrap(),
+                    "fetch.pruneTags",
+                    "true",
+                ],
+            );
+            let restored = r.temp.path().join("restored");
+            restore_workspace_snapshot(&host, &snapshot, &restored, &clone_base(&snapshot, None))
+                .unwrap();
+            for name in ["refs/tags/saved-local-only", "refs/tags/saved-conflict"] {
+                assert_eq!(git(&restored, &["rev-parse", name]), snapshot.refs[name]);
+            }
             assert_eq!(
                 git(&restored, &["rev-parse", "HEAD"]),
                 git(&r.checkout, &["rev-parse", "HEAD"])
@@ -10186,9 +10327,9 @@ mod tests {
         assert_eq!(git(&restored.join("sub"), &["rev-parse", "HEAD"]), commit);
     }
 
-    // Hard-won: daa70eca2: no-origin relative module evidence ignored the restore origin override.
+    // Hard-won: 1d7cc60a7: without origin, an override cannot authorize the future relative module URL.
     #[test]
-    fn origin_override_uses_the_restore_relative_submodule_endpoint() {
+    fn origin_override_cannot_authorize_a_relative_uninitialized_submodule_pin() {
         let root = Repo::new();
         let module = Repo::new();
         let target = Repo::new();
@@ -13001,5 +13142,345 @@ mod tests {
                 .origins_removed_by_teardown
                 .is_empty()
         );
+    }
+    // Hard-won: 1d7cc60a7: consecutive identical stash OIDs did not create consecutive reflog entries.
+    #[test]
+    fn restore_edge_adjacent_stash_entries_preserve_every_oid_and_message() {
+        let root = Repo::new();
+        fs::write(root.checkout.join("file"), "stash A\n").unwrap();
+        let a = git(&root.checkout, &["stash", "create"]);
+        fs::write(root.checkout.join("file"), "stash B\n").unwrap();
+        let b = git(&root.checkout, &["stash", "create"]);
+        git(&root.checkout, &["stash", "store", "-m", "oldest A", &a]);
+        for message in ["middle A", "newest A"] {
+            git(&root.checkout, &["stash", "store", "-m", "temporary B", &b]);
+            git(&root.checkout, &["stash", "store", "-m", message, &a]);
+            git(&root.checkout, &["stash", "drop", "stash@{1}"]);
+        }
+        git(&root.checkout, &["reset", "--hard", "HEAD"]);
+        let before = read_stash(&FileGit, &root.checkout).unwrap();
+        assert_eq!(before.len(), 3);
+        assert!(before.iter().all(|entry| entry.commit == a));
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(read_stash(&FileGit, &restored).unwrap(), before);
+        restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &restored,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(read_stash(&FileGit, &restored).unwrap(), before);
+    }
+
+    // Hard-won: 1d7cc60a7: no-origin provisioned restores resolve relative module URLs from a different cwd.
+    #[test]
+    fn restore_edge_no_origin_relative_staged_pin_requires_initialization_or_absolute_url() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let target = Repo::new();
+        add_submodule(&root, &module);
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
+        module.commit("new pin only under the override sibling\n");
+        let pin = git(&module.checkout, &["rev-parse", "HEAD"]);
+        let authoritative = target.temp.path().join("lib.git");
+        git(
+            target.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.checkout.to_str().unwrap(),
+                authoritative.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.sub.url",
+                "../lib.git",
+            ],
+        );
+        git(&root.checkout, &["add", ".gitmodules"]);
+        git(
+            &root.checkout,
+            &["update-index", "--cacheinfo", &format!("160000,{pin},sub")],
+        );
+        git(&root.checkout, &["remote", "remove", "origin"]);
+        let capture = || {
+            capture_workspace_snapshot(
+                &FileGit,
+                &root.checkout,
+                &CheckoutOwnership::Managed,
+                &root.temp.path().join("no-origin"),
+                &CaptureConsent {
+                    untracked: UntrackedConsent::None,
+                    operations: OperationConsent::None,
+                },
+                Some(target.origin.to_str().unwrap().to_owned()),
+            )
+        };
+        let error = capture().unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::DirtySubmodule(_))
+            ),
+            "{error:#}"
+        );
+        for step in ["sub", "git submodule update --init", "absolute"] {
+            assert!(error.to_string().contains(step), "{error:#}");
+        }
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.sub.url",
+                authoritative.to_str().unwrap(),
+            ],
+        );
+        git(&root.checkout, &["add", ".gitmodules"]);
+        let snapshot = capture().unwrap();
+        assert!(!snapshot.source_had_origin);
+        let destination = target.temp.path().join("elsewhere/provisioned");
+        git(
+            target.temp.path(),
+            &[
+                "clone",
+                root.checkout.to_str().unwrap(),
+                destination.to_str().unwrap(),
+            ],
+        );
+        git(&destination, &["remote", "remove", "origin"]);
+        restore_workspace_snapshot(
+            &FileGit,
+            &snapshot,
+            &destination,
+            &RestoreBase::Provisioned {
+                allow_origin_fetch: false,
+            },
+        )
+        .unwrap();
+        assert!(git(&destination, &["remote"]).is_empty());
+        git(
+            &destination,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        assert_eq!(git(&destination.join("sub"), &["rev-parse", "HEAD"]), pin);
+    }
+
+    // Hard-won: 1d7cc60a7: generic URL joins treated literal file-origin punctuation as query/fragment syntax.
+    #[cfg(unix)]
+    #[test]
+    fn restore_edge_relative_file_module_urls_keep_literal_path_punctuation() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
+        let directory = root.temp.path().join("org#1?team");
+        fs::create_dir(&directory).unwrap();
+        let app = directory.join("app.git");
+        fs::rename(&root.origin, &app).unwrap();
+        git(
+            &root.checkout,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("file://{}", app.display()),
+            ],
+        );
+        let wrong = root.temp.path().join("lib.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.origin.to_str().unwrap(),
+                wrong.to_str().unwrap(),
+            ],
+        );
+        let old = git(&module.checkout, &["rev-parse", "HEAD"]);
+        module.commit("pin published only inside literal directory\n");
+        let pin = git(&module.checkout, &["rev-parse", "HEAD"]);
+        let authoritative = directory.join("lib.git");
+        git(
+            root.temp.path(),
+            &[
+                "clone",
+                "--bare",
+                module.checkout.to_str().unwrap(),
+                authoritative.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.checkout,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.sub.url",
+                "../lib.git",
+            ],
+        );
+        git(&root.checkout, &["add", ".gitmodules"]);
+        git(
+            &root.checkout,
+            &["update-index", "--cacheinfo", &format!("160000,{pin},sub")],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let restored = root.restore(&snapshot, None);
+        git(
+            &restored,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
+            ],
+        );
+        assert_eq!(git(&restored.join("sub"), &["rev-parse", "HEAD"]), pin);
+        git(
+            &wrong,
+            &["fetch", module.checkout.to_str().unwrap(), "main"],
+        );
+        git(&wrong, &["update-ref", "refs/heads/main", &pin]);
+        git(&authoritative, &["update-ref", "refs/heads/main", &old]);
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("wrong-origin"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::None,
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::DirtySubmodule(_))
+            ),
+            "{error:#}"
+        );
+    }
+
+    // Hard-won: 1d7cc60a7: parent bootstrap fetched child modules before installing their recorded origins.
+    #[test]
+    fn restore_edge_parent_fetches_never_recurse_into_unconfigured_children() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let leaf = Repo::new();
+        let source_child = add_submodule(&module, &leaf);
+        add_submodule(&root, &module);
+        git(
+            &root.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+            ],
+        );
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let saved = git(&root.checkout.join("sub/sub"), &["rev-parse", "HEAD"]);
+        for recursion in ["true", "on-demand"] {
+            let destination = root.temp.path().join(format!("provisioned-{recursion}"));
+            git(
+                root.temp.path(),
+                &[
+                    "clone",
+                    root.origin.to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            );
+            git(
+                &destination,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                ],
+            );
+            git(
+                &destination,
+                &["config", "fetch.recurseSubmodules", recursion],
+            );
+            git(
+                &destination.join("sub"),
+                &["config", "fetch.recurseSubmodules", recursion],
+            );
+            git(
+                &destination.join("sub/sub"),
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    root.temp.path().join("unreachable.git").to_str().unwrap(),
+                ],
+            );
+            leaf.commit(&format!("new child commit for {recursion}\n"));
+            git(&leaf.checkout, &["push", "origin", "main"]);
+            git(&source_child, &["fetch", "origin"]);
+            git(
+                &source_child,
+                &[
+                    "checkout",
+                    "--detach",
+                    &git(&leaf.checkout, &["rev-parse", "HEAD"]),
+                ],
+            );
+            git(&module.checkout, &["add", "sub"]);
+            git(
+                &module.checkout,
+                &["commit", "-m", "advance published child"],
+            );
+            git(&module.checkout, &["push", "origin", "main"]);
+            restore_workspace_snapshot(
+                &FileGit,
+                &snapshot,
+                &destination,
+                &RestoreBase::Provisioned {
+                    allow_origin_fetch: true,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                git(
+                    &destination.join("sub/sub"),
+                    &["remote", "get-url", "origin"]
+                ),
+                leaf.origin.to_str().unwrap()
+            );
+            assert_eq!(
+                git(&destination.join("sub/sub"), &["rev-parse", "HEAD"]),
+                saved
+            );
+        }
     }
 }

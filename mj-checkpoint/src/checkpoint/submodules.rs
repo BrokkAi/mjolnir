@@ -764,7 +764,19 @@ fn uninitialized_gitlink_available(
     if url.status != 0 {
         return Ok(false);
     }
-    let mut url = std::str::from_utf8(&url.stdout)?.trim().to_owned();
+    let mut url =
+        std::str::from_utf8(url.stdout.strip_suffix(b"\n").unwrap_or(&url.stdout))?.to_owned();
+    if origin_override.is_some()
+        && (url.starts_with("./") || url.starts_with("../"))
+        && runner
+            .run(checkout, &git_command(&["remote", "get-url", "origin"]))?
+            .status
+            != 0
+    {
+        // A provisioned no-origin restore resolves this against its own cwd,
+        // which capture cannot know. Use the existing staged-pin refusal.
+        return Ok(false);
+    }
     url = crate::snapshot::resolve_submodule_url(runner, checkout, &url, origin_override)?;
     // Match the clone used by submodule update: host config applies, but the
     // parent's repository-local rewrite rules must not reroute this probe.
