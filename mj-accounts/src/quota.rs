@@ -57,6 +57,18 @@ pub struct QuotaRefreshRequest {
     pub opencode_usage_priced: bool,
 }
 
+/// Whether a quota check for this harness can call the managed installer at
+/// all (a host harness or the pinned Antigravity), decided from the kind alone, before reading any profile file. Whether
+/// one profile does ([`QuotaRefreshRequest::runs_host_harness`]) also depends
+/// on its login and provider.
+#[cfg(unix)]
+pub fn kind_may_need_managed_quota_harness(kind: HarnessKind) -> bool {
+    matches!(
+        kind,
+        HarnessKind::Codex | HarnessKind::Grok | HarnessKind::Claude | HarnessKind::Antigravity
+    )
+}
+
 pub use mj_core::config::{CodexQuotaSource, ProviderCredential};
 
 impl QuotaRefreshRequest {
@@ -87,6 +99,30 @@ impl QuotaRefreshRequest {
         }
         hash.update([u8::from(self.opencode_usage_priced)]);
         mj_core::hex::lower_hex(hash.finalize())
+    }
+
+    /// Whether this profile's check runs a host harness program, through
+    /// `quota_harness::locate`, rather than answering from configuration or
+    /// an HTTP endpoint.
+    /// Whether this profile's check or login renewal would call
+    /// `quota_harness::locate`: the question the daemon's prewarm asks, so it
+    /// installs nothing a check would not. It reads the Claude login file, so
+    /// call it on a blocking thread. Claude's decision is
+    /// [`claude_usage::runs_cli`]; Codex and Grok resolve their program
+    /// before reading any login, so the kind and Codex's ChatGPT source decide.
+    #[cfg(unix)]
+    pub fn runs_host_harness(&self) -> bool {
+        kind_may_need_managed_quota_harness(self.harness)
+            && match self.harness {
+                HarnessKind::Claude => {
+                    self.auth_scheme != AuthScheme::AwsCredentialChain
+                        && claude_usage::runs_cli(&self.source_home)
+                }
+                HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
+                // Grok and Antigravity resolve their program before reading
+                // any login.
+                _ => true,
+            }
     }
 
     /// Build the request for one configured profile. The harness home
@@ -161,6 +197,8 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
+#[cfg(unix)]
+pub use crate::quota_harness::prepare_managed;
 pub use mj_core::retry_after::retry_after_header;
 
 /// The hold for a 429: what the provider asked for, kept between one minute

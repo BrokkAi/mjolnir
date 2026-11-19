@@ -38,6 +38,29 @@ pub async fn with_preparation_cancellation<F: std::future::Future>(
     CANCELLATION.scope(token, future).await
 }
 
+/// A preparation stopped because its cancellation token fired. It is a type,
+/// not a message, so callers that treat a failed probe or command as grounds
+/// to repair or remove something can tell "the probe said the thing is broken"
+/// from "the probe was cut short" and must propagate the latter.
+#[derive(Debug)]
+pub struct PreparationCancelled;
+
+impl std::fmt::Display for PreparationCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("preparation cancelled")
+    }
+}
+
+impl std::error::Error for PreparationCancelled {}
+
+/// Whether `error`, at any depth of its context chain, is a cancelled
+/// preparation.
+pub fn is_preparation_cancelled(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<PreparationCancelled>())
+}
+
 pub(crate) fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
     CANCELLATION.try_with(Clone::clone).ok()
 }
@@ -364,7 +387,9 @@ pub async fn run_bounded_observed(
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     let cancellation = preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(PreparationCancelled.into());
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -425,7 +450,7 @@ pub async fn run_bounded_observed(
     });
     let result = tokio::select! {
         result = work => result,
-        _ = cancellation.cancelled() => Ok(Err(anyhow!("preparation cancelled"))),
+        _ = cancellation.cancelled() => Ok(Err(anyhow::Error::from(PreparationCancelled))),
     };
     let result = result.map(|status| {
         status.map(|status| Output {
@@ -1154,7 +1179,9 @@ pub async fn run_capturing_stdout_cancellable(
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     let cancellation = preparation_cancellation();
-    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    if cancellation.is_cancelled() {
+        return Err(PreparationCancelled.into());
+    }
     command
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
@@ -1175,7 +1202,7 @@ pub async fn run_capturing_stdout_cancellable(
             let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
             Ok::<_, anyhow::Error>(status)
         } => result,
-        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+        _ = cancellation.cancelled() => Err(anyhow::Error::from(PreparationCancelled)),
     };
     drop(group);
     #[cfg(windows)]
