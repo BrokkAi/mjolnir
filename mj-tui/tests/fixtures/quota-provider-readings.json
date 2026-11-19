@@ -240,14 +240,15 @@
         "remaining_percent": 60,
         "duration_seconds": 604800,
         "used": null,
-        "limit": 900,
+        "limit": null,
         "resets": "23:14 Nov 24",
         "resets_at_epoch_seconds": 1795583651
       }
     ],
     "extra": null,
     "error": null,
-    "refreshed_at_epoch_seconds": 1795026385
+    "refreshed_at_epoch_seconds": 1795026385,
+    "monthly_price_usd": null
   },
   "codex2": {
     "paid_credits": {
@@ -263,14 +264,15 @@
         "remaining_percent": 0,
         "duration_seconds": 604800,
         "used": null,
-        "limit": 100,
+        "limit": null,
         "resets": "16:31 Nov 19",
         "resets_at_epoch_seconds": 1795127510
       }
     ],
     "extra": null,
     "error": null,
-    "refreshed_at_epoch_seconds": 1795026369
+    "refreshed_at_epoch_seconds": 1795026369,
+    "monthly_price_usd": null
   },
   "codex3": {
     "paid_credits": {
@@ -286,14 +288,15 @@
         "remaining_percent": 0,
         "duration_seconds": 604800,
         "used": null,
-        "limit": 100,
+        "limit": null,
         "resets": "08:12 Nov 22",
         "resets_at_epoch_seconds": 1795356741
       }
     ],
     "extra": null,
     "error": null,
-    "refreshed_at_epoch_seconds": 1795026369
+    "refreshed_at_epoch_seconds": 1795026369,
+    "monthly_price_usd": null
   },
   "codex4": {
     "paid_credits": {
@@ -309,14 +312,15 @@
         "remaining_percent": 0,
         "duration_seconds": 604800,
         "used": null,
-        "limit": 100,
+        "limit": null,
         "resets": "08:44 Nov 24",
         "resets_at_epoch_seconds": 1795531462
       }
     ],
     "extra": null,
     "error": null,
-    "refreshed_at_epoch_seconds": 1795026369
+    "refreshed_at_epoch_seconds": 1795026369,
+    "monthly_price_usd": null
   },
   "dsh": {
     "profile_id": "dsh",
@@ -487,7 +491,8 @@
         "resets_at_epoch_seconds": 1795043365
       }
     ],
-    "refreshed_at_epoch_seconds": 1795026385
+    "refreshed_at_epoch_seconds": 1795026385,
+    "monthly_price_usd": null
   },
   "codex-short-spent": {
     "profile_id": "codex-short-spent",
@@ -502,7 +507,8 @@
         "resets_at_epoch_seconds": 1795043365
       }
     ],
-    "refreshed_at_epoch_seconds": 1795026385
+    "refreshed_at_epoch_seconds": 1795026385,
+    "monthly_price_usd": null
   },
   "muse1": {
     "profile_id": "muse1",

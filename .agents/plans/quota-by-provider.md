@@ -14,6 +14,9 @@ Provider is not the harness. A Codex profile can be configured to talk to DeepSe
 
 ## Progress
 
+- [x] (2026-11-18 TUI-only port) Compared saved patches against c6564d58e and ported scrolling, recentering, timeline blocking/reset markers, segment fallbacks, period/average labels, readable-window selection and partial-total semantics, retaining TUI provider discovery.
+- [x] (2026-11-18 TUI-only port) Quota tests pass (11). Full TUI suite run once (604 pass, 2 ignored, 3 stale goldens); the three goldens were reviewed, refreshed and individually verified without blessing. Doc tests, dev-profile clippy with warnings denied and formatting pass. Changes remain uncommitted.
+
 - [x] (2026-11-18) Mockups agreed with the user (see Artifacts): bar design "D" for the pool, design "4" (next 24 hours lanes) for the expanded per-profile view; both ordered by weekly reset time.
 - [x] Milestone 1: provider attribution helper in mj-core.
 - [x] Milestone 2: pool model (pure computation) in mj-tui.
@@ -23,6 +26,8 @@ Provider is not the harness. A Codex profile can be configured to talk to DeepSe
 
 
 ## Surprises & Discoveries
+
+- Observation (2026-11-18 TUI-only port): the only full-suite differences outside the quota golden were quota-pane `avg` labels and corresponding bar spacing in `dashboard-resource-panels`, `dashboard-session-render` and `profile-picker-table`. Reviewed those complete diffs before updating them; all three pass on subsequent comparison without blessing. Evidence: `.mj/agents/a9afd282f90f4e204b7a1c4b018430b0/tui-full.log` and `golden-*-verify.log`.
 
 - Observation: a fresh isolated TUI needs terminal capability replies in a PTY driver, and startup profile discovery can import conventional host homes. The successful smoke driver used an explicit test home, empty enabled profile homes, disabled placeholders for other harnesses, and a completed setup marker. Every temporary daemon was stopped. Evidence: the report directory's `manual-quota-pools.log` and `manual-first-stripped.txt`.
 
@@ -39,6 +44,9 @@ Provider is not the harness. A Codex profile can be configured to talk to DeepSe
 
 
 ## Decision Log
+
+- Decision (2026-11-18 TUI-only port): daemon-owned provider attribution was abandoned at the user's direction. Attribution stays derived in mj-core from the quota-source decision through `HarnessProfile::quota_provider`, with the existing supervised TUI provider discovery retained. No provider/account fields, collector identities, caches or wire-format changes are part of this port. Configuration and login-switch races during display grouping are accepted and tracked as follow-ups; they do not justify daemon attribution machinery.
+- Decision (2026-11-18 TUI-only port): preserve line scrolling across stationary quota refreshes; recenter only on explicit selection movement or changed selected identity/rendered line range. Pool the longest readable window; name non-weekly periods and equal-weight averages. Failed or empty reports count as missing in every eligible pool, unreadable windows only in their own period, and absent periods do not make an otherwise usable report missing.
 
 - Decision (2026-11-18 review fixes): lane notes always name the pooled allowance and independently append short-window readings and provider extras. Wrap notes below lanes when they cannot fit, retaining row identity on every continuation for selection, scrolling and clicks. Bound the name column so a long profile ID cannot consume other readings.
 - Decision (2026-11-18 review fixes): count subscription profiles without usable readings within the provider/model scope as missing; annotate totals with `*` and report the count. Usage-priced reports are excluded. Use positive absolute limits when every member has one, then complete monthly prices, then equal weights. Provider/scope/period define the metered unit (the report format has no separate unit field).
@@ -71,6 +79,10 @@ Provider is not the harness. A Codex profile can be configured to talk to DeepSe
 
 
 ## Outcomes & Retrospective
+
+2026-11-18 TUI-only port completed on c6564d58e without commits or git-history changes. Wheel scrolling reaches wrapped notes in a one-line viewport; identity and rendered-position tracking preserves manual scrolling on stationary refreshes. Timeline cells use half-open ranges, preserve colliding resets with a conditional W+5 legend, and remain blocked until both exhausted windows recover. Monochrome fill boundaries survive labels; narrow segments expose readings and banked resets below the bar. Non-weekly period names, equal-weight `avg` totals, longest-readable-window fallback and period-specific partial totals are covered by the extended whole-surface golden, including failed/empty probes across periods and scopes. Daemon attribution, stale-provider logic and account deduplication were deliberately excluded. Existing provider discovery and provider order/accents remain intact. Configuration/login-switch display races remain accepted follow-ups.
+
+Validation: 11 quota tests pass, including the golden subsequently compared during the full run. Full TUI suite run once: 604 passed, two ignored, three expected golden mismatches; reviewed and updated only those quota-pane diffs, then each failing test passed without blessing (607 library tests validated in total). Documentation tests pass (zero cases). `mbx clippy -p brokk-mj-tui --all-targets -- -D warnings`, `cargo fmt --all -- --check` and `git diff --check` pass. Evidence logs and progress notes are in `.mj/agents/a9afd282f90f4e204b7a1c4b018430b0/`.
 
 All four milestones and validation are complete. The nine quota tests, provider-file integration, CLI/API parity, six existing dashboard goldens, the new multi-mode quota golden, dev-profile clippy, format checks, and isolated interactive smoke check pass. The Anthropic fixture renders 11% with the agreed reset ordering and relative segment widths. There are no outstanding decisions; changes are left for parent review without commit or push.
 
@@ -166,3 +178,7 @@ In `mj-tui/src/render/quota_pools.rs`: a pure `fn provider_pools(config: &Config
 2026-11-18 validation checkpoint: required clippy passes (`clippy-final.log` in the sub-agent report directory). Existing combined, session, layout, footer, resource-panel and away-dialog goldens have been updated and reviewed. Changed old assertions now refer to provider pool readings; provider refresh preserves cached identity while discovery runs.
 
 2026-11-18 completion evidence: `api_quota_matches_cli_golden` passes (CLI package `brokk-mjolnir`); clippy passes with warnings denied. The isolated `quota-pools-d3fe` PTY check seeded the recorded Anthropic quota into its own database, used empty profile homes, exercised Tab/Enter expansion and clean detach, then stopped its daemon. Its driver and logs are in `.mj/agents/d3fe29a4201859ae1f51526371c93bbb/`. The initial PTY driver needed terminal capability replies; startup discovery also required an isolated test home and disabled placeholders for other harnesses to avoid importing conventional host profiles. No default-instance daemon commands were used. The exact snapshot-replacement regression is included because its existing assertions now refer to provider names and preserve the last pool reading during refresh. No commit or push was made, as requested.
+
+2026-11-18 TUI-only port update: supersedes the abandoned daemon attribution rounds. Port only mj-tui and this plan onto c6564d58e; preserve provider ordering/accents including Z.ai and Meta. Extend the existing quota golden with line scrolling, overlapping and coincident reset windows, unreadable periods and tiny-segment fallbacks. Codex fixtures have no capacity limit or monthly price, matching the collector. Validate outside the sandbox with `mbx test -p brokk-mj-tui quota`, one full `mbx test -p brokk-mj-tui`, `mbx clippy -p brokk-mj-tui --all-targets -- -D warnings`, and `cargo fmt --all -- --check`; bless other goldens only after confirming changes are confined to the quota pane.
+
+2026-11-18 TUI-only validation completion: all requested behaviors and checks are complete, with failures limited to expected golden updates now verified. Only mj-tui and this ExecPlan were changed; HEAD remains c6564d58e on master. No daemon or live-instance commands were invoked.

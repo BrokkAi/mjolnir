@@ -1,7 +1,5 @@
 //! Controller state ingestion: projections, quotas, capacity, and notices.
 
-use crate::Focus;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1072,9 +1070,6 @@ impl DashboardState {
     pub fn set_quotas(&mut self, quotas: BTreeMap<String, ProfileQuota>) {
         self.quota_refreshing.retain(|id| !quotas.contains_key(id));
         self.quotas = quotas;
-        if self.focus == Focus::Quota {
-            self.recenter_on_selection.set(Some(Focus::Quota));
-        }
         self.clamp_selections();
         self.refresh_review_choices();
     }
@@ -1084,9 +1079,6 @@ impl DashboardState {
     /// it: the reports, and which profiles it is asking a provider about now.
     pub fn set_quota_snapshot(&mut self, snapshot: mj_client::quota::QuotaSnapshot) {
         self.quotas = snapshot.reports;
-        if self.focus == Focus::Quota {
-            self.recenter_on_selection.set(Some(Focus::Quota));
-        }
         self.quota_refreshing = snapshot.probing;
         self.clamp_selections();
         self.refresh_review_choices();
@@ -1095,9 +1087,6 @@ impl DashboardState {
     pub fn apply_quota(&mut self, quota: ProfileQuota) {
         self.quota_refreshing.remove(&quota.profile_id);
         self.quotas.insert(quota.profile_id.clone(), quota);
-        if self.focus == Focus::Quota {
-            self.recenter_on_selection.set(Some(Focus::Quota));
-        }
         self.clamp_selections();
         self.refresh_review_choices();
     }

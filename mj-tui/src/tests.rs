@@ -1591,10 +1591,11 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
     assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
     assert_eq!(dashboard.sessions_scroll.get(), 0);
 
-    // The quota pane is also a list: one notch moves its selection by one.
+    // The quota wheel scrolls lines without moving either selection.
     assert_eq!(dashboard.focus, Focus::Sessions);
     dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollDown, pane_areas[2]));
-    assert_eq!(dashboard.selection_for(Focus::Quota), 1);
+    assert_eq!(dashboard.selection_for(Focus::Quota), 0);
+    assert_eq!(dashboard.quota_scroll.get(), 1);
     assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
     assert_eq!(dashboard.focus, Focus::Sessions);
 }

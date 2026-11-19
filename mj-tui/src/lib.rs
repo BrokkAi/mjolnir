@@ -1066,6 +1066,9 @@ pub struct DashboardState {
     pub(crate) sessions_scroll: Cell<usize>,
     pub(crate) targets_scroll: Cell<usize>,
     pub(crate) quota_scroll: Cell<usize>,
+    /// Selection and line range from the previous quota render, before refresh reordering.
+    pub(crate) quota_rendered_selection:
+        RefCell<Option<(render::quota_pools::QuotaRow, usize, usize)>>,
     /// The next render keeps one row beyond the selection visible in the
     /// direction of the latest keyboard or wheel navigation, when it fits.
     /// This is consumed by that pane's renderer after the movement.
@@ -1399,6 +1402,7 @@ impl DashboardState {
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
+            quota_rendered_selection: RefCell::new(None),
             recenter_on_selection: Cell::new(None),
             sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,

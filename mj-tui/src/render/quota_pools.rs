@@ -7,6 +7,25 @@ use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider};
 
 use super::quota_remaining_percent;
 
+// Select the longest readable allowance without changing summary_window's other callers.
+fn readable_window(report: &ProfileQuota) -> Option<&QuotaWindow> {
+    report
+        .windows
+        .iter()
+        .filter(|window| window.model_scope.is_none() && quota_remaining_percent(window).is_some())
+        .max_by_key(|window| {
+            window.duration_seconds.unwrap_or_else(|| {
+                if report.weekly_window() == Some(window) {
+                    604800
+                } else if report.five_hour_window() == Some(window) {
+                    18000
+                } else {
+                    0
+                }
+            })
+        })
+}
+
 type Providers = BTreeMap<String, QuotaProvider>;
 
 #[derive(Debug, Default)]
@@ -214,7 +233,19 @@ pub(crate) struct QuotaPool {
     pub label: String,
     pub members: Vec<PoolMember>,
     pub remaining: u8,
+    pub unweighted: bool,
     pub missing: usize,
+}
+
+impl QuotaPool {
+    pub(crate) fn percentage(&self) -> String {
+        format!(
+            "{}{}%{}",
+            if self.unweighted { "avg " } else { "" },
+            self.remaining,
+            if self.missing > 0 { "*" } else { "" }
+        )
+    }
 }
 
 pub(crate) struct PoolMember {
@@ -298,7 +329,7 @@ pub(crate) fn provider_pools(
         };
         let mut added = false;
         for (scope, report) in reports {
-            let Some(window) = report.summary_window() else {
+            let Some(window) = readable_window(&report) else {
                 continue;
             };
             let Some(remaining) = quota_remaining_percent(window) else {
@@ -324,6 +355,7 @@ pub(crate) fn provider_pools(
                         },
                         members: Vec::new(),
                         remaining: 0,
+                        unweighted: false,
                         missing: 0,
                     });
                     group.pools.len() - 1
@@ -345,9 +377,22 @@ pub(crate) fn provider_pools(
                 fable: quota
                     .fable_weekly_window()
                     .and_then(quota_remaining_percent),
-                note: match (quota.rate_limit_label(now), &quota.extra) {
-                    (Some(rate), Some(extra)) => Some(format!("{rate} · {extra}")),
-                    (rate, extra) => rate.or_else(|| extra.clone()),
+                note: {
+                    let mut notes: Vec<String> = report
+                        .windows
+                        .iter()
+                        .filter(|window| {
+                            window.model_scope.is_none()
+                                && quota_remaining_percent(window).is_none()
+                        })
+                        .map(|window| format!("{} unknown", window.label))
+                        .collect();
+                    let extra = match (quota.rate_limit_label(now), &quota.extra) {
+                        (Some(rate), Some(extra)) => Some(format!("{rate} · {extra}")),
+                        (rate, extra) => rate.or_else(|| extra.clone()),
+                    };
+                    notes.extend(extra);
+                    (!notes.is_empty()).then(|| notes.join(" · "))
                 },
             });
         }
@@ -372,7 +417,7 @@ pub(crate) fn provider_pools(
             })
         });
         for pool in &mut group.pools {
-            if multiple_periods {
+            if multiple_periods || pool.key.period != PoolPeriod::Week {
                 pool.label = format!("{} {}", pool.label, pool.key.period.label())
                     .trim()
                     .to_owned();
@@ -386,29 +431,43 @@ pub(crate) fn provider_pools(
             pool.missing = config
                 .enabled_profiles()
                 .filter(|(id, profile)| {
-                    providers
+                    if !providers
                         .provider(id, profile)
                         .is_some_and(|provider| *provider == group.provider)
-                        && !quotas.get(*id).is_some_and(ProfileQuota::is_usage_priced)
-                        && !pool.members.iter().any(|member| member.id == *id)
-                        && !quotas.get(*id).is_some_and(|quota| {
-                            if quota.error.is_some() {
-                                return false;
-                            }
-                            let report = match pool.key.scope.as_deref() {
-                                Some("gemini") => {
-                                    quota.for_antigravity_pool(AntigravityQuotaPool::Gemini)
-                                }
-                                Some("claude,gpt") => {
-                                    quota.for_antigravity_pool(AntigravityQuotaPool::Claude)
-                                }
-                                _ => quota.clone(),
-                            };
-                            report
-                                .summary_window()
-                                .and_then(quota_remaining_percent)
-                                .is_some()
+                        || pool.members.iter().any(|member| member.id == *id)
+                    {
+                        return false;
+                    }
+                    let eligible =
+                        pool.key.scope.is_none() || profile.kind == HarnessKind::Antigravity;
+                    let Some(report) = quotas.get(*id) else {
+                        return eligible;
+                    };
+                    if report.is_usage_priced() {
+                        return false;
+                    }
+                    // A failed probe cannot tell us which allowances the profile holds.
+                    if report.error.is_some() || report.windows.is_empty() {
+                        return eligible;
+                    }
+                    let scoped = if profile.kind == HarnessKind::Antigravity {
+                        AntigravityQuotaPool::ALL
+                            .into_iter()
+                            .find(|candidate| {
+                                Some(candidate.model_scope()) == pool.key.scope.as_deref()
+                            })
+                            .map(|candidate| report.for_antigravity_pool(candidate))
+                    } else if pool.key.scope.is_none() {
+                        Some(report.clone())
+                    } else {
+                        None
+                    };
+                    scoped.is_some_and(|report| {
+                        report.windows.iter().any(|window| {
+                            PoolPeriod::of(&report, window) == pool.key.period
+                                && quota_remaining_percent(window).is_none()
                         })
+                    })
                 })
                 .count();
             // The provider, scope and period identify the allowance's unit.
@@ -418,6 +477,7 @@ pub(crate) fn provider_pools(
                     member.weight = member.limit.unwrap() as f64;
                 }
             } else if pool.members.iter().any(|member| member.weight <= 0.0) {
+                pool.unweighted = true;
                 for member in &mut pool.members {
                     member.weight = 1.0;
                 }

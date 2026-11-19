@@ -1374,7 +1374,10 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         cycles: 1,
     });
     let row = profiles_row(&mut dashboard);
-    assert!(row.contains("Anthropic 63%, OpenAI 10%*"), "{row:?}");
+    assert!(
+        row.contains("Anthropic avg 63%, OpenAI avg 10%*"),
+        "{row:?}"
+    );
 
     // Refreshing preserves the last pool reading and marks the affected pool.
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
@@ -1386,8 +1389,8 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         cycles: 1,
     });
     let row = profiles_row(&mut dashboard);
-    assert!(row.contains("Anthropic 63%"), "{row:?}");
-    assert!(row.contains("OpenAI 10%* (refreshing)"), "{row:?}");
+    assert!(row.contains("Anthropic avg 63%"), "{row:?}");
+    assert!(row.contains("OpenAI avg 10%* (refreshing)"), "{row:?}");
 
     // The snapshot replaces what the dashboard held; it does not add to it.
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
@@ -1396,7 +1399,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
     });
     let row = profiles_row(&mut dashboard);
     assert!(!row.contains("63%"), "{row:?}");
-    assert!(row.contains("OpenAI 12%*"), "{row:?}");
+    assert!(row.contains("OpenAI avg 12%*"), "{row:?}");
 }
 
 #[test]
@@ -1436,7 +1439,7 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         .into_iter()
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
-    assert!(row.contains("Anthropic 63%"), "{row:?}");
+    assert!(row.contains("Anthropic avg 63%"), "{row:?}");
     assert!(row.contains("codex-1 check refused"), "{row:?}");
 }
 
@@ -1453,8 +1456,8 @@ fn an_exhausted_quota_reads_zero_in_the_minimized_row() {
         .into_iter()
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
-    assert!(quota.contains("Anthropic 0%"), "{quota:?}");
-    assert!(!quota.contains("Anthropic 100%"), "{quota:?}");
+    assert!(quota.contains("Anthropic avg 0%"), "{quota:?}");
+    assert!(!quota.contains("Anthropic avg 100%"), "{quota:?}");
 }
 
 #[test]
@@ -1470,7 +1473,7 @@ fn a_rolling_only_quota_keeps_its_percentage_visible() {
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
 
-    assert!(quota.contains("Anthropic 40%"), "{quota:?}");
+    assert!(quota.contains("Anthropic 5H avg 40%"), "{quota:?}");
     assert!(!quota.contains("Anthropic unavailable"), "{quota:?}");
 }
 

@@ -84,9 +84,8 @@ pub(crate) fn minimized_quota_line(
                     format!("{} {}", provider.provider.display_name(), pool.label)
                 },
                 value: format!(
-                    "{}%{}{}",
-                    pool.remaining,
-                    if pool.missing > 0 { "*" } else { "" },
+                    "{}{}",
+                    pool.percentage(),
                     if pool
                         .members
                         .iter()
@@ -320,19 +319,25 @@ pub(crate) fn render_quotas_at(
         .get()
         .min(lines.len().saturating_sub(viewport));
     let selected = dashboard.selected_quota_row();
-    if take_selection_recenter(dashboard, Focus::Quota) {
-        let mut selected_lines = pool_rows
-            .iter()
-            .filter(|(row, _)| Some(row) == selected.as_ref())
-            .map(|(_, line)| *line);
-        if let Some(first) = selected_lines.next() {
-            let last = selected_lines.next_back().unwrap_or(first);
-            if first < offset {
-                offset = first;
-            }
-            if last >= offset + viewport {
-                offset = (last + 1).saturating_sub(viewport).min(first);
-            }
+    let mut selected_lines = pool_rows
+        .iter()
+        .filter(|(row, _)| Some(row) == selected.as_ref())
+        .map(|(_, line)| *line);
+    let rendered_selection = selected_lines.next().and_then(|first| {
+        selected
+            .clone()
+            .map(|row| (row, first, selected_lines.next_back().unwrap_or(first)))
+    });
+    let moved = *dashboard.quota_rendered_selection.borrow() != rendered_selection;
+    *dashboard.quota_rendered_selection.borrow_mut() = rendered_selection.clone();
+    if (take_selection_recenter(dashboard, Focus::Quota) || (focused && moved))
+        && let Some((_, first, last)) = rendered_selection
+    {
+        if first < offset {
+            offset = first;
+        }
+        if last >= offset + viewport {
+            offset = (last + 1).saturating_sub(viewport).min(first);
         }
     }
     frame.render_widget(
@@ -439,7 +444,7 @@ fn pool_bar(
     now: u64,
     accent: Color,
     refreshing: &std::collections::BTreeSet<String>,
-) -> Vec<Span<'static>> {
+) -> (Vec<Span<'static>>, Vec<String>) {
     let gaps = pool
         .members
         .len()
@@ -447,40 +452,56 @@ fn pool_bar(
         .min(width.saturating_sub(pool.members.len().min(width)));
     let widths = segment_widths(&pool.members, width.saturating_sub(gaps));
     let mut spans = Vec::new();
+    let mut omitted = Vec::new();
     for (index, (member, cells)) in pool.members.iter().zip(widths).enumerate() {
         if index > 0 && index <= gaps {
             spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
         }
         let filled = (cells * usize::from(member.remaining) + 50) / 100;
         let mut label = vec![' '; cells];
-        if cells >= 6 {
-            let mut text = if refreshing.contains(&member.id) {
-                format!("refreshing{}", theme::glyphs().ellipsis)
+        let mut text = if refreshing.contains(&member.id) {
+            format!("refreshing{}", theme::glyphs().ellipsis)
+        } else {
+            format!(
+                "{}{}",
+                if theme::ascii() { "r" } else { "↻" },
+                reset_duration(member.reset, now)
+            )
+        };
+        if refreshing.contains(&member.id) && text.chars().count() >= cells {
+            text = if cells >= 8 { "refresh" } else { "check" }.into();
+        }
+        let banked = member
+            .banked
+            .filter(|banked| *banked > 0)
+            .map(|banked| format!("{}{banked}", if theme::ascii() { "B" } else { "⟲" }));
+        let mut omitted_banked = None;
+        if let Some(banked) = banked {
+            if text.chars().count() + 1 + banked.chars().count() <= cells {
+                text.push_str(&format!(" {banked}"));
             } else {
-                format!(
-                    "{}{}",
-                    if theme::ascii() { "r" } else { "↻" },
-                    reset_duration(member.reset, now)
-                )
-            };
-            if refreshing.contains(&member.id) && text.chars().count() >= cells {
-                text = if cells >= 8 { "refresh" } else { "check" }.into();
+                omitted_banked = Some(banked);
             }
-            if let Some(banked) = member.banked.filter(|banked| *banked > 0) {
-                let extra = format!(" {}{banked}", if theme::ascii() { "B" } else { "⟲" });
-                if text.chars().count() + extra.chars().count() < cells {
-                    text.push_str(&extra);
-                }
+        }
+        let text: Vec<_> = text.chars().collect();
+        let legible_fill = cells > 1
+            && (member.remaining == 0 || filled > 0)
+            && (member.remaining == 100 || filled < cells);
+        if cells >= 6 && text.len() <= cells && legible_fill {
+            label[cells - text.len()..].copy_from_slice(&text);
+            if let Some(banked) = omitted_banked {
+                omitted.push(format!("{} {banked} banked", member.id));
             }
-            let text: Vec<_> = text.chars().collect();
-            // Keep a fill cell beside the reset label when colour cannot
-            // distinguish a spent segment from a full one.
-            if text.len() <= cells
-                && (!(theme::ascii() || theme::current() == theme::UiTheme::Mono)
-                    || text.len() < cells)
-            {
-                label[cells - text.len()..].copy_from_slice(&text);
-            }
+        } else {
+            omitted.push(format!(
+                "{} {}% {}{}",
+                member.id,
+                member.remaining,
+                text.into_iter().collect::<String>(),
+                omitted_banked
+                    .map(|banked| format!(" {banked} banked"))
+                    .unwrap_or_default()
+            ));
         }
         for (cell, ch) in label.into_iter().enumerate() {
             spans.push(Span::styled(
@@ -502,6 +523,15 @@ fn pool_bar(
                     " ".into()
                 },
                 Style::default()
+                    .add_modifier(
+                        if cell < filled
+                            && (theme::ascii() || theme::current() == theme::UiTheme::Mono)
+                        {
+                            Modifier::REVERSED
+                        } else {
+                            Modifier::empty()
+                        },
+                    )
                     .fg(theme::palette().text)
                     .bg(if cell < filled {
                         accent
@@ -511,7 +541,7 @@ fn pool_bar(
             ));
         }
     }
-    spans
+    (spans, omitted)
 }
 
 fn lane(
@@ -528,15 +558,32 @@ fn lane(
         let contains = |reset: Option<i64>| {
             reset.is_some_and(|reset| reset >= 0 && t0 <= reset as u64 && (reset as u64) < t1)
         };
-        let blocked = member.remaining == 0 && member.reset.is_none_or(|reset| reset > t0 as i64);
+        let blocked = (member.remaining == 0 && member.reset.is_none_or(|reset| reset > t0 as i64))
+            || member.five_hour.as_ref().is_some_and(|window| {
+                quota_remaining_percent(window) == Some(0)
+                    && window
+                        .resets_at_epoch_seconds
+                        .is_none_or(|reset| reset > t0 as i64)
+            });
         let five = member.five_hour.as_ref().filter(|window| {
             window
                 .resets_at_epoch_seconds
                 .is_some_and(|reset| reset > t0 as i64)
         });
-        let marker = if contains(member.reset) {
+        let marker = if contains(member.reset)
+            && member
+                .five_hour
+                .as_ref()
+                .is_some_and(|window| contains(window.resets_at_epoch_seconds))
+        {
+            Some('*')
+        } else if contains(member.reset) {
             Some(period.marker())
-        } else if !blocked && five.is_some_and(|window| contains(window.resets_at_epoch_seconds)) {
+        } else if member
+            .five_hour
+            .as_ref()
+            .is_some_and(|window| contains(window.resets_at_epoch_seconds))
+        {
             Some('5')
         } else {
             None
@@ -596,10 +643,7 @@ fn lane_note(
             reset_duration(member.reset, now)
         )
     };
-    // A spent long window blocks the profile, so its five-hour state is moot.
-    if member.remaining == 0 {
-        // Nothing to add.
-    } else if let Some(five) = &member.five_hour {
+    if let Some(five) = &member.five_hour {
         note.push_str(&format!(
             " · 5H {}%, resets in {}",
             quota_remaining_percent(five)
@@ -607,7 +651,7 @@ fn lane_note(
                 .unwrap_or_else(|| "?".into()),
             reset_duration(five.resets_at_epoch_seconds, now)
         ));
-    } else if member.five_hour_idle && *period == PoolPeriod::Week {
+    } else if member.remaining > 0 && member.five_hour_idle && *period == PoolPeriod::Week {
         note.push_str(" · 5H idle: a fresh window starts on first use");
     }
     if member.remaining > 0
@@ -617,6 +661,12 @@ fn lane_note(
     }
     if let Some(extra) = &member.note {
         note.push_str(&format!(" · {extra}"));
+    }
+    if let Some(banked) = member.banked.filter(|banked| *banked > 0) {
+        note.push_str(&format!(
+            " · {}{banked} banked",
+            if theme::ascii() { "B" } else { "⟲" }
+        ));
     }
     note
 }
@@ -674,8 +724,13 @@ fn quota_lines(
                     format!("{} ", pool.label)
                 }
             );
+            let percentage = format!(
+                " {:>padding$}",
+                pool.percentage(),
+                padding = 4 + usize::from(pool.missing > 0)
+            );
             let bar_width =
-                width.saturating_sub(prefix.chars().count() + 5 + usize::from(pool.missing > 0));
+                width.saturating_sub(prefix.chars().count() + percentage.chars().count());
             let mut spans = vec![Span::styled(
                 prefix,
                 if selected {
@@ -684,25 +739,23 @@ fn quota_lines(
                     Style::default()
                 },
             )];
-            spans.extend(pool_bar(
-                &pool,
-                bar_width,
-                now,
-                accent,
-                &dashboard.quota_refreshing,
-            ));
+            let (bar, omitted) =
+                pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
+            spans.extend(bar);
             spans.push(Span::styled(
-                format!(
-                    " {:>3}%{}",
-                    pool.remaining,
-                    if pool.missing > 0 { "*" } else { "" }
-                ),
+                percentage,
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ));
             if pool.members.len() == 1 {
                 profile_rows.push((pool.members[0].id.clone(), lines.len()));
             }
             lines.push(Line::from(spans));
+            for text in wrap_note(&omitted.join(" · "), width.saturating_sub(2))
+                .into_iter()
+                .filter(|_| !omitted.is_empty())
+            {
+                lines.push(Line::styled(format!("  {text}"), theme::muted()));
+            }
             if pool.missing > 0 {
                 lines.push(Line::styled(
                     format!(
@@ -759,7 +812,7 @@ fn quota_lines(
                     format!("{:name_width$}{}", "", axis.into_iter().collect::<String>()),
                     theme::muted(),
                 ));
-                for (member, note) in pool.members.iter().zip(notes) {
+                for (member, mut note) in pool.members.iter().zip(notes) {
                     profile_rows.push((member.id.clone(), lines.len()));
                     let row = QuotaRow::Lane(pool.key.clone(), member.id.clone());
                     let selected = focused && selection.as_ref() == Some(&row);
@@ -777,7 +830,11 @@ fn quota_lines(
                             Style::default()
                         },
                     )];
-                    spans.extend(lane(member, &pool.key.period, lane_width, now, accent));
+                    let timeline = lane(member, &pool.key.period, lane_width, now, accent);
+                    if timeline.iter().any(|span| span.content == "*") {
+                        note.push_str(" · *=W+5 (both resets)");
+                    }
+                    spans.extend(timeline);
                     if name_width + lane_width + 2 + Span::raw(&note).width() <= width {
                         spans.push(Span::styled(format!("  {note}"), theme::muted()));
                         lines.push(Line::from(spans));
@@ -894,15 +951,22 @@ mod tests {
             let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
             writeln!(output, "{}", row.trim_end()).unwrap();
         }
-        // Text cannot distinguish a full segment from a spent segment. Record
-        // background runs as part of the whole-surface golden as well.
+        // Labels can cover fill glyphs. Record backgrounds and modifiers so
+        // monochrome fill boundaries remain part of the surface contract.
         writeln!(output, "background runs (x..end, colour):").unwrap();
         for y in 0..height {
             let mut runs = Vec::new();
             let mut start = 0;
             for x in 1..=width {
-                if x == width || buffer[(x, y)].bg != buffer[(start, y)].bg {
-                    runs.push(format!("{start}..{x} {:?}", buffer[(start, y)].bg));
+                if x == width
+                    || (buffer[(x, y)].bg, buffer[(x, y)].modifier)
+                        != (buffer[(start, y)].bg, buffer[(start, y)].modifier)
+                {
+                    runs.push(format!(
+                        "{start}..{x} {:?} {:?}",
+                        buffer[(start, y)].bg,
+                        buffer[(start, y)].modifier
+                    ));
                     start = x;
                 }
             }
@@ -913,21 +977,65 @@ mod tests {
     // Hard-won: db4dc77c9: refresh reordered pool lanes and stranded selection on another profile.
     #[test]
     fn quota_lane_selection_survives_refresh_by_identity() {
-        let (mut dashboard, _) = fixture();
+        let (mut dashboard, now) = fixture();
         let key = dashboard.quota_rows()[0].pool().unwrap().clone();
         dashboard.toggle_quota_pool();
         dashboard.handle_dashboard_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let selected = QuotaRow::Lane(key.clone(), "claude2".into());
         assert_eq!(dashboard.selected_quota_row(), Some(selected.clone()));
         let before = dashboard.selection_for(Focus::Quota);
+        let mut ignored = String::new();
+        capture(&mut ignored, "before refresh", &mut dashboard, now, 60, 6);
+        let previous_offset = dashboard.quota_scroll.get();
+        dashboard.recenter_on_selection.set(None);
+        dashboard.set_quotas(dashboard.quotas.clone());
+        capture(
+            &mut ignored,
+            "unchanged refresh",
+            &mut dashboard,
+            now,
+            60,
+            6,
+        );
+        assert_eq!(dashboard.quota_scroll.get(), previous_offset);
+        // A wheel offset away from the selection survives a stationary refresh.
+        dashboard.quota_scroll.set(0);
+        dashboard.recenter_on_selection.set(None);
+        dashboard.set_quotas(dashboard.quotas.clone());
+        capture(
+            &mut ignored,
+            "wheel then refresh",
+            &mut dashboard,
+            now,
+            60,
+            6,
+        );
+        assert_eq!(dashboard.quota_scroll.get(), 0);
         let mut reports = dashboard.quotas.clone();
-        reports.get_mut("claude2").unwrap().windows[0].resets_at_epoch_seconds = Some(i64::MAX);
+        reports.get_mut("claude2").unwrap().windows[0].resets_at_epoch_seconds =
+            Some(now as i64 + 10 * 86400);
         dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
             reports,
             ..Default::default()
         });
         assert_eq!(dashboard.selected_quota_row(), Some(selected));
         assert_ne!(dashboard.selection_for(Focus::Quota), before);
+        capture(
+            &mut ignored,
+            "reordered refresh",
+            &mut dashboard,
+            now,
+            60,
+            6,
+        );
+        assert!(
+            dashboard
+                .quota_pool_areas
+                .borrow()
+                .iter()
+                .any(|(row, _)| { dashboard.selected_quota_row().as_ref() == Some(row) })
+        );
+        assert!(dashboard.quota_scroll.get() > previous_offset);
         let mut reports = dashboard.quotas.clone();
         reports.remove("claude2");
         dashboard.set_quotas(reports);
@@ -1001,6 +1109,14 @@ mod tests {
                         132,
                         23,
                     );
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} narrow collapsed"),
+                        &mut dashboard,
+                        now,
+                        60,
+                        30,
+                    );
                     // Show missing and cached readings through the daemon's probing snapshot.
                     let reports = dashboard.quotas.clone();
                     let mut refreshing = reports.clone();
@@ -1054,6 +1170,14 @@ mod tests {
                         now,
                         60,
                         15,
+                    );
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} narrow expanded full Anthropic"),
+                        &mut dashboard,
+                        now,
+                        60,
+                        40,
                     );
                     dashboard.quota_expanded = dashboard
                         .quota_pools()
@@ -1136,7 +1260,7 @@ mod tests {
                         &format!("{symbols:?} six-cell full and spent segments"),
                         &mut dashboard,
                         now,
-                        26,
+                        30,
                         6,
                     );
                 })
@@ -1162,7 +1286,7 @@ mod tests {
                     "monochrome six-cell full and spent segments",
                     &mut dashboard,
                     now,
-                    26,
+                    30,
                     6,
                 );
             })
@@ -1177,6 +1301,9 @@ mod tests {
             reports.insert(long_id.into(), long);
             let profile = dashboard.config.profiles.remove("claude4").unwrap();
             dashboard.config.profiles.insert(long_id.into(), profile);
+            dashboard.quota_providers =
+                super::super::quota_pools::ProviderDiscovery::start(&dashboard.config);
+            dashboard.quota_providers.settle();
             dashboard.set_quotas(reports);
             dashboard.toggle_quota_pool();
             capture(
@@ -1201,6 +1328,36 @@ mod tests {
                 60,
                 6,
             );
+            dashboard.recenter_on_selection.set(Some(Focus::Quota));
+            capture(
+                &mut output,
+                "wrapped lane first line in one-line viewport",
+                &mut dashboard,
+                now,
+                60,
+                3,
+            );
+            let selection = dashboard.selected_quota_row();
+            let first = dashboard.quota_scroll.get();
+            dashboard.pane_areas = Some([Rect::default(), Rect::default(), Rect::new(0, 0, 60, 3)]);
+            for step in 1..=2 {
+                dashboard.handle_mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::ScrollDown,
+                    column: 10,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                });
+                capture(
+                    &mut output,
+                    &format!("wrapped lane wheel continuation {step}"),
+                    &mut dashboard,
+                    now,
+                    60,
+                    3,
+                );
+                assert_eq!(dashboard.quota_scroll.get(), first + step);
+                assert_eq!(dashboard.selected_quota_row(), selection);
+            }
             dashboard.quota_expanded = dashboard
                 .quota_pools()
                 .into_iter()
@@ -1248,6 +1405,220 @@ mod tests {
                 minimized.to_string().trim_end()
             )
             .unwrap();
+        });
+        // Hard-won: quota review: unreadable long windows hid usable profiles and short limits did not block lanes.
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard
+                    .config
+                    .profiles
+                    .retain(|id, _| id == "kimi" || id.starts_with("codex"));
+                let kimi = dashboard.quotas.get_mut("kimi").unwrap();
+                let mut unknown = kimi.windows[0].clone();
+                unknown.label = "Week".into();
+                unknown.duration_seconds = Some(604800);
+                unknown.remaining_percent = None;
+                unknown.used = None;
+                unknown.limit = Some(100);
+                kimi.windows = vec![
+                    unknown,
+                    mj_client::quota::QuotaWindow {
+                        label: "5H".into(),
+                        remaining_percent: Some(70),
+                        duration_seconds: Some(18000),
+                        resets_at_epoch_seconds: Some(now as i64 + 7200),
+                        model_scope: None,
+                        used: None,
+                        limit: None,
+                        resets: None,
+                    },
+                ];
+                let short_fallback = kimi.windows[1].clone();
+                for (id, week, short, reset) in [
+                    ("codex", 80, 0, 7200),
+                    ("codex2", 0, 0, 21600),
+                    ("codex3", 0, 0, 3600),
+                ] {
+                    let report = dashboard.quotas.get_mut(id).unwrap();
+                    report.windows = vec![
+                        mj_client::quota::QuotaWindow {
+                            label: "Week".into(),
+                            duration_seconds: Some(604800),
+                            remaining_percent: Some(week),
+                            resets_at_epoch_seconds: Some(now as i64 + 10800),
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: None,
+                        },
+                        mj_client::quota::QuotaWindow {
+                            label: "5H".into(),
+                            duration_seconds: Some(18000),
+                            remaining_percent: Some(short),
+                            resets_at_epoch_seconds: Some(now as i64 + reset),
+                            model_scope: None,
+                            used: None,
+                            limit: None,
+                            resets: None,
+                        },
+                    ];
+                }
+                let report = dashboard.quotas.get_mut("codex4").unwrap();
+                let mut unknown = report.windows[0].clone();
+                unknown.remaining_percent = None;
+                unknown.used = None;
+                report.windows = vec![unknown, short_fallback];
+                dashboard.quota_expanded = dashboard
+                    .quota_pools()
+                    .into_iter()
+                    .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                    .collect();
+                dashboard.set_selection_for(Focus::Quota, 0);
+                capture(
+                    &mut output,
+                    &format!("{symbols:?} unreadable week and exhausted overlapping windows"),
+                    &mut dashboard,
+                    now,
+                    132,
+                    34,
+                );
+            });
+        }
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                theme::with_theme(theme::UiTheme::Mono, || {
+                    let (mut dashboard, now) = fixture();
+                    dashboard
+                        .config
+                        .profiles
+                        .retain(|id, _| id.starts_with("codex-short-"));
+                    let report = dashboard.quotas.get_mut("codex-short-spent").unwrap();
+                    report.windows[0].remaining_percent = Some(30);
+                    dashboard.set_selection_for(Focus::Quota, 0);
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} monochrome 30 vs 100 percent under labels"),
+                        &mut dashboard,
+                        now,
+                        30,
+                        7,
+                    );
+                })
+            });
+        }
+        theme::with_symbols(SymbolSet::Unicode, || {
+            let (mut dashboard, now) = fixture();
+            let report = dashboard.quotas.get_mut("claude5").unwrap();
+            let reset = report.weekly_window().unwrap().resets_at_epoch_seconds;
+            report
+                .windows
+                .iter_mut()
+                .find(|window| window.label == "5H")
+                .unwrap()
+                .resets_at_epoch_seconds = reset;
+            dashboard.toggle_quota_pool();
+            capture(
+                &mut output,
+                "coincident weekly and five-hour resets",
+                &mut dashboard,
+                now,
+                60,
+                32,
+            );
+        });
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard.config.profiles.retain(|id, _| {
+                    id.starts_with("claude") && id != "claude-aws" && id != "claude-login"
+                });
+                // Twelve timeline cells at this width: reset on cell starts,
+                // including the first cell, must belong to exactly one cell.
+                let template = dashboard.quotas["claude5"]
+                    .five_hour_window()
+                    .unwrap()
+                    .clone();
+                dashboard.quotas.get_mut("claude2").unwrap().windows[0].resets_at_epoch_seconds =
+                    Some(now as i64 + 4 * 3600);
+                for (id, hours) in [("claude5", 2), ("claude7", 0)] {
+                    let report = dashboard.quotas.get_mut(id).unwrap();
+                    let mut five = template.clone();
+                    five.resets_at_epoch_seconds = Some(now as i64 + hours * 3600);
+                    report.windows.retain(|window| window.label != "5H");
+                    report.windows.push(five);
+                }
+                dashboard.toggle_quota_pool();
+                capture(
+                    &mut output,
+                    &format!("{symbols:?} reset at cell start and banked fallback"),
+                    &mut dashboard,
+                    now,
+                    60,
+                    36,
+                );
+            });
+        }
+        // Hard-won: quota review: one-cell and omitted segments looked spent at 40%.
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard.config.profiles.retain(|id, _| {
+                    id.starts_with("claude") && id != "claude-aws" && id != "claude-login"
+                });
+                let report = dashboard.quotas.get_mut("claude5").unwrap();
+                report
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.label == "Week")
+                    .unwrap()
+                    .remaining_percent = Some(40);
+                report.monthly_price_usd = Some(1);
+                report.banked_resets = Some(1);
+                for (width, height) in [(60, 8), (16, 26), (11, 44)] {
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} tiny segment remaining and banked resets"),
+                        &mut dashboard,
+                        now,
+                        width,
+                        height,
+                    );
+                }
+            });
+        }
+        // Hard-won: quota review: failed probes vanished from partial totals for other periods.
+        theme::with_symbols(SymbolSet::Unicode, || {
+            let (mut dashboard, now) = fixture();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| id.starts_with("codex") || id.starts_with("gemini"));
+            for id in ["codex2", "gemini2"] {
+                let report = dashboard.quotas.get_mut(id).unwrap();
+                report.error = Some("login refused; sign in again".into());
+                report.windows.clear();
+            }
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "failed probes missing from every eligible period and scope",
+                &mut dashboard,
+                now,
+                132,
+                22,
+            );
+            for id in ["codex2", "gemini2"] {
+                dashboard.quotas.get_mut(id).unwrap().error = None;
+            }
+            capture(
+                &mut output,
+                "empty reports missing from every eligible period and scope",
+                &mut dashboard,
+                now,
+                132,
+                22,
+            );
         });
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "quota-provider-pools", &output);
     }
