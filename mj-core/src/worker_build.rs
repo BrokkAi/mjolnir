@@ -1,10 +1,17 @@
 //! Daemon and worker compatibility identities shared by the workspace.
 
+#[cfg(unix)]
 use std::collections::HashMap;
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::path::Path;
+use std::sync::Arc;
+#[cfg(unix)]
+use std::{
+    fs::Metadata,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
 
 use sha2::{Digest, Sha256};
 
@@ -195,33 +202,28 @@ pub fn worker_build_from_bytes(bytes: &[u8]) -> Result<&str> {
     found.context("missing worker build stamp (legacy or invalid worker)")
 }
 
+#[cfg(unix)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ExecutableIdentity {
-    #[cfg(unix)]
     device: u64,
-    #[cfg(unix)]
     inode: u64,
-    #[cfg(not(unix))]
-    path: PathBuf,
     size: u64,
-    modified: std::time::SystemTime,
+    modified: (i64, i64),
+    changed: (i64, i64),
 }
 
+#[cfg(unix)]
 impl ExecutableIdentity {
-    fn from_metadata(_path: &Path, metadata: &Metadata) -> io::Result<Self> {
-        #[cfg(unix)]
+    fn from_metadata(metadata: &Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
 
-        Ok(Self {
-            #[cfg(unix)]
+        Self {
             device: metadata.dev(),
-            #[cfg(unix)]
             inode: metadata.ino(),
-            #[cfg(not(unix))]
-            path: _path.to_owned(),
             size: metadata.len(),
-            modified: metadata.modified()?,
-        })
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
     }
 }
 
@@ -272,20 +274,24 @@ impl ExecutableContents {
     }
 }
 
+#[cfg(unix)]
 type ExecutableRead = Arc<Mutex<Option<Arc<ExecutableContents>>>>;
 
+#[cfg(unix)]
 #[derive(Default)]
 struct MemoizedExecutable {
     read: ExecutableRead,
     paths: usize,
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 struct ExecutableMemo {
     by_identity: HashMap<ExecutableIdentity, MemoizedExecutable>,
     by_path: HashMap<PathBuf, ExecutableIdentity>,
 }
 
+#[cfg(unix)]
 impl ExecutableMemo {
     fn lookup(&mut self, path: &Path, identity: &ExecutableIdentity) -> ExecutableRead {
         if self.by_path.get(path) != Some(identity) {
@@ -306,35 +312,45 @@ impl ExecutableMemo {
 }
 
 fn executable_contents(path: &Path) -> Result<Arc<ExecutableContents>> {
-    static MEMO: LazyLock<Mutex<ExecutableMemo>> = LazyLock::new(Mutex::default);
-
     let mut input =
         File::open(path).with_context(|| format!("open worker executable {}", path.display()))?;
-    let result = (|| {
-        // Stat the handle we will read. An install renames a new inode into
-        // place, and an in-place write changes mtime (including nanoseconds)
-        // or size. Verification starts after writers finish the file.
-        let identity = ExecutableIdentity::from_metadata(path, &input.metadata()?)?;
-        let read = MEMO
-            .lock()
-            .expect("worker executable memo")
-            .lookup(path, &identity);
-        // Concurrent launches of this file share the read. Other binaries
-        // can be opened and read independently.
-        let mut contents = read.lock().expect("worker executable read");
-        if let Some(contents) = contents.as_ref() {
-            return Ok(Arc::clone(contents));
-        }
-        let scanned = ExecutableContents::read(&mut input)?;
-        ensure!(
-            identity == ExecutableIdentity::from_metadata(path, &input.metadata()?)?,
-            "worker executable changed while being read"
-        );
-        let scanned = Arc::new(scanned);
-        *contents = Some(Arc::clone(&scanned));
-        Ok(scanned)
-    })();
+
+    #[cfg(unix)]
+    let result = memoized_executable_contents(path, &mut input);
+    // Path, size and mtime cannot distinguish same-size replacements with
+    // preserved timestamps on Windows. Read the file each time there.
+    #[cfg(not(unix))]
+    let result = ExecutableContents::read(&mut input).map(Arc::new);
+
     result.with_context(|| format!("read worker executable {}", path.display()))
+}
+
+#[cfg(unix)]
+fn memoized_executable_contents(path: &Path, input: &mut File) -> Result<Arc<ExecutableContents>> {
+    static MEMO: LazyLock<Mutex<ExecutableMemo>> = LazyLock::new(Mutex::default);
+
+    // Stat the open file we will read. Publication by rename supplies a new
+    // inode. An in-place write updates ctime even if the writer restores mtime.
+    // Keep both timestamps at their full nanosecond resolution.
+    let identity = ExecutableIdentity::from_metadata(&input.metadata()?);
+    let read = MEMO
+        .lock()
+        .expect("worker executable memo")
+        .lookup(path, &identity);
+    // Concurrent launches of this file share the read. Other binaries
+    // can be opened and read independently.
+    let mut contents = read.lock().expect("worker executable read");
+    if let Some(contents) = contents.as_ref() {
+        return Ok(Arc::clone(contents));
+    }
+    let scanned = ExecutableContents::read(input)?;
+    ensure!(
+        identity == ExecutableIdentity::from_metadata(&input.metadata()?),
+        "worker executable changed while being read"
+    );
+    let scanned = Arc::new(scanned);
+    *contents = Some(Arc::clone(&scanned));
+    Ok(scanned)
 }
 
 pub(crate) fn executable_digest(path: &Path) -> Result<String> {
@@ -476,6 +492,7 @@ mod tests {
         }
     }
 
+    // Hard-won: b93657092: same-size rewrites with restored mtime kept the old digest and stamp.
     #[test]
     fn worker_executable_memo_refreshes_after_rename_and_rewrite() {
         use crate::worker_launch::worker_executable_digest;
@@ -502,24 +519,19 @@ mod tests {
         bytes.extend_from_slice(worker_build_stamp().as_bytes());
         write(&path, &bytes, modified);
         verify_worker_build(&path).unwrap();
+        #[cfg(unix)]
         let original = executable_contents(&path).unwrap();
         assert_eq!(
             worker_executable_digest(&path).unwrap(),
             crate::hex::lower_hex(Sha256::digest(&bytes))
         );
+        #[cfg(unix)]
         assert!(Arc::ptr_eq(&original, &executable_contents(&path).unwrap()));
 
         let mut stale = bytes.clone();
         let last_digit = stale.len() - 2;
         stale[last_digit] = b'a';
-        // On Unix make inode identity the only difference. On other platforms
-        // the memo uses path, size and mtime, so the replacement needs a new mtime.
-        let replacement_time = if cfg!(unix) {
-            modified
-        } else {
-            modified + Duration::from_secs(2)
-        };
-        write(&replacement, &stale, replacement_time);
+        write(&replacement, &stale, modified);
         std::fs::rename(&replacement, &path).unwrap();
         assert_eq!(
             worker_executable_digest(&path).unwrap(),
@@ -535,6 +547,24 @@ mod tests {
             worker_executable_digest(&path).unwrap(),
             crate::hex::lower_hex(Sha256::digest(&bytes))
         );
+
+        #[cfg(unix)]
+        {
+            // Let ctime tick even on filesystems whose clock advances at
+            // scheduler tick granularity.
+            std::thread::sleep(Duration::from_millis(20));
+            let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+            write(&path, &stale, original_mtime);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                original_mtime
+            );
+            assert!(verify_worker_build(&path).is_err());
+            assert_eq!(
+                worker_executable_digest(&path).unwrap(),
+                crate::hex::lower_hex(Sha256::digest(&stale))
+            );
+        }
     }
 
     // Hard-won: 740cb30c5: a layout change put diagnostic text and the bare build id after the prefix constant, read as a conflicting stamp.

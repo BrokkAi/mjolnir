@@ -595,7 +595,7 @@ impl WorkerLaunchConfig {
 /// One definition, because both sides of the upgrade decision compare it: the
 /// worker reports the digest of the file serving it, and the controller
 /// computes the digest of the file it would install. The digest and build
-/// stamp share a streaming read and are memoized by executable identity.
+/// stamp share a streaming read and are memoized by executable identity on Unix.
 pub fn worker_executable_digest(path: &Path) -> Result<String> {
     crate::worker_build::executable_digest(path)
 }
