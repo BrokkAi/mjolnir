@@ -1,12 +1,11 @@
 use super::*;
 
 pub fn spawn_session_manager() -> Result<SessionManagerChannels> {
-    spawn_session_manager_observed(None, Arc::new(NoRecoveryPlanner))
+    spawn_session_manager_observed(None)
 }
 
 pub fn spawn_session_manager_observed(
     delegation: Option<DelegationSender>,
-    recovery_planner: Arc<dyn RecoveryPlanner>,
 ) -> Result<SessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
@@ -18,7 +17,6 @@ pub fn spawn_session_manager_observed(
     };
     let (mut updates_tx, updates_rx) = coalesced_update_channel();
     updates_tx.delegation = delegation;
-    updates_tx.recovery_planner = recovery_planner;
     let session_gate = updates_tx.session_gate.clone();
     let session_cpu = updates_tx.cpu.subscribe();
     let model_policies = updates_tx.model_policies.clone();

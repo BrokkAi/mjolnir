@@ -574,7 +574,6 @@ pub async fn run_session_actor(
                             owner_changes.borrow_and_update();
                             match recover_worker_for_session(
                                 updates.session_gate.clone(),
-                                updates.recovery_planner.clone(),
                                 plan,
                                 restart_unresponsive,
                                 Some(target.session_id.clone()),

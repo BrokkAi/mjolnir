@@ -36,8 +36,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     }));
     mj_controller::database::save_session(&parent).unwrap();
     let (feed, observations) = delegation_channel();
-    let mut manager =
-        spawn_session_manager_observed(Some(feed), Arc::new(NoRecoveryPlanner)).unwrap();
+    let mut manager = spawn_session_manager_observed(Some(feed)).unwrap();
     manager
         .targets
         .send_replace(vec![leased_relay_target(relay_root.path())]);

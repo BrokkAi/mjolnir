@@ -3,10 +3,9 @@
 //! relay client and credential sync (`worker_client`), worker recovery, and
 //! the checkpoint transfers and GitHub credentials those need.
 //!
-//! It builds on worker staging and the store, and executes the recovery plans
-//! of `mj-session-types`. The controller's lifecycle operations use it; it
-//! does not know them, and asks for what only they can decide through
-//! `session_manager::RecoveryPlanner` and `worker_client::CredentialSyncRuntime`.
+//! It builds on worker staging, worker launch and the store, and executes the
+//! recovery plans of `mj-session-types`. The controller's lifecycle operations
+//! use it; it does not know them.
 
 // `test-support` compiles the test-only items for the tests of the crates
 // above, which use only some of them. The dead-code lints still run on normal

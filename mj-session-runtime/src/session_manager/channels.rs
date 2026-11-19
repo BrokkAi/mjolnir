@@ -337,7 +337,6 @@ impl Drop for SessionManagerShutdown {
 #[derive(Clone)]
 pub struct CoalescedUpdateSender {
     pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
-    pub recovery_planner: Arc<dyn RecoveryPlanner>,
     pub harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
     pub pending_observations:
@@ -568,7 +567,6 @@ pub fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdat
     (
         CoalescedUpdateSender {
             session_gate: Arc::default(),
-            recovery_planner: Arc::new(NoRecoveryPlanner),
             harness_failure: Default::default(),
             pending_observations: Default::default(),
             last_raw_options: Default::default(),

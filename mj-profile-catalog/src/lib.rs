@@ -16,6 +16,7 @@
 
 // The moved modules name these by their old paths.
 pub(crate) use mj_accounts::{quota, review_selection};
+#[cfg(test)]
 pub(crate) use mj_store::database;
 pub(crate) use mj_targets::targets;
 #[cfg(test)]

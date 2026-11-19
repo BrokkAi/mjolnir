@@ -167,9 +167,13 @@ it or introduce a dependency between sibling branches.
   `mj_session_runtime`) is the daemon's side of a running session: the
   session manager's relay actors, the relay client and credential sync,
   worker recovery, checkpoint transfer, and GitHub credentials. It builds on
-  worker staging and asks the controller above it only through traits
-  (`RecoveryPlanner`, `CredentialSyncRuntime`). `mj_controller` re-exports
-  its modules under their old names.
+  worker staging and worker launch. `mj_controller` re-exports its modules
+  under their old names.
+- `brokk-mj-worker-launch` (`mj-worker-launch/`, library `mj_worker_launch`)
+  plans what a session's worker is launched with, as functions over the
+  configuration and the session records: launch configuration, staged files,
+  the recovery plan and the reconnect command. `Controller`'s methods of the
+  same names call it, and so does the session runtime's worker recovery.
 - `brokk-mj-profile-catalog` (`mj-profile-catalog/`, library
   `mj_profile_catalog`) discovers what each profile's harness offers (models
   and options), caches the answers and keeps them current. It builds on

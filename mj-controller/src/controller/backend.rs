@@ -145,19 +145,7 @@ impl Controller {
     }
 
     pub fn reconnect_command(&self, session_id: &str) -> Result<CommandSpec> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        session.validate_configuration(&self.config)?;
-        let locator = session.target.as_ref().context("session has no target")?;
-        let backend = backend_locator(locator, session, &self.config)?;
-        targets::reconnect_plan(&backend, session_id)?
-            .commands
-            .into_iter()
-            .next()
-            .context("reconnect plan is empty")
+        crate::worker_launch::reconnect_command(&self.config, &self.state, session_id)
     }
 
     /// The directories the live sessions on one target write to.

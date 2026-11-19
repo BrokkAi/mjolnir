@@ -122,19 +122,11 @@ pub async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
 ) -> Result<WorkerRecoveryOutcome> {
-    recover_worker_for_session(
-        Arc::default(),
-        Arc::new(NoRecoveryPlanner),
-        plan,
-        restart_unresponsive,
-        None,
-    )
-    .await
+    recover_worker_for_session(Arc::default(), plan, restart_unresponsive, None).await
 }
 
 pub async fn recover_worker_for_session(
     gate: Arc<crate::recovery_gate::RecoveryGate>,
-    planner: Arc<dyn RecoveryPlanner>,
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<String>,
@@ -165,7 +157,6 @@ pub async fn recover_worker_for_session(
                 .as_ref()
                 .map(crate::recovery_gate::HoldsSession::admission)
                 .as_ref(),
-            planner.as_ref(),
             &executor,
         )
     })
@@ -173,42 +164,11 @@ pub async fn recover_worker_for_session(
     .context("worker recovery task failed")?
 }
 
-/// Builds a session's recovery plan afresh from the durable records.
-///
-/// A plan is made where sessions are launched, above the session manager, and
-/// an actor keeps the one it was given. After a failed Move that plan can be
-/// older than the launch the Move recorded, so recovery asks for a new one.
-pub trait RecoveryPlanner: Send + Sync {
-    fn replan_after_move(
-        &self,
-        session_id: &str,
-        operation: &mj_core::state::MoveOperation,
-    ) -> Result<WorkerRecoveryPlan>;
-}
-
-/// The planner of a session manager that was spawned without one. Only the
-/// daemon's manager recovers sessions that a Move has touched, and it is
-/// spawned with the controller's planner.
-pub struct NoRecoveryPlanner;
-
-impl RecoveryPlanner for NoRecoveryPlanner {
-    fn replan_after_move(
-        &self,
-        session_id: &str,
-        _operation: &mj_core::state::MoveOperation,
-    ) -> Result<WorkerRecoveryPlan> {
-        bail!(
-            "session {session_id} needs a new recovery plan after its Move, and this session manager was started without a planner"
-        )
-    }
-}
-
 pub fn recover_worker_admitted(
     mut plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,
     admission: Option<&crate::recovery_gate::SessionAdmission>,
-    planner: &dyn RecoveryPlanner,
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
     let owner = match session_id {
@@ -247,7 +207,13 @@ pub fn recover_worker_admitted(
             && operation.source_checkpoint_only
             && operation.destination_target.is_none()
         {
-            plan = planner.replan_after_move(id, &operation)?;
+            let (config, state) = crate::database::load_config_and_state()?;
+            plan = mj_worker_launch::worker_launch::worker_recovery_plan(
+                &config,
+                &state,
+                id,
+                Some(&operation),
+            )?;
         }
         if ensure_recovery_target_running(executor, plan.target.as_ref())
             .context("restore relay worker target")?
@@ -416,7 +382,6 @@ pub fn recover_worker_controlled(
         restart_unresponsive,
         session_id,
         admission.as_ref(),
-        &NoRecoveryPlanner,
         executor,
     )
 }

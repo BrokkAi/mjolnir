@@ -307,7 +307,7 @@ mod tests {
         harness: HarnessKind,
         worker_root: &Path,
     ) -> mj_core::state::SessionRecord {
-        let mut session = crate::controller::test_support::checkpoint_test_session(id);
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
         session.harness_kind = harness;
         session.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: worker_root.to_path_buf(),

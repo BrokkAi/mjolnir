@@ -1401,11 +1401,18 @@ async fn target_is_current(
     if let Some(runtime) = runtime {
         return runtime.credential_target_is_current(target);
     }
-    // The daemon owns the session records, and only it runs a gated sync.
-    bail!(
-        "credential sync for session {} runs under a gate without a daemon to say whether the session is current",
-        target.session_id
-    )
+    let candidate = target.clone();
+    tokio::task::spawn_blocking(move || {
+        // Read only: cancellation may leave this blocking read finishing
+        // after admission has been released.
+        let config = mj_core::config::Config::load()?;
+        let state = crate::database::load_state()?;
+        Ok::<_, anyhow::Error>(super::credential_sync_target_is_current(
+            &config, state, &candidate,
+        ))
+    })
+    .await
+    .context("reload credential sync target")?
 }
 
 /// Run `work` for the session under background admission, when the session is

@@ -8,12 +8,11 @@
     allow(dead_code, unused_imports)
 )]
 
-pub(crate) use mj_targets::aws_assume_role;
-pub(crate) use mj_targets::aws_credentials;
 pub mod backoff;
 pub use mj_accounts::claude_usage;
-pub mod launch_timing;
 pub use mj_accounts::login_terminal;
+pub use mj_worker_launch::launch_timing;
+pub use mj_worker_launch::local_profile_homes;
 
 pub use mj_import::compaction;
 pub mod controller;
@@ -65,6 +64,7 @@ pub use mj_targets::test_isolation;
 pub use mj_targets::test_log;
 
 pub use mj_session_runtime::wait_policy;
+pub use mj_worker_launch::worker_launch;
 
 pub mod session_images;
 

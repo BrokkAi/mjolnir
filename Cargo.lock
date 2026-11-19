@@ -775,6 +775,7 @@ dependencies = [
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
+ "brokk-mj-worker-launch",
  "brokk-mj-worker-runtime",
  "brokk-mj-worker-staging",
  "chrono",
@@ -789,7 +790,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sysinfo",
  "tar",
  "tempfile",
  "tokio",
@@ -1026,6 +1026,7 @@ dependencies = [
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
+ "brokk-mj-worker-launch",
  "brokk-mj-worker-runtime",
  "brokk-mj-worker-staging",
  "chrono",
@@ -1222,6 +1223,24 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "brokk-mj-worker-launch"
+version = "2.72.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "brokk-mj-build-cache",
+ "brokk-mj-core",
+ "brokk-mj-session-types",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-worker-staging",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

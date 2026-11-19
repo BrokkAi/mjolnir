@@ -16,21 +16,21 @@ doctest = false
 
 [features]
 default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks", "mj-import/test-hooks", "mj-sessionwiki/test-hooks", "mj-build-cache/test-hooks", "mj-worker-staging/test-hooks", "mj-session-runtime/test-hooks", "mj-profile-catalog/test-hooks"]
+test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks", "mj-import/test-hooks", "mj-sessionwiki/test-hooks", "mj-build-cache/test-hooks", "mj-worker-staging/test-hooks", "mj-session-runtime/test-hooks", "mj-profile-catalog/test-hooks", "mj-worker-launch/test-hooks"]
 # Exposes the shared test fixtures to the tests of mj-daemon.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support", "mj-import/test-support", "mj-sessionwiki/test-support", "mj-build-cache/test-support", "mj-worker-staging/test-support", "mj-session-runtime/test-support", "mj-profile-catalog/test-support"]
+test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support", "mj-import/test-support", "mj-sessionwiki/test-support", "mj-build-cache/test-support", "mj-worker-staging/test-support", "mj-session-runtime/test-support", "mj-profile-catalog/test-support", "mj-worker-launch/test-support"]
 
 [lints]
 workspace = true
 
 [dependencies]
-sysinfo.workspace = true
 mj-core.workspace = true
 mj-transcript = { workspace = true, features = ["github-history"] }
 mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true
+mj-worker-launch.workspace = true
 mj-profile-catalog.workspace = true
 mj-session-runtime.workspace = true
 mj-worker-staging.workspace = true
@@ -64,6 +64,7 @@ zip.workspace = true
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-targets = { workspace = true, features = ["test-support"] }
 mj-store = { workspace = true, features = ["test-support"] }
+mj-worker-launch = { workspace = true, features = ["test-support"] }
 mj-profile-catalog = { workspace = true, features = ["test-support"] }
 mj-session-runtime = { workspace = true, features = ["test-support"] }
 mj-worker-staging = { workspace = true, features = ["test-support"] }

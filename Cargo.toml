@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-profile-catalog", "mj-session-runtime", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-profile-catalog", "mj-session-runtime", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -49,6 +49,7 @@ mj-build-cache = { path = "mj-build-cache", package = "brokk-mj-build-cache", ve
 mj-worker-staging = { path = "mj-worker-staging", package = "brokk-mj-worker-staging", version = "2.72.0" }
 mj-session-runtime = { path = "mj-session-runtime", package = "brokk-mj-session-runtime", version = "2.72.0" }
 mj-profile-catalog = { path = "mj-profile-catalog", package = "brokk-mj-profile-catalog", version = "2.72.0" }
+mj-worker-launch = { path = "mj-worker-launch", package = "brokk-mj-worker-launch", version = "2.72.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.72.0" }
 mj-setup = { path = "mj-setup", package = "brokk-mj-setup", version = "2.72.0" }
 mj-server = { path = "mj-server", package = "brokk-mj-server", version = "2.72.0" }

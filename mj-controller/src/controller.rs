@@ -14,8 +14,8 @@ mod github_tokens;
 mod interrupted;
 pub use interrupted::interrupted_lifecycle_cause;
 pub mod lifecycle;
+pub use crate::local_profile_homes;
 pub use lifecycle::LifecycleFailureReason;
-pub mod local_profile_homes;
 pub use mj_build_cache::mbx;
 pub mod move_session;
 mod network_git;
@@ -46,8 +46,6 @@ pub(crate) use mj_worker_staging::worker_binary;
 #[cfg(test)]
 mod session_runtime_tests;
 mod worker_launch;
-pub use worker_launch::DurableRecoveryPlanner;
-mod worker_project_memory;
 mod worker_restart;
 #[cfg(test)]
 mod worker_staging_tests;
