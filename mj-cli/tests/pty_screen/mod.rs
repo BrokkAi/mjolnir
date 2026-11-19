@@ -29,7 +29,10 @@ pub struct TerminalTimeline {
     last_poll: Option<std::time::Instant>,
     /// The longest time between two polls, and when it ended.
     longest_gap: (std::time::Duration, std::time::Duration),
-    notes: Vec<(std::time::Duration, &'static str)>,
+    notes: Vec<(std::time::Duration, String)>,
+    /// When the background query was answered, until the next query shows
+    /// that the program read the answer.
+    pub awaiting_next_query: Option<std::time::Instant>,
 }
 
 impl TerminalTimeline {
@@ -39,6 +42,7 @@ impl TerminalTimeline {
             last_poll: None,
             longest_gap: Default::default(),
             notes: Vec::new(),
+            awaiting_next_query: None,
         }
     }
 
@@ -53,8 +57,8 @@ impl TerminalTimeline {
         self.last_poll = Some(now);
     }
 
-    pub fn note(&mut self, what: &'static str) {
-        self.notes.push((self.started.elapsed(), what));
+    pub fn note(&mut self, what: impl Into<String>) {
+        self.notes.push((self.started.elapsed(), what.into()));
     }
 }
 
