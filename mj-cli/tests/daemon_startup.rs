@@ -284,7 +284,9 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 128c9a3de: revision-126 fixtures omitted historical harness constraints.
     connection
         .execute_batch(
-            "ALTER TABLE session_moves DROP COLUMN source_environment_id;
+            "DROP INDEX IF EXISTS session_moves_source_environment;
+         DROP INDEX IF EXISTS retained_move_sources_environment;
+         ALTER TABLE session_moves DROP COLUMN source_environment_id;
          ALTER TABLE retained_move_sources DROP COLUMN environment_id;
          DROP TRIGGER IF EXISTS environment_report_registered;
          DROP TRIGGER IF EXISTS environment_report_updated;
