@@ -126,23 +126,35 @@ impl StandaloneSession {
             history_active: Default::default(),
         };
         if adopting && connection.materialized.applied_event_ordinal == 0 {
-            let baseline = connection.client.live_session_baseline().await?;
-            ensure!(
-                baseline.state.session_id == target.session_id,
-                "live recovery baseline belongs to another session"
-            );
-            for queued in &baseline.queue {
-                if let Some(prompt) = queued.command.prompt_blocks() {
-                    connection.cache_prompt_attachments(&prompt).await?;
+            match connection
+                .client
+                .attach(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+                .await
+            {
+                Ok(_) => {} // Ordinary reattachment retains the complete history.
+                Err(error) if relay_desynchronized(&error) => {
+                    let baseline = connection.client.live_session_baseline().await?;
+                    ensure!(
+                        baseline.state.session_id == target.session_id,
+                        "live recovery baseline belongs to another session"
+                    );
+                    for queued in &baseline.queue {
+                        if let Some(prompt) = queued.command.prompt_blocks() {
+                            connection.cache_prompt_attachments(&prompt).await?;
+                        }
+                    }
+                    let projection =
+                        mj_transcript::projection::materialized_session_from_live_baseline(
+                            &baseline,
+                        )?;
+                    crate::database::install_live_session_baseline(&projection, baseline)?;
+                    // A concurrent installer may own the cursor already. Load its
+                    // durable result, then use ordinary reattachment.
+                    (connection.materialized, connection.window) =
+                        load_projection(&target.session_id).await?;
                 }
+                Err(error) => return Err(error),
             }
-            let projection =
-                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
-            crate::database::install_live_session_baseline(&projection, baseline)?;
-            // A concurrent installer may own the cursor already. Load its
-            // durable result, then use ordinary reattachment.
-            (connection.materialized, connection.window) =
-                load_projection(&target.session_id).await?;
         }
         connection.sync_in_place().await?;
         Ok(connection)

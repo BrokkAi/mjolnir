@@ -1925,7 +1925,27 @@ pub(super) fn install_live_session_baseline_to(
         )?;
     }
     write_materialized_session(&tx, materialized)?;
+    let turn_id = materialized
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.accepted_ordinal);
+    for request in &materialized.pending_elicitations {
+        events::insert_api_event(
+            &tx,
+            &materialized.session_id,
+            materialized
+                .last_activity_at_ms
+                .unwrap_or_else(mj_core::clock::epoch_millis),
+            &ApiEventData::InputRequired {
+                request: Some(request.clone()),
+                turn_id,
+            },
+        )?;
+    }
     tx.commit()?;
+    if !materialized.pending_elicitations.is_empty() {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
     Ok(true)
 }
 

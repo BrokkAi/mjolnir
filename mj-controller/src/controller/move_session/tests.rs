@@ -97,6 +97,10 @@ fn move_queue_relay_child() {
     let marker = PathBuf::from(
         std::env::var_os(MOVE_QUEUE_RELAY_MARKER).expect("relay crash marker is configured"),
     );
+    let wire_protocol = fs::read_to_string(root.join("protocol-version"))
+        .ok()
+        .map(|value| value.trim().parse::<u32>().unwrap())
+        .unwrap_or(mj_core::relay::RELAY_PROTOCOL_VERSION);
     let crash_after_first = !marker.exists();
     // The delegation-only connection must not open a second journal writer.
     let mut relay = None;
@@ -109,7 +113,7 @@ fn move_queue_relay_child() {
         use mj_core::relay::{RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload};
         let payload = match &request.request {
             RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
-                negotiated: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                negotiated: wire_protocol,
                 relay_version: "1.0.0".into(),
                 session_id: MOVE_QUEUE_SESSION_ID.into(),
                 worker_build: None,
@@ -152,7 +156,7 @@ fn move_queue_relay_child() {
                 &mut output,
                 &RelayResponseEnvelope {
                     request_id: request.request_id,
-                    protocol_version: request.protocol_version,
+                    protocol_version: wire_protocol,
                     body: RelayResponseBody::Ok { payload },
                 },
             )
@@ -223,7 +227,7 @@ fn move_queue_relay_child() {
                 &mut output,
                 &RelayResponseEnvelope {
                     request_id: request.request_id,
-                    protocol_version: request.protocol_version,
+                    protocol_version: wire_protocol,
                     body: RelayResponseBody::Ok { payload },
                 },
             )
@@ -254,17 +258,24 @@ fn move_queue_relay_child() {
                     ..
                 }
             );
-        let response = if matches!(request.request, RelayRequest::SetOperatorAway { .. }) {
+        assert!(
+            request.request.supported_at(wire_protocol),
+            "request exceeds emulated worker protocol"
+        );
+        let mut response = if matches!(request.request, RelayRequest::SetOperatorAway { .. }) {
             RelayResponseEnvelope {
                 request_id: request.request_id,
-                protocol_version: request.protocol_version,
+                protocol_version: wire_protocol,
                 body: RelayResponseBody::Ok {
                     payload: RelayResponsePayload::Status(relay.operational_state()),
                 },
             }
         } else {
+            let mut request = request;
+            request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
             relay.handle(request)
         };
+        response.protocol_version = wire_protocol;
         write_relay_frame(&mut output, &response).expect("write relay response");
         if should_crash {
             if std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1") {
@@ -6486,4 +6497,111 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
             .unwrap()
             .contains("child after recovery cut")
     );
+}
+
+#[cfg(unix)]
+// Hard-won: c07fe902: intact genesis was discarded and old workers were refused unnecessarily.
+#[test]
+fn adoption_reattaches_from_genesis_before_requiring_a_live_baseline() {
+    use mj_core::relay::{RelayObservation, RelayRequestEnvelope};
+    let name = test_name("adoption_reattaches_from_genesis_before_requiring_a_live_baseline");
+    if !isolated_test_child(&name, "MJ_ADOPT_INTACT_GENESIS_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    fs::write(root.join("protocol-version"), "71").unwrap();
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "legacy").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "legacy-native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let mut backup = mj_core::state::MaterializedSession::empty(MOVE_QUEUE_SESSION_ID);
+    backup.applied_event_ordinal = relay.latest_ordinal();
+    backup.applied_event_digest = relay.latest_digest().to_owned();
+    relay.handle(RelayRequestEnvelope {
+        request_id: "prompt".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "legacy-prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("preserved request")],
+            },
+        },
+    });
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"preserved historical reply"}
+    })).unwrap()).unwrap();
+    let frontier = relay.latest_ordinal();
+    drop(relay);
+    crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
+    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_adopting(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .unwrap();
+        let projection = connection.snapshot().materialized;
+        assert_eq!(projection.applied_event_ordinal, frontier);
+        assert!(
+            serde_json::to_string(&projection.transcript)
+                .unwrap()
+                .contains("preserved historical reply")
+        );
+        assert!(!projection.transcript.iter().any(
+            |item| item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID
+        ));
+        assert!(!root.join("baseline-frontier").exists());
+    });
+    // A tracked projection restored behind the ACK must fail visibly and
+    // remain intact; its explicit recovery is a separately approved follow-up.
+    crate::database::save_materialized_session(&backup).unwrap();
+    runtime.block_on(async {
+        let error = crate::session_manager::StandaloneSession::connect_command(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .err()
+        .expect("old tracked projection cannot replay a pruned cursor");
+        assert!(
+            format!("{error:#}")
+                .contains("controller store is behind the worker's retained journal")
+        );
+    });
+    assert_eq!(
+        crate::database::materialized_event_frontier(MOVE_QUEUE_SESSION_ID).unwrap(),
+        Some((backup.applied_event_ordinal, backup.applied_event_digest))
+    );
+    // Model an old worker whose checkpoint floor already removed genesis. The
+    // current relay stand-in collected that prefix when the first attach ACKed.
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        MOVE_QUEUE_SESSION_ID,
+    ))
+    .unwrap();
+    runtime.block_on(async {
+        let error = crate::session_manager::StandaloneSession::connect_adopting(
+            &spec,
+            MOVE_QUEUE_SESSION_ID,
+        )
+        .await
+        .err()
+        .expect("trimmed legacy worker needs baseline support");
+        assert!(
+            format!("{error:#}").contains("restart that worker on the current binary, then adopt")
+        );
+    });
+    assert!(!root.join("baseline-frontier").exists());
 }

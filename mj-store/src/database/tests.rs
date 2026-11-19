@@ -8716,10 +8716,13 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
     state.native_agents.push(child.clone());
     let mut wrong_owner = child.clone();
     wrong_owner.owner_session_id = "wrong-owner".into();
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("recovered-question", serde_json::json!({
+        "mode":"form", "sessionId":"session-1", "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
     let mut baseline = LiveSessionBaseline {
         state,
         queue: Vec::new(),
-        questions: Vec::new(),
+        questions: vec![question.clone()],
         unavailable_questions: 0,
         active_turn: None,
         native_agent_replay: Some(vec![wrong_owner]),
@@ -8750,6 +8753,17 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
             .unwrap(),
         0
     );
+    let filter = ApiEventFilter {
+        session_id: Some("session-1".into()),
+        ..Default::default()
+    };
+    assert!(
+        !events::load_api_events_from(&database, &filter, Some(0), 100)
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| matches!(event.event, ApiEventData::InputRequired { .. }))
+    );
     baseline.native_agent_replay = Some(vec![child]);
     assert!(
         materialized::install_live_session_baseline_to(&database, &projection, &baseline).unwrap()
@@ -8757,6 +8771,9 @@ fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
     assert!(
         !materialized::install_live_session_baseline_to(&database, &projection, &baseline).unwrap()
     );
+    let required = events::load_api_events_from(&database, &filter, Some(0), 100).unwrap();
+    assert_eq!(required.events.iter().filter(|event| matches!(&event.event, ApiEventData::InputRequired { request: Some(request), .. } if request.id == question.id)).count(), 1);
+    assert_eq!(connection.query_row("SELECT count(*) FROM operator_away_requests WHERE session_id='session-1' AND elicitation_id='recovered-question'", [], |row| row.get::<_, u64>(0)).unwrap(), 1);
     assert_eq!(
         load_materialized_session_from(&database, "session-1")
             .unwrap()

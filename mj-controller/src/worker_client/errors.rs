@@ -22,6 +22,18 @@ pub struct RelayRejected(pub RelayProtocolError);
 
 impl std::fmt::Display for RelayRejected {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(mj_core::relay::RelayErrorDetail::Desynchronized {
+            requested_after,
+            earliest_available,
+            ..
+        }) = &self.0.detail
+            && requested_after < earliest_available
+        {
+            write!(
+                formatter,
+                "controller store is behind the worker's retained journal; "
+            )?;
+        }
         write!(
             formatter,
             "relay rejected request ({:?}): {}",
