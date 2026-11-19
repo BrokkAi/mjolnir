@@ -937,9 +937,9 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
             .iter()
             .map(|c| c.profile_id.as_str())
             .collect::<Vec<_>>(),
-        // A top-level quota move ranks the five-hour-windowed profile below
-        // even usage-priced ones, however full its window is.
-        ["healthy", "unknown", "paid", "api", "windowed"]
+        // A top-level quota move ranks a profile inside a five-hour window
+        // below unwindowed and unknown quota, above paid credits and API.
+        ["healthy", "unknown", "windowed", "paid", "api"]
     );
 }
 

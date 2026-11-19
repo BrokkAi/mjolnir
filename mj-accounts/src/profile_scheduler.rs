@@ -76,8 +76,8 @@ impl AsRef<SubagentCandidate> for SubagentCandidate {
 /// get a weighted order within their tier; included quota always comes first.
 /// Profiles named in `prefer` (dashboard's load-balancing preference) rank
 /// ahead of the rest, in preference order, while their quota tier allows.
-/// `placement` decides whether profiles with a five-hour quota window keep
-/// that order.
+/// `placement` decides whether profiles with a five-hour quota window in
+/// force keep that order.
 pub fn draw_candidates<T: AsRef<SubagentCandidate>>(
     candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
@@ -141,11 +141,15 @@ pub fn order_by_draw<T: AsRef<SubagentCandidate>>(
             quota_rank(left.1.as_ref(), model, now_seconds),
             left.1.as_ref(),
             placement,
+            model,
+            now_seconds,
         )
         .cmp(&tier(
             quota_rank(right.1.as_ref(), model, now_seconds),
             right.1.as_ref(),
             placement,
+            model,
+            now_seconds,
         ))
         .then_with(|| {
             projects_short_window_exhaustion(left.1.as_ref(), model, now_seconds).cmp(
@@ -187,8 +191,8 @@ pub fn rank_candidates<T: AsRef<SubagentCandidate>>(
         let (left, right) = (left.as_ref(), right.as_ref());
         let left_rank = quota_rank(left, model, now_seconds);
         let right_rank = quota_rank(right, model, now_seconds);
-        tier(left_rank, left, placement)
-            .cmp(&tier(right_rank, right, placement))
+        tier(left_rank, left, placement, model, now_seconds)
+            .cmp(&tier(right_rank, right, placement, model, now_seconds))
             .then_with(|| {
                 projects_short_window_exhaustion(left, model, now_seconds)
                     .cmp(&projects_short_window_exhaustion(right, model, now_seconds))
@@ -208,30 +212,44 @@ pub fn rank_candidates<T: AsRef<SubagentCandidate>>(
 }
 
 /// Which spawn the ranking serves. Top-level sessions rank profiles with a
-/// five-hour quota window below profiles without one, regardless of how much
-/// the window has left: the windowed allowance runs out per window while
-/// usage-priced profiles keep billing. Sub-agent and reviewer spawns keep the
-/// plain quota order.
+/// five-hour quota window in force below included quota without one and
+/// unknown quota, but above paid credits and usage-priced profiles: the
+/// windowed allowance runs out per window, yet it is already paid for, while
+/// paid credits and API profiles bill each request. Sub-agent and reviewer
+/// spawns keep the plain quota order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     TopLevel,
     Child,
 }
 
-/// Whether the profile's subscription report carries a five-hour window.
-fn has_five_hour_window(candidate: &SubagentCandidate) -> bool {
+/// Whether a five-hour window is in force for `model`: the report carries
+/// one that applies to the model and has not reset since it was read.
+/// Providers report no five-hour window while none is running (Claude omits
+/// it until first use), so only profiles actually inside a window match.
+fn has_five_hour_window_in_force(
+    candidate: &SubagentCandidate,
+    model: &str,
+    now_seconds: i64,
+) -> bool {
     matches!(
         &candidate.quota,
         CandidateQuota::Subscription { windows, .. }
-            if windows.iter().any(|window| window.is_five_hour())
+            if windows.iter().any(|window| {
+                window.is_five_hour()
+                    && crate::quota::window_applies(window, model)
+                    && window
+                        .resets_at_epoch_seconds
+                        .is_none_or(|reset| reset > now_seconds)
+            })
     )
 }
 
 /// Where a candidate's quota places it, best first. Usage-priced (API)
 /// profiles bill each request, so every subscription that may still run the
-/// model comes before them — except for a top-level placement, which they
-/// lead instead (see [`Placement`]); a subscription known to be out of quota
-/// for the model would only fail, so it always comes last.
+/// model comes before them (a top-level placement moves five-hour-windowed
+/// quota down a tier; see [`Placement`]); a subscription known to be out of
+/// quota for the model would only fail, so it always comes last.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum QuotaRank {
     /// Quota left, with its pace score; a higher score ranks first.
@@ -244,19 +262,26 @@ enum QuotaRank {
 
 /// The rank's tier for this placement. The one place tier order is decided;
 /// every comparator asks it.
-fn tier(rank: QuotaRank, candidate: &SubagentCandidate, placement: Placement) -> u8 {
+fn tier(
+    rank: QuotaRank,
+    candidate: &SubagentCandidate,
+    placement: Placement,
+    model: &str,
+    now_seconds: i64,
+) -> u8 {
     if placement == Placement::TopLevel
-        && has_five_hour_window(candidate)
-        && matches!(rank, QuotaRank::Available(_) | QuotaRank::Paid(_))
+        && matches!(rank, QuotaRank::Available(_))
+        && has_five_hour_window_in_force(candidate, model, now_seconds)
     {
-        // Below usage-priced profiles, above an exhausted one.
-        return 4;
+        // Below unwindowed included quota and unknown quota, above paid
+        // credits and usage-priced profiles.
+        return 2;
     }
     match rank {
         QuotaRank::Available(_) => 0,
         QuotaRank::Unknown => 1,
-        QuotaRank::Paid(_) => 2,
-        QuotaRank::UsagePriced => 3,
+        QuotaRank::Paid(_) => 3,
+        QuotaRank::UsagePriced => 4,
         QuotaRank::Exhausted => 5,
     }
 }

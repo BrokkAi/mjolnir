@@ -1133,19 +1133,30 @@ mod tests {
         candidate
     }
 
-    // A top-level launch preserves five-hour-windowed quota for when nothing
-    // else can bill: windowed profiles rank below usage-priced ones no matter
-    // how full their window is; child placements keep the plain quota order.
+    // A top-level launch ranks a profile inside a five-hour window below
+    // unwindowed and unknown quota but above paid credits and usage-priced
+    // profiles, which bill per request; a five-hour window that has already
+    // reset is not in force. Child placements keep the plain quota order.
     #[test]
-    fn top_level_ranking_demotes_five_hour_windowed_profiles_below_unwindowed() {
+    fn top_level_ranking_places_five_hour_windowed_profiles_above_billed_ones() {
         let build = || {
+            let mut paid = candidate("paid", Some(0), &["luna"]);
+            if let CandidateQuota::Subscription { paid_credits, .. } = &mut paid.quota {
+                *paid_credits = mj_client::quota::PaidCredits::limited(1e12);
+            }
+            let mut lapsed = five_hour_candidate("windowed-lapsed", Some(30), &["luna"]);
+            if let CandidateQuota::Subscription { windows, .. } = &mut lapsed.quota {
+                windows[0].resets_at_epoch_seconds = Some(0);
+            }
             vec![
                 SubagentCandidate {
                     quota: CandidateQuota::UsagePriced,
                     ..candidate("api", None, &["luna"])
                 },
+                paid,
                 five_hour_candidate("windowed-high", Some(90), &["luna"]),
                 candidate("weekly-low", Some(40), &["luna"]),
+                lapsed,
                 candidate("unknown", None, &["luna"]),
                 five_hour_candidate("windowed-empty", Some(0), &["luna"]),
             ]
@@ -1156,8 +1167,10 @@ mod tests {
             ids(&children),
             vec![
                 "windowed-high",
+                "windowed-lapsed",
                 "weekly-low",
                 "unknown",
+                "paid",
                 "api",
                 "windowed-empty"
             ]
@@ -1167,10 +1180,12 @@ mod tests {
         assert_eq!(
             ids(&top_level),
             vec![
+                "windowed-lapsed",
                 "weekly-low",
                 "unknown",
-                "api",
                 "windowed-high",
+                "paid",
+                "api",
                 "windowed-empty"
             ]
         );
