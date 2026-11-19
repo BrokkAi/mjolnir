@@ -10,42 +10,77 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// The enabled profiles, copied cheaply under the controller lock. Building
+/// requests from them reads credential and provider files, so that happens off
+/// the lock ([`quota_requests_from`]).
+#[cfg(unix)]
+pub fn enabled_quota_profiles(
+    config: &mj_core::config::Config,
+) -> Vec<(String, mj_core::config::HarnessProfile)> {
+    config
+        .enabled_profiles()
+        .map(|(id, profile)| (id.to_owned(), profile.clone()))
+        .collect()
+}
+
+#[cfg(unix)]
+fn quota_requests_from(
+    profiles: Vec<(String, mj_core::config::HarnessProfile)>,
+) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    profiles
+        .iter()
+        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
+        .collect()
+}
+
 /// Install, in the background, the pinned harnesses the quota checks would
 /// otherwise install inline on their first run (#1595), so that wait is
-/// usually over before a check needs it. It holds no handoff admission: the
-/// installation is safe to stop, the daemon's cancellation ends it (killing
-/// the installer's process group and leaving only staging the next
-/// installation sweeps), and the next daemon prepares again. A failure is
-/// logged and not retried; the next check that needs the harness installs it.
+/// usually over before a check needs it. It holds no handoff admission and
+/// the next daemon prepares again, so it is safe to stop. On cancellation the
+/// task stops awaiting and returns: dropping the installation kills the
+/// installers' process groups, but an archive extraction on a blocking thread
+/// ignores cancellation, and shutdown must not wait for it. Staging publishes
+/// by atomic rename, so an abandoned extraction publishes nothing and the next
+/// installation sweeps its staging. A failure is logged and not retried; the
+/// next check that needs the harness installs it.
+#[cfg(unix)]
 pub fn spawn_quota_harness_prewarm(
-    requests: Vec<QuotaRefreshRequest>,
+    profiles: Vec<(String, mj_core::config::HarnessProfile)>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        #[cfg(unix)]
-        {
+        let prepare = async {
+            let requests = match tokio::task::spawn_blocking(move || quota_requests_from(profiles))
+                .await
+            {
+                Ok(requests) => requests,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
+                    return Vec::new();
+                }
+            };
             // The scope cancels its token when it ends, so it gets a child.
-            let scope = cancellation.child_token();
-            // Awaited to the end rather than dropped: on cancellation the
-            // installer stops its child process group and returns.
-            let failures = mj_core::subprocess::with_preparation_cancellation(
-                scope,
+            mj_core::subprocess::with_preparation_cancellation(
+                cancellation.child_token(),
                 mj_controller::quota::prepare_managed(&requests),
             )
-            .await;
-            if cancellation.is_cancelled() {
-                return;
-            }
-            for (harness, error) in failures {
-                tracing::warn!(
-                    harness = harness.id(),
-                    error = %format!("{error:#}"),
-                    "could not prepare the pinned harness ahead of quota checks; the next check retries"
-                );
-            }
+            .await
+        };
+        let failures = tokio::select! {
+            () = cancellation.cancelled() => return,
+            failures = prepare => failures,
+        };
+        if cancellation.is_cancelled() {
+            return;
         }
-        #[cfg(not(unix))]
-        let _ = (requests, cancellation);
+        for (harness, error) in failures {
+            tracing::warn!(
+                harness = harness.id(),
+                error = %format!("{error:#}"),
+                "could not prepare the pinned harness ahead of quota checks; the next check retries"
+            );
+        }
     })
 }
 

@@ -149,6 +149,7 @@ impl QuotaRefreshRequest {
     /// Whether this profile's check runs a host harness program, through
     /// `quota_harness::locate`, rather than answering from configuration or
     /// an HTTP endpoint.
+    #[cfg(unix)]
     pub(crate) fn runs_host_harness(&self) -> bool {
         match self.harness {
             HarnessKind::Grok => true,

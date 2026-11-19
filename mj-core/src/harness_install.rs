@@ -3395,14 +3395,22 @@ mod tests {
         });
         assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
 
-        let child = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+        let child = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        // `kill -0` also succeeds on a zombie, which has already stopped
+        // running. Ask `ps` for the process state: no output (gone) or `Z`
+        // means it is not running, whether or not anything reaped it.
         let alive = || {
-            std::process::Command::new("kill")
-                .args(["-0", &child])
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &child])
                 .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap()
-                .success()
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
         };
         for _ in 0..100 {
             if !alive() {
@@ -3416,7 +3424,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .filter(|name| !name.starts_with(".install"))
             .collect::<Vec<_>>();
-        assert!(published.is_empty(), "cancelled install published {published:?}");
+        assert!(
+            published.is_empty(),
+            "cancelled install published {published:?}"
+        );
 
         let environment = fake_node_tools(temp.path(), &install_counter);
         let managed = resolve_at(

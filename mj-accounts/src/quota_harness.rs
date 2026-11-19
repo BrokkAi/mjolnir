@@ -15,6 +15,7 @@ type Installation = mj_core::harness_install::Located;
 #[cfg(not(unix))]
 type Installation = std::convert::Infallible;
 
+#[cfg(unix)]
 use crate::quota::QuotaRefreshRequest;
 
 pub(crate) struct QuotaProgram {
@@ -86,6 +87,16 @@ async fn host_program(
     .context("find host quota harness task failed")?
 }
 
+/// The environment the installer searches and caches under: this process's,
+/// overlaid with the profile's.
+#[cfg(unix)]
+fn search_environment(environment: &HashMap<String, String>) -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .chain(environment.clone())
+        .collect()
+}
+
 /// The pinned managed installation a quota check runs when the host has no
 /// CLI. The first call on a host does the cold install.
 #[cfg(unix)]
@@ -94,10 +105,7 @@ async fn managed_installation(
     environment: &HashMap<String, String>,
 ) -> Result<Installation> {
     let name = harness.cli_binary_name();
-    let search: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-        .chain(environment.clone())
-        .collect();
+    let search = search_environment(environment);
     let policy = ExecutionPolicy::ConfiguredApprovals;
     let (command, args) = mj_core::harness_runtime::fallback_launch(harness, policy);
     mj_core::harness_install::locate(
@@ -114,12 +122,16 @@ async fn managed_installation(
 
 /// Install, ahead of the first quota check, the pinned harness each request
 /// would otherwise install inline. Only requests whose check runs a host
-/// harness, on a host that does not provide it, are prepared, once per
-/// harness; the daemon container's image carries its harnesses and installs
-/// nothing. The leases are released on return: a check takes its own, and an
-/// installation in progress is shared through the installer's own lock.
-/// Failures are returned with their harness; nothing is retried here, because
-/// the next check that needs the harness prepares it again.
+/// harness, on a host that does not provide it, are prepared. The installer
+/// caches per `XDG_CACHE_HOME`/`HOME`, so work is grouped by (harness, cache
+/// root): groups run concurrently, and within a group the profiles are tried
+/// in order until one preparation succeeds, so one profile's broken
+/// environment does not hide the others. The daemon container's image carries
+/// its harnesses and installs nothing. The leases are released on return: a
+/// check takes its own, and an installation in progress is shared through the
+/// installer's own lock. Every failure is returned with its harness; nothing
+/// is retried here, because the next check that needs the harness prepares it
+/// again. Dropping the future cancels the installers' process groups.
 #[cfg(unix)]
 pub async fn prepare_managed(
     requests: &[QuotaRefreshRequest],
@@ -127,26 +139,45 @@ pub async fn prepare_managed(
     if mj_core::placement::daemon_container().is_some() {
         return Vec::new();
     }
-    let mut attempted = std::collections::BTreeSet::new();
     let mut failures = Vec::new();
-    for request in requests {
-        let harness = request.harness;
-        if !request.runs_host_harness() || attempted.contains(&harness) {
-            continue;
-        }
+    let mut groups: BTreeMap<(HarnessKind, PathBuf), Vec<HashMap<String, String>>> =
+        BTreeMap::new();
+    for request in requests
+        .iter()
+        .filter(|request| request.runs_host_harness())
+    {
         let environment: HashMap<String, String> =
             request.environment.clone().into_iter().collect();
-        let prepared = match host_program(harness, &environment).await {
-            Ok(Some(_)) => continue,
-            Ok(None) => managed_installation(harness, &environment).await.map(drop),
-            Err(error) => Err(error),
-        };
-        // Another profile on a different PATH may still need the install.
-        if let Err(error) = prepared {
-            failures.push((harness, error));
+        let search = search_environment(&environment);
+        match mj_core::harness_runtime::managed_harness_cache_root(
+            search.get("XDG_CACHE_HOME").map(std::ffi::OsStr::new),
+            search.get("HOME").map(std::ffi::OsStr::new),
+        ) {
+            Ok(root) => groups
+                .entry((request.harness, root))
+                .or_default()
+                .push(environment),
+            Err(error) => failures.push((request.harness, error)),
         }
-        attempted.insert(harness);
     }
+    let results = futures::future::join_all(groups.into_iter().map(
+        |((harness, _), environments)| async move {
+            let mut failures = Vec::new();
+            for environment in environments {
+                match host_program(harness, &environment).await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => match managed_installation(harness, &environment).await {
+                        Ok(_lease) => break,
+                        Err(error) => failures.push((harness, error)),
+                    },
+                    Err(error) => failures.push((harness, error)),
+                }
+            }
+            failures
+        },
+    ))
+    .await;
+    failures.extend(results.into_iter().flatten());
     failures
 }
 
