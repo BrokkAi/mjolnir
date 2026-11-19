@@ -33,6 +33,7 @@ pub mod checkpoint_transfer;
 pub mod github_app;
 pub mod github_credential;
 pub mod project_memory_merge;
+pub mod readiness;
 pub mod session_manager;
 pub mod wait_policy;
 pub mod worker_client;

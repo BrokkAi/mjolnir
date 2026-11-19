@@ -15,7 +15,7 @@ use crate::targets::{
 use mj_core::config::HarnessKind;
 use mj_core::relay::{HarnessPreparation, RelayExecutionState};
 
-use super::worker_binary::{WorkerProbe, probe_worker};
+use mj_worker_staging::worker_binary::{WorkerProbe, probe_worker};
 
 pub use mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
 
@@ -44,9 +44,9 @@ const WORKER_STARTUP_CONNECT_INTERVAL: Duration = Duration::from_millis(500);
 const WORKER_STARTUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How often a wait loop looks for cancellation while it is idle.
-pub(super) const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+pub const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-pub(super) enum NativeSessionReadiness {
+pub enum NativeSessionReadiness {
     Waiting,
     Started,
     Preparing { step: String, since_ms: i64 },
@@ -57,7 +57,11 @@ pub(super) enum NativeSessionReadiness {
 
 pub use mj_session_types::HarnessPreparationFailure;
 
-pub(super) trait NativeSessionProbe {
+// Public only because the wait functions are generic over it; every
+// implementor is a concrete type in this workspace, so no caller needs an
+// auto trait bound on the futures.
+#[allow(async_fn_in_trait)]
+pub trait NativeSessionProbe {
     fn protocol_version(&self) -> u32 {
         mj_core::relay::RELAY_PROTOCOL_VERSION
     }
@@ -97,7 +101,7 @@ impl NativeSessionProbe for StandaloneSession {
     }
 }
 
-pub(super) async fn wait_for_native_session(
+pub async fn wait_for_native_session(
     relay: &mut impl NativeSessionProbe,
     executor: &impl CommandExecutor,
     harness: HarnessKind,
@@ -223,7 +227,7 @@ async fn wait_for_native_session_with_stage(
 /// the harness can start a prompt waits here first, then waits for the native
 /// session. A worker that predates preparation reporting serves only after
 /// preparing, so its first answer already counts.
-pub(super) async fn wait_for_harness_prepared_in_stage(
+pub async fn wait_for_harness_prepared_in_stage(
     relay: &mut impl NativeSessionProbe,
     executor: &impl CommandExecutor,
     stage: ProvisionStage,
@@ -347,7 +351,7 @@ async fn wait_for_startup(
 
 /// Wait for the ACP-native session while exposing the part of launch that is
 /// currently blocking. The guard is balanced on success, error, and cancel.
-pub(super) async fn wait_for_native_session_in_stage(
+pub async fn wait_for_native_session_in_stage(
     relay: &mut impl NativeSessionProbe,
     executor: &impl CommandExecutor,
     stage: ProvisionStage,
@@ -421,7 +425,7 @@ impl StartingWorkerProbe for StartingWorkerConnection<'_> {
 /// control socket only after it recovers durable state, so the first attempts
 /// usually fail; retry until the worker accepts, until the worker reports its
 /// own death, or until the startup window closes.
-pub(super) async fn connect_started_worker(
+pub async fn connect_started_worker(
     spec: &CommandSpec,
     session_id: &str,
     executor: &impl CommandExecutor,
@@ -440,7 +444,7 @@ pub(super) async fn connect_started_worker(
 /// Same as [`connect_started_worker`], with an explicit wait. Restarting a
 /// worker over a large durable journal recovers that journal before it binds
 /// `control.sock`, so a checkpoint bounce has to outlast that recovery.
-pub(super) async fn connect_started_worker_with_timeout(
+pub async fn connect_started_worker_with_timeout(
     spec: &CommandSpec,
     session_id: &str,
     executor: &impl CommandExecutor,
@@ -465,7 +469,7 @@ pub(super) async fn connect_started_worker_with_timeout(
 /// caller that wants to retry a failed start needs exactly this fact, and only
 /// this wait knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::controller) struct WorkerStartupFailure {
+pub struct WorkerStartupFailure {
     pub reached_socket: bool,
 }
 
@@ -796,10 +800,10 @@ mod tests {
 
     use anyhow::{Result, bail};
 
-    use crate::controller::worker_binary::{
+    use crate::targets::{CancellableProcessExecutor, CommandOutput};
+    use mj_worker_staging::worker_binary::{
         WorkerExitRecord, WorkerStartupRecord, WorkerStartupStep,
     };
-    use crate::targets::{CancellableProcessExecutor, CommandOutput};
 
     use super::*;
 

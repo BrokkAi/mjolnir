@@ -26,7 +26,7 @@ mod path_completion;
 pub use crate::profile_config;
 mod provisioning;
 pub mod publication;
-mod readiness;
+pub(crate) use mj_session_runtime::readiness;
 pub use readiness::HarnessPreparationFailure;
 pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
