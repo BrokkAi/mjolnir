@@ -2234,33 +2234,39 @@ fn native_project_target(project_directory: &str) -> String {
         )
 }
 
-/// The least room the preview pane is worth drawing in: a border plus three
-/// rows of text. Five session rows outrank a taller preview.
-const PREVIEW_MINIMUM_HEIGHT: u16 = 5;
+/// The least room the preview pane is worth drawing in: a border plus one
+/// row of text. Below this the preview is hidden rather than drawn empty.
+const PREVIEW_MINIMUM_HEIGHT: u16 = 3;
 
-/// How tall the preview pane under the list is when the dialog shows one.
-/// With room for [`LIST_MINIMUM_ROWS`] session rows plus the preview's
-/// minimum, it is two fifths of the body, capped so the list keeps those rows.
-/// On a shorter terminal the list keeps only its [`COMPACT_LIST_PANEL`] and the
-/// preview takes whatever remains, so the user can still see what they open.
-fn preview_height(inner: Rect) -> u16 {
-    let room = inner.height.saturating_sub(RESUME_FIXED_ROWS);
-    let full_list = LIST_MINIMUM_ROWS + LIST_CHROME_ROWS;
-    if room >= full_list + PREVIEW_MINIMUM_HEIGHT {
-        (inner.height * 2 / 5)
-            .min(room - full_list)
-            .max(PREVIEW_MINIMUM_HEIGHT)
-    } else {
-        room.saturating_sub(COMPACT_LIST_PANEL)
-    }
+/// Rows left for the preview once the fixed bands and the list's five
+/// session rows have their share.
+fn preview_room(inner: Rect) -> u16 {
+    inner
+        .height
+        .saturating_sub(RESUME_FIXED_ROWS + LIST_MINIMUM_ROWS + LIST_CHROME_ROWS)
 }
 
-/// Rows the list panel always keeps: its border, its header and two sessions.
-const COMPACT_LIST_PANEL: u16 = 5;
+/// Whether the dialog has room for a preview beside a list of five session
+/// rows. The list outranks the transcript: a terminal too short for both
+/// shows only the list, never an empty bordered box.
+fn preview_fits(inner: Rect) -> bool {
+    preview_room(inner) >= PREVIEW_MINIMUM_HEIGHT
+}
+
+/// How tall the preview pane under the list is when it fits: two fifths of
+/// the body, capped so the list keeps [`LIST_MINIMUM_ROWS`] session rows.
+fn preview_height(inner: Rect) -> u16 {
+    (inner.height * 2 / 5)
+        .min(preview_room(inner))
+        .max(PREVIEW_MINIMUM_HEIGHT)
+}
+
+/// The least the list panel keeps on a very short terminal: its border, its
+/// header and two sessions. The fixed bands around it stay on screen.
+const LIST_PANEL_FLOOR: u16 = 5;
 /// Rows the list panel spends on its border and column header.
 const LIST_CHROME_ROWS: u16 = 3;
-/// Session rows the list keeps while the transcript preview is showing and
-/// the terminal has room for both.
+/// Session rows the list keeps whenever the terminal is tall enough.
 const LIST_MINIMUM_ROWS: u16 = 5;
 /// Rows every band but the list and the preview takes: tabs, search, footer
 /// and the four gaps between them and the preview.
@@ -2273,12 +2279,13 @@ const RESUME_DIALOG_HEIGHT: u16 = 28;
 /// The preview band is present only when the dialog has something to show in
 /// it, so the list keeps the whole height when it does not.
 fn resume_bands(inner: Rect, preview: bool) -> Vec<Rect> {
+    let preview = preview && preview_fits(inner);
     let mut constraints = vec![
         Constraint::Length(1),
         Constraint::Length(1), // tabs, gap
         Constraint::Length(1),
         Constraint::Length(1), // search, gap
-        Constraint::Min(COMPACT_LIST_PANEL),
+        Constraint::Min(LIST_PANEL_FLOOR),
         Constraint::Length(1), // list, gap
     ];
     if preview {
@@ -2307,7 +2314,9 @@ pub(crate) fn render_resume_dialog(
 ) {
     let popup = centered_modal(frame, surfaces, 84, RESUME_DIALOG_HEIGHT, area);
     let inner = DialogShell::padded_inner(popup);
-    let preview = dialog.preview_body(dashboard.resume_rows());
+    let preview = dialog
+        .preview_body(dashboard.resume_rows())
+        .filter(|_| preview_fits(inner));
     let bands = resume_bands(inner, preview.is_some());
     let rows = &bands;
     // The footer is the last band whether or not a preview sits above it.
