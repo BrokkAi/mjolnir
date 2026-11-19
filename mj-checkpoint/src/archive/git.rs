@@ -2067,15 +2067,48 @@ pub(crate) fn discover_linked_worktrees(
     let top_level = fs::canonicalize(repository)
         .with_context(|| format!("resolve {}", repository.display()))?;
     let (_, common_directory) = git_directories(runner, repository)?;
-    let listed = git_bytes(
+    let mut listed = run_git(
         runner,
         repository,
         ["worktree", "list", "--porcelain", "-z"],
         &[],
-        "list linked worktrees",
     )?;
+    let delimiter = if listed.status == 129 {
+        // Older target Git rejects -z. Its line format cannot represent a
+        // newline path, so inspect registration paths before interpreting it.
+        ensure!(
+            !top_level.as_os_str().as_encoded_bytes().contains(&b'\n'),
+            "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"
+        );
+        match fs::read_dir(common_directory.join("worktrees")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        let path = fs::read(entry.path().join("gitdir"))?;
+                        let path = path.strip_suffix(b"\n").unwrap_or(&path);
+                        ensure!(
+                            !path.contains(&b'\n'),
+                            "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"
+                        );
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect legacy worktree registrations"),
+        }
+        listed = run_git(runner, repository, ["worktree", "list", "--porcelain"], &[])?;
+        b'\n'
+    } else {
+        0
+    };
+    ensure!(
+        listed.status == 0,
+        "{}",
+        git_failure("list linked worktrees", &listed)
+    );
     let mut found = Vec::new();
-    for line in listed.split(|byte| *byte == 0) {
+    for line in listed.stdout.split(|byte| *byte == delimiter) {
         let Some(path) = line.strip_prefix(b"worktree ") else {
             continue;
         };

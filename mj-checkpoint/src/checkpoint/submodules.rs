@@ -71,13 +71,17 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub remote_refs_stale: bool,
     pub local_work: Vec<String>,
     inspected_admins: BTreeSet<PathBuf>,
+    loss_root: PathBuf,
 }
 pub(crate) fn inspect_snapshot_submodules(
     runner: &dyn GitCommandRunner,
     repository: &Path,
 ) -> Result<SnapshotSubmoduleInspection> {
     let mut inspection = SubmoduleInspection::default();
-    let mut snapshot = SnapshotSubmoduleInspection::default();
+    let mut snapshot = SnapshotSubmoduleInspection {
+        loss_root: std::fs::canonicalize(repository)?,
+        ..Default::default()
+    };
     inspect_checkout(
         runner,
         repository,
@@ -509,6 +513,44 @@ fn inspect_cached_worktree_heads(
                     named.display(),
                     entry.file_name().to_string_lossy()
                 ));
+            }
+        }
+        // A published HEAD does not cover tracked edits in a linked checkout.
+        // Only directories inside the selected teardown can lose those files.
+        let back_link = std::fs::read(worktree.join("gitdir"))?;
+        let back_link = back_link.strip_suffix(b"\n").unwrap_or(&back_link);
+        let back_link = mj_core::path_input::from_git_bytes(back_link)?;
+        let back_link = if back_link.is_absolute() {
+            back_link
+        } else {
+            worktree.join(back_link)
+        };
+        if let Some(directory) = back_link.parent() {
+            match std::fs::canonicalize(directory) {
+                Ok(directory) if directory.starts_with(&snapshot.loss_root) => {
+                    let tracked = submodule_git(
+                        runner,
+                        &directory,
+                        &[
+                            "status",
+                            "--porcelain",
+                            "--untracked-files=no",
+                            "--ignore-submodules=none",
+                        ],
+                    )?;
+                    let hidden = crate::archive::git::hidden_tracked_paths(runner, &directory)?;
+                    if !tracked.is_empty() || !hidden.is_empty() {
+                        snapshot.local_work.push(format!(
+                            "submodule {} linked-worktree {} has tracked edits ({})",
+                            named.display(),
+                            entry.file_name().to_string_lossy(),
+                            directory.display()
+                        ));
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("inspect module linked checkout"),
             }
         }
         // A module's linked checkout can retain its own nested module stores.

@@ -3101,6 +3101,10 @@ fn restore_submodules(
             Err(error) => return Err(error).context("inspect submodule restore path"),
         }
     }
+    for submodule in &submodules {
+        crate::archive::slash_path(Path::new(&submodule.name))
+            .with_context(|| format!("unsafe submodule admin name {:?}", submodule.name))?;
+    }
     let owning_checkout = |path: &Path| -> &Path {
         submodules
             .iter()
@@ -3192,7 +3196,22 @@ fn restore_submodules(
         let admin = if directory.join(".git").try_exists()? {
             crate::archive::git::git_directories(runner, &directory)?.0
         } else {
-            git_path(runner, &owner, &format!("modules/{}", submodule.name))?
+            let modules = git_path(runner, &owner, "modules")?;
+            let relative = Path::new("modules").join(&submodule.name);
+            crate::archive::ensure_no_symlink_ancestors(
+                modules.parent().context("module store has no parent")?,
+                &relative,
+            )?;
+            let admin = modules.join(&submodule.name);
+            match fs::symlink_metadata(&admin) {
+                Ok(metadata) => ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "submodule admin path is a symlink"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("inspect submodule admin path"),
+            }
+            admin
         };
         let first_origin = submodule.origin_urls.first().with_context(|| {
             format!(
@@ -3671,7 +3690,11 @@ pub fn restore_workspace_snapshot(
         let directory = git_path(runner, destination, "objects/pack")?;
         fs::create_dir_all(&directory)?;
         let path = directory.join(format!("pack-{hash}.pack"));
-        fs::copy(pack, &path).context("copy snapshot pack into clone")?;
+        // index-pack makes installed packs read-only. A provisioned retry can
+        // reuse this content-addressed file; index-pack still verifies it below.
+        if !path.try_exists()? {
+            fs::copy(pack, &path).context("copy snapshot pack into clone")?;
+        }
         let output = runner.run(
             destination,
             &GitCommand {
@@ -3853,6 +3876,9 @@ pub fn restore_workspace_snapshot(
             )?;
         }
     }
+    // Provisioned restore may retry after a later step needs local provisioning.
+    // Rebuild the saved list rather than appending another copy on each attempt.
+    git_text(runner, destination, ["update-ref", "-d", "refs/stash"])?;
     for entry in snapshot.stash.iter().rev() {
         require_object(runner, destination, "stash", &entry.commit)?;
         let output = runner.run(
@@ -4530,6 +4556,16 @@ mod tests {
         fs::write(nested.join("file"), "nested commit\n").unwrap();
         git(&nested, &["commit", "-am", "nested"]);
         fs::write(nested.join("file"), "nested working state\n").unwrap();
+        let legacy = workspace_inventory(
+            &crate::test_support::Git231,
+            &r.checkout,
+            &CheckoutOwnership::Managed,
+        )
+        .unwrap_err();
+        assert!(
+            legacy.to_string().contains("newline worktree paths"),
+            "{legacy:#}"
+        );
         let encoded = serde_json::to_value(r.capture(&CheckoutOwnership::Managed)).unwrap();
         assert_eq!(
             encoded["worktrees"][0]["relative_path"],
@@ -6977,6 +7013,105 @@ mod tests {
         );
     }
 
+    // Hard-won: efc122a75: published module-linked HEADs hid tracked edits inside teardown.
+    #[test]
+    fn module_linked_checkout_edits_refuse_only_inside_the_managed_teardown() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        let source = root.checkout.join("sub");
+        let outside = root.temp.path().join("outside-module-lane");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                outside.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        fs::write(outside.join("file"), "unrelated external edits\n").unwrap();
+        root.capture(&CheckoutOwnership::Managed);
+        let inside = source.join("local-lane");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                inside.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        let exclude = git_path(&FileGit, &source, "info/exclude").unwrap();
+        fs::write(exclude, "local-lane/\n").unwrap();
+        fs::write(inside.join("file"), "staged linked edits\n").unwrap();
+        git(&inside, &["add", "file"]);
+        fs::write(inside.join("file"), "unstaged linked edits\n").unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("guard.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("linked-worktree")
+                && error.to_string().contains("tracked edits"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(inside.join("file")).unwrap(),
+            "unstaged linked edits\n"
+        );
+    }
+
+    // Hard-won: efc122a75: module names could escape the administrative module store.
+    #[test]
+    fn submodule_admin_name_cannot_attach_an_outside_repository() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let outside = Repo::new();
+        add_submodule(&root, &module);
+        let snapshot = root.capture(&CheckoutOwnership::Managed);
+        let destination = root.temp.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        git(&destination, &["init"]);
+        let config = fs::read(outside.checkout.join(".git/config")).unwrap();
+        let head = git(&outside.checkout, &["rev-parse", "HEAD"]);
+        for name in [
+            outside.checkout.join(".git").to_str().unwrap(),
+            "../../outside",
+        ] {
+            let mut modules = snapshot.initialized_submodules.clone();
+            modules[0].name = name.to_owned();
+            let error = restore_submodules(
+                &FileGit,
+                &destination,
+                &modules,
+                Some(&snapshot.index_gitlinks),
+                true,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unsafe submodule admin name"),
+                "{error:#}"
+            );
+        }
+        assert_eq!(
+            fs::read(outside.checkout.join(".git/config")).unwrap(),
+            config
+        );
+        assert_eq!(git(&outside.checkout, &["rev-parse", "HEAD"]), head);
+        assert!(!destination.join("sub").exists());
+    }
+
     // Hard-won: 3a4aef552: deinit hid unpublished nested refs/stashes from the managed loss guard.
     #[test]
     fn deinitialized_submodule_protects_cached_nested_refs_and_stashes() {
@@ -7852,6 +7987,10 @@ mod tests {
         );
         git(&r.checkout, &["commit", "-am", "submodule"]);
         git(&r.checkout, &["push", "origin", "main"]);
+        for message in ["first saved stash", "second saved stash"] {
+            fs::write(r.checkout.join("file"), message).unwrap();
+            git(&r.checkout, &["stash", "push", "-m", message]);
+        }
         let snapshot = r.capture(&CheckoutOwnership::Managed);
         let destination = r.temp.path().join("provisioned");
         git(
@@ -7897,6 +8036,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(read_stash(&FileGit, &destination).unwrap(), snapshot.stash);
         assert_eq!(
             git(&destination.join("sub"), &["rev-parse", "HEAD"]),
             snapshot.initialized_submodules[0].commit
