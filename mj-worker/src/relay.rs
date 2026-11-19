@@ -1031,11 +1031,6 @@ impl DurableRelay {
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
-        if !checkpoint_only {
-            relay.return_mailbox_hook_lease(
-                mj_core::relay::MailboxHookLeaseReturnReason::WorkerRestart,
-            )?;
-        }
         let recovered_native_history =
             missing_native_history && relay.recover_native_history_evidence();
         let recovered_questions = upgrading_questions && relay.recover_pending_elicitations();
@@ -1204,6 +1199,15 @@ impl DurableRelay {
                     "save recovered worker snapshot".to_owned()
                 }
             })?;
+        }
+        // Complete an ACK's interrupted file collection before any startup
+        // append can try sealing an acknowledged active file with no live span.
+        // Evidence upgrades above are durable before their old files disappear.
+        relay.garbage_collect_relay_history()?;
+        if !checkpoint_only {
+            relay.return_mailbox_hook_lease(
+                mj_core::relay::MailboxHookLeaseReturnReason::WorkerRestart,
+            )?;
         }
         relay.adopt_unqueued_queue_commands()?;
         relay.ensure_initial_commands_succeeded()?;

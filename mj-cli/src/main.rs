@@ -2636,7 +2636,7 @@ async fn recover(args: RecoverArgs) -> Result<()> {
                 result = daemon.adopt_recovery(mj_client::daemon::RecoveryAdoptionRequest { session_id: session.clone(), target_id: target, profile, bundle, all_instances }, |event| {
                     match event {
                         mj_client::daemon::RecoveryAdoptionProgress::Waiting { blockers, destroy_command } => {
-                            eprintln!("Waiting for {}.", blockers.join("; "));
+                            eprintln!("Waiting for {}.", mj_core::transcript::sanitize_terminal_text(&blockers.join("; ")));
                             if let Some(command) = destroy_command { eprintln!("If the worker never becomes idle, the only way forward is to destroy it: {command}"); }
                         }
                         mj_client::daemon::RecoveryAdoptionProgress::Installed { session_id } => {

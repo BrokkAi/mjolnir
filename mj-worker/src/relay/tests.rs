@@ -9920,3 +9920,45 @@ fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
         .unwrap();
     assert!(exited_cut.try_recv().unwrap().is_ok());
 }
+
+// Hard-won: 64493cb: a durable ACK with an uncleared full active file prevented the first restart append.
+#[test]
+fn startup_collects_an_acknowledged_full_active_segment_before_appending() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let active = temp
+        .path()
+        .join(RELAY_JOURNAL_DIR)
+        .join(RELAY_ACTIVE_SEGMENT);
+    let payload = "x".repeat(64 * 1024);
+    while fs::metadata(&active).map_or(0, |metadata| metadata.len())
+        < mj_core::relay::RELAY_SEGMENT_BYTE_LIMIT
+    {
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: payload.clone(),
+            })
+            .unwrap();
+    }
+    let frontier = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    // Crash between the durable ACK and physical active-file replacement.
+    relay.snapshot.acknowledged_through = frontier;
+    relay.snapshot.acknowledged_digest = digest.clone();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert_eq!(relay.latest_ordinal(), frontier + 1);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "newer").unwrap();
+    let events = relay.events_after(frontier, &digest).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].observation,
+        RelayObservation::SessionRestarted
+    ));
+}
