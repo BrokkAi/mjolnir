@@ -418,15 +418,20 @@ def git(*args, cwd=None):
                 raise Cancelled(f"cancelled during git {args[0]}")
     # git exiting (or its pipes closing) doesn't prove its scope is empty: stop the scope and
     # prove it gone, with the same check as a server, before anything else runs.
-    run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
-    deadline = time.monotonic() + STOP_SECONDS
-    while True:
-        gone, detail = scope_tree_gone(f"{unit}.scope")
-        if gone:
-            break
-        if time.monotonic() > deadline:
-            raise TeardownUnconfirmed(f"{unit}.scope not confirmed empty after git {args[0]} ({detail})")
-        time.sleep(1)
+    try:
+        run_bounded(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
+        deadline = time.monotonic() + STOP_SECONDS
+        while True:
+            gone, detail = scope_tree_gone(f"{unit}.scope")
+            if gone:
+                break
+            if time.monotonic() > deadline:
+                raise TeardownUnconfirmed(f"{unit}.scope not confirmed empty after git {args[0]} ({detail})")
+            time.sleep(1)
+    except TeardownUnconfirmed:
+        raise
+    except BaseException as e:  # a timeout or bus error leaves the scope unaccounted for: halt
+        raise TeardownUnconfirmed(f"{unit}.scope: teardown check failed after git {args[0]}: {e!r}") from e
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, ["git", *args], out, err)
     return out.strip()
