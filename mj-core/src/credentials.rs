@@ -915,6 +915,10 @@ pub enum CredentialSyncAction {
     GithubTokenPushed,
     /// A stale session token was removed because the controller has none.
     GithubTokenRemoved,
+    /// The controller's AWS credentials replaced the session's. This is not a
+    /// harness login: a worker holding a rejected login has nothing to retry
+    /// with after it.
+    AwsCredentialsPushed,
     /// The session's AWS credentials were withdrawn, because the profile
     /// requires role-scoped credentials and none could be issued.
     AwsCredentialsRemoved,

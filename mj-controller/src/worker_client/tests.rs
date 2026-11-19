@@ -6,6 +6,17 @@ use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Whether the result installed AWS credentials on the session.
+fn aws_pushed(result: &CredentialSyncResult, session_id: &str) -> bool {
+    result.outcomes.iter().any(|outcome| {
+        outcome.session_id == session_id
+            && outcome
+                .outcome
+                .as_ref()
+                .is_ok_and(|actions| actions.contains(&CredentialSyncAction::AwsCredentialsPushed))
+    })
+}
+
 /// What a direct (no actor) reconciliation of one session borrows.
 macro_rules! access {
     () => {
@@ -1686,7 +1697,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
                 unchanged_login: None,
                 current_access_token: None,
                 session_id: "remote".into(),
-                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+                outcome: Ok(vec![CredentialSyncAction::AwsCredentialsPushed]),
                 step_failures: Vec::new(),
             }]
         );
@@ -1789,7 +1800,7 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
         .unwrap();
     assert_eq!(
         granted_outcome.outcome,
-        Ok(vec![CredentialSyncAction::Pushed])
+        Ok(vec![CredentialSyncAction::AwsCredentialsPushed])
     );
     let received: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&granted_received).unwrap()).unwrap();
@@ -1893,7 +1904,7 @@ async fn role_scoped_mints_for_one_profile_run_together() {
     assert!(
         outcomes
             .iter()
-            .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::Pushed])),
+            .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::AwsCredentialsPushed])),
         "{outcomes:?}"
     );
 }
@@ -1976,7 +1987,7 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
     assert!(
         outcomes
             .iter()
-            .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::Pushed])),
+            .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::AwsCredentialsPushed])),
         "{outcomes:?}"
     );
 }
@@ -2587,7 +2598,7 @@ async fn a_matching_secret_without_a_scope_record_is_installed_again() {
         outcomes.iter().any(|outcome| outcome
             .outcome
             .as_ref()
-            .is_ok_and(|actions| actions.contains(&CredentialSyncAction::Pushed))),
+            .is_ok_and(|actions| actions.contains(&CredentialSyncAction::AwsCredentialsPushed))),
         "{outcomes:?}"
     );
 }
@@ -3560,7 +3571,7 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
             break result;
         }
     };
-    assert!(done.pushed_to("obsolete"), "{done:?}");
+    assert!(aws_pushed(&done, "obsolete"), "{done:?}");
     // The withdrawal is reported once, by the interim result, not again in the
     // cycle's own.
     let removals =
@@ -3895,7 +3906,7 @@ async fn an_unreadable_provider_configuration_is_that_cycles_outcome_and_a_repai
     // Unreadable: the unscoped credentials are withdrawn (said at once), and
     // the error said.
     let withdrawn = next_partial(&mut coordinator).await;
-    assert!(withdrawn.pushed_to("unreadable") || withdrawn.failures().next().is_some());
+    assert!(aws_pushed(&withdrawn, "unreadable") || withdrawn.failures().next().is_some());
     let failed = loop {
         let result = next_partial(&mut coordinator).await;
         if result
@@ -3928,7 +3939,7 @@ async fn an_unreadable_provider_configuration_is_that_cycles_outcome_and_a_repai
             break result;
         }
     };
-    assert!(repaired.pushed_to("unreadable"), "{repaired:?}");
+    assert!(aws_pushed(&repaired, "unreadable"), "{repaired:?}");
     assert!(root.join("aws").exists());
 }
 
@@ -4086,7 +4097,7 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let result = coordinator.result().await.expect("coordinator stopped");
-            if result.partial && result.pushed_to("auth-session") {
+            if result.partial && aws_pushed(&result, "auth-session") {
                 return;
             }
         }
@@ -4121,7 +4132,7 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
         "the credentials were not reinstalled"
     );
     assert!(root.join("aws-scope.json").exists());
-    assert!(triggered.pushed_to("auth-session"), "{triggered:?}");
+    assert!(aws_pushed(&triggered, "auth-session"), "{triggered:?}");
     assert!(!triggered.partial);
 }
 
@@ -5355,6 +5366,45 @@ async fn a_renewed_login_reaches_a_session_whatever_background_work_holds_it() {
     drop(sync_handle);
     drop(sync);
     channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1600: an unlocked reading of the same login erased the native-lock evidence
+// macOS keeps a Claude login in the Keychain, not in the profile home.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlocked_reading_of_the_same_login_keeps_the_native_lock_evidence() {
+    let home = tempfile::tempdir().unwrap();
+    let login = |token: &str| {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"refresh","expiresAt":4000000000000}}}}"#
+        )
+    };
+    let credentials = home.path().join(".credentials.json");
+    std::fs::write(&credentials, login("first")).unwrap();
+    let mut target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00Z",
+        &home.path().join("received"),
+    );
+    target.harness = mj_core::config::HarnessKind::Claude;
+    let profile = credential_sync::ProfileLogin::new(None, Default::default());
+
+    // An authentication-triggered pass reads under the lock; a routine pass
+    // then reads the same bytes without it.
+    profile.refresh(None, &target, true).await;
+    assert_eq!(profile.snapshot_read_under_lock(&target), Some(true));
+    profile.refresh(None, &target, false).await;
+    assert_eq!(
+        profile.snapshot_read_under_lock(&target),
+        Some(true),
+        "the unlocked reading erased the evidence"
+    );
+
+    // A different login replaces the reading, flag included.
+    std::fs::write(&credentials, login("second")).unwrap();
+    profile.refresh(None, &target, false).await;
+    assert_eq!(profile.snapshot_read_under_lock(&target), Some(false));
 }
 
 // Hard-won: #1581: a slow credential RPC delayed delivery to all later sessions.

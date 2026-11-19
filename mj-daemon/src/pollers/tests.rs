@@ -2346,6 +2346,15 @@ fn an_auth_failure_reaches_the_person_only_when_nothing_will_resolve_it() {
     delivered.outcomes[0].outcome = Ok(vec![mj_core::credentials::CredentialSyncAction::Pushed]);
     assert_eq!(notice(&delivered, HarnessKind::Claude), None);
 
+    // Only AWS credentials were pushed: the worker still holds the rejected
+    // login and has nothing to retry with.
+    let mut aws_only = unidentified.clone();
+    aws_only.outcomes[0].outcome = Ok(vec![
+        mj_core::credentials::CredentialSyncAction::AwsCredentialsPushed,
+    ]);
+    let aws_only = notice(&aws_only, HarnessKind::Claude).unwrap();
+    assert!(aws_only.contains("was not established"), "{aws_only}");
+
     // A worker that cannot retry by itself still needs the person: Codex has
     // no authentication retry, and a Claude turn that recorded no login
     // fingerprint gives the worker nothing to compare the new login with.

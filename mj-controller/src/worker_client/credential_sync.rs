@@ -285,7 +285,7 @@ pub(super) struct SessionAccess<'a> {
     pub(super) runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
 }
 
-enum PassEvent {
+pub(super) enum PassEvent {
     Pulled(String),
     Finished(CredentialSyncResult),
 }
@@ -2406,7 +2406,10 @@ pub(super) struct ProfileLogin {
 }
 
 impl ProfileLogin {
-    fn new(events: Option<mpsc::UnboundedSender<PassEvent>>, rejected: DeliveryRegistry) -> Self {
+    pub(super) fn new(
+        events: Option<mpsc::UnboundedSender<PassEvent>>,
+        rejected: DeliveryRegistry,
+    ) -> Self {
         Self {
             decide: Default::default(),
             current: watch::Sender::new(None),
@@ -2416,7 +2419,7 @@ impl ProfileLogin {
         }
     }
 
-    async fn refresh(
+    pub(super) async fn refresh(
         &self,
         runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
@@ -2430,8 +2433,39 @@ impl ProfileLogin {
         }
         let changed = before.as_ref().map(|before| &before.credential)
             != login.as_ref().ok().map(|after| &after.credential);
-        self.current.send_replace(Some(login));
+        self.publish(login);
         changed && before.is_some()
+    }
+
+    /// Publish a new reading as the profile's login. Reading the same bytes
+    /// again without the native lock adds nothing to what a locked reading
+    /// showed (this exact login was current at a moment after the failure),
+    /// so it keeps that evidence; different bytes replace the reading, flag
+    /// included. Callers hold `decide`, so readings are published in the order
+    /// they were taken and an older login never replaces a newer one here.
+    fn publish(&self, login: Result<Arc<CanonicalLogin>, String>) {
+        self.current.send_modify(|current| {
+            let login = match (login, current.take()) {
+                (Ok(new), Some(Ok(old)))
+                    if old.read_under_lock && !new.read_under_lock && old.bytes == new.bytes =>
+                {
+                    let mut kept = Arc::unwrap_or_clone(new);
+                    kept.read_under_lock = true;
+                    Ok(Arc::new(kept))
+                }
+                (login, _) => login,
+            };
+            *current = Some(login);
+        });
+    }
+
+    /// Whether the snapshot the next job will use was read under the native
+    /// lock. `None` when there is no snapshot for the target.
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub(super) fn snapshot_read_under_lock(&self, target: &CredentialSyncTarget) -> Option<bool> {
+        self.for_target(target)
+            .ok()
+            .map(|login| login.read_under_lock)
     }
 
     /// The profile's login for this pass, read once: the pass delivers it and
@@ -2553,8 +2587,8 @@ impl ProfileLogin {
         if installed.installed || installed.snapshot != login.credential {
             // A pull and the host's own concurrent renewal both invalidate the
             // deliveries selected against the previous generation.
-            self.current
-                .send_replace(Some(self.read(target, false).await));
+            let login = self.read(target, false).await;
+            self.publish(login);
             self.send(PassEvent::Pulled(target.profile_id.clone()));
         }
         Ok(installed)
@@ -2930,7 +2964,7 @@ async fn reconcile_aws(
                 installed == expected,
                 "session AWS credentials do not match the controller after installation"
             );
-            Ok(Some(CredentialSyncAction::Pushed))
+            Ok(Some(CredentialSyncAction::AwsCredentialsPushed))
         }
         AwsSync::Unavailable {
             scoped_required: false,
