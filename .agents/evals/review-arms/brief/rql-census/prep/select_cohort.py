@@ -13,6 +13,10 @@ ties. Walking down the ranking, at most one repo per shared-history group is
 provisionally selected; every member stays ranked. A repo enters the test set only
 after tracing admits at least 8 relation diffs, so tracing walks this list and a repo
 that misses the floor gives its place to the next.
+
+One ranking uses one measurement provenance: every record that ran Bifrost must share
+the binary and the driver's environment key, or the script refuses. Until every pinned
+repo has a record, it prints the table and exits non-zero.
 """
 import json
 import pathlib
@@ -30,6 +34,11 @@ def main():
         sys.exit(f"{log} does not exist")
     measured = latest_records(log)
     pins = {e[0]: e[1] for e in (l.split() for l in open(sys.argv[3])) if e}
+    provenance = {(r.get("binary_sha256"), json.dumps(r.get("environment"), sort_keys=True))
+                  for repo, r in measured.items() if repo in pins and r.get("binary_sha256")}
+    if len(provenance) > 1:
+        sys.exit(f"{log} mixes {len(provenance)} Bifrost builds or measurement environments; "
+                 "measure every pinned repo under one before ranking")
     y = json.load(open(sys.argv[2]))
     estimate = y["windows"]["wide_2025"]["per_repo_relation_estimate_capped"]
     group_of = y["group_of"]
@@ -76,6 +85,9 @@ def main():
               f"{x['hours']:.2f} | {x['peak_gib']:.1f} | {status} |")
     total = sum(x["hours"] for x in rows if not x["failure"])
     print(f"\nIndexing CPU-hours, all measured repos that reached ready: {total:.1f}")
+    missing = [repo for repo in pins if repo not in measured]
+    if missing:
+        sys.exit(f"incomplete batch: no record yet for {', '.join(missing)}")
 
 
 if __name__ == "__main__":
