@@ -537,9 +537,7 @@ pub fn usage_envelopes(
 #[derive(Debug, Clone)]
 pub struct ObserveSpool {
     root: PathBuf,
-    queued: std::sync::Arc<std::sync::Mutex<Option<BTreeMap<String, PathBuf>>>>,
     ids: ObserveEmittedIds,
-    cancellation: CancellationToken,
 }
 
 impl ObserveSpool {
@@ -550,31 +548,15 @@ impl ObserveSpool {
         let ids = ObserveEmittedIds::new(&requested.with_file_name("delivery.json"));
         let root = fs::canonicalize(&requested)
             .with_context(|| format!("resolve Observe spool {}", requested.display()))?;
-        Ok(Self {
-            root,
-            queued: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            ids,
-            cancellation: CancellationToken::new(),
-        })
+        Ok(Self { root, ids })
     }
 
     /// The logical Observe state path owns id logs, independently of where a
-    /// symlink places the spool. Rebuildable indexing follows daemon cancellation.
-    pub fn open_for_delivery(
-        paths: &ObservePaths,
-        cancellation: &CancellationToken,
-    ) -> Result<Self> {
+    /// symlink places the spool.
+    pub fn open_for_delivery(paths: &ObservePaths) -> Result<Self> {
         let mut spool = Self::open(&paths.spool)?;
         spool.ids = ObserveEmittedIds::new(&paths.state);
-        spool.cancellation = cancellation.clone();
         Ok(spool)
-    }
-
-    fn filename_digest(path: &Path) -> Result<&str> {
-        path.file_stem()
-            .and_then(|value| value.to_str())
-            .and_then(|value| value.rsplit('-').next())
-            .context("invalid Observe spool filename")
     }
 
     pub fn emitted_ids(&self) -> &ObserveEmittedIds {
@@ -592,39 +574,6 @@ impl ObserveSpool {
             .context("Observe envelope lost its session id")?;
         let digest = Sha256::digest(format!("{session_id}\0{}", envelope.meta.event_id).as_bytes());
         let digest = mj_core::hex::lower_hex(digest);
-        let mut queued = self
-            .queued
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Observe spool lock poisoned"))?;
-        if queued.is_none() {
-            let mut index = BTreeMap::new();
-            for entry in fs::read_dir(&self.root)? {
-                ensure!(
-                    !self.cancellation.is_cancelled(),
-                    "Observe spool indexing cancelled"
-                );
-                let path = entry?.path();
-                if path.extension().and_then(|value| value.to_str()) == Some("json") {
-                    index
-                        .entry(Self::filename_digest(&path)?.to_owned())
-                        .or_insert(path);
-                }
-            }
-            ensure!(
-                !self.cancellation.is_cancelled(),
-                "Observe spool indexing cancelled"
-            );
-            *queued = Some(index);
-        }
-        let queued = queued
-            .as_mut()
-            .expect("spool index initialized under its owner lock");
-        if let Some(path) = queued.get(&digest) {
-            Self::check_queued_identity(path, envelope)?;
-            mj_core::config::sync_directory(&self.root)?;
-            return Ok(path.clone());
-        }
-
         let name = format!(
             "{:020}-{:020}-{:03}-{digest}.json",
             envelope.meta.ts.max(0),
@@ -656,13 +605,9 @@ impl ObserveSpool {
                 return Err(error).context("publish Observe spool entry");
             }
             Self::check_queued_identity(&path, envelope)?;
-            queued.insert(digest, path.clone());
             mj_core::config::sync_directory(&self.root)?;
             return Ok(path);
         }
-        // The index owns publication identity as soon as the final link exists,
-        // including when cleanup or directory durability subsequently fails.
-        queued.insert(digest, path.clone());
         fs::remove_file(&temporary)
             .with_context(|| format!("remove Observe spool link {}", temporary.display()))?;
         mj_core::config::sync_directory(&self.root)?;
@@ -680,41 +625,6 @@ impl ObserveSpool {
         );
         // A crash can leave the spool ahead of the id log. The first queued
         // version wins even when a later projection has grown its content.
-        Ok(())
-    }
-
-    /// Recover the spool-to-id-log gap even when projection of a session fails.
-    /// Delivery may remove a queued entry only after its id is durable.
-    pub fn prepare_delivery(&self, batch: &[u8], cancellation: &CancellationToken) -> Result<()> {
-        // A crash may have interrupted the original link's directory sync.
-        // Make the queued files durable before their ids can outlive them.
-        mj_core::config::sync_directory(&self.root)?;
-        let mut sessions: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for envelope in serde_json::Deserializer::from_slice(batch).into_iter::<ObserveEnvelope>() {
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
-            let envelope = envelope.context("decode queued Observe envelope")?;
-            let session_id = envelope.event["session_id"]
-                .as_str()
-                .context("queued Observe envelope lost session id")?;
-            sessions
-                .entry(session_id.to_owned())
-                .or_default()
-                .push(envelope.meta.event_id);
-        }
-        let ids = self.emitted_ids();
-        for (session, queued) in sessions {
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
-            let known = ids.load(&session)?;
-            let missing = queued
-                .into_iter()
-                .filter(|id| !known.contains(id))
-                .collect::<Vec<_>>();
-            ids.append(&session, &missing)?;
-        }
         Ok(())
     }
 
@@ -747,15 +657,8 @@ impl ObserveSpool {
             "refusing to remove an Observe spool file outside {}",
             self.root.display()
         );
-        let mut queued = self
-            .queued
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Observe spool lock poisoned"))?;
         fs::remove_file(&path)
             .with_context(|| format!("remove delivered Observe spool entry {}", path.display()))?;
-        if let Some(queued) = queued.as_mut() {
-            queued.remove(Self::filename_digest(&path)?);
-        }
         Ok(())
     }
 }

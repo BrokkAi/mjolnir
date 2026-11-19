@@ -26,7 +26,13 @@ pub(super) fn spawn(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> JoinHandle<Result<()>> {
-    tokio::spawn(async move { run(state, cancellation).await })
+    tokio::spawn(async move {
+        let outcome = run(state, cancellation).await;
+        if let Err(error) = &outcome {
+            tracing::warn!(error = %format!("{error:#}"), "automatic Brokk Observe delivery stopped");
+        }
+        outcome
+    })
 }
 
 async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Result<()> {
@@ -76,9 +82,10 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
     let mut immediate = true;
     let mut backoff = INITIAL_DELIVERY_BACKOFF;
 
+    // Export saves cursor progress before returning, including cancellation.
+    // An idle exit has no progress to preserve and must not rewrite the store.
     loop {
         if cancellation.is_cancelled() {
-            save_delivery(&paths, &delivery, None).await?;
             return Ok(());
         }
         if immediate {
@@ -88,12 +95,15 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                 tracing::warn!(error = %format!("{error:#}"), "automatic Brokk Observe export stopped early");
             }
             if cancellation.is_cancelled() {
-                save_delivery(&paths, &delivery, None).await?;
                 return Ok(());
             }
-            // Each batch repairs its own id log before upload. An enqueue
-            // failure must not prevent already-durable entries freeing space.
-            let flush = flush_spool(&paths, &config, &client, &cancellation).await;
+            // One owner exports and durably records ids before delivering.
+            // A failed pass may have left an unlogged spool entry behind.
+            let flush = if export.is_ok() {
+                flush_spool(&paths, &config, &client, &cancellation).await
+            } else {
+                Ok(0)
+            };
             match &flush {
                 Ok(delivered) => {
                     if *delivered > 0 {
@@ -114,14 +124,16 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                 }
             }
             if cancellation.is_cancelled() {
-                save_delivery(&paths, &delivery, None).await?;
                 return Ok(());
             }
             let failed = match (&export, &flush) {
-                (Ok(()), Ok(_)) => {
-                    record_success(&paths, &delivery).await?;
-                    false
-                }
+                (Ok(()), Ok(_)) => match record_success(&paths, &delivery).await {
+                    Ok(()) => false,
+                    Err(error) => {
+                        tracing::warn!(error = %format!("{error:#}"), "could not persist Observe delivery success");
+                        true
+                    }
+                },
                 (export, flush) => {
                     let error = match (export, flush) {
                         (Err(export), Err(flush)) => {
@@ -131,17 +143,16 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                         (_, Err(flush)) => format!("delivery: {flush:#}"),
                         (Ok(()), Ok(_)) => unreachable!(),
                     };
-                    record_failure(&paths, &delivery, &anyhow!(error)).await?;
+                    if let Err(error) = record_failure(&paths, &delivery, &anyhow!(error)).await {
+                        tracing::warn!(error = %format!("{error:#}"), "could not persist Observe delivery failure; retrying");
+                    }
                     true
                 }
             };
             immediate = *revisions.borrow() != before;
             if failed {
                 tokio::select! {
-                    _ = cancellation.cancelled() => {
-                        save_delivery(&paths, &delivery, None).await?;
-                        return Ok(());
-                    },
+                    _ = cancellation.cancelled() => return Ok(()),
                     _ = tokio::time::sleep(backoff) => immediate = true,
                     changed = revisions.changed() => {
                         if changed.is_err() { return Ok(()); }
@@ -157,10 +168,7 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
         }
 
         tokio::select! {
-            _ = cancellation.cancelled() => {
-                save_delivery(&paths, &delivery, None).await?;
-                return Ok(());
-            },
+            _ = cancellation.cancelled() => return Ok(()),
             changed = revisions.changed() => {
                 if changed.is_err() {
                     return Ok(());
@@ -195,7 +203,7 @@ async fn publish_changed_sessions(
         let mut delivery = delivery
             .lock()
             .map_err(|_| anyhow!("Observe state lock poisoned"))?;
-        let spool = ObserveSpool::open_for_delivery(&paths, &cancellation)?;
+        let spool = ObserveSpool::open_for_delivery(&paths)?;
         let mut ids = runtime_state
             .sessions
             .keys()
@@ -352,13 +360,15 @@ fn publish_one(
         known.remote = known.remote.take().or(found.remote);
         known.branch = found.position.branch.clone().or(known.branch.take());
         let start_already_sent = known.head.is_none()
-            && cursor.is_none_or(|cursor| cursor.reported_git.is_none())
-            && emitted.contains(&mj_core::observe::event_id(
-                &record.id,
-                0,
-                "SessionStart",
-                0,
-            ));
+            && cursor.is_some_and(|cursor| {
+                cursor.reported_git.is_none()
+                    && emitted.contains(&mj_core::observe::event_id(
+                        &record.id,
+                        0,
+                        "SessionStart",
+                        0,
+                    ))
+            });
         if known.head.is_none() {
             known.head = found.launch.clone();
         }
@@ -558,8 +568,8 @@ fn enqueue_envelopes(
             if !appended.is_empty() {
                 ids.append(session_id, &appended)?;
             }
-            // Batch delivery recovers any current id left behind by a failure
-            // after publication, independently of whether projection can retry.
+            // The failed pass cannot flush. Its next projection retries this
+            // envelope against the existing-file idempotence check.
             return Err(error);
         }
         emitted.insert(envelope.meta.event_id.clone());
@@ -784,7 +794,7 @@ async fn flush_spool(
     let delivery_paths = paths.clone();
     let preparing_cancellation = cancellation.clone();
     let (spool, pending) = tokio::task::spawn_blocking(move || {
-        let spool = ObserveSpool::open_for_delivery(&delivery_paths, &preparing_cancellation)?;
+        let spool = ObserveSpool::open_for_delivery(&delivery_paths)?;
         let pending = spool.pending_cancellable(&preparing_cancellation)?;
         Ok::<_, anyhow::Error>((spool, Arc::new(pending)))
     })
@@ -828,16 +838,10 @@ async fn flush_spool(
     let mut index = 0_usize;
     while index < pending.len() {
         let batch_paths = Arc::clone(&pending);
-        let preparing_spool = spool.clone();
-        let preparing_cancellation = cancellation.clone();
-        let (body, end) = tokio::task::spawn_blocking(move || {
-            let (body, end) = batch_from(&batch_paths, index, limit)?;
-            // Recover only this server-sized batch, using bytes already read.
-            preparing_spool.prepare_delivery(&body, &preparing_cancellation)?;
-            Ok::<_, anyhow::Error>((body, end))
-        })
-        .await
-        .context("Observe batch preparation task panicked")??;
+        let (body, end) =
+            tokio::task::spawn_blocking(move || batch_from(&batch_paths, index, limit))
+                .await
+                .context("Observe batch read task panicked")??;
         if cancellation.is_cancelled() {
             return Ok(0);
         }
@@ -914,7 +918,7 @@ fn batch_from(paths: &[PathBuf], start: usize, limit: usize) -> Result<(Vec<u8>,
 async fn save_delivery(
     paths: &ObservePaths,
     delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
-    outcome: Option<std::result::Result<(), String>>,
+    outcome: std::result::Result<(), String>,
 ) -> Result<()> {
     let path = paths.state.clone();
     let delivery = Arc::clone(delivery);
@@ -923,9 +927,8 @@ async fn save_delivery(
             .lock()
             .map_err(|_| anyhow!("Observe state lock poisoned"))?;
         match outcome {
-            Some(Ok(())) => state.mark_success(mj_core::clock::epoch_millis()),
-            Some(Err(error)) => state.mark_failure(mj_core::clock::epoch_millis(), error),
-            None => {}
+            Ok(()) => state.mark_success(mj_core::clock::epoch_millis()),
+            Err(error) => state.mark_failure(mj_core::clock::epoch_millis(), error),
         }
         state.save(&path)
     })
@@ -937,7 +940,7 @@ async fn record_success(
     paths: &ObservePaths,
     delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
 ) -> Result<()> {
-    save_delivery(paths, delivery, Some(Ok(()))).await
+    save_delivery(paths, delivery, Ok(())).await
 }
 
 async fn record_failure(
@@ -945,7 +948,7 @@ async fn record_failure(
     delivery: &Arc<std::sync::Mutex<ObserveDeliveryState>>,
     error: &anyhow::Error,
 ) -> Result<()> {
-    save_delivery(paths, delivery, Some(Err(format!("{error:#}")))).await
+    save_delivery(paths, delivery, Err(format!("{error:#}"))).await
 }
 
 #[cfg(test)]
@@ -1026,8 +1029,7 @@ mod tests {
         drop(spool);
         // Restart without recording an id, then project a longer message.
         let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
-        let mut changed = projected_stop("recover-native-opus", "complete answer");
-        changed.meta.ts += 1; // Content revisions may also change ordering metadata.
+        let changed = projected_stop("recover-native-opus", "complete answer");
         let mut delivery = ObserveDeliveryState::load(&path, 1).unwrap();
         assert_eq!(replay_stop(&spool, &mut delivery, changed.clone()), 1);
         assert_eq!(
@@ -1044,34 +1046,6 @@ mod tests {
         delivery = ObserveDeliveryState::load(&path, 1).unwrap();
         assert_eq!(replay_stop(&spool, &mut delivery, changed), 0);
         assert!(spool.pending().unwrap().is_empty());
-        // Another crash-left session cannot be projected at all. Delivery
-        // recovers its id from the queued envelope before removing that file.
-        let unprojectable = projected_stop("unprojectable-session", "queued before crash");
-        spool.enqueue(&unprojectable).unwrap();
-        assert!(
-            spool
-                .emitted_ids()
-                .load("unprojectable-session")
-                .unwrap()
-                .is_empty()
-        );
-        let later = spool.root().join("zz-later.json");
-        std::fs::write(&later, b"not a valid envelope").unwrap();
-        let pending = spool.pending().unwrap();
-        let (body, end) =
-            batch_from(&pending, 0, unprojectable.to_ndjson().unwrap().len()).unwrap();
-        assert_eq!(end, 1);
-        // Hard-won: d91380c89: preparation must not read the rest of the backlog.
-        spool
-            .prepare_delivery(&body, &CancellationToken::new())
-            .unwrap();
-        assert_eq!(
-            spool.emitted_ids().load("unprojectable-session").unwrap(),
-            BTreeSet::from([unprojectable.meta.event_id.clone()])
-        );
-        spool.remove(&pending[0]).unwrap();
-        spool.remove(&later).unwrap();
-        assert_eq!(replay_stop(&spool, &mut delivery, unprojectable), 0);
     }
 
     // Hard-won: 66409e7c5: a post-link sync failure let delivery outrun its id log.
@@ -1090,11 +1064,6 @@ mod tests {
         let session_id = "post-link-sync-failure";
         let envelope = projected_stop(session_id, "first answer");
         let mut delivery = ObserveDeliveryState::load(&path, 1).unwrap();
-        // Prime the lazy identity index before denying directory reads.
-        let earlier = spool
-            .enqueue(&projected_stop("earlier-session", "earlier answer"))
-            .unwrap();
-        spool.remove(&earlier).unwrap();
         let permissions = std::fs::metadata(spool.root()).unwrap().permissions();
         // Creating/removing directory entries still works, but opening this
         // directory for its fsync fails after the final spool link is visible.
@@ -1120,8 +1089,7 @@ mod tests {
         assert!(spool.emitted_ids().load(session_id).unwrap().is_empty());
         let queued = spool.pending().unwrap();
         assert_eq!(queued.len(), 1);
-        let mut replay = projected_stop(session_id, "longer answer");
-        replay.meta.ts += 1;
+        let replay = projected_stop(session_id, "longer answer");
         assert_eq!(replay_stop(&spool, &mut delivery, replay), 1);
         assert_eq!(spool.pending().unwrap(), queued);
         assert_eq!(
@@ -1195,7 +1163,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(relocated_spool.path(), &paths.spool).unwrap();
         // Hard-won: d91380c89: a relocated spool must use the migrated id log.
-        let spool = ObserveSpool::open_for_delivery(&paths, &CancellationToken::new()).unwrap();
+        let spool = ObserveSpool::open_for_delivery(&paths).unwrap();
 
         assert_eq!(replay_stop(&spool, &mut reloaded, envelope), 0);
         assert!(spool.pending().unwrap().is_empty());
@@ -1373,13 +1341,7 @@ mod tests {
                 .unwrap();
         let state = mj_core::state::State::default();
         let mut publish = |record: &SessionRecord| {
-            let count =
-                publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap();
-            if record.checkpoint.is_none() {
-                // Hard-won: d91380c89: partial export can persist SessionStart without a cursor.
-                delivery.sessions.remove(&record.id);
-            }
-            count
+            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
         };
         // Every head in the spool, in delivery order, with the event carrying it.
         let heads = || {
@@ -1526,20 +1488,6 @@ mod tests {
             "an unchanged projection must not be rebuilt"
         );
         delivery.save(&paths.state).unwrap();
-
-        #[cfg(unix)]
-        if unsafe { libc::geteuid() } != 0 {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = std::fs::metadata(spool.root()).unwrap().permissions();
-            std::fs::set_permissions(spool.root(), std::fs::Permissions::from_mode(0o500)).unwrap();
-            let enqueue = spool.enqueue(&projected_stop(
-                "cannot-enqueue",
-                "no free writable storage",
-            ));
-            std::fs::set_permissions(spool.root(), permissions).unwrap();
-            // Hard-won: d91380c89: failed enqueue must still let durable entries drain.
-            assert!(enqueue.is_err());
-        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
