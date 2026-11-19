@@ -547,7 +547,7 @@ fn pool_bar(
         // members by name and not others. An unknown or refreshing reading
         // keeps a one-cell marker so it does not read as spent quota.
         let mut text: Vec<_> = text.chars().collect();
-        if cells < 6 || text.len() > cells {
+        if text.len() > cells {
             text = if member.awaiting_reading {
                 vec!['?']
             } else if refreshing.contains(&member.id) {

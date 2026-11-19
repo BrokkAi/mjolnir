@@ -67,7 +67,7 @@ background runs (x..end, colour):
 │DEEPSEEK                                                  │
 │  dsh: pay-per-use                                        │
 │META                                                      │
-│ + Rolling    30m     1h  1h30m                   avg 58%*│
+│ + Rolling    30m     1h  1h30m    2h 2h30m    3h avg 58%*│
 │  1 profile not reporting                                 │
 │  muse2 70% · Cached usage; next refresh pending          │
 │  muse: login expired · Cached login notice               │
@@ -500,7 +500,7 @@ background runs (x..end, colour):
 ╭ Profiles (refreshed 16s ag…╮
 │>+ 5H   4h43m  4h43m avg 50%│
 │GOOGLE                      ▐
-│ + Gemini            avg 90%│
+│ + Gemini  6d5h 6d6h avg 90%│
 │ + Claude & GPT      avg 49%│
 ╰────────────────────────────╯
 background runs (x..end, colour):
@@ -579,7 +579,7 @@ background runs (x..end, colour):
 |DEEPSEEK                                                  |
 |  dsh: pay-per-use                                        |
 |META                                                      |
-| + Rolling ...30m|####1h|#1h30m|####.|####.|####. avg 58%*|
+| + Rolling ...30m|####1h|#1h30m|###2h|2h30m|###3h avg 58%*|
 |  1 profile not reporting                                 |
 |  muse2 70% - Cached usage; next refresh pending          |
 |  muse: login expired - Cached login notice               |
@@ -1012,7 +1012,7 @@ background runs (x..end, colour):
 + Profiles (refreshed 16s a..+
 |>+ 5H ##4h43m|.4h43m avg 50%|
 |GOOGLE                      #
-| + Gemini ####.|#### avg 90%|
+| + Gemini #6d5h|6d6h avg 90%|
 | + Claude & GPT #.|# avg 49%|
 +----------------------------+
 background runs (x..end, colour):
@@ -1136,7 +1136,7 @@ background runs (x..end, colour):
 │DEEPSEEK                                                  ▐
 │  dsh: pay-per-use                                        ▐
 │META                                                      ▐
-│ + Rolling    30m     1h  1h30m                   avg 58%*│
+│ + Rolling    30m     1h  1h30m    2h 2h30m    3h avg 58%*│
 │  1 profile not reporting                                 │
 ╰──────────────────────────────────────────────────────────╯
 background runs (x..end, colour):
