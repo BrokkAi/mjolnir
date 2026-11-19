@@ -77,6 +77,7 @@ pub(crate) struct SnapshotSubmoduleInspection {
     pub intent_to_add: Vec<(PathBuf, PathBuf)>,
     pub remote_refs_stale: bool,
     pub local_work: Vec<String>,
+    pub operations: Vec<(PathBuf, crate::snapshot::GitOperationKind)>,
     inspected_admins: BTreeSet<PathBuf>,
     loss_root: PathBuf,
 }
@@ -243,6 +244,9 @@ fn inspect_checkout(
                 .insert(std::fs::canonicalize(&admin)?);
             inspect_cached_worktree_heads(runner, &admin, &named, snapshot)?;
             inspect_cached_children(runner, &admin.join("modules"), &named, snapshot)?;
+            if let Some(operation) = crate::snapshot::operation(runner, &submodule)? {
+                snapshot.operations.push((named.clone(), operation));
+            }
             snapshot.intent_to_add.extend(
                 crate::snapshot::intent_to_add_paths(runner, &submodule)?
                     .into_iter()
@@ -464,6 +468,12 @@ fn inspect_cached_local_work(
             &evidence.objects,
             true,
         )?);
+        inspect_cached_index(
+            &cached,
+            admin,
+            &format!("submodule {}", named.display()),
+            snapshot,
+        )?;
         inspect_cached_worktree_heads(runner, admin, named, snapshot)?;
     }
     inspect_cached_children(runner, &admin.join("modules"), named, snapshot)
@@ -491,6 +501,41 @@ fn commit_published(
     Ok(false)
 }
 
+fn inspect_cached_index(
+    runner: &dyn GitCommandRunner,
+    admin: &Path,
+    description: &str,
+    snapshot: &mut SnapshotSubmoduleInspection,
+) -> Result<()> {
+    if !admin.join("index").try_exists()? {
+        return Ok(());
+    }
+    let staged = submodule_git(
+        runner,
+        admin,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--no-ext-diff",
+            "--ignore-submodules=none",
+            "--ita-visible-in-index",
+            "-z",
+        ],
+    )?;
+    let paths = staged
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(mj_core::path_input::from_git_bytes)
+        .collect::<Result<Vec<_>>>()?;
+    if !paths.is_empty() {
+        snapshot.local_work.push(format!("{description} index has staged changes: {}; commit and push them, or reset the index before suspending",
+            paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")));
+    }
+    Ok(())
+}
+
 fn inspect_cached_worktree_heads(
     runner: &dyn GitCommandRunner,
     admin: &Path,
@@ -513,6 +558,16 @@ fn inspect_cached_worktree_heads(
             inner: runner,
             admin: &worktree,
         };
+        inspect_cached_index(
+            &context,
+            &worktree,
+            &format!(
+                "submodule {} linked-worktree {}",
+                named.display(),
+                entry.file_name().to_string_lossy()
+            ),
+            snapshot,
+        )?;
         let head = context.run(
             &worktree,
             &git_command(&["rev-parse", "--verify", "--quiet", "HEAD"]),
