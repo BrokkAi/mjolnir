@@ -1889,19 +1889,25 @@ pub(crate) fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'sta
     })
 }
 
+/// The targets a Targets row lists. A standard runtime whose engine was never
+/// installed is not listed: the user never configured it. Any other missing
+/// runtime stays, marked unavailable.
+pub(crate) fn listed_capacity_targets<'a>(
+    target_ids: &'a [String],
+    dashboard: &'a DashboardState,
+) -> impl Iterator<Item = &'a String> + 'a {
+    target_ids
+        .iter()
+        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent))
+}
+
 pub(crate) fn capacity_target_labels(
     target_ids: &[String],
     dashboard: &DashboardState,
 ) -> Line<'static> {
     let config = &dashboard.config;
     let mut spans = Vec::new();
-    // A standard runtime whose engine was never installed is not listed:
-    // the user never configured it. Any other missing runtime stays, marked
-    // unavailable.
-    let listed = target_ids
-        .iter()
-        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent));
-    for (index, target_id) in listed.enumerate() {
+    for (index, target_id) in listed_capacity_targets(target_ids, dashboard).enumerate() {
         if index > 0 {
             spans.push(Span::raw(", "));
         }
