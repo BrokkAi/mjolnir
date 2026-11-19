@@ -295,19 +295,39 @@ struct ExecutableMemo {
 impl ExecutableMemo {
     fn lookup(&mut self, path: &Path, identity: &ExecutableIdentity) -> ExecutableRead {
         if self.by_path.get(path) != Some(identity) {
-            if let Some(previous) = self.by_path.insert(path.to_owned(), identity.clone()) {
-                let entry = self
-                    .by_identity
-                    .get_mut(&previous)
-                    .expect("indexed executable");
-                entry.paths -= 1;
-                if entry.paths == 0 {
-                    self.by_identity.remove(&previous);
+            if !self.by_path.contains_key(path) {
+                // A new path: forget paths that no longer exist, such as a
+                // verified download's temporary file, so one-off paths do not
+                // accumulate for the life of the process.
+                let gone = self
+                    .by_path
+                    .keys()
+                    .filter(|known| std::fs::symlink_metadata(known).is_err())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for known in gone {
+                    self.forget(&known);
                 }
             }
+            self.forget(path);
+            self.by_path.insert(path.to_owned(), identity.clone());
             self.by_identity.entry(identity.clone()).or_default().paths += 1;
         }
         Arc::clone(&self.by_identity[identity].read)
+    }
+
+    /// Drop `path`'s entry and its identity's record once no path names it.
+    fn forget(&mut self, path: &Path) {
+        if let Some(previous) = self.by_path.remove(path) {
+            let entry = self
+                .by_identity
+                .get_mut(&previous)
+                .expect("indexed executable");
+            entry.paths -= 1;
+            if entry.paths == 0 {
+                self.by_identity.remove(&previous);
+            }
+        }
     }
 }
 
