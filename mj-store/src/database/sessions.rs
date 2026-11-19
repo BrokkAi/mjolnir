@@ -1046,6 +1046,9 @@ pub(super) fn record_adoption_failure_if_current_to(
     if current.state == SessionState::Disconnected
         && current.native_session_id.is_none()
         && current.target == expected.target
+        && current.target_template_id == expected.target_template_id
+        && current.last_profile == expected.last_profile
+        && current.bundle_id == expected.bundle_id
     {
         current.last_error = Some(detail.to_owned());
         current.updated_at = updated_at.to_owned();
@@ -2184,6 +2187,27 @@ mod ownership_tests {
         assert!(current.last_error.is_none());
         let saved = load_state_from(&path).unwrap();
         assert_eq!(saved.sessions[&stale.id], current);
+        // Hard-won: 3210bf3: a captured failure owner must not outlive identity changes.
+        for field in ["profile", "target"] {
+            let mut changed = stale.clone();
+            changed.last_error = Some("new owner's diagnosis".into());
+            match field {
+                "profile" => changed.last_profile.push_str("-new"),
+                "target" => changed.target_template_id.push_str("-new"),
+                _ => unreachable!(),
+            }
+            save_session_to(&path, &changed).unwrap();
+            let expected = load_state_from(&path).unwrap().sessions[&stale.id].clone();
+            let actual = record_adoption_failure_if_current_to(
+                &path,
+                &stale,
+                "stale refusal",
+                "2030-01-01T00:00:02Z",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 
     // Hard-won: #1538: a resume save overwrote a Container settings edit made while it provisioned

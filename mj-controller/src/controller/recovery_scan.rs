@@ -184,14 +184,21 @@ impl Controller {
     ) -> AdoptionOutcome {
         let session_id = request.session_id.as_str();
         let mut admission = None;
+        let mut failure_owner = None;
         let mut result = self
-            .adopt_orphan_worker_inner(request, executor, &mut control, &mut admission)
+            .adopt_orphan_worker_inner(
+                request,
+                executor,
+                &mut control,
+                &mut admission,
+                &mut failure_owner,
+            )
             .await;
         if result.is_err()
             && admission.is_none()
-            && self.state.sessions.contains_key(session_id)
             && !control.cancelled.is_cancelled()
             && !crate::upgrade::is_draining()
+            && let Some(expected) = failure_owner.as_ref()
         {
             let cancelled = std::sync::atomic::AtomicBool::new(false);
             let owner = tokio::select! {
@@ -210,8 +217,7 @@ impl Controller {
                             _session: owner,
                             _handoff: work,
                         });
-                        result =
-                            Err(self.record_adoption_failure(session_id, result.err().unwrap()));
+                        result = Err(self.record_adoption_failure(expected, result.err().unwrap()));
                     }
                     Err(error) => {
                         result = result.map_err(|failure| {
@@ -230,6 +236,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         control: &mut AdoptionControl,
         install_admission: &mut Option<AdoptionInstall>,
+        failure_owner: &mut Option<SessionRecord>,
     ) -> Result<()> {
         let session_id = request.session_id.as_str();
         let target_id = request.target_id.as_str();
@@ -253,6 +260,9 @@ impl Controller {
                         );
                     }
                 }
+                // Only a request that passed the target/profile/bundle checks
+                // can publish a diagnostic on this provisional resource owner.
+                *failure_owner = Some(existing.clone());
                 (existing, false)
             }
             // A leftover resource whose session id is still taken cannot be
@@ -496,6 +506,7 @@ impl Controller {
         self.state
             .sessions
             .insert(session_id.to_owned(), current.clone());
+        *failure_owner = Some(current.clone());
         *install_admission = Some(
             self.finish_adoption_attachment(&spec, client, current, guard, executor, control)
                 .await
@@ -537,16 +548,17 @@ impl Controller {
         let attach = async {
             let ready = async {
                 let mut connection = StandaloneSession::connect_command(spec, &session_id).await?;
-                loop {
-                    ensure_adoptable_worker(connection.operational())?;
-                    if connection.operational().native_session_is_ready() {
-                        return Ok::<_, anyhow::Error>(connection);
-                    }
-                    // Startup is worker-owned; wait without lifecycle admission,
-                    // using the ordinary busy-session synchronization cadence.
-                    tokio::time::sleep(crate::session_manager::SESSION_SYNC_INTERVAL).await;
-                    connection.sync().await?;
-                }
+                ensure_adoptable_worker(connection.operational())?;
+                // This shared wait retains the controller-owned startup deadline
+                // for pre-66 workers; current workers decide their own expiry.
+                super::readiness::wait_for_native_session(
+                    &mut connection,
+                    executor,
+                    expected.harness_kind,
+                )
+                .await?;
+                ensure_adoptable_worker(connection.operational())?;
+                Ok::<_, anyhow::Error>(connection)
             };
             tokio::select! {
                 biased;
@@ -623,21 +635,22 @@ impl Controller {
         Ok(())
     }
 
-    fn record_adoption_failure(&mut self, session_id: &str, error: anyhow::Error) -> anyhow::Error {
-        let Some(expected) = self.state.sessions.get(session_id) else {
-            return error;
-        };
+    fn record_adoption_failure(
+        &mut self,
+        expected: &SessionRecord,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
         match crate::database::record_adoption_failure_if_current(
             expected,
             &format!("orphan adoption failed: {error:#}"),
             &now(),
         ) {
             Ok(Some(current)) => {
-                self.state.sessions.insert(session_id.to_owned(), current);
+                self.state.sessions.insert(expected.id.clone(), current);
                 error
             }
             Ok(None) => {
-                self.state.sessions.remove(session_id);
+                self.state.sessions.remove(&expected.id);
                 error
             }
             Err(persist_error) => error.context(format!(
@@ -1689,7 +1702,7 @@ mod tests {
         let workers = tempfile::tempdir().unwrap();
         // Exactly what an adoption commits before its handshake, on a worker
         // root that holds no worker binary, so the handshake cannot succeed.
-        let record = adopted_session_record(
+        let mut record = adopted_session_record(
             session_id,
             "local-bare",
             "codex".into(),
@@ -1704,6 +1717,7 @@ mod tests {
             adoption_unfinished(&record, "local-bare"),
             "the record adoption commits must be the record adoption can retry"
         );
+        record.last_error = Some("the original worker failure".into());
         crate::database::save_session(&record).unwrap();
         let mut config = Config::default();
         config
@@ -1712,6 +1726,28 @@ mod tests {
         let mut state = State::default();
         state.sessions.insert(session_id.to_owned(), record);
         let mut controller = Controller { config, state };
+
+        // Hard-won: 3210bf3: validation failures overwrote a session the request never owned.
+        let unchanged = crate::database::read_durable_session_record(session_id)
+            .unwrap()
+            .unwrap();
+        for (target, profile, bundle) in [
+            ("different-target", None, None),
+            ("local-bare", Some("different-profile"), None),
+            ("local-bare", None, Some("different-bundle")),
+        ] {
+            controller
+                .adopt_orphan_worker(session_id, target, profile, bundle, false, &ProcessExecutor)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                crate::database::read_durable_session_record(session_id)
+                    .unwrap()
+                    .unwrap(),
+                unchanged
+            );
+            assert!(crate::upgrade::active_labels().is_empty());
+        }
 
         let failure = controller
             .adopt_orphan_worker(
