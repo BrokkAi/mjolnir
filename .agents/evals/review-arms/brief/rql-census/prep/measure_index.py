@@ -361,7 +361,7 @@ def phase(binary, root, cache, log):
     rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
     # Bifrost actually started inside its scope (the sampler or the readiness read saw the
     # scope's cgroup). A systemd-run or exec failure never gets that far: not a measurement.
-    rec["launched"] = server.cgroup is not None
+    rec["launched"] = server.cgroup is not None or rec.get("scope_result") == "oom-kill"
     if rec.get("scope_result") in ("oom-kill", "unknown") or rec.get("oom_kill"):
         # Hitting the cap at any point, even after a ready reply, invalidates the phase.
         rec["ready"] = False
@@ -547,12 +547,14 @@ def main():
             wt = out / "wt" / repo
             # A previous run may have left this worktree (registered or not). Its server scope is
             # already proven gone by reap_leftover_scopes(), so removing the files is safe.
-            if wt.exists():
+            # A git killed during `worktree add` can leave the registration locked; unlock it,
+            # and remove with --force twice (git's way to remove a locked worktree).
+            for args in (("worktree", "unlock", str(wt)), ("worktree", "remove", "--force", "--force", str(wt))):
                 try:  # supervised like every git call: scoped and holding the tree lock
-                    git("worktree", "remove", "--force", str(wt), cwd=clone)
+                    git(*args, cwd=clone)
                 except subprocess.CalledProcessError:
-                    pass  # not a registered worktree; the directory is removed below
-                shutil.rmtree(wt, ignore_errors=True)
+                    pass  # not registered or not locked; the directory is removed below
+            shutil.rmtree(wt, ignore_errors=True)
             git("worktree", "prune", cwd=clone)
             git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
             rec.update(head=head, base=base, binary_sha256=binary_sha, memory_max=MEMORY_MAX,
@@ -597,7 +599,10 @@ def main():
         # failure such as OOM or a readiness timeout), and the warm phase ran or was deliberately
         # skipped after a failed cold one. A cold result with no warm one (checkout to the pinned
         # head failed in between), or a cold server that never started, is incomplete.
-        return (r.get("cold") or {}).get("launched") is True and "warm_restart" in r
+        cold, warm = r.get("cold") or {}, r.get("warm_restart")
+        if cold.get("launched") is not True or warm is None:
+            return False
+        return bool(warm.get("skipped")) or warm.get("launched") is True
     unmeasured = [repo for repo in repos if not reached_measurement(final.get(repo) or {})]
     usable = [repo for repo in repos if not (final.get(repo) or {}).get("error")
               and all((final[repo].get(ph) or {}).get("ready") for ph in ("cold", "warm_restart"))]
