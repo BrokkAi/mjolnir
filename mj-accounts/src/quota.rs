@@ -161,11 +161,20 @@ impl QuotaRefreshRequest {
     /// Whether this profile's check runs a host harness program, through
     /// `quota_harness::locate`, rather than answering from configuration or
     /// an HTTP endpoint.
+    /// Whether this profile's check or login renewal would call
+    /// `quota_harness::locate`: the question the daemon's prewarm asks, so it
+    /// installs nothing a check would not. It reads the Claude login file, so
+    /// call it on a blocking thread. Claude's decision is
+    /// [`claude_usage::runs_cli`]; Codex and Grok resolve their program
+    /// before reading any login, so the kind and Codex's ChatGPT source decide.
     #[cfg(unix)]
-    pub(crate) fn runs_host_harness(&self) -> bool {
+    pub fn runs_host_harness(&self) -> bool {
         kind_may_run_host_harness(self.harness)
             && match self.harness {
-                HarnessKind::Claude => self.auth_scheme != AuthScheme::AwsCredentialChain,
+                HarnessKind::Claude => {
+                    self.auth_scheme != AuthScheme::AwsCredentialChain
+                        && claude_usage::runs_cli(&self.source_home)
+                }
                 HarnessKind::Codex => matches!(self.codex_source, CodexQuotaSource::ChatGptLogin),
                 _ => true,
             }

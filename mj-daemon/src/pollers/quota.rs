@@ -33,6 +33,7 @@ fn quota_requests_from(
     profiles
         .iter()
         .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
+        .filter(QuotaRefreshRequest::runs_host_harness)
         .collect()
 }
 

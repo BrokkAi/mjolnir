@@ -121,8 +121,10 @@ async fn managed_installation(
 }
 
 /// Install, ahead of the first quota check, the pinned harness each request
-/// would otherwise install inline. Only requests whose check runs a host
-/// harness, on a host that does not provide it, are prepared. The installer
+/// would otherwise install inline. `requests` are those that run a host
+/// harness ([`QuotaRefreshRequest::runs_host_harness`], which may read the
+/// profile's login file, so call it on a blocking thread); they are prepared
+/// only on a host that does not provide the harness. The installer
 /// caches per `XDG_CACHE_HOME`/`HOME`, so work is grouped by (harness, cache
 /// root): groups run concurrently, and within a group the profiles are tried
 /// in order until one preparation succeeds, so one profile's broken
@@ -160,11 +162,25 @@ pub async fn prepare_managed(
             Err(error) => failures.push((request.harness, error)),
         }
     }
+    let cancellation = mj_core::subprocess::preparation_cancellation();
     let results = futures::future::join_all(groups.into_iter().map(
-        |((harness, _), environments)| async move {
+        |((harness, _), environments)| {
+            let cancellation = cancellation.clone();
+            async move {
             let mut failures = Vec::new();
             for environment in environments {
-                match host_program(harness, &environment).await {
+                // The PATH lookup is blocking filesystem reads that a stalled
+                // mount can hang, and shutdown must not wait for them. It only
+                // reads, so abandoning it on cancellation is safe. Racing here
+                // leaves the quota check's own `locate` unchanged.
+                let host = tokio::select! {
+                    () = cancellation.cancelled() => {
+                        failures.push((harness, mj_core::subprocess::PreparationCancelled.into()));
+                        break;
+                    }
+                    host = host_program(harness, &environment) => host,
+                };
+                match host {
                     Ok(Some(_)) => continue,
                     Ok(None) => match managed_installation(harness, &environment).await {
                         Ok(_lease) => break,
@@ -174,6 +190,7 @@ pub async fn prepare_managed(
                 }
             }
             failures
+            }
         },
     ))
     .await;
