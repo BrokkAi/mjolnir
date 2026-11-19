@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Rank measured repos for the test cohort by expected relation diffs.
 
-Usage: select_cohort.py INDEX_COST.jsonl YIELD.json > cohort.md
+Usage: select_cohort.py INDEX_COST.jsonl YIELD.json index-pins.txt > cohort.md
 
 Rule (PLAN-rql-census.md, Data, revised 2026-11-19): rank by B, the repo's capped
 2025+ relation estimate (yield.json, wide_2025.per_repo_relation_estimate_capped).
 The index measurement only excludes: a repo whose cold index or warm restart did not
-reach ready (over the cap, or a Bifrost failure) can't be selected. Indexing CPU-hours,
+reach ready (over the cap, or a Bifrost failure), or whose current record was taken at
+another revision or cap, can't be selected. Indexing CPU-hours,
 cold + (B - 1) x warm from the scope cgroup's cpu_to_ready_usec, are reported and break
 ties. Walking down the ranking, at most one repo per shared-history group is
 provisionally selected; every member stays ranked. A repo enters the test set only
@@ -20,21 +21,29 @@ import sys
 from measure_index import latest_records  # the producer's definition of a repo's current record
 
 COHORT = 12
+MEMORY_MAX = "48G"  # the plan's measurement cap (PLAN-rql-census.md, Data)
 
 
 def main():
-    measured = latest_records(pathlib.Path(sys.argv[1]))
+    log = pathlib.Path(sys.argv[1])
+    if not log.exists():  # missing evidence is an error, not an empty cohort
+        sys.exit(f"{log} does not exist")
+    measured = latest_records(log)
+    pins = {e[0]: e[1] for e in (l.split() for l in open(sys.argv[3])) if e}
     y = json.load(open(sys.argv[2]))
     estimate = y["windows"]["wide_2025"]["per_repo_relation_estimate_capped"]
     group_of = y["group_of"]
 
     rows = []
-    for repo, r in measured.items():
+    for repo in pins:
+        r = measured.get(repo, {"error": "not measured yet"})
         cold, warm = r.get("cold") or {}, r.get("warm_restart") or {}
         b = estimate.get(repo, 0.0)
         failure = None
         if r.get("error"):  # the latest attempt failed before or around its phases
-            failure = "setup: " + r["error"]
+            failure = r["error"]
+        elif r.get("head") != pins[repo] or r.get("memory_max") != MEMORY_MAX:
+            failure = f"measured at {str(r.get('head'))[:10]} under {r.get('memory_max')}, not the pin and cap"
         elif not cold.get("ready"):
             failure = cold.get("error") or "cold index not ready"
         elif not warm.get("ready"):
@@ -53,7 +62,7 @@ def main():
     print("|---|---|---|---|---|---|---|---|")
     for i, x in enumerate(rows, 1):
         if x["failure"]:
-            status = "failed measurement: " + x["failure"].split("\n")[0][:120]
+            status = "excluded: " + x["failure"].split("\n")[0][:120]
         elif x["group"] and x["group"] in taken:
             status = "reserve (shared-history group already selected)"
         elif picked < COHORT:
@@ -67,8 +76,6 @@ def main():
               f"{x['hours']:.2f} | {x['peak_gib']:.1f} | {status} |")
     total = sum(x["hours"] for x in rows if not x["failure"])
     print(f"\nIndexing CPU-hours, all measured repos that reached ready: {total:.1f}")
-    not_measured = sorted(set(estimate) - set(measured), key=lambda r: -estimate[r])[:10]
-    print(f"Top unmeasured by estimate: {', '.join(not_measured)}")
 
 
 if __name__ == "__main__":
