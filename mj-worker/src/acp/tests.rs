@@ -6172,12 +6172,17 @@ mod terminals {
         runtime.stop().await;
     }
 
+    // Hard-won: 9a72411: a failed synthetic terminal opened an idle Claude turn with no result.
     #[tokio::test]
     async fn terminal_spawn_failure_releases_its_cut_registration() {
         let root = tempfile::tempdir().unwrap();
         let owner = Arc::new(crate::relay::RelayCell::new(
             crate::relay::DurableRelay::open(root.path(), "terminal-adoption", "test").unwrap(),
         ));
+        owner
+            .lock()
+            .unwrap()
+            .set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
         let mut runtime = start_scripted_runtime_with_owner(Some(Arc::downgrade(&owner)));
         let terminal = create_terminal(
             &mut runtime.agent,

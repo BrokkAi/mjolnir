@@ -556,8 +556,9 @@ impl DurableRelay {
                 }
                 let receipt = self.snapshot.handled_commands.get(&initial.command_id);
                 let delivered = match receipt {
-                    // Legacy migration pins a previously used startup without its old receipt.
-                    None => true,
+                    // A legacy pin prevents reseeding, but acceptance alone cannot
+                    // distinguish delivery from removal before dispatch.
+                    None => false,
                     Some(receipt)
                         if receipt.failure.as_deref() == Some("queued command was removed") =>
                     {
@@ -2256,6 +2257,10 @@ impl DurableRelay {
             // claude-agent-acp 0.94.0 `dist/tool-calls/renderer.js`
             // (`unfinished`) on 2026-10-23; the file is unchanged in 0.97.0.
             && !matches!(update, SessionUpdate::ToolCallUpdate(_))
+            // Our terminal inventory/card is not evidence of a parent model
+            // cycle: a child may request it while the parent remains idle.
+            && !matches!(update, SessionUpdate::ToolCall(call)
+                if crate::acp::is_fallback_terminal_tool_call(call))
             && self.can_open_harness_turn()
     }
 

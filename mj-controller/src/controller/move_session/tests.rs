@@ -7404,6 +7404,7 @@ enum AdoptionProbe {
     Disconnect,
     Install,
     PreparingFails,
+    PublicationRejected,
     Unusable(&'static str),
 }
 
@@ -7515,7 +7516,9 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
         let (installed, notice) = tokio::sync::oneshot::channel();
         let send_notice = matches!(
             disposition,
-            AdoptionProbe::Install | AdoptionProbe::PreparingFails
+            AdoptionProbe::Install
+                | AdoptionProbe::PreparingFails
+                | AdoptionProbe::PublicationRejected
         )
         .then_some(installed);
         let work = tokio::spawn(async move {
@@ -7556,7 +7559,9 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
         }
         if matches!(
             disposition,
-            AdoptionProbe::Install | AdoptionProbe::PreparingFails
+            AdoptionProbe::Install
+                | AdoptionProbe::PreparingFails
+                | AdoptionProbe::PublicationRejected
         ) {
             let publication = tokio::time::timeout(std::time::Duration::from_secs(5), notice)
                 .await
@@ -7656,6 +7661,12 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     )
                     .expect("ACP readiness wait owns no admission"),
                 );
+                if matches!(disposition, AdoptionProbe::PublicationRejected) {
+                    // Destroy may win while ordinary catch-up owns no admission.
+                    let mut changed = current;
+                    changed.state = SessionState::Lost;
+                    crate::database::save_session(&changed).unwrap();
+                }
                 fs::write(root.join("test-native-ready"), b"1").unwrap();
             }
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
@@ -7670,6 +7681,31 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     .unwrap();
                 assert_eq!(current.state, SessionState::Disconnected);
                 assert!(current.native_session_id.is_none());
+                return;
+            }
+            if matches!(disposition, AdoptionProbe::PublicationRejected) {
+                assert!(outcome.result.is_err());
+                let refused = gate
+                    .try_start(
+                        MOVE_QUEUE_SESSION_ID,
+                        crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                    )
+                    .err()
+                    .expect("a rejected accepted publication owns its final error reply");
+                assert!(refused.holders.contains(&"adoption connected publication"));
+                crate::upgrade::gate().begin_draining();
+                assert!(outcome.admission.is_some());
+                assert!(
+                    crate::upgrade::active_labels()
+                        .iter()
+                        .any(|label| label.contains("adoption connected publication"))
+                );
+                drop(outcome.admission);
+                assert!(
+                    crate::upgrade::active_labels()
+                        .iter()
+                        .all(|label| !label.contains("adoption connected publication"))
+                );
                 return;
             }
             outcome.result.unwrap();
@@ -7996,5 +8032,16 @@ fn adoption_genesis_replay_failure_stays_disconnected_and_retryable() {
     assert!(
         !root.join("baseline-frontier").exists(),
         "intact genesis uses ordinary replay on every retry"
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: 9a72411: a rejected accepted publication dropped admission before its error reply.
+#[test]
+fn adoption_rejected_publication_keeps_admission_through_the_error_reply() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::PublicationRejected,
+        "adoption_rejected_publication_keeps_admission_through_the_error_reply",
     );
 }

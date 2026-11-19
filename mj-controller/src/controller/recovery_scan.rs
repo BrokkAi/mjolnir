@@ -520,23 +520,29 @@ impl Controller {
             .sessions
             .insert(session_id.to_owned(), current.clone());
         *failure_owner = Some(current.clone());
-        *install_admission = Some(
-            self.finish_adoption_attachment(&spec, client, current, guard, executor, control)
-                .await
-                .context("worker adopted; reattaching failed")?,
-        );
+        self.finish_adoption_attachment(
+            (&spec, client),
+            current,
+            guard,
+            executor,
+            control,
+            install_admission,
+        )
+        .await
+        .context("worker adopted; reattaching failed")?;
         Ok(())
     }
 
     async fn finish_adoption_attachment(
         &mut self,
-        spec: &CommandSpec,
-        client: crate::worker_client::RelayClient,
+        prepared: (&CommandSpec, crate::worker_client::RelayClient),
         expected: SessionRecord,
         guard: AdoptionInstall,
         executor: &(impl CommandExecutor + Sync),
         control: &mut AdoptionControl,
-    ) -> Result<AdoptionInstall> {
+        publication_admission: &mut Option<AdoptionInstall>,
+    ) -> Result<()> {
+        let (spec, client) = prepared;
         let session_id = expected.id.clone();
         let installed = control.installed.take();
         if let Some(installed) = installed {
@@ -605,11 +611,14 @@ impl Controller {
             accepted = crate::database::enqueue_adoption_connected(expected, native, now(), guard) => accepted?,
         };
         let (result, guard) = accepted.finish().await?;
+        // Acceptance owns the definitive reply even when its writer rejects a
+        // stale publication. Handoff cannot race a second admission attempt.
+        *publication_admission = Some(guard);
         let current = result?;
         self.state.sessions.insert(session_id.to_owned(), current);
         // The short connected-publication holder spans runtime refresh and
         // the final reply; ordinary catch-up above owns no lifecycle holder.
-        Ok(guard)
+        Ok(())
     }
 
     fn revalidate_adoption_resource(&mut self, expected: &SessionRecord) -> Result<()> {

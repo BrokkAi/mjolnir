@@ -30,25 +30,36 @@ fn initial_fifo_commands() -> Vec<mj_core::worker_launch::InitialWorkerCommand> 
 // Hard-won: 6f0f854: a legacy receipt evicted before /clear allowed startup replay at upgrade.
 #[test]
 fn startup_upgrade_uses_lifetime_prompt_watermark_after_pruning_and_clear() {
-    legacy_startup_with_pruned_receipt(true, false);
+    legacy_startup_with_pruned_receipt(true, false, false);
 }
 
 // Hard-won: 6f0f854: pre-watermark native use must still prove startup was seeded.
 #[test]
 fn startup_upgrade_preserves_pre_watermark_native_use_without_a_receipt() {
-    legacy_startup_with_pruned_receipt(false, true);
+    legacy_startup_with_pruned_receipt(false, true, false);
 }
 
-fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool) {
+// Hard-won: 9a72411: a pruned removal receipt was displayed as delivery of a legacy brief.
+#[test]
+fn startup_upgrade_does_not_display_a_removed_brief_after_its_receipt_is_pruned() {
+    legacy_startup_with_pruned_receipt(false, false, true);
+}
+
+fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool, removed: bool) {
     let temp = tempfile::tempdir().unwrap();
     let commands = vec![mj_core::worker_launch::InitialWorkerCommand {
         command_id: "original-brief".into(),
         command: prompt("original task"),
         optional: false,
     }];
-    let mut relay =
-        DurableRelay::open_for_harness(temp.path(), SESSION, "old", HarnessKind::Codex, &commands)
-            .unwrap();
+    let mut relay = DurableRelay::open_for_harness(
+        temp.path(),
+        SESSION,
+        "old",
+        HarnessKind::Codex,
+        if removed { &[] } else { &commands },
+    )
+    .unwrap();
     relay.set_turn_verdict_harness(HarnessKind::Codex);
     relay
         .record_observation(RelayObservation::SessionOpened {
@@ -58,8 +69,29 @@ fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool) {
             replaced_unused_native_session_id: None,
         })
         .unwrap();
-    relay.claim_pending_commands(true).unwrap();
-    finish_prompt(&mut relay, "original-brief");
+    if removed {
+        submit_relay(&mut relay, "blocking-prompt", prompt("already running"));
+        relay.claim_pending_commands(true).unwrap();
+        relay.initial_commands = commands.clone();
+        relay.seed_initial_commands().unwrap();
+        submit_relay(
+            &mut relay,
+            "remove-original",
+            RelayCommand::RemoveQueuedPrompt {
+                queued_command_id: "original-brief".into(),
+            },
+        );
+        assert_eq!(
+            relay.snapshot.handled_commands["original-brief"]
+                .failure
+                .as_deref(),
+            Some("queued command was removed")
+        );
+        finish_prompt(&mut relay, "blocking-prompt");
+    } else {
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "original-brief");
+    }
     submit_relay(&mut relay, "later-prompt", prompt("later"));
     relay.claim_pending_commands(true).unwrap();
     finish_prompt(&mut relay, "later-prompt");
@@ -139,15 +171,9 @@ fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool) {
                 .contains_key("original-brief")
         );
         let cut = relay.live_session_baseline().unwrap();
-        assert_eq!(cut.delivered_initial_prompts.len(), 1);
-        assert_eq!(
-            cut.delivered_initial_prompts[0].command_id,
-            "original-brief"
-        );
-        assert_eq!(
-            cut.delivered_initial_prompts[0].command,
-            commands[0].command
-        );
+        // Missing legacy receipts prove neither completion nor removal. The
+        // startup pin prevents replay without inventing a delivered user row.
+        assert!(cut.delivered_initial_prompts.is_empty());
         assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     }
 }
