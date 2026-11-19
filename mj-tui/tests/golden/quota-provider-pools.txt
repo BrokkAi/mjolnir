@@ -1569,6 +1569,90 @@ background runs (x..end, colour):
 29: 0..11 Rgb(22, 27, 30) NONE, 11..49 Rgb(200, 200, 210) NONE, 49..51 Rgb(56, 58, 62) NONE, 51..59 Rgb(22, 27, 30) BOLD, 59..60 Rgb(22, 27, 30) NONE
 30: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..60 Rgb(22, 27, 30) NONE
 31: 0..60 Rgb(22, 27, 30) NONE
+=== Unicode month limit blocks week lane; stale five-hour keeps week marker (100x20) ===
+╭ Profiles (refreshed 1h ago)──────────────────────────────────────────────────────────────────────╮
+│ANTHROPIC                                                                                         │
+│>-                                                                                     ↻4h ⟲1  60%│
+│          12:26 00:26                                                                             │
+│  claude5 ··W·········                                                                            │
+│    week 60%, resets in 4h · 5H reset due, awaiting reading · Fable 91% · ⟲1 banked               │
+│MOONSHOT                                                                                          │
+│ - week                                                                                 ↻2d0h 100%│
+│  kimi 100% · Booster balance: 123 credits                                                        │
+│       12:26 00:26                                                                                │
+│  kimi ·5····                                                                                     │
+│    week 100%, resets in 2d0h · 5H 100%, resets in 2h50m · Booster balance: 123 credits           │
+│ - Month                                                                                 ↻12h   0%│
+│  kimi 0% · Booster balance: 123 credits                                                          │
+│       12:26 00:26                                                                                │
+│  kimi ·5····M                                                                                    │
+│    Month back Thu 00:26 (12h) · 5H 100%, resets in 2h50m · Booster balance: 123 credits          │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+background runs (x..end, colour):
+0: 0..1 Rgb(22, 27, 30) NONE, 1..29 Rgb(22, 27, 30) BOLD, 29..100 Rgb(22, 27, 30) NONE
+1: 0..1 Rgb(22, 27, 30) NONE, 1..10 Rgb(22, 27, 30) BOLD, 10..100 Rgb(22, 27, 30) NONE
+2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..58 Rgb(217, 119, 87) NONE, 58..94 Rgb(59, 40, 35) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+3: 0..100 Rgb(22, 27, 30) NONE
+4: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..100 Rgb(22, 27, 30) NONE
+5: 0..100 Rgb(22, 27, 30) NONE
+6: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..100 Rgb(22, 27, 30) NONE
+7: 0..9 Rgb(22, 27, 30) NONE, 9..94 Rgb(150, 110, 230) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+8: 0..100 Rgb(22, 27, 30) NONE
+9: 0..100 Rgb(22, 27, 30) NONE
+10: 0..8 Rgb(22, 27, 30) NONE, 8..14 Rgb(15, 18, 20) NONE, 14..20 Rgb(39, 35, 58) NONE, 20..100 Rgb(22, 27, 30) NONE
+11: 0..100 Rgb(22, 27, 30) NONE
+12: 0..10 Rgb(22, 27, 30) NONE, 10..94 Rgb(45, 38, 66) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+13: 0..100 Rgb(22, 27, 30) NONE
+14: 0..100 Rgb(22, 27, 30) NONE
+15: 0..8 Rgb(22, 27, 30) NONE, 8..14 Rgb(15, 18, 20) NONE, 14..20 Rgb(39, 35, 58) NONE, 20..100 Rgb(22, 27, 30) NONE
+16: 0..100 Rgb(22, 27, 30) NONE
+17: 0..100 Rgb(22, 27, 30) NONE
+18: 0..100 Rgb(22, 27, 30) NONE
+19: 0..100 Rgb(22, 27, 30) NONE
+=== Ascii month limit blocks week lane; stale five-hour keeps week marker (100x20) ===
++ Profiles (refreshed 1h ago)----------------------------------------------------------------------+
+|ANTHROPIC                                                                                         |
+|>- ######################################################..............................r4h.B1  60%|
+|          12:26 00:26                                                                             |
+|  claude5 ??W?????????                                                                            |
+|    week 60%, resets in 4h - 5H reset due, awaiting reading - Fable 91% - B1 banked               |
+|MOONSHOT                                                                                          |
+| - week ################################################################################r2d0h 100%|
+|  kimi 100% - Booster balance: 123 credits                                                        |
+|       12:26 00:26                                                                                |
+|  kimi .5....------                                                                               |
+|    week 100%, resets in 2d0h - 5H 100%, resets in 2h50m - Booster balance: 123 credits           |
+| - Month ................................................................................r12h   0%|
+|  kimi 0% - Booster balance: 123 credits                                                          |
+|       12:26 00:26                                                                                |
+|  kimi .5....M-----                                                                               |
+|    Month back Thu 00:26 (12h) - 5H 100%, resets in 2h50m - Booster balance: 123 credits          |
+|                                                                                                  |
+|                                                                                                  |
++--------------------------------------------------------------------------------------------------+
+background runs (x..end, colour):
+0: 0..1 Rgb(22, 27, 30) NONE, 1..29 Rgb(22, 27, 30) BOLD, 29..100 Rgb(22, 27, 30) NONE
+1: 0..1 Rgb(22, 27, 30) NONE, 1..10 Rgb(22, 27, 30) BOLD, 10..100 Rgb(22, 27, 30) NONE
+2: 0..1 Rgb(22, 27, 30) NONE, 1..4 Rgb(42, 58, 57) BOLD, 4..58 Rgb(217, 119, 87) REVERSED, 58..94 Rgb(59, 40, 35) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+3: 0..100 Rgb(22, 27, 30) NONE
+4: 0..11 Rgb(22, 27, 30) NONE, 11..23 Rgb(15, 18, 20) NONE, 23..100 Rgb(22, 27, 30) NONE
+5: 0..100 Rgb(22, 27, 30) NONE
+6: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..100 Rgb(22, 27, 30) NONE
+7: 0..9 Rgb(22, 27, 30) NONE, 9..94 Rgb(150, 110, 230) REVERSED, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+8: 0..100 Rgb(22, 27, 30) NONE
+9: 0..100 Rgb(22, 27, 30) NONE
+10: 0..8 Rgb(22, 27, 30) NONE, 8..14 Rgb(15, 18, 20) NONE, 14..20 Rgb(39, 35, 58) NONE, 20..100 Rgb(22, 27, 30) NONE
+11: 0..100 Rgb(22, 27, 30) NONE
+12: 0..10 Rgb(22, 27, 30) NONE, 10..94 Rgb(45, 38, 66) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+13: 0..100 Rgb(22, 27, 30) NONE
+14: 0..100 Rgb(22, 27, 30) NONE
+15: 0..8 Rgb(22, 27, 30) NONE, 8..14 Rgb(15, 18, 20) NONE, 14..20 Rgb(39, 35, 58) NONE, 20..100 Rgb(22, 27, 30) NONE
+16: 0..100 Rgb(22, 27, 30) NONE
+17: 0..100 Rgb(22, 27, 30) NONE
+18: 0..100 Rgb(22, 27, 30) NONE
+19: 0..100 Rgb(22, 27, 30) NONE
 === Unicode reset at cell start and banked fallback (60x36) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────╮
 │ANTHROPIC                                                 │

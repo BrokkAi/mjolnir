@@ -577,8 +577,12 @@ fn pool_bar(
                 },
                 Style::default()
                     .add_modifier(
+                        // An accent that cannot be tinted (indexed colours) gives
+                        // filled and spent cells one colour; mark fill by video.
                         if cell < filled
-                            && (theme::ascii() || theme::current() == theme::UiTheme::Mono)
+                            && (theme::ascii()
+                                || theme::current() == theme::UiTheme::Mono
+                                || !matches!(accent, Color::Rgb(..)))
                         {
                             Modifier::REVERSED
                         } else {
@@ -602,25 +606,25 @@ fn lane(
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     // A reading older than its own reset (weekly or five-hour) cannot say
-    // whether the profile is usable now, so draw no availability.
-    if member.awaiting_reading || member.five_hour_awaiting_reading {
-        // The cached reading predates its own reset: nothing is known to be
-        // available, so draw no availability.
-        let symbol = if theme::ascii() { "?" } else { "·" };
-        return vec![Span::styled(
-            symbol.repeat(cells),
-            Style::default()
-                .fg(theme::palette().muted)
-                .bg(theme::palette().background),
-        )];
-    }
+    // whether the profile is usable now, so draw no availability; reset
+    // markers from readings that are still current stay.
+    let unknown = member.awaiting_reading || member.five_hour_awaiting_reading;
     for cell in 0..cells {
         let t0 = now.saturating_add(cell as u64 * 86400 / cells as u64);
         let t1 = now.saturating_add((cell + 1) as u64 * 86400 / cells as u64);
         let contains = |reset: Option<i64>| {
             reset.is_some_and(|reset| reset >= 0 && t0 <= reset as u64 && (reset as u64) < t1)
         };
-        let blocked = (member.remaining == 0 && member.reset.is_none_or(|reset| reset > t0 as i64))
+        let weekly_reset = member.reset.filter(|_| !member.awaiting_reading);
+        let five_reset = member
+            .five_hour
+            .as_ref()
+            .filter(|_| !member.five_hour_awaiting_reading)
+            .and_then(|window| window.resets_at_epoch_seconds);
+        let blocked = member
+            .other_long_blocked_until
+            .is_some_and(|until| until > t0 as i64)
+            || (member.remaining == 0 && member.reset.is_none_or(|reset| reset > t0 as i64))
             || member.five_hour.as_ref().is_some_and(|window| {
                 quota_remaining_percent(window) == Some(0)
                     && window
@@ -632,24 +636,30 @@ fn lane(
                 .resets_at_epoch_seconds
                 .is_some_and(|reset| reset > t0 as i64)
         });
-        let marker = if contains(member.reset)
-            && member
-                .five_hour
-                .as_ref()
-                .is_some_and(|window| contains(window.resets_at_epoch_seconds))
-        {
+        let marker = if contains(weekly_reset) && contains(five_reset) {
             Some('*')
-        } else if contains(member.reset) {
+        } else if contains(weekly_reset) {
             Some(period.marker())
-        } else if member
-            .five_hour
-            .as_ref()
-            .is_some_and(|window| contains(window.resets_at_epoch_seconds))
-        {
+        } else if contains(five_reset) {
             Some('5')
         } else {
             None
         };
+        if unknown {
+            spans.push(Span::styled(
+                marker
+                    .unwrap_or(if theme::ascii() { '?' } else { '·' })
+                    .to_string(),
+                Style::default()
+                    .fg(if marker.is_some() {
+                        theme::palette().text
+                    } else {
+                        theme::palette().muted
+                    })
+                    .bg(theme::palette().background),
+            ));
+            continue;
+        }
         let symbol = marker.unwrap_or(if blocked {
             if theme::ascii() { '.' } else { '·' }
         } else if theme::ascii() || theme::current() == theme::UiTheme::Mono {
@@ -1046,6 +1056,28 @@ mod tests {
             }
             writeln!(output, "{y}: {}", runs.join(", ")).unwrap();
         }
+    }
+
+    // Hard-won: quota review: an indexed accent cannot be tinted, so filled and spent cells matched.
+    #[test]
+    fn indexed_accent_marks_filled_cells_apart_from_spent_ones() {
+        theme::with_symbols(SymbolSet::Unicode, || {
+            theme::with_theme(theme::UiTheme::TerminalLight, || {
+                let (dashboard, now) = fixture();
+                let mut pool = dashboard.quota_pools().remove(0).pools.remove(0);
+                pool.members.truncate(1);
+                pool.members[0].remaining = 50;
+                pool.members[0].awaiting_reading = false;
+                let accent = theme::palette().muted;
+                assert!(!matches!(accent, Color::Rgb(..)));
+                let (spans, _) = pool_bar(&pool, 10, now, accent, &Default::default());
+                let style_at = |cell: usize| spans[cell].style;
+                assert_ne!(
+                    (style_at(0).bg, style_at(0).add_modifier),
+                    (style_at(9).bg, style_at(9).add_modifier)
+                );
+            })
+        });
     }
 
     // Hard-won: db4dc77c9: refresh reordered pool lanes and stranded selection on another profile.
@@ -1692,6 +1724,50 @@ mod tests {
                 32,
             );
         });
+        // Hard-won: quota review: a Month limit did not block the weekly lane, a stale
+        // five-hour reading hid the weekly reset marker, and indexed accents drew
+        // filled and spent cells alike.
+        for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
+            theme::with_symbols(symbols, || {
+                let (mut dashboard, now) = fixture();
+                dashboard
+                    .config
+                    .profiles
+                    .retain(|id, _| matches!(id.as_str(), "kimi" | "claude5"));
+                let kimi = dashboard.quotas.get_mut("kimi").unwrap();
+                kimi.windows[0].remaining_percent = Some(0);
+                kimi.windows[0].resets_at_epoch_seconds = Some(now as i64 + 12 * 3600);
+                let mut week = kimi.windows[0].clone();
+                week.label = "Week".into();
+                week.remaining_percent = Some(100);
+                week.resets_at_epoch_seconds = Some(now as i64 + 2 * 86400);
+                kimi.windows.push(week);
+                let claude = dashboard.quotas.get_mut("claude5").unwrap();
+                claude.refreshed_at_epoch_seconds = now - 3600;
+                for window in &mut claude.windows {
+                    window.resets_at_epoch_seconds = Some(now as i64 + 4 * 3600);
+                    if window.label == "5H" {
+                        window.resets_at_epoch_seconds = Some(now as i64 - 600);
+                    }
+                }
+                dashboard.quota_expanded = dashboard
+                    .quota_pools()
+                    .into_iter()
+                    .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                    .collect();
+                dashboard.set_selection_for(Focus::Quota, 0);
+                capture(
+                    &mut output,
+                    &format!(
+                        "{symbols:?} month limit blocks week lane; stale five-hour keeps week marker"
+                    ),
+                    &mut dashboard,
+                    now,
+                    100,
+                    20,
+                );
+            });
+        }
         for symbols in [SymbolSet::Unicode, SymbolSet::Ascii] {
             theme::with_symbols(symbols, || {
                 let (mut dashboard, now) = fixture();

@@ -337,6 +337,9 @@ pub(crate) struct PoolMember {
     pub reset: Option<i64>,
     /// The reset time has passed and no reading taken since has arrived.
     pub awaiting_reading: bool,
+    /// Latest reset among the profile's other exhausted unscoped long windows
+    /// (`i64::MAX` when one reports no reset): the lane stays blocked until then.
+    pub other_long_blocked_until: Option<i64>,
     pub banked: Option<u64>,
     pub five_hour: Option<QuotaWindow>,
     pub five_hour_awaiting_reading: bool,
@@ -437,10 +440,11 @@ pub(crate) fn provider_pools(
                     continue;
                 };
                 added = true;
+                let key_period = PoolPeriod::of(window);
                 let key = PoolKey {
                     provider: group.provider.clone(),
                     scope: scope.clone(),
-                    period: PoolPeriod::of(window),
+                    period: key_period.clone(),
                 };
                 let index = group
                     .pools
@@ -472,6 +476,20 @@ pub(crate) fn provider_pools(
                             && reset as u64 <= now
                             && quota.refreshed_at_epoch_seconds < reset as u64
                     }),
+                    other_long_blocked_until: report
+                        .windows
+                        .iter()
+                        .filter(|other| {
+                            other.model_scope.is_none()
+                                && matches!(
+                                    PoolPeriod::of(other),
+                                    PoolPeriod::Week | PoolPeriod::Month
+                                )
+                                && PoolPeriod::of(other) != key_period
+                                && quota_remaining_percent(other) == Some(0)
+                        })
+                        .map(|other| other.resets_at_epoch_seconds.unwrap_or(i64::MAX))
+                        .max(),
                     banked: report.banked_resets_for_window(window),
                     five_hour: report
                         .five_hour_window()

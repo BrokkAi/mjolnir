@@ -259,8 +259,27 @@ impl DashboardState {
             });
         }
 
+        let providers = crate::render::quota_pools::provider_pools(
+            &self.config,
+            &self.quotas,
+            &self.quota_providers,
+            now,
+        );
+        // A reading crossing its reset changes pool totals and lanes while the
+        // countdowns stay at `0m`, so count the windows awaiting a reading
+        // (the minimized line shows the totals too).
+        let awaiting = providers
+            .iter()
+            .flat_map(|provider| &provider.pools)
+            .flat_map(|pool| &pool.members)
+            .filter(|member| member.awaiting_reading || member.five_hour_awaiting_reading)
+            .count();
+        clocks.push(DisplayedClock {
+            key: "quota:awaiting-reading".to_owned(),
+            value: awaiting.to_string(),
+        });
         if self.pane_size(SupportPane::Quota) != crate::PaneSize::Minimized {
-            for provider in self.quota_pools() {
+            for provider in providers {
                 for pool in provider.pools {
                     let expanded = self.quota_expanded.contains(&pool.key);
                     for member in pool.members {
@@ -396,5 +415,39 @@ mod tests {
 
         dashboard.render_change_snapshot.clock.sessions[0].value = "0s".into();
         assert!(dashboard.clock_changed());
+    }
+
+    #[test]
+    fn quota_reading_crossing_its_reset_changes_the_clock() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let now = epoch_seconds();
+        let quota: mj_client::quota::ProfileQuota = serde_json::from_value(serde_json::json!({
+            "profile_id": "claude",
+            "harness": "claude",
+            "refreshed_at_epoch_seconds": now - 3600,
+            "windows": [{
+                "label": "Week",
+                "duration_seconds": 604800,
+                "remaining_percent": 50,
+                "resets_at_epoch_seconds": now + 1,
+            }],
+        }))
+        .unwrap();
+        dashboard.config.profiles.insert(
+            "claude".into(),
+            mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, "/x"),
+        );
+        dashboard.quotas.insert("claude".into(), quota);
+        dashboard.acknowledge_render();
+        let before = dashboard.quota_clock_signature(now);
+        let after = dashboard.quota_clock_signature(now + 2);
+        let awaiting = |clocks: &[DisplayedClock]| {
+            clocks
+                .iter()
+                .find(|clock| clock.key == "quota:awaiting-reading")
+                .map(|clock| clock.value.clone())
+        };
+        assert_eq!(awaiting(&before).as_deref(), Some("0"));
+        assert_eq!(awaiting(&after).as_deref(), Some("1"));
     }
 }
