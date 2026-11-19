@@ -57,6 +57,23 @@ pub enum CodexLauncher {
     Program(PathBuf),
 }
 
+impl CodexLauncher {
+    pub(crate) async fn prepare(
+        &self,
+        env: &HashMap<String, String>,
+    ) -> anyhow::Result<crate::quota_harness::QuotaProgram> {
+        match self {
+            Self::Host => crate::quota_harness::locate(HarnessKind::Codex, env).await,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Program(command) => Ok(crate::quota_harness::QuotaProgram {
+                command: command.clone(),
+                environment: HashMap::new(),
+                _installation: None,
+            }),
+        }
+    }
+}
+
 pub struct CodexUsageClient {
     child: crate::streamed_child::ProxyChild,
     /// Which launcher started this client; a poll that asks for another one
@@ -76,19 +93,9 @@ impl CodexUsageClient {
         cwd: PathBuf,
         env: HashMap<String, String>,
         launcher: &CodexLauncher,
+        program: crate::quota_harness::QuotaProgram,
     ) -> Result<Self, QueryError> {
         let mut env = env;
-        let program = match launcher {
-            CodexLauncher::Host => crate::quota_harness::locate(HarnessKind::Codex, &env)
-                .await
-                .map_err(|error| QueryError::Launch(format!("{error:#}")))?,
-            #[cfg(any(test, feature = "test-support"))]
-            CodexLauncher::Program(command) => crate::quota_harness::QuotaProgram {
-                command: command.clone(),
-                environment: HashMap::new(),
-                _installation: None,
-            },
-        };
         env.extend(program.environment.clone());
         let stdio = spawn_app_server(&program.command, cwd, env).await?;
         let crate::streamed_child::ProxyStdio {
@@ -340,12 +347,20 @@ async fn start(
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
+    prepared: &mut Option<crate::quota_harness::QuotaProgram>,
 ) -> Result<(), QueryError> {
     if let Some(stale) = client.take_if(|ready| &ready.launcher != launcher) {
         stale.shutdown().await;
     }
     if client.is_none() {
-        *client = Some(CodexUsageClient::spawn(cwd, env, launcher).await?);
+        let program = match prepared.take() {
+            Some(program) => program,
+            None => launcher
+                .prepare(&env)
+                .await
+                .map_err(|error| QueryError::Launch(format!("{error:#}")))?,
+        };
+        *client = Some(CodexUsageClient::spawn(cwd, env, launcher, program).await?);
     }
     Ok(())
 }
@@ -376,13 +391,14 @@ async fn discard_failed_client(client: &mut Option<CodexUsageClient>, replaceabl
 
 /// Refresh a persistent app-server client, recreating it after transport or
 /// protocol failures. Calls are awaited serially by the session worker.
-pub async fn refresh_with_cache_root(
+pub(crate) async fn refresh_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
+    prepared: &mut Option<crate::quota_harness::QuotaProgram>,
 ) -> CodexUsageStatus {
-    let result = match start(client, cwd, env, launcher).await {
+    let result = match start(client, cwd, env, launcher, prepared).await {
         Ok(()) => {
             tokio::time::timeout(REQUEST_TIMEOUT, async {
                 prepare(client).await?.query().await
@@ -423,13 +439,14 @@ pub struct LoginRefreshFailure {
 /// expiry at the same instant both try to spend the same token, one wins, and
 /// the loser's turn dies. Rotating early on the host, so the sync can push the
 /// new file, keeps container copies away from that instant.
-pub async fn refresh_login_with_cache_root(
+pub(crate) async fn refresh_login_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
     launcher: &CodexLauncher,
+    prepared: &mut Option<crate::quota_harness::QuotaProgram>,
 ) -> Result<(), LoginRefreshFailure> {
-    let result = match start(client, cwd, env, launcher).await {
+    let result = match start(client, cwd, env, launcher, prepared).await {
         Ok(()) => {
             tokio::time::timeout(REQUEST_TIMEOUT, async {
                 prepare(client).await?.refresh_token().await
@@ -690,7 +707,7 @@ fn window_label(minutes: Option<i64>) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -729,7 +746,7 @@ mod tests {
         env: HashMap<String, String>,
         _temp: &tempfile::TempDir,
     ) -> CodexUsageStatus {
-        refresh_with_cache_root(client, cwd, env, &CodexLauncher::Host).await
+        refresh_with_cache_root(client, cwd, env, &CodexLauncher::Host, &mut None).await
     }
 
     #[cfg(unix)]
@@ -739,7 +756,7 @@ mod tests {
         env: HashMap<String, String>,
         _temp: &tempfile::TempDir,
     ) -> Result<(), LoginRefreshFailure> {
-        refresh_login_with_cache_root(client, cwd, env, &CodexLauncher::Host).await
+        refresh_login_with_cache_root(client, cwd, env, &CodexLauncher::Host, &mut None).await
     }
 
     #[cfg(unix)]
@@ -1105,6 +1122,7 @@ IFS= read -r line
                 managed_harness_install_dir(&test_cache_root(&temp), HarnessKind::Codex)
                     .join(CODEX_CLI_ENTRYPOINT),
             ),
+            &mut None,
         )
         .await
         .expect("started client");

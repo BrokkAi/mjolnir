@@ -734,18 +734,6 @@ async fn refresh_profile_with_cache_root(
                 "could not read the Codex configuration: {error}"
             )),
             CodexQuotaSource::ChatGptLogin => 'codex: {
-                // Serialize the expiry decision and every app-server request with
-                // other daemons and credential syncs using this login slot.
-                // Waiting for ownership is outside the RPC request timeout.
-                let _credential_guard = match mj_core::credentials::CredentialWriteGuard::acquire(
-                    HarnessKind::Codex,
-                    &credential_path,
-                )
-                .await
-                {
-                    Ok(guard) => guard,
-                    Err(error) => break 'codex Err(error),
-                };
                 let launcher = codex_usage::CodexLauncher::Host;
                 #[cfg(test)]
                 let launcher = cache_root.as_ref().map_or(launcher, |root| {
@@ -759,6 +747,24 @@ async fn refresh_profile_with_cache_root(
                 });
                 #[cfg(not(test))]
                 let _ = cache_root;
+                // Installation touches no credentials; finish it before
+                // reserving the login slot used by credential synchronization.
+                let mut prepared = match launcher.prepare(&environment).await {
+                    Ok(program) => Some(program),
+                    Err(error) => break 'codex Err(error),
+                };
+                // Serialize the expiry decision and every app-server request with
+                // other daemons and credential syncs using this login slot.
+                // Waiting for ownership is outside the RPC request timeout.
+                let _credential_guard = match mj_core::credentials::CredentialWriteGuard::acquire(
+                    HarnessKind::Codex,
+                    &credential_path,
+                )
+                .await
+                {
+                    Ok(guard) => guard,
+                    Err(error) => break 'codex Err(error),
+                };
                 // A poll starts at most one app-server. A failed rotation drops its
                 // client. When that client was cached from an earlier poll, a new
                 // one may still read the quota, which is how a login that the old
@@ -773,6 +779,7 @@ async fn refresh_profile_with_cache_root(
                         cwd.clone(),
                         environment.clone(),
                         &launcher,
+                        &mut prepared,
                     )
                     .await;
                     match login_refresh {
@@ -800,6 +807,7 @@ async fn refresh_profile_with_cache_root(
                             cwd,
                             environment,
                             &launcher,
+                            &mut prepared,
                         )
                         .await
                     }

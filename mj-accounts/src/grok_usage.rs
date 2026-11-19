@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -281,7 +281,7 @@ fn epoch_seconds(timestamp: &str) -> Option<i64> {
         .map(|moment| moment.timestamp())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
