@@ -114,7 +114,6 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
                         retry_after_ms = backoff.as_millis(),
                         "could not deliver Mjolnir events to Brokk Observe; retained the spool"
                     );
-                    backoff = (backoff * 2).min(MAX_DELIVERY_BACKOFF);
                 }
             }
             if cancellation.is_cancelled() {
@@ -145,16 +144,29 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
             };
             immediate = *revisions.borrow() != before;
             if failed {
-                tokio::select! {
-                    _ = cancellation.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep(backoff) => immediate = true,
-                    changed = revisions.changed() => {
-                        if changed.is_err() { return Ok(()); }
-                        immediate = true;
+                if flush.is_err() {
+                    let delay = backoff;
+                    backoff = (backoff * 2).min(MAX_DELIVERY_BACKOFF);
+                    // New revisions cannot repair failed id commits or a
+                    // delivery outage; retain their pending work until retry.
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(delay) => immediate = true,
                     }
-                    changed = wiki_changes.changed() => {
-                        if changed.is_err() { return Ok(()); }
-                        immediate = true;
+                } else {
+                    // Ordinary projection errors must not delay healthy
+                    // sessions whose revisions can still be delivered.
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(backoff) => immediate = true,
+                        changed = revisions.changed() => {
+                            if changed.is_err() { return Ok(()); }
+                            immediate = true;
+                        }
+                        changed = wiki_changes.changed() => {
+                            if changed.is_err() { return Ok(()); }
+                            immediate = true;
+                        }
                     }
                 }
             }
@@ -338,7 +350,9 @@ fn publish_one(
         .subagents
         .get(&record.id)
         .map(|relation| relation.parent_session_id.clone());
-    let emitted = spool.emitted_ids().load(&record.id)?;
+    let emitted = spool
+        .emitted_ids()
+        .load_cancellable(&record.id, spool.cancellation())?;
     let cursor = delivery.sessions.get(&record.id);
     let initialized_at = delivery.initialized_at_ms;
     let started_at_ms = chrono::DateTime::parse_from_rfc3339(&record.created_at)
@@ -367,15 +381,13 @@ fn publish_one(
         known.remote = known.remote.take().or(found.remote);
         known.branch = found.position.branch.clone().or(known.branch.take());
         let start_already_sent = known.head.is_none()
-            && cursor.is_some_and(|cursor| {
-                cursor.reported_git.is_none()
-                    && emitted.contains(&mj_core::observe::event_id(
-                        &record.id,
-                        0,
-                        "SessionStart",
-                        0,
-                    ))
-            });
+            && cursor.is_none_or(|cursor| cursor.reported_git.is_none())
+            && emitted.contains(&mj_core::observe::event_id(
+                &record.id,
+                0,
+                "SessionStart",
+                0,
+            ));
         if known.head.is_none() {
             known.head = found.launch.clone();
         }
@@ -537,7 +549,9 @@ fn publish_checkpoint(
     if let Some(position) = &position {
         insert_before_session_end(&mut envelopes, checkpoint_envelopes(&session, position)?);
     }
-    let emitted = spool.emitted_ids().load(session_id)?;
+    let emitted = spool
+        .emitted_ids()
+        .load_cancellable(session_id, spool.cancellation())?;
     enqueue_envelopes(
         session_id,
         envelopes,
@@ -816,7 +830,9 @@ async fn flush_after_export(
         .as_ref()
         .is_err_and(|error| error.downcast_ref::<ObserveIdsNotDurable>().is_some())
     {
-        return Ok(0);
+        // A deferred flush is a failed delivery cycle, not a successful empty
+        // batch: retry scheduling must keep its growing delay.
+        return Err(anyhow!(ObserveIdsNotDurable));
     }
     flush_spool(paths, config, client, cancellation).await
 }
@@ -1394,9 +1410,6 @@ mod tests {
             ObserveDeliveryState::load(&root.path().join("delivery.json"), 1_800_000_000_000)
                 .unwrap();
         let state = mj_core::state::State::default();
-        let mut publish = |record: &SessionRecord| {
-            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
-        };
         // Every head in the spool, in delivery order, with the event carrying it.
         let heads = || {
             spool
@@ -1435,12 +1448,49 @@ mod tests {
                 record.updated_at = revision.into();
             };
 
-        // The session starts before anything says where its checkout is.
-        assert!(publish(&record) >= 2);
+        // The first export starts before the launch commit is known, then
+        // fails after the projected envelopes are queued but before its cursor.
+        let materialized = mj_controller::database::load_materialized_session(&record.id)
+            .unwrap()
+            .unwrap();
+        let transcript = transcript_response_from_materialized(&record.id, &materialized).unwrap();
+        let session = ObserveSession {
+            id: record.id.clone(),
+            harness: record.harness_kind.id().to_owned(),
+            ..Default::default()
+        };
+        let mut envelopes = envelopes_for_transcript(&session, &transcript).unwrap();
+        let mut invalid = envelopes[0].clone();
+        invalid.meta.event_id.clear();
+        envelopes.push(invalid);
+        // Hard-won: e2421d353: partial first export lost the launch commit on retry.
+        let partial = enqueue_envelopes(
+            &record.id,
+            envelopes,
+            ObserveBatch {
+                revision: &record.updated_at,
+                materialized_event_ordinal: materialized.applied_event_ordinal,
+                execution: materialized.execution,
+                historical: false,
+                checkpoint_sha256: None,
+                reported_git: None,
+            },
+            &spool,
+            &mut delivery,
+            BTreeSet::new(),
+        );
+        assert!(partial.is_err());
+        assert!(!delivery.sessions.contains_key(&record.id));
+        assert!(spool.emitted_ids().load(&record.id).unwrap().contains(
+            &mj_core::observe::event_id(&record.id, 0, "SessionStart", 0)
+        ));
         for path in spool.pending().unwrap() {
             spool.remove(&path).unwrap();
         }
 
+        let mut publish = |record: &SessionRecord| {
+            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
+        };
         // Its first checkpoint reports the launch commit ahead of the head, so
         // Observe's first head is the start and its newest is the end.
         checkpointed(&mut record, 1, &first, "2026-08-14T12:00:01Z");

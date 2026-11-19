@@ -882,6 +882,14 @@ impl ObserveEmittedIds {
     }
 
     pub fn load(&self, session_id: &str) -> Result<BTreeSet<String>> {
+        self.load_cancellable(session_id, &CancellationToken::new())
+    }
+
+    pub fn load_cancellable(
+        &self,
+        session_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<BTreeSet<String>> {
         let path = self.path(session_id);
         let file = match fs::File::open(&path) {
             Ok(file) => file,
@@ -892,10 +900,27 @@ impl ObserveEmittedIds {
                 return Err(error).with_context(|| format!("read emitted ids {}", path.display()));
             }
         };
+        Self::read(
+            BufReader::new(ObserveStateReader { file, cancellation }),
+            cancellation,
+        )
+        .with_context(|| format!("read emitted ids {}", path.display()))
+    }
+
+    fn read(
+        mut reader: impl BufRead,
+        cancellation: &CancellationToken,
+    ) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
-        let mut reader = BufReader::new(file);
         let mut line = String::new();
-        while reader.read_line(&mut line)? > 0 {
+        loop {
+            ensure!(
+                !cancellation.is_cancelled(),
+                "Observe emitted-id load cancelled"
+            );
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
             if let Some(id) = line.strip_suffix('\n') {
                 ids.insert(id.to_owned());
             }
@@ -906,8 +931,8 @@ impl ObserveEmittedIds {
 
     pub fn append(&self, session_id: &str, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
-            // A known batch may drain a full disk. Open only an existing file,
-            // without creating entries or changing its length. Windows requires
+            // An unchanged projection syncs existing records without creating
+            // entries or changing their length. Windows requires
             // write access on the handle used by FlushFileBuffers.
             OpenOptions::new()
                 .read(true)
@@ -1146,6 +1171,51 @@ mod tests {
         );
         item.text = text.into();
         item
+    }
+
+    // Hard-won: e2421d353: loading a large emitted-id log ignored handoff cancellation.
+    #[test]
+    fn observe_emitted_id_load_cancels_after_reading_a_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let ids = ObserveEmittedIds::new(&root.path().join("delivery.json"));
+        let events = (0..1000)
+            .map(|index| format!("sha256:{index:064x}"))
+            .collect::<Vec<_>>();
+        ids.append("large-session", &events).unwrap();
+        let before = fs::read(ids.path("large-session")).unwrap();
+        assert!(before.len() > 64 * 1024);
+        let cancellation = CancellationToken::new();
+        struct CancelOnRefill<'a> {
+            input: ObserveStateReader<'a>,
+            read_once: bool,
+        }
+        impl std::io::Read for CancelOnRefill<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.read_once {
+                    self.input.cancellation.cancel();
+                }
+                self.read_once = true;
+                std::io::Read::read(&mut self.input, buffer)
+            }
+        }
+        let input = CancelOnRefill {
+            input: ObserveStateReader {
+                file: fs::File::open(ids.path("large-session")).unwrap(),
+                cancellation: &cancellation,
+            },
+            read_once: false,
+        };
+        assert!(ObserveEmittedIds::read(BufReader::new(input), &cancellation).is_err());
+        assert!(cancellation.is_cancelled());
+        assert!(
+            ids.load_cancellable("large-session", &cancellation)
+                .is_err()
+        );
+        assert_eq!(fs::read(ids.path("large-session")).unwrap(), before);
+        assert_eq!(
+            ids.load("large-session").unwrap(),
+            events.into_iter().collect()
+        );
     }
 
     // Hard-won: 66409e7c5: legacy migration could hold daemon handoff until completion.
