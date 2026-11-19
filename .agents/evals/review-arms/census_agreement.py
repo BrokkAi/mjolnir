@@ -76,8 +76,11 @@ def unique_facts(sets):
 
 
 def categories(fact):
+    rql = fact["rql"] or {}
+    rql_class = rql.get("class")
     return {
-        "rql.class": (fact["rql"] or {}).get("class"),
+        "rql.class": rql_class,
+        "rql.row_role": rql.get("row_role") if rql_class in ("documented", "missing") else None,
         "kind": fact["kind"],
         "anchors_on_touched": (fact["anchoring"] or {}).get("anchors_on_touched"),
     }
@@ -85,7 +88,7 @@ def categories(fact):
 
 def comparison(pairs):
     categories_by_fact = {category: {"agree": 0, "n": 0}
-                          for category in ("rql.class", "kind", "anchors_on_touched")}
+                          for category in ("rql.class", "rql.row_role", "kind", "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
     defects = {"both_confirmed": 0, "both_not_confirmed": 0, "split": 0}
     for first, second in pairs:

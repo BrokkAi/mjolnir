@@ -195,6 +195,21 @@ def row_kinds(signature):
     return set(re.findall(r"`(\w+)`", signature))
 
 
+def proposed_signature(step, allowed):
+    known_kinds = {kind for _, inputs, output, _, _ in allowed.values()
+                   for signature in (inputs, output) for kind in row_kinds(signature)}
+
+    def signature(value):
+        # Declarations may give bare or backticked domain names. Free-form
+        # descriptions do not establish a domain for the type checker.
+        kinds = re.split(r"\s*(?:,\s*(?:or\s+)?|\bor\b|\|)\s*", value.strip().replace("`", ""))
+        if set(kinds) <= known_kinds:
+            return " or ".join(f"`{kind}`" for kind in kinds)
+        return "unknown"
+
+    return "step", signature(step["input"]), signature(step["output"]), (), ()
+
+
 def check_query(query, allowed, *, query_heads=None):
     """Check documented form names and propagate their known terminal row kinds."""
     errors = []
@@ -207,8 +222,18 @@ def check_query(query, allowed, *, query_heads=None):
         name = form[0]
         if name not in allowed:
             errors.append(f"undocumented RQL form {name!r}")
+            unknown_arguments(form[1:])
             return "unknown", "", "", (), ()
         return allowed[name]
+
+    def unknown_arguments(args):
+        # An undocumented head cannot establish which operands are queries or
+        # options. Inspect nested lists, including those inside vectors.
+        for arg in args:
+            if isinstance(arg, list) and arg and isinstance(arg[0], str) and re.fullmatch(r"[\w/-]+", arg[0]):
+                infer(arg)
+            elif isinstance(arg, (list, tuple)):
+                unknown_arguments(arg)
 
     def arguments(form):
         positional, options = [], {}
@@ -234,7 +259,9 @@ def check_query(query, allowed, *, query_heads=None):
 
     def pattern(form, *, nested=False):
         use, *_ = form_signature(form)
-        if use not in ("pattern", "unknown") and not (nested and use == "operand"):
+        if use == "unknown":
+            return
+        if use != "pattern" and not (nested and use == "operand"):
             errors.append(f"{form[0]}: expected a structural pattern")
             return
         args = iter(form[1:])
@@ -323,8 +350,9 @@ def check_query(query, allowed, *, query_heads=None):
         if output == "no rows":
             errors.append(f"{name}: describes a plan without executing and returns no rows")
             return set()
-        if output == "unknown":
+        if inputs == "unknown" or output == "unknown":
             untyped = True
+        if output == "unknown":
             return set()
         if output == "same row":
             return input_kinds
@@ -447,13 +475,15 @@ def validate_fact(fact, split, where, errors, query_checks, allowed):
             spellings = (name, name.replace("_", "-"), name.replace("-", "_"))
             if any(spelling in allowed for spelling in spellings):
                 errors.append(f"{where}: missing_step {name!r} is already documented")
-            if string(query):
-                # The proposed step has no documented signature. Inspect query
-                # positions without applying the documented-only checks.
+            elif string(query):
                 query_heads = set()
-                check_query(query, allowed, query_heads=query_heads)
+                extended = {**allowed, name: proposed_signature(step, allowed)}
+                problems, status = check_query(query, extended, query_heads=query_heads)
                 if name not in query_heads:
-                    errors.append(f"{where}: query must invoke missing_step {name!r}")
+                    problems.append(f"query must invoke missing_step {name!r}")
+                errors.extend(f"{where}: {problem}" for problem in problems)
+                if not problems:
+                    query_checks.append({"fact": where, "status": status})
     # Step 5 is outside the development task. The output example includes
     # anchoring, so accept a well-formed object there as well as null.
     if split == "development" and anchoring is None:
