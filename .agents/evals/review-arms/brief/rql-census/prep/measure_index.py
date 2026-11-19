@@ -33,6 +33,9 @@ ENV = {"BIFROST_OPEN_PACKS_DISABLE": "1", "BIFROST_SEMANTIC_PACK_DOWNLOAD": "off
 # 3600 and request_watchdog_seconds 600; bench.py stop() waits 120 s, then terminates). A
 # wedged server then fails its repo visibly instead of stalling the shortlist.
 READINESS_SECONDS = 3600
+# Per-server memory cap (the scope's MemoryMax): 48 GiB on the 64 GiB measurement host, leaving
+# room for the OS and this driver; an index that exceeds it is a recorded failure.
+MEMORY_MAX = os.environ.get("RQL_INDEX_MEMORY_MAX", "48G")
 REQUEST_SECONDS = 600
 STOP_SECONDS = 120
 
@@ -42,14 +45,45 @@ class Server:
         env = dict(os.environ, **ENV, BIFROST_CACHE_ROOT=str(cache))
         env.pop("BIFROST_CACHE_DIR", None)  # it would take precedence over the fresh cache root
         self.log = open(log, "ab")
-        self.proc = subprocess.Popen([binary, "--root", str(root), "--mcp", "extended|workspace"],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
-                                     env=env, cwd=root)
+        # Each server runs in its own transient systemd scope: the scope's cgroup holds Bifrost
+        # and every process it starts, enforces the memory cap on that whole tree, and its
+        # memory.peak is the tree's peak, not just the parent's VmHWM.
+        self.unit = f"rql-bifrost-{os.getpid()}-{time.monotonic_ns()}"
+        self.proc = subprocess.Popen(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={self.unit}",
+             "-p", f"MemoryMax={MEMORY_MAX}", "-p", "MemorySwapMax=0",
+             binary, "--root", str(root), "--mcp", "extended|workspace"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env, cwd=root)
         self.seq = 0
         # A reader thread owns stdout, so a deadline can bound each wait even when several
         # replies arrive in one read (select on a buffered pipe would miss buffered lines).
         self.lines = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
+        # The scope's cgroup vanishes when the tree exits, so sample it while it lives: the
+        # last memory.peak, OOM kills and tree CPU survive a timeout or an OOM kill.
+        self.sample = {"peak_tree_kib": None, "oom_kill": 0, "tree_cpu_usec": None}
+        self.sampling = True
+        threading.Thread(target=self._sample, daemon=True).start()
+
+    def _cgroup_dir(self):
+        try:
+            return "/sys/fs/cgroup" + open(f"/proc/{self.proc.pid}/cgroup").read().split("::", 1)[1].strip()
+        except (OSError, IndexError):
+            return None
+
+    def _sample(self):
+        while self.sampling and self.proc.poll() is None:
+            d = self._cgroup_dir()
+            if d:
+                try:
+                    self.sample["peak_tree_kib"] = int(open(f"{d}/memory.peak").read()) // 1024
+                    events = dict(l.split() for l in open(f"{d}/memory.events"))
+                    self.sample["oom_kill"] = int(events.get("oom_kill", 0))
+                    cpu = dict(l.split() for l in open(f"{d}/cpu.stat"))
+                    self.sample["tree_cpu_usec"] = int(cpu["usage_usec"])
+                except (OSError, ValueError, KeyError):
+                    pass
+            time.sleep(2)
 
     def _read(self):
         for line in self.proc.stdout:
@@ -105,25 +139,19 @@ class Server:
                 return payload, polls
             time.sleep(1)
 
-    def peak_rss_kib(self):
-        try:
-            for line in open(f"/proc/{self.proc.pid}/status"):
-                if line.startswith("VmHWM:"):
-                    return int(line.split()[1])
-        except OSError:
-            return None
 
     def stop(self):
         self.proc.stdin.close()
         try:
             rc = self.proc.wait(timeout=STOP_SECONDS)
         except subprocess.TimeoutExpired:
-            self.proc.terminate()
-            try:
-                rc = self.proc.wait(timeout=STOP_SECONDS)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                rc = self.proc.wait()
+            rc = None
+        # Stop the scope in every case: it kills the whole process tree (Bifrost and anything it
+        # started) before the caller touches the worktree or cache.
+        subprocess.run(["systemctl", "--user", "stop", f"{self.unit}.scope"], capture_output=True)
+        if rc is None:
+            rc = self.proc.wait()
+        self.sampling = False
         self.log.close()
         return rc
 
@@ -140,12 +168,13 @@ def phase(binary, root, cache, log):
     try:
         server.initialize()
         payload, polls = server.wait_ready()
-        rec.update(wall=time.monotonic() - t0, polls=polls, peak_rss_kib=server.peak_rss_kib(),
+        rec.update(wall=time.monotonic() - t0, polls=polls,
                    ready=True, readiness={k: payload.get(k) for k in
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
     except Exception as e:
         rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
     rec["exit"] = server.stop()
+    rec.update(server.sample)  # peak_tree_kib, oom_kill, tree_cpu_usec, also on failure
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     rec.update(cpu_user=after.ru_utime - before.ru_utime, cpu_sys=after.ru_stime - before.ru_stime,
                cache_bytes=du(cache))
@@ -156,7 +185,22 @@ def git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+def require_ec2():
+    """Refuse to index anywhere but an EC2 instance: an unbounded index crashed the user's
+    workstation twice (bifrost-dev #14480). The per-server scope cap applies on EC2 too."""
+    try:
+        vendor = open("/sys/devices/virtual/dmi/id/sys_vendor").read().strip()
+    except OSError:
+        vendor = ""
+    if vendor != "Amazon EC2":
+        sys.exit(f"refusing to run Bifrost indexing on a non-EC2 host (sys_vendor={vendor!r})")
+    if subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={MEMORY_MAX}", "true"],
+                      capture_output=True).returncode:
+        sys.exit("systemd-run --user --scope with MemoryMax is unavailable; the memory cap can't be enforced")
+
+
 def main():
+    require_ec2()
     # Each line is `owner__repo`, or `owner__repo <pinned sha> <origin url>`. The pinned form
     # clones from the origin (for hosts without /nfs/morannon) and measures at that commit.
     entries = [l.split() for l in open(sys.argv[1]) if l.strip()]
@@ -167,11 +211,17 @@ def main():
     results = out / "index-cost.jsonl"
     # A repo is done only once a record shows both phases ready with no error; failed or
     # unready measurements are retried on the next run (the latest record wins downstream).
+    import hashlib
+    with open(binary, "rb") as f:
+        binary_sha = hashlib.file_digest(f, "sha256").hexdigest()
+    # A record is reusable only for the same repo, pinned revision and Bifrost binary.
     done = set()
     if results.exists():
         for l in open(results):
             r = json.loads(l)
-            if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart")):
+            if not r.get("error") and all((r.get(ph) or {}).get("ready") for ph in ("cold", "warm_restart")) \
+                    and r.get("binary_sha256") == binary_sha \
+                    and (r["repo"] not in pins or r.get("head") == pins[r["repo"]][0]):
                 done.add(r["repo"])
     for repo in repos:
         if repo in done:
@@ -194,7 +244,7 @@ def main():
             if wt.exists():
                 git("worktree", "remove", "--force", str(wt), cwd=clone)
             git("worktree", "add", "-q", "--detach", str(wt), base, cwd=clone)
-            rec.update(head=head, base=base,
+            rec.update(head=head, base=base, binary_sha256=binary_sha,
                        rust_files=len([p for p in subprocess.run(
                            ["git", "-C", str(wt), "ls-files", "-z", "*.rs"], check=True,
                            capture_output=True).stdout.split(b"\0") if p]))
