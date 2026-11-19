@@ -428,7 +428,14 @@ impl PreparedChat {
 
     /// Constructs the view without filesystem or database access.
     pub fn open(self) -> ActiveChat {
-        ActiveChat::from_prepared(self)
+        ActiveChat::from_prepared(self, None)
+    }
+
+    /// Open with the composer a surface held while this attachment was in
+    /// flight. The chat adopts it before starting its own reads, so session
+    /// history loads once, into the composer it keeps.
+    pub fn open_with_composer(self, composer: super::LiveComposer) -> ActiveChat {
+        ActiveChat::from_prepared(self, Some(composer))
     }
 
     /// A same-session handoff keeps the latest local composer, not the saved
@@ -526,7 +533,7 @@ impl ActiveChat {
         }
     }
 
-    fn from_prepared(prepared: PreparedChat) -> Self {
+    fn from_prepared(prepared: PreparedChat, composer: Option<super::LiveComposer>) -> Self {
         let PreparedChat {
             session,
             bundle_id,
@@ -611,6 +618,10 @@ impl ActiveChat {
         state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
+        let adopted = composer.is_some();
+        if let Some(composer) = composer {
+            state.adopt_live_composer(composer);
+        }
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
         state.request_session_history();
         state.dispatch_composer_requests(
@@ -667,6 +678,11 @@ impl ActiveChat {
             deferred_elicitation_drafts: Vec::new(),
             earlier_task: None,
         };
+        if adopted {
+            // As in `adopt_live_composer`: the view may have advanced while
+            // the composer was parked.
+            chat.apply_session_view(Ok(chat.session.view()));
+        }
         chat.refresh_voice_availability();
         chat
     }
@@ -674,7 +690,8 @@ impl ActiveChat {
     /// Reconcile transferred local state with this attachment's authoritative view.
     pub fn adopt_live_composer(&mut self, composer: super::LiveComposer) {
         self.state.adopt_live_composer(composer);
-        // The adopted composer replaces the one `open` loaded history into.
+        // The adopted composer may never have loaded this session's history
+        // (a standby composer), and it replaces the one that did.
         self.state.request_session_history();
         self.dispatch_composer_requests();
         // The view may have advanced while the composer was parked. Applying

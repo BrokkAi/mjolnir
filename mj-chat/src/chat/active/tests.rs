@@ -4133,7 +4133,7 @@ async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
 
 // Hard-won: standby adoption dropped the session-history read
 #[tokio::test]
-async fn adopting_standby_loads_session_history_for_up_navigation() {
+async fn opening_with_standby_composer_loads_session_history_for_up_navigation() {
     use mj_core::storage::PromptHistoryEntry;
     let fixture = mj_client::session::replacement_session_test_fixture("standby-history", 1);
     fixture
@@ -4148,7 +4148,13 @@ async fn adopting_standby_loads_session_history_for_up_navigation() {
         submitted_ids: None,
         history: Some(history),
     });
-    let mut chat = ActiveChat::open(
+    let mut standby = ChatState::standby(
+        "standby-history",
+        &Config::default(),
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    let mut chat = ActiveChat::prepare_with_persistence(
         session,
         "bundle-1",
         None,
@@ -4156,14 +4162,10 @@ async fn adopting_standby_loads_session_history_for_up_navigation() {
         SessionHeaderIdentity::default(),
         String::new(),
         Notices::default(),
-    );
-    let mut standby = ChatState::standby(
-        "standby-history",
-        &Config::default(),
-        SessionHeaderIdentity::default(),
-        Notices::default(),
-    );
-    chat.adopt_live_composer(standby.take_live_composer().unwrap());
+        None,
+    )
+    .open_with_composer(standby.take_live_composer().unwrap());
+
     let reply = tokio::time::timeout(Duration::from_secs(2), listings.recv())
         .await
         .expect("adopted composer requests history")
@@ -4186,6 +4188,7 @@ async fn adopting_standby_loads_session_history_for_up_navigation() {
     })
     .await
     .expect("history result arrives");
+    assert!(listings.try_recv().is_err(), "the chat reads history once");
     chat.handle_event_result(Event::Key(key(KeyCode::Up)));
     assert_eq!(chat.state.input, "stored prompt");
 }
