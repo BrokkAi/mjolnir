@@ -940,7 +940,9 @@ def main():
         print(json.dumps(summary, indent=2))
         return
     args.labels_dir.mkdir(parents=True, exist_ok=True)
-    with (args.labels_dir / ".lock").open("a") as lock:
+    # One lock per split and labeller: each writes its own label file and uses its own account,
+    # so a replication run waiting for quota mustn't block a primary run.
+    with (args.labels_dir / f".{args.split or 'all'}-{args.labeller or 'none'}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         log(args.labels_dir, "cohort", **summary)
         if args.check_quota:
