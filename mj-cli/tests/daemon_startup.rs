@@ -1805,18 +1805,25 @@ fi
     let preparation_address = preparation.local_addr().unwrap();
     let after_cancel = storage.path().join("written-after-cancel");
     let helper = storage.path().join("preparation.py");
+    let helper_trace = storage.path().join("helper-trace.txt");
     fs::write(
         &helper,
         format!(
             r#"
-import os, socket
+import os, socket, subprocess
+# Which process started this helper, for the report of a helper that is not
+# killed: only the login's own helper is the login's to stop.
+parent = subprocess.run(['ps', '-o', 'pid=,ppid=,pgid=,command=', '-p', str(os.getppid())],
+                        capture_output=True, text=True).stdout.strip()
+open({trace:?}, 'a').write('helper pid=%d pgid=%d parent: %s\n' % (os.getpid(), os.getpgid(0), parent))
 s = socket.create_connection(('127.0.0.1', {port}))
 s.sendall((str(os.getpid()) + '\n').encode())
 s.recv(1)
 open({output:?}, 'w').write('helper survived cancellation')
 "#,
             port = preparation_address.port(),
-            output = after_cancel.to_str().unwrap()
+            output = after_cancel.to_str().unwrap(),
+            trace = helper_trace.to_str().unwrap()
         ),
     )
     .unwrap();
@@ -2050,7 +2057,29 @@ open({output:?}, 'w').write('helper survived cancellation')
             }
         })
         .await
-        .expect("daemon login integration timed out");
+        .unwrap_or_else(|_| {
+            // Say which helpers ran and what is still alive: a helper that
+            // outlives its login is the failure this test exists to catch.
+            let processes = Command::new("ps")
+                .args(["-axo", "pid,ppid,pgid,stat,command"])
+                .output()
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .filter(|line| {
+                            ["preparation.py", " login ", "daemon-run", "PID"]
+                                .iter()
+                                .any(|name| line.contains(name))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            panic!(
+                "daemon login integration timed out in ending {ending}\nhelpers started:\n{}\nprocesses:\n{processes}",
+                fs::read_to_string(&helper_trace).unwrap_or_default()
+            )
+        });
     });
     daemon.wait().unwrap();
 }
