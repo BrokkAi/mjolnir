@@ -2085,7 +2085,13 @@ pub(crate) fn discover_linked_worktrees(
                 for entry in entries {
                     let entry = entry?;
                     if entry.file_type()?.is_dir() {
-                        let path = fs::read(entry.path().join("gitdir"))?;
+                        let path = match fs::read(entry.path().join("gitdir")) {
+                            Ok(path) => path,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(error) => {
+                                return Err(error).context("read legacy worktree registration");
+                            }
+                        };
                         let path = path.strip_suffix(b"\n").unwrap_or(&path);
                         let registered = mj_core::path_input::from_git_bytes(path)?;
                         let checkout = registered
