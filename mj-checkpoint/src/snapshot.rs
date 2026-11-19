@@ -215,20 +215,39 @@ pub struct CaptureConsent {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnrepresentedWorktree {
-    pub root_repository: bool,
+    pub locked: bool,
+    pub can_move_inside: bool,
     pub git_dir: PathBuf,
     pub path: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleLocalWork {
+    pub path: PathBuf,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventoryBlocker {
+    #[serde(flatten)]
+    pub kind: SnapshotRefused,
+    pub paths: Vec<Scoped<PathBuf>>,
+    pub remedy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum SnapshotRefused {
     Untracked(Vec<UntrackedItem>),
     OperationInProgress(ShownOperation),
     DirtySubmodule(Scoped<PathBuf>),
-    UnpublishedSubmoduleWork(Vec<Scoped<String>>),
+    UnpublishedSubmoduleWork(Vec<Scoped<ModuleLocalWork>>),
     SubmoduleOperations(Vec<Scoped<GitOperationKind>>),
-    ShallowHistory(Vec<String>),
-    UnrepresentedWorktrees(Vec<Scoped<UnrepresentedWorktree>>),
+    ShallowRepository(CheckoutKey),
+    UnrepresentedGitState {
+        directories: Vec<Scoped<PathBuf>>,
+        worktrees: Vec<Scoped<UnrepresentedWorktree>>,
+    },
     HiddenTrackedEdits(Vec<Scoped<PathBuf>>),
     IntentToAdd(Vec<Scoped<PathBuf>>),
     TrackedKeepFiles {
@@ -266,13 +285,20 @@ impl std::fmt::Display for SnapshotRefused {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Self::UnrepresentedWorktrees(items) => write!(f, "{}", items.iter().map(|item| {
-                let repo = mj_core::targets::posix_quote(&item.value.git_dir.to_string_lossy());
-                let path = mj_core::targets::posix_quote(&item.value.path.to_string_lossy());
-                let alternative = if item.value.root_repository { " or move it inside the clone" } else { "" };
-                format!("unrepresented worktree {} depends on the Git directory removed by suspend; run `git --git-dir {repo} --work-tree {repo} worktree remove {path}`{alternative}, then suspend again", item.value.path.display())
-            }).collect::<Vec<_>>().join("; ")),
-            Self::ShallowHistory(items) => write!(f, "{}; fetch the missing history from a remote that has it with `git fetch --unshallow` or `git fetch --deepen=<n>`, then suspend again", items.join("; ")),
+            Self::UnrepresentedGitState { directories, worktrees } => {
+                let mut items = directories.iter().map(|item| format!("unrepresented Git directory {}; push or copy out anything wanted, then delete this directory before suspending", item.value.display())).collect::<Vec<_>>();
+                items.extend(worktrees.iter().map(|item| {
+                    let repo = mj_core::targets::posix_quote(&item.value.git_dir.to_string_lossy());
+                    let path = mj_core::targets::posix_quote(&item.value.path.to_string_lossy());
+                    let alternative = if item.value.can_move_inside && !item.value.locked { " or move it inside the clone" } else { "" };
+                    {
+                    let locked = if item.value.locked { format!("; this worktree is locked: once it is available and its contents are safe, deliberately run `git --git-dir {repo} --work-tree {repo} worktree unlock {path}` first") } else { String::new() };
+                    format!("unrepresented worktree {}{locked}; push or copy out anything wanted, then run `git --git-dir {repo} --work-tree {repo} worktree remove --force {path}`{alternative} before suspending", item.value.path.display())
+                }
+                }));
+                write!(f, "{}", items.join("; "))
+            }
+            Self::ShallowRepository(checkout) => write!(f, "snapshot for {}:{} needs full history; run `git fetch --unshallow`. If origin is itself shallow, run `git fetch --unshallow <url>` from any remote with full history. If none exists, use `mj suspend --without-checkpoint` or keep the session running", checkout.repository_id, checkout.checkout_path.display()),
             Self::SubmoduleOperations(items) => write!(f, "{}", items.iter().map(|item| {
                 let [command, argument] = abort_operation_arguments(item.value);
                 let path = mj_core::targets::posix_quote(&item.checkout.checkout_path.to_string_lossy());
@@ -288,7 +314,7 @@ impl std::fmt::Display for SnapshotRefused {
                         "{}:{}:{}",
                         item.checkout.repository_id,
                         item.checkout.checkout_path.display(),
-                        item.value
+                        item.value.description
                     ))
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -383,9 +409,13 @@ pub struct WorkspaceInventory {
     pub tracked_keep_files: Vec<Scoped<PathBuf>>,
     pub keep_dir: Option<PathBuf>,
     pub dirty_submodules: Vec<Scoped<PathBuf>>,
-    pub submodule_local_work: Vec<Scoped<String>>,
+    pub submodule_local_work: Vec<Scoped<ModuleLocalWork>>,
     pub submodule_operations: Vec<Scoped<GitOperationKind>>,
     pub unrepresented_worktrees: Vec<Scoped<UnrepresentedWorktree>>,
+    pub unrepresented_git_dirs: Vec<Scoped<PathBuf>>,
+    pub shallow: bool,
+    pub blockers: Vec<InventoryBlocker>,
+    pub in_place_only: bool,
     pub hidden_tracked_edits: Vec<Scoped<PathBuf>>,
     pub intent_to_add: Vec<Scoped<PathBuf>>,
     pub initialized_submodules: Vec<Scoped<SnapshotSubmodule>>,
@@ -765,11 +795,19 @@ fn operation_record(
         return Ok(None);
     };
     let paths: &[&str] = match kind {
-        GitOperationKind::Merge => &["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "ORIG_HEAD"],
+        GitOperationKind::Merge => &[
+            "MERGE_HEAD",
+            "MERGE_MSG",
+            "MERGE_MODE",
+            "ORIG_HEAD",
+            "MERGE_AUTOSTASH",
+        ],
         GitOperationKind::Rebase => &[
             "rebase-merge/head-name",
             "rebase-merge/onto",
             "rebase-merge/orig-head",
+            "rebase-merge/autostash",
+            "rebase-apply/autostash",
             "rebase-apply/head-name",
             "rebase-apply/onto",
             "rebase-apply/orig-head",
@@ -1621,92 +1659,170 @@ fn prepare_capture(
                 .iter()
                 .any(|(_, tree)| tree.operation.is_some()))
     {
-        // Abort may restore different HEAD/index gitlinks. Validate that exact
-        // state before pinning it, retaining the pre-abort refusal above.
+        // Abort can unregister initialized modules. Recheck unconditional
+        // structural blockers against the final HEAD/index before pinning.
         let inventory = repository_inventory(runner, repository)?;
         check_repository_consent(repository, &inventory, consent)?;
         return Ok(inventory);
     }
     Ok(inventory)
 }
+struct ConsentInputs {
+    untracked: Vec<UntrackedItem>,
+    operations: Vec<ShownOperation>,
+}
 fn check_consent(inventory: &WorkspaceInventory, consent: &CaptureConsent) -> Result<()> {
+    check_consent_inputs(
+        inventory.raw,
+        check_unconditional_blockers(inventory)?,
+        consent,
+    )
+}
+fn check_unconditional_blockers(inventory: &WorkspaceInventory) -> Result<ConsentInputs> {
+    if let Some(blocker) = inventory.blockers.first() {
+        return Err(blocker.kind.clone().into());
+    }
     let mut untracked = Vec::new();
     let mut operations = Vec::new();
-    let mut hidden = Vec::new();
-    let mut intent = Vec::new();
-    let mut dirty_submodules = Vec::new();
-    let mut local_work = Vec::new();
-    let mut submodule_operations = Vec::new();
-    let mut unrepresented_worktrees = Vec::new();
-    let mut tracked_keep = Vec::new();
-    let mut collect =
-        |inventory: &WorkspaceInventory| {
-            untracked.extend(inventory.untracked.iter().map(|entry| UntrackedItem::Path {
+    for tree in std::iter::once(inventory).chain(inventory.worktrees.iter().map(|(_, tree)| tree)) {
+        untracked.extend(tree.untracked.iter().map(|entry| UntrackedItem::Path {
+            checkout: entry.checkout.clone(),
+            path: entry.path.clone(),
+            identity: entry.identity.clone(),
+        }));
+        untracked.extend(tree.nested_repositories.iter().map(|entry| {
+            UntrackedItem::NestedRepository {
                 checkout: entry.checkout.clone(),
                 path: entry.path.clone(),
                 identity: entry.identity.clone(),
-            }));
-            untracked.extend(inventory.nested_repositories.iter().map(|entry| {
-                UntrackedItem::NestedRepository {
-                    checkout: entry.checkout.clone(),
-                    path: entry.path.clone(),
-                    identity: entry.identity.clone(),
-                }
-            }));
-            tracked_keep.extend(inventory.tracked_keep_files.clone());
-            untracked.extend(inventory.untracked_stashes.iter().map(|entry| {
-                UntrackedItem::Stash {
+            }
+        }));
+        untracked.extend(
+            tree.untracked_stashes
+                .iter()
+                .map(|entry| UntrackedItem::Stash {
                     checkout: entry.checkout.clone(),
                     commit: entry.value.commit.clone(),
                     message: entry.value.message.clone(),
-                }
-            }));
-            if !(inventory.raw && inventory.operation.is_some()) {
-                hidden.extend(inventory.hidden_tracked_edits.clone());
-                intent.extend(inventory.intent_to_add.clone());
-            }
-            dirty_submodules.extend(inventory.dirty_submodules.clone());
-            local_work.extend(inventory.submodule_local_work.clone());
-            submodule_operations.extend(inventory.submodule_operations.clone());
-            unrepresented_worktrees.extend(inventory.unrepresented_worktrees.clone());
-            if let Some(operation) = &inventory.operation {
-                operations.push(operation.clone());
-            }
-        };
-    collect(inventory);
-    for (_, inventory) in &inventory.worktrees {
-        collect(inventory);
+                }),
+        );
+        operations.extend(tree.operation.iter().cloned());
     }
-    if !tracked_keep.is_empty() {
-        return Err(SnapshotRefused::TrackedKeepFiles {
-            keep_dir: inventory
-                .keep_dir
-                .clone()
-                .context("tracked keep inventory has no keep directory")?,
-            paths: tracked_keep,
+    Ok(ConsentInputs {
+        untracked,
+        operations,
+    })
+}
+fn inventory_blockers(inventory: &WorkspaceInventory) -> Result<Vec<InventoryBlocker>> {
+    if inventory.in_place_only {
+        return Ok(Vec::new());
+    }
+    let mut reasons = Vec::new();
+    if !inventory.raw && inventory.shallow {
+        reasons.push(SnapshotRefused::ShallowRepository(
+            inventory.checkout.clone(),
+        ));
+    }
+    let mut directories = Vec::new();
+    let mut worktrees = Vec::new();
+    for tree in std::iter::once(inventory).chain(inventory.worktrees.iter().map(|(_, tree)| tree)) {
+        if !tree.tracked_keep_files.is_empty() {
+            reasons.push(SnapshotRefused::TrackedKeepFiles {
+                keep_dir: tree
+                    .keep_dir
+                    .clone()
+                    .context("tracked keep inventory has no keep directory")?,
+                paths: tree.tracked_keep_files.clone(),
+            });
         }
-        .into());
+        if !(tree.raw && tree.operation.is_some()) {
+            if !tree.intent_to_add.is_empty() {
+                reasons.push(SnapshotRefused::IntentToAdd(tree.intent_to_add.clone()));
+            }
+            if !tree.hidden_tracked_edits.is_empty() {
+                reasons.push(SnapshotRefused::HiddenTrackedEdits(
+                    tree.hidden_tracked_edits.clone(),
+                ));
+            }
+        }
+        if !tree.raw {
+            if !tree.submodule_operations.is_empty() {
+                reasons.push(SnapshotRefused::SubmoduleOperations(
+                    tree.submodule_operations.clone(),
+                ));
+            }
+            if !tree.submodule_local_work.is_empty() {
+                reasons.push(SnapshotRefused::UnpublishedSubmoduleWork(
+                    tree.submodule_local_work.clone(),
+                ));
+            }
+            directories.extend(tree.unrepresented_git_dirs.clone());
+            worktrees.extend(tree.unrepresented_worktrees.clone());
+        }
+        reasons.extend(
+            tree.dirty_submodules
+                .iter()
+                .cloned()
+                .map(SnapshotRefused::DirtySubmodule),
+        );
     }
-    ensure!(intent.is_empty(), SnapshotRefused::IntentToAdd(intent));
-    ensure!(
-        hidden.is_empty(),
-        SnapshotRefused::HiddenTrackedEdits(hidden)
-    );
-    if !inventory.raw && !submodule_operations.is_empty() {
-        return Err(SnapshotRefused::SubmoduleOperations(submodule_operations).into());
+    if !directories.is_empty() || !worktrees.is_empty() {
+        reasons.push(SnapshotRefused::UnrepresentedGitState {
+            directories,
+            worktrees,
+        });
     }
-    if !inventory.raw && !local_work.is_empty() {
-        return Err(SnapshotRefused::UnpublishedSubmoduleWork(local_work).into());
-    }
-    if let Some(path) = dirty_submodules.into_iter().next() {
-        return Err(SnapshotRefused::DirtySubmodule(path).into());
-    }
-    if !inventory.raw && !unrepresented_worktrees.is_empty() {
-        return Err(SnapshotRefused::UnrepresentedWorktrees(unrepresented_worktrees).into());
-    }
+    Ok(reasons
+        .into_iter()
+        .map(|kind| {
+            let paths = match &kind {
+                SnapshotRefused::TrackedKeepFiles { paths, .. }
+                | SnapshotRefused::IntentToAdd(paths)
+                | SnapshotRefused::HiddenTrackedEdits(paths) => paths.clone(),
+                SnapshotRefused::DirtySubmodule(path) => vec![path.clone()],
+                SnapshotRefused::UnpublishedSubmoduleWork(items) => items
+                    .iter()
+                    .map(|item| scoped(&item.checkout, item.value.path.clone()))
+                    .collect(),
+                SnapshotRefused::SubmoduleOperations(items) => items
+                    .iter()
+                    .map(|item| scoped(&item.checkout, PathBuf::new()))
+                    .collect(),
+                SnapshotRefused::ShallowRepository(checkout) => {
+                    vec![scoped(checkout, PathBuf::new())]
+                }
+                SnapshotRefused::UnrepresentedGitState {
+                    directories,
+                    worktrees,
+                } => directories
+                    .iter()
+                    .cloned()
+                    .chain(
+                        worktrees
+                            .iter()
+                            .map(|item| scoped(&item.checkout, item.value.path.clone())),
+                    )
+                    .collect(),
+                SnapshotRefused::Untracked(_) | SnapshotRefused::OperationInProgress(_) => {
+                    Vec::new()
+                }
+            };
+            InventoryBlocker {
+                remedy: kind.to_string(),
+                paths,
+                kind,
+            }
+        })
+        .collect())
+}
+fn check_consent_inputs(raw: bool, inputs: ConsentInputs, consent: &CaptureConsent) -> Result<()> {
+    let ConsentInputs {
+        mut untracked,
+        operations,
+    } = inputs;
     untracked.retain(|entry| !untracked_covered(&consent.untracked, entry));
     ensure!(untracked.is_empty(), SnapshotRefused::Untracked(untracked));
-    if !inventory.raw {
+    if !raw {
         for operation in operations {
             let covered = match &consent.operations {
                 OperationConsent::None => false,
@@ -2054,47 +2170,14 @@ fn selected_refs(
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect();
     for (name, (commit, _)) in owners {
+        if let Some(live) = cut.refs.get(*name).filter(|live| live.as_str() != *commit)
+            && name.starts_with("refs/heads/")
+        {
+            refs.insert(format!("refs/mj/displaced/{live}"), live.clone());
+        }
         refs.insert((*name).to_owned(), (*commit).to_owned());
     }
     Ok(SelectedRefs { refs, complete })
-}
-fn shallow_history_gaps(
-    runner: &dyn GitCommandRunner,
-    checkout: &Path,
-    tips: &[String],
-    origin_tips: &[String],
-) -> Result<Vec<String>> {
-    let shallow = match fs::read(git_path(runner, checkout, "shallow")?) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).context("read shallow boundaries"),
-    };
-    let mut gaps = Vec::new();
-    for boundary in std::str::from_utf8(&shallow)?
-        .lines()
-        .filter(|line| !line.is_empty())
-    {
-        if !crate::checkpoint::commit_published(runner, checkout, boundary, tips)?
-            || crate::checkpoint::commit_published(runner, checkout, boundary, origin_tips)?
-        {
-            continue;
-        }
-        let commit = git_bytes(
-            runner,
-            checkout,
-            ["cat-file", "commit", boundary],
-            &[],
-            "read shallow boundary",
-        )?;
-        let parents = commit
-            .split(|byte| *byte == b'\n')
-            .take_while(|line| !line.is_empty())
-            .filter_map(|line| line.strip_prefix(b"parent "))
-            .map(std::str::from_utf8)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        gaps.push(format!("shallow boundary {boundary} with parents {} is not covered by origin; its parents are omitted from the pack", parents.join(", ")));
-    }
-    Ok(gaps)
 }
 fn write_snapshot_pack(
     runner: &dyn GitCommandRunner,
@@ -2355,6 +2438,56 @@ fn check_repository_consent(
 ) -> Result<()> {
     check_consent(inventory, consent)
 }
+fn in_place_only_mode(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    ownership: &CheckoutOwnership,
+    origin_override: Option<&str>,
+) -> Result<bool> {
+    Ok(matches!(ownership, CheckoutOwnership::Raw { .. })
+        && origin_override.is_none()
+        && run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?.status != 0)
+}
+fn in_place_only_inventory(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    key: &CheckoutKey,
+) -> Result<WorkspaceInventory> {
+    let shallow = git_text(runner, checkout, ["rev-parse", "--is-shallow-repository"])? == "true";
+    let mut notices = vec!["raw checkout has no origin; this snapshot resumes only in place and keeps files, index and operations unchanged".to_owned()];
+    if shallow {
+        notices.push("raw repository is shallow; snapshots do not preserve shallow metadata; the source checkout is kept".to_owned());
+    }
+    Ok(WorkspaceInventory {
+        notices,
+        checkout: key.clone(),
+        in_place_only: true,
+        shallow,
+        operation: operation_record(runner, checkout, key)?,
+        raw: true,
+        hidden_tracked_edits: crate::archive::git::hidden_tracked_paths(runner, checkout)?
+            .into_iter()
+            .map(|path| scoped(key, path))
+            .collect(),
+        untracked: Vec::new(),
+        untracked_stashes: Vec::new(),
+        nested_repositories: Vec::new(),
+        tracked_keep_files: Vec::new(),
+        keep_dir: None,
+        dirty_submodules: Vec::new(),
+        submodule_local_work: Vec::new(),
+        submodule_operations: Vec::new(),
+        unrepresented_worktrees: Vec::new(),
+        unrepresented_git_dirs: Vec::new(),
+        blockers: Vec::new(),
+        intent_to_add: Vec::new(),
+        initialized_submodules: Vec::new(),
+        index_gitlinks: Vec::new(),
+        remote_refs_stale: false,
+        worktrees: Vec::new(),
+    })
+}
+
 /// Inventory every repository and decide consent for the complete session before
 /// the first abort or other mutation. Paths inside consent remain repository-relative.
 /// The caller must have stopped all writers to managed checkouts and hold their
@@ -2381,16 +2514,12 @@ pub fn capture_session_snapshot(
             "duplicate snapshot repository ID {}",
             repository.id
         );
-        let in_place = matches!(repository.ownership, CheckoutOwnership::Raw { .. })
-            && repository.origin_override.is_none()
-            && run_git(
-                runner,
-                &repository.checkout,
-                ["remote", "get-url", "origin"],
-                &[],
-            )?
-            .status
-                != 0;
+        let in_place = in_place_only_mode(
+            runner,
+            &repository.checkout,
+            &repository.ownership,
+            repository.origin_override.as_deref(),
+        )?;
         let mode = if in_place {
             CaptureMode::InPlaceOnly
         } else {
@@ -2401,15 +2530,21 @@ pub fn capture_session_snapshot(
         };
         inventories.insert(repository.id.clone(), mode);
     }
+    let mut pending_consents = Vec::new();
     for repository in repositories {
         if let CaptureMode::Transfer(inventory) = &inventories[&repository.id] {
-            check_repository_consent(
-                repository,
-                inventory,
-                consent.repositories.get(&repository.id).unwrap_or(&none),
-            )
-            .map_err(|error| session_error(&repository.id, error))?;
+            let inputs = check_unconditional_blockers(inventory)
+                .map_err(|error| session_error(&repository.id, error))?;
+            pending_consents.push((repository, inventory.raw, inputs));
         }
+    }
+    for (repository, raw, inputs) in pending_consents {
+        check_consent_inputs(
+            raw,
+            inputs,
+            consent.repositories.get(&repository.id).unwrap_or(&none),
+        )
+        .map_err(|error| session_error(&repository.id, error))?;
     }
     let mut snapshots = BTreeMap::new();
     for repository in repositories {
@@ -2495,8 +2630,9 @@ fn capture_in_place_metadata(
     repository: &RepositoryInput,
 ) -> Result<WorkspaceSnapshot> {
     let checkout = &repository.checkout;
-    let skipped = operation(runner, checkout)?.is_some();
-    let mut notices = vec!["raw checkout has no origin; this snapshot resumes only in place and keeps files, index and operations unchanged".to_owned()];
+    let inventory = in_place_only_inventory(runner, checkout, &repository_key(&repository.id))?;
+    let skipped = inventory.operation.is_some();
+    let mut notices = inventory.notices;
     let status = run_git(
         runner,
         checkout,
@@ -2517,7 +2653,7 @@ fn capture_in_place_metadata(
             true
         }
     };
-    let hidden = crate::archive::git::hidden_tracked_paths(runner, checkout)?;
+    let hidden = inventory.hidden_tracked_edits;
     Ok(WorkspaceSnapshot {
         object_format: git_text(runner, checkout, ["rev-parse", "--show-object-format"])?,
         worktree_config_enabled: worktree_config_enabled(runner, checkout)?,
@@ -2738,6 +2874,14 @@ fn capture_prepared_workspace(
                 "workspace refs, HEAD or submodules kept changing during snapshot capture; retry after the checkout is idle"
             );
         }
+        for (branch, (owner_commit, _)) in &owners {
+            if let Some(live) = source_refs
+                .get(*branch)
+                .filter(|live| live.as_str() != *owner_commit)
+            {
+                notices.push(format!("branch {branch} saved at {owner_commit}; its live tip {live} is preserved as refs/mj/displaced/{live}"));
+            }
+        }
         let selected = selected_refs(runner, checkout, &cut, ownership, &owners)?;
         let snapshot_refs = selected.refs;
         let stash = original_stash
@@ -2789,16 +2933,6 @@ fn capture_prepared_workspace(
                 }
                 .into());
             }
-        }
-        let gaps = shallow_history_gaps(runner, checkout, &tips, &exclusions.objects)?;
-        if !gaps.is_empty() {
-            if matches!(ownership, CheckoutOwnership::Managed) {
-                return Err(SnapshotRefused::ShallowHistory(gaps).into());
-            }
-            notices.push(format!(
-                "{}; this raw snapshot cannot be restored elsewhere; the source checkout is kept",
-                gaps.join("; ")
-            ));
         }
         let pack = write_snapshot_pack(runner, checkout, &tips, &exclusions.objects, pack_path)?;
         check_repository_consent(
@@ -2979,6 +3113,9 @@ fn repository_inventory(
         &repository_key(&repository.id),
         repository.origin_override.as_deref(),
     )?;
+    if inventory.in_place_only {
+        return Ok(inventory);
+    }
     if let Some(keep) = keep_relative(repository)? {
         inventory.keep_dir = repository.keep_dir.clone();
         inventory.tracked_keep_files = tracked_keep_paths(
@@ -3021,6 +3158,7 @@ fn repository_inventory(
             nested.tracked_keep_files.dedup();
         }
     }
+    inventory.blockers = inventory_blockers(&inventory)?;
     Ok(inventory)
 }
 pub fn workspace_inventory(
@@ -3052,6 +3190,56 @@ pub fn session_inventory(
     }
     Ok(result)
 }
+fn modules_after_abort(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    inventory: &WorkspaceInventory,
+) -> Result<Vec<PathBuf>> {
+    let Some(operation) = inventory.operation.as_ref() else {
+        return Ok(inventory
+            .initialized_submodules
+            .iter()
+            .map(|module| root.join(&module.value.path))
+            .collect());
+    };
+    let target = if operation.kind == GitOperationKind::Am {
+        git_text(runner, root, ["rev-parse", "ORIG_HEAD"])?
+    } else {
+        saved_head(runner, root, true)?.commit().to_owned()
+    };
+    let mut config_commit = target.clone();
+    let markers: &[&str] = match operation.kind {
+        GitOperationKind::Merge => &["MERGE_AUTOSTASH"],
+        GitOperationKind::Rebase => &["rebase-merge/autostash", "rebase-apply/autostash"],
+        _ => &[],
+    };
+    for marker in markers {
+        match fs::read_to_string(git_path(runner, root, marker)?) {
+            Ok(oid) => {
+                config_commit = oid.trim().to_owned();
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("read abort autostash"),
+        }
+    }
+    let registered =
+        crate::checkpoint::registered_gitlinks_at(runner, root, &target, &config_commit)?;
+    let mut paths = Vec::new();
+    for module in &inventory.initialized_submodules {
+        let outer = inventory
+            .initialized_submodules
+            .iter()
+            .filter(|candidate| module.value.path.starts_with(&candidate.value.path))
+            .min_by_key(|candidate| candidate.value.path.components().count())
+            .context("module has no owning checkout")?;
+        if registered.contains(&outer.value.path) {
+            paths.push(root.join(&module.value.path));
+        }
+    }
+    Ok(paths)
+}
+
 fn workspace_inventory_scoped(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
@@ -3059,6 +3247,9 @@ fn workspace_inventory_scoped(
     key: &CheckoutKey,
     origin_override: Option<&str>,
 ) -> Result<WorkspaceInventory> {
+    if in_place_only_mode(runner, checkout, ownership, origin_override)? {
+        return in_place_only_inventory(runner, checkout, key);
+    }
     fn collect(
         runner: &dyn GitCommandRunner,
         checkout: &Path,
@@ -3080,7 +3271,7 @@ fn workspace_inventory_scoped(
             submodules.notices.push(notice);
         }
         if raw && !submodules.local_work.is_empty() {
-            submodules.notices.push(format!("{}; submodule local refs, stashes, staged index and operation state do not travel with this snapshot; the raw checkout is kept", submodules.local_work.join(", ")));
+            submodules.notices.push(format!("{}; submodule local refs, stashes, staged index and operation state do not travel with this snapshot; the raw checkout is kept", submodules.local_work.iter().map(|work| work.description.as_str()).collect::<Vec<_>>().join(", ")));
         }
         if raw {
             submodules.notices.extend(submodules.operations.iter().map(|(path, kind)|
@@ -3176,11 +3367,12 @@ fn workspace_inventory_scoped(
                 .into_iter()
                 .map(|value| scoped(key, value))
                 .collect(),
-            unrepresented_worktrees: submodules
-                .unrepresented_worktrees
-                .into_iter()
-                .map(|value| scoped(key, value))
-                .collect(),
+            unrepresented_worktrees: Vec::new(),
+            unrepresented_git_dirs: Vec::new(),
+            blockers: Vec::new(),
+            in_place_only: false,
+            shallow: git_text(runner, checkout, ["rev-parse", "--is-shallow-repository"])?
+                == "true",
             submodule_operations: submodules
                 .operations
                 .into_iter()
@@ -3237,6 +3429,89 @@ fn workspace_inventory_scoped(
             )?,
         ));
     }
+    let mut roots = vec![checkout.to_path_buf()];
+    let mut modules = result
+        .initialized_submodules
+        .iter()
+        .map(|module| checkout.join(&module.value.path))
+        .collect::<Vec<_>>();
+    for (path, tree) in &result.worktrees {
+        let root = checkout.join(path);
+        roots.push(root.clone());
+        modules.extend(
+            tree.initialized_submodules
+                .iter()
+                .map(|module| root.join(&module.value.path)),
+        );
+    }
+    let structure =
+        crate::checkpoint::inspect_snapshot_git_structure(runner, checkout, &roots, &modules)?;
+    result.unrepresented_git_dirs = structure
+        .directories
+        .into_iter()
+        .map(|path| scoped(key, path))
+        .collect();
+    result.unrepresented_worktrees = structure
+        .worktrees
+        .into_iter()
+        .map(|value| scoped(key, value))
+        .collect();
+    if !raw
+        && (result.operation.is_some()
+            || result
+                .worktrees
+                .iter()
+                .any(|(_, tree)| tree.operation.is_some()))
+    {
+        let mut predicted_modules = modules_after_abort(runner, checkout, &result)?;
+        for (path, tree) in &result.worktrees {
+            predicted_modules.extend(modules_after_abort(runner, &checkout.join(path), tree)?);
+        }
+        let predicted = crate::checkpoint::inspect_snapshot_git_structure(
+            runner,
+            checkout,
+            &roots,
+            &predicted_modules,
+        )?;
+        for path in predicted.directories {
+            if !result
+                .unrepresented_git_dirs
+                .iter()
+                .any(|entry| entry.value == path)
+            {
+                result.unrepresented_git_dirs.push(scoped(key, path));
+            }
+        }
+        for value in predicted.worktrees {
+            if !result
+                .unrepresented_worktrees
+                .iter()
+                .any(|entry| entry.value == value)
+            {
+                result.unrepresented_worktrees.push(scoped(key, value));
+            }
+        }
+    }
+    if raw
+        && (!result.unrepresented_git_dirs.is_empty() || !result.unrepresented_worktrees.is_empty())
+    {
+        let paths = result
+            .unrepresented_git_dirs
+            .iter()
+            .map(|entry| entry.value.display().to_string())
+            .chain(
+                result
+                    .unrepresented_worktrees
+                    .iter()
+                    .map(|entry| entry.value.path.display().to_string()),
+            )
+            .collect::<Vec<_>>();
+        result.notices.push(format!("unrepresented Git state at {}; these paths do not travel with the snapshot; the raw checkout is kept", paths.join(", ")));
+    }
+    if raw && result.shallow {
+        result.notices.push("raw repository is shallow; snapshots do not preserve shallow metadata; the source checkout is kept".to_owned());
+    }
+    result.blockers = inventory_blockers(&result)?;
     Ok(result)
 }
 
@@ -3265,6 +3540,8 @@ fn same_checkout_cut(left: &WorkspaceInventory, right: &WorkspaceInventory) -> b
         && left.submodule_local_work == right.submodule_local_work
         && left.submodule_operations == right.submodule_operations
         && left.unrepresented_worktrees == right.unrepresented_worktrees
+        && left.unrepresented_git_dirs == right.unrepresented_git_dirs
+        && left.shallow == right.shallow
         && left.intent_to_add == right.intent_to_add
         && left.worktrees.len() == right.worktrees.len()
         && left.worktrees.iter().zip(&right.worktrees).all(
@@ -4913,7 +5190,7 @@ mod tests {
         assert!(
             matches!(
                 dependency.downcast_ref::<SnapshotRefused>(),
-                Some(SnapshotRefused::UnrepresentedWorktrees(_))
+                Some(SnapshotRefused::UnrepresentedGitState { .. })
             ),
             "{dependency:#}"
         );
@@ -4940,6 +5217,7 @@ mod tests {
             &r.checkout,
             &["worktree", "remove", outside.to_str().unwrap()],
         );
+        fs::remove_dir_all(r.checkout.join(".git/worktrees/incomplete")).unwrap();
         let encoded = serde_json::to_value(r.capture(&CheckoutOwnership::Managed)).unwrap();
         assert_eq!(
             encoded["worktrees"][0]["relative_path"],
@@ -5359,6 +5637,24 @@ mod tests {
         let index = fs::read(root.checkout.join(".git/index")).unwrap();
         let module_index = fs::read(git_path(&FileGit, &module_dir, "index").unwrap()).unwrap();
         let merge = fs::read(root.checkout.join(".git/MERGE_HEAD")).unwrap();
+        let repository = RepositoryInput {
+            in_container: false,
+            id: "raw".into(),
+            checkout: root.checkout.clone(),
+            ownership: CheckoutOwnership::Raw { launch: None },
+            origin_override: None,
+            pack_path: root.temp.path().join("unused.pack"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: Some(root.temp.path().join("outside-unused-keep")),
+        };
+        let inventory = session_inventory(&NoNetworkGit, &[repository]).unwrap();
+        assert!(inventory["raw"].in_place_only && inventory["raw"].blockers.is_empty());
+        assert!(
+            inventory["raw"]
+                .notices
+                .iter()
+                .any(|notice| notice.contains("only in place"))
+        );
         let snapshot = capture_workspace_snapshot(
             &NoNetworkGit,
             &root.checkout,
@@ -6427,6 +6723,7 @@ mod tests {
         git(&r.checkout, &["commit", "-am", "submodule"]);
         git(&r.checkout, &["push", "origin", "main"]);
         git(&r.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(r.checkout.join(".git/modules/sub")).unwrap();
         sub.commit("new published gitlink\n");
         git(&sub.checkout, &["push", "origin", "main"]);
         let commit = git(&sub.checkout, &["rev-parse", "HEAD"]);
@@ -6461,7 +6758,7 @@ mod tests {
         a.start_conflict("merge");
         fs::write(a.checkout.join("notes.txt"), "approved only in a").unwrap();
         fs::write(b.checkout.join("notes.txt"), "not approved in b").unwrap();
-        let repositories: Vec<_> = [("a", &a), ("b", &b)]
+        let mut repositories: Vec<_> = [("a", &a), ("b", &b)]
             .into_iter()
             .map(|(id, repo)| RepositoryInput {
                 in_container: false,
@@ -6504,6 +6801,35 @@ mod tests {
         let refusal = error.downcast_ref::<SnapshotRefused>().unwrap();
         assert!(
             matches!(refusal, SnapshotRefused::Untracked(items) if items == &vec![scoped_item_path(&b.checkout, repository_key("b"), "notes.txt")])
+        );
+        assert!(a.checkout.join(".git/MERGE_HEAD").exists());
+        let c = Repo::new();
+        c.commit("shallow blocker\n");
+        git(&c.checkout, &["push", "origin", "main"]);
+        git(&c.checkout, &["fetch", "--depth=1", "origin"]);
+        repositories.push(RepositoryInput {
+            in_container: false,
+            id: "c".into(),
+            checkout: c.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: c.temp.path().join("blocked.pack"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: None,
+        });
+        let inventory = session_inventory(&FileGit, &repositories).unwrap();
+        assert!(
+            inventory["c"]
+                .blockers
+                .iter()
+                .any(|blocker| matches!(blocker.kind, SnapshotRefused::ShallowRepository(_)))
+        );
+        let error =
+            capture_session_snapshot(&FileGit, &repositories, &SessionCaptureConsent::default())
+                .unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::ShallowRepository(key)) if key.repository_id == "c"),
+            "{error:#}"
         );
         assert!(a.checkout.join(".git/MERGE_HEAD").exists());
     }
@@ -7387,142 +7713,6 @@ mod tests {
         );
     }
 
-    // Hard-won: efc122a75: published module-linked HEADs hid tracked edits inside teardown.
-    #[test]
-    fn module_linked_checkout_edits_refuse_only_inside_the_managed_teardown() {
-        let root = Repo::new();
-        let module = Repo::new();
-        add_submodule(&root, &module);
-        let source = root.checkout.join("sub");
-        let admin = crate::archive::git::git_directories(&FileGit, &source)
-            .unwrap()
-            .0;
-        fs::remove_file(source.join(".git")).unwrap();
-        fs::rename(admin, source.join(".git")).unwrap();
-        git(
-            &source,
-            &[
-                "--work-tree",
-                source.to_str().unwrap(),
-                "config",
-                "--unset",
-                "core.worktree",
-            ],
-        );
-        let outside = root.temp.path().join("outside-module-lane");
-        git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                outside.to_str().unwrap(),
-                "origin/main",
-            ],
-        );
-        fs::write(outside.join("file"), "sole detached commit\n").unwrap();
-        git(&outside, &["commit", "-am", "sole detached commit"]);
-        let private = git(&outside, &["rev-parse", "HEAD"]);
-        let error = capture_workspace_snapshot(
-            &FileGit,
-            &root.checkout,
-            &CheckoutOwnership::Managed,
-            &root.temp.path().join("standalone.pack"),
-            &CaptureConsent {
-                untracked: UntrackedConsent::Any,
-                operations: OperationConsent::Any,
-            },
-            None,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains(&private), "{error:#}");
-        git(&outside, &["checkout", "--detach", "origin/main"]);
-        fs::write(outside.join("file"), "external staged state\n").unwrap();
-        git(&outside, &["add", "file"]);
-        let error = capture_workspace_snapshot(
-            &FileGit,
-            &root.checkout,
-            &CheckoutOwnership::Managed,
-            &root.temp.path().join("external-index.pack"),
-            &CaptureConsent {
-                untracked: UntrackedConsent::Any,
-                operations: OperationConsent::Any,
-            },
-            None,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("index"), "{error:#}");
-        git(&outside, &["reset", "--hard", "origin/main"]);
-        fs::write(outside.join("file"), "unrelated external edits\n").unwrap();
-        let error = capture_workspace_snapshot(
-            &FileGit,
-            &root.checkout,
-            &CheckoutOwnership::Managed,
-            &root.temp.path().join("outside-dependency.pack"),
-            &CaptureConsent {
-                untracked: UntrackedConsent::Any,
-                operations: OperationConsent::Any,
-            },
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                error.downcast_ref::<SnapshotRefused>(),
-                Some(SnapshotRefused::UnrepresentedWorktrees(_))
-            ),
-            "{error:#}"
-        );
-        assert!(
-            error.to_string().contains("worktree remove")
-                && error.to_string().contains("outside-module-lane"),
-            "{error:#}"
-        );
-        root.capture(&CheckoutOwnership::Raw { launch: None });
-        git(
-            &source,
-            &["worktree", "remove", "--force", outside.to_str().unwrap()],
-        );
-        root.capture(&CheckoutOwnership::Managed);
-        let inside = source.join("local-lane");
-        git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                inside.to_str().unwrap(),
-                "origin/main",
-            ],
-        );
-        let exclude = git_path(&FileGit, &source, "info/exclude").unwrap();
-        fs::write(exclude, "local-lane/\n").unwrap();
-        fs::write(inside.join("file"), "staged linked edits\n").unwrap();
-        git(&inside, &["add", "file"]);
-        fs::write(inside.join("file"), "unstaged linked edits\n").unwrap();
-        let error = capture_workspace_snapshot(
-            &FileGit,
-            &root.checkout,
-            &CheckoutOwnership::Managed,
-            &root.temp.path().join("guard.pack"),
-            &CaptureConsent {
-                untracked: UntrackedConsent::Any,
-                operations: OperationConsent::Any,
-            },
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("linked-worktree")
-                && error.to_string().contains("tracked edits"),
-            "{error:#}"
-        );
-        assert_eq!(
-            fs::read_to_string(inside.join("file")).unwrap(),
-            "unstaged linked edits\n"
-        );
-    }
-
     // Hard-won: efc122a75: module names could escape the administrative module store.
     #[test]
     fn submodule_admin_name_cannot_attach_an_outside_repository() {
@@ -7563,198 +7753,6 @@ mod tests {
         assert!(!destination.join("sub").exists());
     }
 
-    // Hard-won: 3a4aef552: deinit hid unpublished nested refs/stashes from the managed loss guard.
-    #[test]
-    fn deinitialized_submodule_protects_cached_nested_refs_and_stashes() {
-        let root = Repo::new();
-        let parent = Repo::new();
-        let leaf = Repo::new();
-        add_submodule(&parent, &leaf);
-        add_submodule(&root, &parent);
-        git(
-            &root.checkout,
-            &[
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "update",
-                "--init",
-                "--recursive",
-            ],
-        );
-        let nested = root.checkout.join("sub/sub");
-        let pin = git(&nested, &["rev-parse", "HEAD"]);
-        git(&nested, &["switch", "-c", "hidden"]);
-        fs::write(nested.join("file"), "hidden unpublished commit\n").unwrap();
-        git(&nested, &["commit", "-am", "hidden"]);
-        let detached = git(&nested, &["rev-parse", "HEAD"]);
-        git(&nested, &["checkout", "--detach", &pin]);
-        fs::write(nested.join("file"), "hidden stash\n").unwrap();
-        git(&nested, &["stash", "push", "-m", "hidden stash"]);
-        let stash = git(&nested, &["rev-parse", "refs/stash"]);
-        git(&nested, &["reflog", "expire", "--expire=all", "refs/stash"]);
-        assert_eq!(git(&nested, &["rev-parse", "refs/stash"]), stash);
-        git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
-        let capture = |ownership| {
-            capture_workspace_snapshot(
-                &FileGit,
-                &root.checkout,
-                ownership,
-                &root.temp.path().join("deinit.pack"),
-                &CaptureConsent {
-                    untracked: UntrackedConsent::Any,
-                    operations: OperationConsent::Any,
-                },
-                None,
-            )
-        };
-        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-        for name in ["sub/sub", "refs/heads/hidden", "refs/stash"] {
-            assert!(error.to_string().contains(name), "{error:#}");
-        }
-        let snapshot = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();
-        assert!(
-            snapshot
-                .notices
-                .iter()
-                .any(|notice| notice.contains("refs/heads/hidden") && notice.contains("refs/stash"))
-        );
-        assert!(snapshot.initialized_submodules.is_empty());
-        let admin = root.checkout.join(".git/modules/sub/modules/sub");
-        for arguments in [
-            vec!["update-ref", "--no-deref", "HEAD", detached.as_str()],
-            vec!["update-ref", "-d", "refs/heads/hidden"],
-            vec!["update-ref", "-d", "refs/stash"],
-        ] {
-            let mut command = vec![
-                "--git-dir",
-                admin.to_str().unwrap(),
-                "--work-tree",
-                admin.to_str().unwrap(),
-            ];
-            command.extend(arguments);
-            git(&root.checkout, &command);
-        }
-        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-        assert!(error.to_string().contains("sub/sub HEAD"), "{error:#}");
-        // git rm also deletes the live .gitmodules registration, but not its cache.
-        git(&root.checkout, &["rm", "sub"]);
-        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-        assert!(error.to_string().contains("sub/sub HEAD"), "{error:#}");
-        let raw = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();
-        assert!(
-            raw.notices
-                .iter()
-                .any(|notice| notice.contains("sub/sub HEAD"))
-        );
-        git(
-            &root.checkout,
-            &[
-                "--git-dir",
-                admin.to_str().unwrap(),
-                "--work-tree",
-                admin.to_str().unwrap(),
-                "update-ref",
-                "--no-deref",
-                "HEAD",
-                &pin,
-            ],
-        );
-        let linked = root.checkout.join("lane");
-        git(
-            &root.checkout,
-            &["worktree", "add", "--detach", linked.to_str().unwrap()],
-        );
-        git(
-            &linked,
-            &[
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "update",
-                "--init",
-                "sub",
-            ],
-        );
-        let linked_module = linked.join("sub");
-        git(&linked_module, &["switch", "-c", "private-linked"]);
-        fs::write(linked_module.join("file"), "linked cache work\n").unwrap();
-        git(&linked_module, &["commit", "-am", "private linked work"]);
-        let own_linked = root.temp.path().join("module-linked-tip");
-        git(
-            &linked_module,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                own_linked.to_str().unwrap(),
-                "origin/main",
-            ],
-        );
-        fs::write(own_linked.join("file"), "only module-linked HEAD\n").unwrap();
-        git(&own_linked, &["commit", "-am", "only module-linked HEAD"]);
-        let only_head = git(&own_linked, &["rev-parse", "HEAD"]);
-        git(&linked, &["rm", "-f", "sub"]);
-        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-        assert!(
-            error.to_string().contains("lane")
-                && error.to_string().contains("refs/heads/private-linked"),
-            "{error:#}"
-        );
-        let linked_admin = git_path(&FileGit, &linked, "modules/sub").unwrap();
-        let published = git(&parent.checkout, &["rev-parse", "HEAD"]);
-        for arguments in [
-            vec!["update-ref", "--no-deref", "HEAD", published.as_str()],
-            vec!["update-ref", "-d", "refs/heads/private-linked"],
-        ] {
-            let mut command = vec![
-                "--git-dir",
-                linked_admin.to_str().unwrap(),
-                "--work-tree",
-                linked_admin.to_str().unwrap(),
-            ];
-            command.extend(arguments);
-            git(&root.checkout, &command);
-        }
-        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-        assert!(
-            error.to_string().contains("linked-worktree") && error.to_string().contains(&only_head),
-            "{error:#}"
-        );
-        git(&own_linked, &["checkout", "--detach", "origin/main"]);
-        let missing = root.checkout.join("gone-lane");
-        git(
-            &root.checkout,
-            &["worktree", "add", "--detach", missing.to_str().unwrap()],
-        );
-        git(
-            &missing,
-            &[
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "update",
-                "--init",
-                "sub",
-            ],
-        );
-        let missing_module = missing.join("sub");
-        git(&missing_module, &["checkout", "--detach"]);
-        fs::write(missing_module.join("file"), "prunable module HEAD only\n").unwrap();
-        git(
-            &missing_module,
-            &["commit", "-am", "prunable module HEAD only"],
-        );
-        let missing_head = git(&missing_module, &["rev-parse", "HEAD"]);
-        git(&missing, &["rm", "-f", "sub"]);
-        fs::remove_dir_all(&missing).unwrap();
-        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-        assert!(
-            error.to_string().contains("gone-lane") && error.to_string().contains(&missing_head),
-            "{error:#}"
-        );
-    }
-
     // Hard-won: 3a4aef552: a parent-local rewrite could authorize an uninitialized mirror-only pin.
     #[test]
     fn uninitialized_submodule_probe_ignores_parent_local_mirror_rewrites() {
@@ -7778,6 +7776,7 @@ mod tests {
         );
         let pin = git(&module.checkout, &["rev-parse", "HEAD"]);
         git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
         git(
             &root.checkout,
             &["update-index", "--cacheinfo", &format!("160000,{pin},sub")],
@@ -7983,6 +7982,7 @@ mod tests {
         git(&module.checkout, &["push", "origin", "main"]);
         let tip = git(&module.checkout, &["rev-parse", "HEAD"]);
         git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
         git(
             &root.checkout,
             &["update-index", "--cacheinfo", &format!("160000,{tip},sub")],
@@ -8801,64 +8801,6 @@ mod tests {
         );
     }
 
-    // Hard-won: 4dba9ad05: ignored module-linked directories hid untracked files from consent.
-    #[test]
-    fn module_linked_untracked_files_are_inventoried_and_unrepresented_checkouts_refuse_managed() {
-        let root = Repo::new();
-        let module = Repo::new();
-        add_submodule(&root, &module);
-        let source = root.checkout.join("sub");
-        let linked = source.join("local-lane");
-        git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                linked.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-        fs::write(
-            git_path(&FileGit, &source, "info/exclude").unwrap(),
-            "local-lane/\n",
-        )
-        .unwrap();
-        fs::write(linked.join("notes.txt"), "untracked linked notes\n").unwrap();
-        let inventory =
-            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
-        assert!(
-            inventory
-                .untracked
-                .iter()
-                .any(|entry| entry.path == Path::new("sub/local-lane/notes.txt"))
-        );
-        let error = capture_workspace_snapshot(
-            &FileGit,
-            &root.checkout,
-            &CheckoutOwnership::Managed,
-            &root.temp.path().join("unrepresented.pack"),
-            &CaptureConsent {
-                untracked: UntrackedConsent::Any,
-                operations: OperationConsent::Any,
-            },
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                error.downcast_ref::<SnapshotRefused>(),
-                Some(SnapshotRefused::UnrepresentedWorktrees(_))
-            ),
-            "{error:#}"
-        );
-        assert!(!error.to_string().contains("move it inside"), "{error:#}");
-        assert_eq!(
-            fs::read_to_string(linked.join("notes.txt")).unwrap(),
-            "untracked linked notes\n"
-        );
-    }
-
     // Hard-won: 4dba9ad05: cache-first traversal resolved a live child's relative origin from its admin.
     #[cfg(unix)]
     #[test]
@@ -9022,103 +8964,6 @@ mod tests {
         assert_ne!(git(&bad, &["rev-parse", "main"]), snapshot.head.commit());
     }
 
-    // Hard-won: 4dba9ad05: fork shallow boundaries omitted ancestry even with parents in alternates.
-    #[test]
-    fn shallow_fork_boundaries_require_origin_coverage_even_with_local_parents() {
-        let upstream = Repo::new();
-        let fork = Repo::new();
-        fork.commit("fork parent\n");
-        let parent = git(&fork.checkout, &["rev-parse", "HEAD"]);
-        fork.commit("fork boundary\n");
-        git(&fork.checkout, &["push", "origin", "main"]);
-        let boundary = git(&fork.checkout, &["rev-parse", "HEAD"]);
-        let checkout = upstream.temp.path().join("shallow");
-        let url = url::Url::from_directory_path(&fork.origin)
-            .unwrap()
-            .to_string();
-        git(
-            upstream.temp.path(),
-            &["clone", "--depth=1", &url, checkout.to_str().unwrap()],
-        );
-        git(
-            &checkout,
-            &[
-                "remote",
-                "set-url",
-                "origin",
-                upstream.origin.to_str().unwrap(),
-            ],
-        );
-        let capture = |ownership| {
-            capture_workspace_snapshot(
-                &FileGit,
-                &checkout,
-                ownership,
-                &upstream.temp.path().join("shallow.pack"),
-                &CaptureConsent {
-                    untracked: UntrackedConsent::Any,
-                    operations: OperationConsent::Any,
-                },
-                None,
-            )
-        };
-        for alternate in [false, true] {
-            if alternate {
-                fs::write(
-                    checkout.join(".git/objects/info/alternates"),
-                    format!("{}\n", fork.origin.join("objects").display()),
-                )
-                .unwrap();
-            }
-            assert_eq!(
-                run_git(&FileGit, &checkout, ["cat-file", "-e", &parent], &[])
-                    .unwrap()
-                    .status
-                    == 0,
-                alternate
-            );
-            let error = capture(&CheckoutOwnership::Managed).unwrap_err();
-            assert!(
-                matches!(
-                    error.downcast_ref::<SnapshotRefused>(),
-                    Some(SnapshotRefused::ShallowHistory(_))
-                ),
-                "{error:#}"
-            );
-            assert!(
-                error.to_string().contains(&boundary)
-                    && error.to_string().contains(&parent)
-                    && error.to_string().contains("fetch --unshallow"),
-                "{error:#}"
-            );
-        }
-        let raw = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();
-        assert!(
-            raw.notices
-                .iter()
-                .any(|notice| notice.contains("cannot be restored elsewhere")
-                    && notice.contains(&boundary))
-        );
-        git(
-            &checkout,
-            &["remote", "set-url", "origin", fork.origin.to_str().unwrap()],
-        );
-        let snapshot = capture(&CheckoutOwnership::Managed).unwrap();
-        let destination = upstream.temp.path().join("restored-full");
-        restore_workspace_snapshot(
-            &FileGit,
-            &snapshot,
-            &destination,
-            &clone_base(&snapshot, None),
-        )
-        .unwrap();
-        assert_eq!(
-            git(&destination, &["rev-parse", "--is-shallow-repository"]),
-            "false"
-        );
-        git(&destination, &["cat-file", "-e", &parent]);
-    }
-
     // Hard-won: 35bdaa417: equal saved positions stay attached while a third forced rebase detaches.
     #[test]
     fn three_shared_branch_worktrees_restore_two_agreeing_attached_and_one_rebasing_detached() {
@@ -9170,62 +9015,69 @@ mod tests {
         );
     }
 
-    // Hard-won: 4f875368d: clean abandoned rebase metadata held an otherwise unreachable autostash.
+    // Hard-won: d00d140bd: even fully published leftover state is not represented by a snapshot.
     #[test]
-    fn abandoned_module_rebase_operation_protects_clean_edit_step_and_autostash() {
+    fn structural_git_state_refuses_published_leftovers_and_clean_module_worktrees_and_warns_raw() {
         let root = Repo::new();
         let module = Repo::new();
-        module.commit("published middle\n");
-        let middle = git(&module.checkout, &["rev-parse", "HEAD"]);
-        module.commit("published tip\n");
-        let tip = git(&module.checkout, &["rev-parse", "HEAD"]);
-        git(&module.checkout, &["push", "origin", "main"]);
         add_submodule(&root, &module);
+        git(
+            &root.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                module.origin.to_str().unwrap(),
+                "retired",
+            ],
+        );
+        git(
+            &root.checkout,
+            &["commit", "-am", "published retired module"],
+        );
+        git(&root.checkout, &["push", "origin", "main"]);
+        git(&root.checkout, &["submodule", "deinit", "-f", "retired"]);
+        let leftover = root.checkout.join(".git/modules/retired");
         let source = root.checkout.join("sub");
-        let abandoned = root.temp.path().join("abandoned-edit");
+        let linked = source.join("local-lane");
         git(
             &source,
             &[
                 "worktree",
                 "add",
                 "--detach",
-                abandoned.to_str().unwrap(),
+                linked.to_str().unwrap(),
                 "HEAD",
             ],
         );
-        fs::write(abandoned.join("file"), "private autostashed working edit\n").unwrap();
-        let editor = format!("sequence.editor=printf 'edit {middle}\npick {tip}\n' >");
+        fs::write(
+            git_path(&FileGit, &source, "info/exclude").unwrap(),
+            "local-lane/\n",
+        )
+        .unwrap();
+        git(&source, &["worktree", "lock", linked.to_str().unwrap()]);
+        let outside = root.temp.path().join("outside-root-with-module");
         git(
-            &abandoned,
+            &root.checkout,
+            &["worktree", "add", "--detach", outside.to_str().unwrap()],
+        );
+        git(
+            &outside,
             &[
                 "-c",
-                &editor,
-                "rebase",
-                "--interactive",
-                "--autostash",
-                "HEAD~2",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "sub",
             ],
         );
-        assert_eq!(git(&abandoned, &["rev-parse", "HEAD"]), middle);
-        assert_eq!(git(&abandoned, &["diff", "--cached", "--name-only"]), "");
-        assert_eq!(git(&abandoned, &["status", "--porcelain"]), "");
-        let marker = git_path(&FileGit, &abandoned, "rebase-merge/autostash").unwrap();
-        let stash = fs::read(&marker).unwrap();
-        assert!(!stash.is_empty());
-        git(
-            &abandoned,
-            &[
-                "cat-file",
-                "-e",
-                std::str::from_utf8(&stash).unwrap().trim(),
-            ],
-        );
-        fs::remove_dir_all(&abandoned).unwrap();
         let error = capture_workspace_snapshot(
             &FileGit,
             &root.checkout,
             &CheckoutOwnership::Managed,
-            &root.temp.path().join("cached-operation.pack"),
+            &root.temp.path().join("structure.pack"),
             &CaptureConsent {
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
@@ -9236,92 +9088,312 @@ mod tests {
         assert!(
             matches!(
                 error.downcast_ref::<SnapshotRefused>(),
-                Some(SnapshotRefused::UnpublishedSubmoduleWork(_))
+                Some(SnapshotRefused::UnrepresentedGitState { .. })
             ),
             "{error:#}"
         );
-        for text in ["abandoned-edit", "Rebase", "operation state"] {
-            assert!(error.to_string().contains(text), "{error:#}");
+        for path in [&leftover, &linked, &outside] {
+            assert!(
+                error.to_string().contains(path.to_str().unwrap()),
+                "{error:#}"
+            );
         }
-        assert_eq!(fs::read(&marker).unwrap(), stash);
-        let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(error.to_string().contains("worktree remove --force"));
         assert!(
-            snapshot
-                .notices
-                .iter()
-                .any(|notice| notice.contains("Rebase")
-                    && notice.contains("operation state")
-                    && notice.contains("do not travel"))
+            error.to_string().contains("locked")
+                && error.to_string().contains("worktree unlock")
+                && error.to_string().contains("once it is available")
         );
-        assert_eq!(fs::read(marker).unwrap(), stash);
+        assert!(!error.to_string().contains("move it inside"));
+        let raw = root.capture(&CheckoutOwnership::Raw { launch: None });
+        for path in [&leftover, &linked, &outside] {
+            assert!(
+                raw.notices
+                    .iter()
+                    .any(|notice| notice.contains(path.to_str().unwrap())
+                        && notice.contains("raw checkout is kept"))
+            );
+        }
+        assert!(linked.join(".git").exists());
+        assert!(leftover.exists());
     }
 
-    // Hard-won: d7e66a63a: abandoned module indexes can hold the only staged unpublished blobs.
+    // Hard-won: 5e28ea249: bisect reset can unregister a represented module and leave its admin behind.
     #[test]
-    fn abandoned_module_indexes_protect_staged_work_with_fully_published_refs() {
-        for linked in [false, true] {
-            let root = Repo::new();
-            let module = Repo::new();
-            add_submodule(&root, &module);
-            let source = root.checkout.join("sub");
-            let abandoned = if linked {
-                let path = root.temp.path().join("abandoned-module");
-                git(
-                    &source,
-                    &[
-                        "worktree",
-                        "add",
-                        "--detach",
-                        path.to_str().unwrap(),
-                        "HEAD",
-                    ],
-                );
-                path
-            } else {
-                source.clone()
-            };
-            fs::write(abandoned.join("file"), "only staged index blob\n").unwrap();
-            git(&abandoned, &["add", "file"]);
-            let index = git_path(&FileGit, &abandoned, "index").unwrap();
-            let before = fs::read(&index).unwrap();
-            if linked {
-                fs::remove_dir_all(&abandoned).unwrap();
-            } else {
-                git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
-            }
-            assert_eq!(fs::read(&index).unwrap(), before);
-            let error = capture_workspace_snapshot(
+    fn bisect_abort_structural_prediction_refuses_before_operation_consent() {
+        let root = Repo::new();
+        let module = Repo::new();
+        let base = git(&root.checkout, &["rev-parse", "HEAD"]);
+        add_submodule(&root, &module);
+        root.commit("middle with module\n");
+        root.commit("tip with module\n");
+        let bad = git(&root.checkout, &["rev-parse", "HEAD"]);
+        git(&root.checkout, &["checkout", "--detach", &base]);
+        git(&root.checkout, &["bisect", "start", &bad, &base]);
+        assert!(root.checkout.join(".gitmodules").exists());
+        let before = operation_record(&FileGit, &root.checkout, &CheckoutKey::default()).unwrap();
+        let position = git(&root.checkout, &["rev-parse", "HEAD"]);
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("post-abort.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::UnrepresentedGitState { .. })
+            ),
+            "{error:#}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(root.checkout.join(".git/modules/sub").to_str().unwrap()),
+            "{error:#}"
+        );
+        assert_eq!(git(&root.checkout, &["rev-parse", "HEAD"]), position);
+        assert_eq!(
+            operation_record(&FileGit, &root.checkout, &CheckoutKey::default()).unwrap(),
+            before
+        );
+        assert!(root.checkout.join(".git/modules/sub").exists());
+    }
+
+    // Hard-won: f2e45560f: abort reapplies autostashed .gitmodules instead of its committed registration.
+    #[test]
+    fn autostashed_gitmodules_removal_is_a_structural_blocker_before_merge_abort_consent() {
+        let root = Repo::new();
+        let module = Repo::new();
+        add_submodule(&root, &module);
+        root.conflict();
+        fs::remove_file(root.checkout.join(".gitmodules")).unwrap();
+        assert_ne!(
+            run_git(
                 &FileGit,
                 &root.checkout,
-                &CheckoutOwnership::Managed,
-                &root.temp.path().join("cached-index.pack"),
+                ["merge", "--autostash", "side"],
+                &[]
+            )
+            .unwrap()
+            .status,
+            0
+        );
+        assert!(root.checkout.join(".gitmodules").exists());
+        let marker = git_path(&FileGit, &root.checkout, "MERGE_AUTOSTASH").unwrap();
+        let before = fs::read(&marker).unwrap();
+        let inventory =
+            workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+        let blocker = inventory
+            .blockers
+            .iter()
+            .find(|blocker| matches!(blocker.kind, SnapshotRefused::UnrepresentedGitState { .. }))
+            .unwrap();
+        assert!(
+            blocker
+                .paths
+                .iter()
+                .any(|path| path.value == root.checkout.join(".git/modules/sub"))
+        );
+        let encoded = serde_json::to_value(blocker).unwrap();
+        assert_eq!(encoded["kind"], "unrepresented_git_state");
+        assert!(encoded["remedy"].as_str().unwrap().contains("delete"));
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &root.checkout,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("autostash-blocked.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), blocker.remedy);
+        assert_eq!(fs::read(marker).unwrap(), before);
+        assert_eq!(
+            operation(&FileGit, &root.checkout).unwrap(),
+            Some(GitOperationKind::Merge)
+        );
+    }
+
+    // Hard-won: d00d140bd: no boundary coverage test guarantees a full-history restore.
+    #[test]
+    fn shallow_managed_checkout_requires_full_history_and_raw_gets_notice() {
+        let origin = Repo::new();
+        origin.commit("second commit\n");
+        git(&origin.checkout, &["push", "origin", "main"]);
+        let checkout = origin.temp.path().join("shallow");
+        let url = url::Url::from_directory_path(&origin.origin)
+            .unwrap()
+            .to_string();
+        git(
+            origin.temp.path(),
+            &["clone", "--depth=1", &url, checkout.to_str().unwrap()],
+        );
+        let capture = |ownership| {
+            capture_workspace_snapshot(
+                &FileGit,
+                &checkout,
+                ownership,
+                &origin.temp.path().join("shallow.pack"),
                 &CaptureConsent {
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
                 None,
             )
-            .unwrap_err();
-            assert!(
-                matches!(
-                    error.downcast_ref::<SnapshotRefused>(),
-                    Some(SnapshotRefused::UnpublishedSubmoduleWork(_))
-                ),
-                "{error:#}"
-            );
-            assert!(
-                error.to_string().contains("index") && error.to_string().contains("file"),
-                "{error:#}"
-            );
-            let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
-            assert!(
-                snapshot
-                    .notices
-                    .iter()
-                    .any(|notice| notice.contains("index") && notice.contains("file"))
-            );
-            assert_eq!(fs::read(index).unwrap(), before);
+        };
+        let error = capture(&CheckoutOwnership::Managed).unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::ShallowRepository(_))
+            ),
+            "{error:#}"
+        );
+        for text in [
+            "needs full history",
+            "git fetch --unshallow",
+            "git fetch --unshallow <url>",
+            "mj suspend --without-checkpoint",
+            "keep the session running",
+        ] {
+            assert!(error.to_string().contains(text), "{error:#}");
         }
+        let raw = capture(&CheckoutOwnership::Raw { launch: None }).unwrap();
+        assert!(
+            raw.notices
+                .iter()
+                .any(|notice| notice.contains("shallow")
+                    && notice.contains("source checkout is kept"))
+        );
+        git(&checkout, &["fetch", "--unshallow"]);
+        capture(&CheckoutOwnership::Managed).unwrap();
+        let rebasing = Repo::new();
+        rebasing.conflict();
+        git(&rebasing.checkout, &["push", "origin", "main", "side"]);
+        rebasing.start_conflict("rebase");
+        git(&rebasing.checkout, &["fetch", "--depth=1", "origin"]);
+        assert_eq!(
+            git(
+                &rebasing.checkout,
+                &["rev-parse", "--is-shallow-repository"]
+            ),
+            "true"
+        );
+        let before =
+            operation_record(&FileGit, &rebasing.checkout, &CheckoutKey::default()).unwrap();
+        let index = fs::read(git_path(&FileGit, &rebasing.checkout, "index").unwrap()).unwrap();
+        let error = capture_workspace_snapshot(
+            &FileGit,
+            &rebasing.checkout,
+            &CheckoutOwnership::Managed,
+            &rebasing.temp.path().join("blocked-rebase.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::ShallowRepository(_))
+            ),
+            "{error:#}"
+        );
+        assert_eq!(
+            operation_record(&FileGit, &rebasing.checkout, &CheckoutKey::default()).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(git_path(&FileGit, &rebasing.checkout, "index").unwrap()).unwrap(),
+            index
+        );
+    }
+
+    // Hard-won: 3a482c228: owner normalization could drop an uncaptured checkout's newer live tip.
+    #[test]
+    fn displaced_live_tip_survives_two_raw_rebases_and_a_second_managed_snapshot() {
+        let root = Repo::new();
+        root.conflict();
+        let first = git(&root.checkout, &["rev-parse", "HEAD"]);
+        git(&root.checkout, &["switch", "-c", "primary"]);
+        let a = root.checkout.join("a-rebase");
+        let b = root.checkout.join("b-rebase");
+        let outside = root.temp.path().join("outside-advancer");
+        for path in [&a, &outside] {
+            git(
+                &root.checkout,
+                &["worktree", "add", "--force", path.to_str().unwrap(), "main"],
+            );
+        }
+        assert_ne!(
+            run_git(&FileGit, &a, ["rebase", "side"], &[])
+                .unwrap()
+                .status,
+            0
+        );
+        fs::write(outside.join("extra-one"), "second saved tip\n").unwrap();
+        git(&outside, &["add", "extra-one"]);
+        git(&outside, &["commit", "-m", "second tip"]);
+        let second = git(&outside, &["rev-parse", "HEAD"]);
+        git(
+            &root.checkout,
+            &["worktree", "add", "--force", b.to_str().unwrap(), "main"],
+        );
+        assert_ne!(
+            run_git(&FileGit, &b, ["rebase", "side"], &[])
+                .unwrap()
+                .status,
+            0
+        );
+        fs::write(outside.join("extra-two"), "newer unpublished live tip\n").unwrap();
+        git(&outside, &["add", "extra-two"]);
+        git(&outside, &["commit", "-m", "live tip"]);
+        let live = git(&outside, &["rev-parse", "HEAD"]);
+        let displaced = format!("refs/mj/displaced/{live}");
+        let snapshot = root.capture(&CheckoutOwnership::Raw { launch: None });
+        assert_eq!(snapshot.refs["refs/heads/main"], first);
+        assert_eq!(snapshot.refs[&displaced], live);
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored.join("a-rebase"), &["rev-parse", "HEAD"]),
+            first
+        );
+        assert_eq!(
+            read_head(&FileGit, &restored.join("b-rebase")).unwrap(),
+            SnapshotHead::Detached(second.clone())
+        );
+        assert_eq!(git(&restored, &["rev-parse", &displaced]), live);
+        let next = capture_workspace_snapshot(
+            &FileGit,
+            &restored,
+            &CheckoutOwnership::Managed,
+            &root.temp.path().join("again.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(next.refs[&displaced], live);
+        let again = root.temp.path().join("restored-again");
+        restore_workspace_snapshot(&FileGit, &next, &again, &clone_base(&next, None)).unwrap();
+        for commit in [&first, &second, &live] {
+            git(&again, &["cat-file", "-e", commit]);
+        }
+        assert_eq!(git(&again, &["rev-parse", &displaced]), live);
     }
 
     // Hard-won: d60a6c566: clean module bisect state passed capture without a loss warning.
@@ -9401,6 +9473,7 @@ mod tests {
             ],
         );
         git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
         git(
             &root.checkout,
             &[
@@ -9469,6 +9542,7 @@ mod tests {
             ],
         );
         git(&root.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(root.checkout.join(".git/modules/sub")).unwrap();
         git(
             &root.checkout,
             &[
@@ -9751,6 +9825,7 @@ mod tests {
         );
         git(&r.checkout, &["commit", "-am", "base submodule"]);
         git(&r.checkout, &["submodule", "deinit", "-f", "sub"]);
+        fs::remove_dir_all(r.checkout.join(".git/modules/sub")).unwrap();
         git(
             &r.checkout,
             &[
