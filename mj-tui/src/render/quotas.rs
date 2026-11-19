@@ -514,22 +514,21 @@ fn pool_bar(
             spans.push(Span::raw(if theme::ascii() { "|" } else { " " }));
         }
         // A reading older than its own reset says nothing about what is left.
-        let filled = if member.awaiting_reading {
+        let mut filled = if member.awaiting_reading {
             0
         } else {
             (cells * usize::from(member.remaining) + 50) / 100
         };
+        if cells > 1 && member.remaining > 0 && member.remaining < 100 {
+            filled = filled.clamp(1, cells - 1);
+        }
         let mut label = vec![' '; cells];
         let mut text = if member.awaiting_reading {
             "reset due".to_string()
         } else if refreshing.contains(&member.id) {
             format!("refreshing{}", theme::glyphs().ellipsis)
         } else {
-            format!(
-                "{}{}",
-                if theme::ascii() { "r" } else { "↻" },
-                reset_label(member.reset, member.reset_text.as_deref(), now)
-            )
+            reset_label(member.reset, member.reset_text.as_deref(), now)
         };
         if refreshing.contains(&member.id) && text.chars().count() >= cells {
             text = if cells >= 8 { "refresh" } else { "check" }.into();
@@ -547,10 +546,7 @@ fn pool_bar(
             }
         }
         let text: Vec<_> = text.chars().collect();
-        let legible_fill = cells > 1
-            && (member.awaiting_reading || member.remaining == 0 || filled > 0)
-            && (member.remaining == 100 || filled < cells);
-        if cells >= 6 && text.len() <= cells && legible_fill {
+        if cells >= 6 && text.len() <= cells {
             label[cells - text.len()..].copy_from_slice(&text);
             if let Some(banked) = omitted_banked {
                 omitted.push(format!("{} {banked} banked", member.id));
