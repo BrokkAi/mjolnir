@@ -52,8 +52,7 @@ use mj_core::workspace::{ConversationLayout, PaneSizes};
 use mj_tui::tile_layout::PaneId;
 use mj_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption, KeyRoute,
-    PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
-    resume_profile_placeholders,
+    PreparedMaterializedSessionDetail, SessionOperationKind, resume_profile_placeholders,
 };
 use ratatui::layout::Direction;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
@@ -404,7 +403,7 @@ pub(crate) struct DashboardContext {
     /// runs its own attach, so opening one conversation never cancels
     /// another.
     pub(crate) opening_chat_sessions: BTreeMap<PaneId, String>,
-    attachments: BTreeMap<PaneId, attachment::SessionAttachment>,
+    attachments: BTreeMap<String, attachment::SessionAttachment>,
     /// The sessions the last frame drew a conversation for. Read receipts
     /// follow what was on screen, which is one pane today and every drawn
     /// pane once the panes render themselves.
@@ -829,14 +828,15 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // leaves the frame current, so it needs no rebuild.
                 let mut previous_consumed = false;
                 loop {
-                    if previous_consumed
-                        && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open())
+                    if (previous_consumed
+                        && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open()))
+                        || context.dashboard.notification_input_needs_frame()
                     {
                         context.loop_stalls.phase(loop_stalls::Phase::Draw);
                         context.draw()?;
                         context.loop_stalls.phase(loop_stalls::Phase::Arm);
                     }
-                    if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open()) {
+                    if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open(), context.dashboard.notification_form_owns_keyboard()) {
                         context.cancel_chat_open();
                         context.dashboard.focus_sessions();
                         context.dashboard.set_notice("Session opening cancelled. Press Enter in Sessions to retry.");
@@ -856,8 +856,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                         route => route,
                     };
                     let (consumed, batched) = if let KeyRoute::Command { id, index } = route {
-                        context.dashboard.cancel_component_pointer();
-                        if let Some(chat) = context.visible_chat() { chat.cancel_component_pointer(); }
+                        context.dashboard.cancel_all_component_pointers(&mut context.chats);
                         // Detaching from an open conversation has to save the
                         // draft and the read cursor, which is the chat's own
                         // bookkeeping rather than the dashboard's.
@@ -1383,23 +1382,14 @@ impl DashboardContext {
         self.dashboard.set_opening_session(opening.as_deref());
     }
 
-    /// Stop the attach a pane is running for `session_id`, if one is.
+    /// Stop the session's shared attachment, whichever surfaces requested it.
     fn cancel_chat_open_for(&mut self, session_id: &str) {
-        for pane in self.panes_opening(session_id) {
-            self.opening_chat_sessions.remove(&pane);
-            if let Some(attachment) = self.attachments.get_mut(&pane) {
-                attachment.cancel();
-            }
+        if let Some(attachment) = self.attachments.get_mut(session_id) {
+            attachment.defer();
         }
-        self.sync_opening_session();
-    }
-
-    fn panes_opening(&self, session_id: &str) -> Vec<PaneId> {
         self.opening_chat_sessions
-            .iter()
-            .filter(|(_, opening)| opening.as_str() == session_id)
-            .map(|(pane, _)| *pane)
-            .collect()
+            .retain(|_, session| session != session_id);
+        self.sync_opening_session();
     }
 
     pub(crate) fn defer_all_chat_opens(&mut self) {
@@ -1449,9 +1439,9 @@ impl DashboardContext {
         }
     }
 
-    /// Drops the warm chats no pane shows any more, saving each one first.
+    /// Save and retire chats when neither the layout nor a form card holds them.
     pub(crate) fn retire_chats_outside_the_layout(&mut self) {
-        let shown = self.dashboard.pane_session_ids();
+        let shown = self.wanted_chat_sessions();
         for session_id in self
             .chats
             .keys()
@@ -1563,11 +1553,10 @@ impl DashboardContext {
             self.save_question_draft(&session_id);
         }
         self.opening_chat_sessions.remove(&pane);
-        self.attachments.remove(&pane);
-        if let Some(session_id) = self.dashboard.close_pane(pane) {
-            self.park_chat_composer(&session_id);
-            self.record_chat_detach(&session_id);
-            self.chats.remove(&session_id);
+
+        self.cancel_chat_open_in(pane);
+        if self.dashboard.close_pane(pane).is_some() {
+            self.retire_chats_outside_the_layout();
             self.selection.clear();
         }
         self.sync_opening_session();
@@ -2354,9 +2343,15 @@ fn record_terminal_draft_state(
     ))
 }
 
-fn opening_cancel_event(event: &Event, opening: bool, modal: bool) -> bool {
+fn opening_cancel_event(
+    event: &Event,
+    opening: bool,
+    modal: bool,
+    form_owns_keyboard: bool,
+) -> bool {
     opening
         && !modal
+        && !form_owns_keyboard
         && matches!(event, Event::Key(key) if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release)
 }
 
@@ -2407,6 +2402,39 @@ fn dispatch_event(
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::chat::ChatEventOutcome,
 ) -> (bool, bool) {
+    context
+        .dashboard
+        .prepare_component_event(&event, &mut context.chats);
+    if matches!(&event, Event::Mouse(_))
+        && !context.dashboard.modal_open()
+        && !context.dashboard.component_pointer_captured()
+        && let Some(session) = context
+            .dashboard
+            .conversation_pointer_session(&context.chats)
+        && let Some(pane) = context.dashboard.pane_for_session(&session)
+        && let Some(chat) = context.pane_chat_mut(pane)
+    {
+        let result = chat.handle_event_result(event);
+        *chat_outcome = result
+            .action
+            .unwrap_or(mj_chat::chat::ChatEventOutcome::None);
+        return (
+            result.consumed,
+            matches!(*chat_outcome, mj_chat::chat::ChatEventOutcome::None),
+        );
+    }
+    if let Some(result) = context
+        .dashboard
+        .handle_notification_form_event(&mut context.chats, &event)
+    {
+        *chat_outcome = result
+            .action
+            .unwrap_or(mj_chat::chat::ChatEventOutcome::None);
+        return (
+            result.consumed,
+            matches!(*chat_outcome, mj_chat::chat::ChatEventOutcome::None),
+        );
+    }
     let dashboard_pointer =
         matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
     // The wheel belongs to the pane under the pointer. Only an unfocused pane

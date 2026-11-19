@@ -3233,10 +3233,10 @@ function draftTarget(draft) {
   return snapshot?.targets.find(target => target.id === draft?.targetId);
 }
 
-// YOLO targets are SSH bare targets with permissions = "yolo"; containers
-// are unconstrained but have no permission mode and use the shared set.
+// The server decides which targets run without approvals and so use the
+// YOLO sub-agent set.
 function targetYolo(draft) {
-  return draftTarget(draft)?.permission_mode === 'yolo';
+  return draftTarget(draft)?.yolo === true;
 }
 
 function targetSubagentsConfigured(draft) {

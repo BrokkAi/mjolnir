@@ -716,6 +716,7 @@ async fn an_open_chat_hands_off_to_a_replacement_actor_without_losing_its_draft(
     assert!(chat.state.notice().is_none());
 }
 
+// Hard-won: 1f62bc101: reviewer answer failures were invisible when only the notification form was open.
 #[tokio::test]
 async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     let fixture =
@@ -747,7 +748,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     // form yet. A session switch must retain both local snapshots so the
     // reviewer answer is restored when its stream catches up.
     chat.state.restore_elicitation(request);
-    chat.deferred_elicitation_draft = Some(reviewer_draft);
+    chat.deferred_elicitation_drafts = vec![reviewer_draft];
     let drafts = chat.elicitation_drafts();
     assert_eq!(drafts.len(), 2);
     assert!(drafts.iter().any(|draft| !draft.reviewer()));
@@ -756,6 +757,215 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
             .iter()
             .any(|draft| draft.reviewer() && draft.reviewer_role() == Some("reviewer-a"))
     );
+    // Hard-won: 1f62bc101: reviewer answer refusals disappeared from notification-only forms.
+    chat.state.elicitation = None;
+    chat.state.elicitation_is_reviewers = false;
+    chat.deferred_elicitation_drafts.clear();
+    let request = ElicitationRequest::from_acp_params("reviewer-failure", serde_json::json!({
+        "mode": "form", "sessionId": "reviewer-a", "message": "Review answer", "requestedSchema": {
+            "type": "object", "properties": {"answer": {"type": "string"}}
+        }
+    })).unwrap();
+    chat.state
+        .set_turn_review(Some(mj_client::review::RuntimeReviewView {
+            child_session_id: None,
+            session_id: "session-deferred-review".into(),
+            phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            roles: vec![mj_core::review::driver::RoleStatus {
+                role: "reviewer".into(),
+                label: "Reviewer".into(),
+                state: mj_core::review::driver::RoleState::Running,
+                child_session_id: Some("reviewer-a".into()),
+            }],
+            status: "Review running".into(),
+            verdict: None,
+            questions: vec![mj_client::review::ReviewerQuestion {
+                role: "reviewer-a".into(),
+                request: request.clone(),
+            }],
+        }));
+    chat.state
+        .show_review_role_elicitation(Some("reviewer-a".into()), request);
+    let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    chat.handle_elicitation_event(Event::Paste("kept reviewer answer".into()));
+    let draft = chat.state.elicitation_draft().unwrap();
+    chat.handle_elicitation_event(Event::Key(key(KeyCode::Enter)));
+    assert!(!chat.state.reviewer_elicitation_open());
+    assert!(
+        chat.has_pending_elicitation_input(),
+        "accepted answer retains its result owner after the form closes"
+    );
+    // Hard-won: f69edee: a failure for A lost its draft while reviewer B owned the dialog.
+    let review_a = chat.state.turn_review().unwrap().view.clone();
+    let mut review_b = review_a.clone();
+    let mut question_b = draft.request().clone();
+    question_b.id = "reviewer-b-question".into();
+    question_b.message = "Reviewer B question".into();
+    let mut role_b = review_b.roles[0].clone();
+    role_b.child_session_id = Some("reviewer-b".into());
+    review_b.roles.push(role_b);
+    review_b
+        .questions
+        .push(mj_client::review::ReviewerQuestion {
+            role: "reviewer-b".into(),
+            request: question_b.clone(),
+        });
+    chat.apply_review_view(Some(review_b.clone()));
+    assert_eq!(
+        chat.state.elicitation.as_ref().unwrap().request(),
+        &question_b
+    );
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("reviewer lookup failed".into()),
+    });
+    assert_eq!(
+        chat.state.elicitation.as_ref().unwrap().request(),
+        &question_b
+    );
+    assert_eq!(chat.state.deferred_form_results.len(), 1);
+    // Hard-won: 5dc2084: upgrade snapshots omitted a rejected draft waiting behind another form.
+    let saved = serde_json::to_value(chat.elicitation_drafts()).unwrap();
+    let mut upgraded = clipboard_test_chat();
+    // Hard-won: 57e492d: ChatOpened restores snapshots before installing the review projection.
+    upgraded.restore_elicitation_drafts(serde_json::from_value(saved).unwrap());
+    upgraded.apply_review_view(Some(review_b));
+    terminal
+        .draw(|frame| {
+            upgraded.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let recovered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(recovered.contains("kept reviewer answer"));
+    assert!(recovered.contains("reviewer lookup failed"));
+    // B is resolved elsewhere; the authoritative refresh reveals A again.
+    chat.apply_review_view(Some(review_a.clone()));
+    assert!(chat.state.deferred_form_results.is_empty());
+
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("reviewer lookup failed"));
+    assert!(text.contains("kept reviewer answer"));
+    assert!(!chat.has_pending_elicitation_input());
+    // Hard-won: f69edee: a standby composer consumed a reviewer failure without its review projection.
+    chat.handle_elicitation_event(Event::Key(key(KeyCode::Enter)));
+    let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+    let mut standby = ChatState::standby(
+        "session-deferred-review",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    standby.adopt_live_composer(chat.take_live_composer().unwrap());
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("parked reviewer failure".into()),
+    });
+    standby.drain_composer();
+    assert_eq!(standby.deferred_form_results.len(), 1);
+    // Hard-won: 57e492d: parked composer failures were omitted from upgrade snapshots.
+    let parked_saved = serde_json::to_string(&standby.elicitation_drafts()).unwrap();
+    assert!(parked_saved.contains("parked reviewer failure"));
+    assert!(parked_saved.contains("kept reviewer answer"));
+    assert!(standby.elicitation.is_none());
+    let mut replacement = clipboard_test_chat();
+    replacement.adopt_live_composer(standby.take_live_composer().unwrap());
+    assert_eq!(
+        replacement.state.deferred_form_results.len(),
+        1,
+        "the review projection is not known yet"
+    );
+    replacement.apply_review_view(Some(review_a));
+    assert!(replacement.state.deferred_form_results.is_empty());
+    terminal
+        .draw(|frame| {
+            replacement.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("parked reviewer failure"));
+    assert!(text.contains("kept reviewer answer"));
+    let mut chat = replacement;
+    // Hard-won: 56747ef: a failed answer resurrected a question removed by the latest review projection.
+    chat.apply_review_view(None);
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("reviewer lookup failed".into()),
+    });
+    assert!(!chat.state.reviewer_elicitation_open());
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("request is no longer pending".into()),
+    });
+    assert!(!chat.state.reviewer_elicitation_open());
+    assert!(
+        chat.state
+            .conversation_notices
+            .iter()
+            .any(|notice| notice.text.contains("not delivered"))
+    );
+    let notices = chat.state.conversation_notices.len();
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: None,
+        result: Err("request is no longer pending".into()),
+    });
+    assert_eq!(
+        chat.state.conversation_notices.len(),
+        notices,
+        "automatic late plan answers stay quiet"
+    );
+    let mut newer = draft.request().clone();
+    newer.id = "new-primary-question".into();
+    newer.message = "New primary question".into();
+    chat.state.elicitation = None;
+    chat.state.elicitation_is_reviewers = false;
+    chat.state.elicitation_role = None;
+    chat.state.restore_elicitation(newer);
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("old failure".into()),
+    });
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("New primary question"));
+    assert!(!text.contains("old failure"));
 }
 
 #[tokio::test]
@@ -2361,6 +2571,65 @@ async fn stale_clipboard_results_do_not_cross_capability_or_input_context_change
         assert!(chat.state.composer_runtime.attachment_queue.is_empty());
         assert!(!chat.state.composer_runtime.paste_in_flight);
     }
+    // Hard-won: 5dc2084: reused IDs delivered clipboard text to a replacement request or reviewer role.
+    for changed_role in [false, true] {
+        let mut chat = clipboard_test_chat();
+        let request = ElicitationRequest::from_acp_params("reused", serde_json::json!({"mode":"form", "sessionId":"clipboard", "message":"Original", "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}})).unwrap();
+        if changed_role {
+            chat.state
+                .show_review_role_elicitation(Some("first-reviewer".into()), request.clone());
+        } else {
+            chat.state.restore_elicitation(request.clone());
+        }
+        chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+        let pending = clipboard_result(&chat, ClipboardContent::Text("stale answer".into()));
+        chat.state.elicitation = None;
+        if changed_role {
+            chat.state
+                .show_review_role_elicitation(Some("other-reviewer".into()), request);
+        } else {
+            let mut replacement = request;
+            replacement.message = "Replacement".into();
+            chat.state.restore_elicitation(replacement);
+        }
+        chat.state.apply_composer_update(pending);
+        let saved = serde_json::to_string(&chat.state.elicitation_draft()).unwrap();
+        assert!(!saved.contains("stale answer"));
+    }
+    // A second presentation is the same answer target, even if its
+    // conversation redraws the earlier-message reader during the read.
+    let mut chat = clipboard_test_chat();
+    chat.state.restore_elicitation(ElicitationRequest::from_acp_params("shared-form", serde_json::json!({
+        "mode": "form", "sessionId": "clipboard-test", "message": "Answer", "requestedSchema": {
+            "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]
+        }
+    })).unwrap());
+    chat.state.earlier = Some(Default::default());
+    chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+    // Hard-won: c9867384e: releasing a notification parked a read before it could update its form draft.
+    chat.state.composer_runtime.paste_in_flight = true;
+    assert!(chat.has_pending_elicitation_input());
+    let pending = clipboard_result(&chat, ClipboardContent::Text("shared answer".into()));
+    chat.select_elicitation_surface(super::super::ElicitationSurface::Conversation);
+    chat.state.apply_composer_update(pending);
+    assert!(!chat.has_pending_elicitation_input());
+    chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+    let ChatAction::RespondElicitation { response, .. } =
+        chat.state.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("notification answer remains editable while the conversation reader is open");
+    };
+    assert_eq!(
+        response,
+        mj_core::elicitation::ElicitationResponse::Accept {
+            content: [(
+                "path".into(),
+                mj_core::elicitation::ElicitationValue::String("shared answer".into())
+            )]
+            .into_iter()
+            .collect(),
+        }
+    );
 }
 
 #[tokio::test]

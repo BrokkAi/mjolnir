@@ -15,8 +15,8 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
     }
 
-    /// Whether this session's recorded target runs with
-    /// `permissions = "yolo"`, which selects its own sub-agent choices.
+    /// Whether this session's harness runs without approvals on its
+    /// recorded target, which selects the YOLO sub-agent choices.
     fn session_is_yolo_target(&self, _session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
         Box::pin(async { Ok(false) })
     }

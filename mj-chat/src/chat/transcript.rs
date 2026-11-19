@@ -761,6 +761,10 @@ impl ChatState {
         }
     }
 
+    pub(super) fn cancel_transcript_scrollbar_pointer(&mut self) {
+        self.transcript_scrollbar.pointer.cancel_pointer();
+    }
+
     /// Whether the host must keep routing left-button motion to this chat.
     /// The pointer may leave the pane while a thumb is held.
     pub fn transcript_scrollbar_dragging(&self) -> bool {

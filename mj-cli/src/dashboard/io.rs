@@ -125,10 +125,6 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         generation: u64,
-        assignment: mj_tui::PaneAssignment,
-        /// The pane that asked for this conversation. A result whose pane has
-        /// since moved on to another session is dropped.
-        pane: mj_tui::tile_layout::PaneId,
         session_id: String,
         result: Box<std::result::Result<mj_chat::chat::PreparedChat, String>>,
     },
@@ -905,27 +901,27 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ChatOpened {
                 generation,
-                assignment,
-                pane,
                 session_id,
                 result,
             } => {
                 // Ignore a late result after the pane that asked for it moved
                 // on (or the dashboard has shut down).
-                if !self.attachments.get(&pane).is_some_and(|attachment| {
-                    attachment.accepts_pane_result(
-                        generation,
-                        assignment,
-                        &self.dashboard,
-                        pane,
-                        &session_id,
-                    )
-                }) || self.opening_chat_sessions.get(&pane).map(String::as_str)
-                    != Some(session_id.as_str())
-                {
+                if !self.attachments.get(&session_id).is_some_and(|attachment| {
+                    attachment.accepts_surface_result(generation, &self.dashboard, &session_id)
+                }) {
+                    if let Some(attachment) = self.attachments.get_mut(&session_id)
+                        && attachment.accepts(generation, Some(&session_id)) {
+                        attachment.defer();
+                        self.opening_chat_sessions.retain(|_, session| session != &session_id);
+                        self.sync_opening_session();
+                    }
                     return;
                 }
-                self.opening_chat_sessions.remove(&pane);
+                let conversation_opening = self.attachments[&session_id]
+                    .has_conversation_interest(&self.dashboard, &session_id);
+                self.attachments.get_mut(&session_id).unwrap().finish();
+                self.opening_chat_sessions.retain(|_, session| session != &session_id);
+                if !self.wanted_chat_sessions().contains(&session_id) { return; }
                 self.sync_opening_session();
                 // The attach may have crossed a lifecycle boundary while it
                 // was preparing. Keep the warm chat/draft untouched and drop
@@ -936,7 +932,7 @@ impl DashboardContext {
                         .transition_failure_kind(&session_id)
                         .is_some()
                 {
-                    self.defer_chat_open_in(pane);
+                    self.attachments.get_mut(&session_id).unwrap().defer();
                     return;
                 }
                 match *result {
@@ -984,13 +980,12 @@ impl DashboardContext {
                         // was in flight is handed over now.
                         self.refresh_chat_context();
                         self.apply_runtime_review_to_chat(&session_id);
-                        self.dashboard.clear_notice();
+                        self.dashboard.report_chat_attachment_result(&session_id, None, conversation_opening);
                         self.acknowledge_visible_chats();
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
-                        self.dashboard
-                            .report_open_failure(&session_id, &error.to_string());
+                        self.dashboard.report_chat_attachment_result(&session_id, Some(&error), conversation_opening);
                     }
                 }
             }
