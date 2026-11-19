@@ -35,7 +35,7 @@ pub(super) async fn record_activity_stream(
             recorded = current;
         } else {
             let record = Arc::clone(&record);
-            let outcome = tokio::task::spawn_blocking(move || {
+            let outcome = mj_core::runtime::spawn_blocking(move || {
                 let mut record = record.lock().unwrap_or_else(PoisonError::into_inner);
                 record(changed, chrono::Utc::now().timestamp_millis())
             })
@@ -128,11 +128,12 @@ mod tests {
         // recorder, which a blocking `std::sync::mpsc` recv would starve.
         let (calls_tx, mut calls) = tokio::sync::mpsc::unbounded_channel();
         let mut attempt = 0_usize;
-        let recorder = tokio::spawn(record_activity_stream(receiver, move |changed, _at| {
-            attempt += 1;
-            calls_tx.send(changed).unwrap();
-            if attempt == 1 { Err(busy()) } else { Ok(()) }
-        }));
+        let recorder =
+            mj_core::runtime::spawn(record_activity_stream(receiver, move |changed, _at| {
+                attempt += 1;
+                calls_tx.send(changed).unwrap();
+                if attempt == 1 { Err(busy()) } else { Ok(()) }
+            }));
 
         sender.send(snapshot(&[("session-1", "working")])).unwrap();
         let first = calls.recv().await.unwrap();

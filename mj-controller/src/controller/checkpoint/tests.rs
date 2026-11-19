@@ -1,7 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -40,7 +41,9 @@ use mj_transcript::projection::canonical_session_from_materialized_owned as cano
 #[cfg(unix)]
 use crate::targets::ProvisionStage;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
-use mj_core::relay::{RelayCommand, RelayCursor, RelayExecutionState};
+#[cfg(unix)]
+use mj_core::relay::RelayCommand;
+use mj_core::relay::{RelayCursor, RelayExecutionState};
 
 pub(crate) use super::stand_in::*;
 use super::*;
@@ -2889,7 +2892,7 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
     .await
     .unwrap();
     let submitting = handle.clone();
-    let mut prompt = tokio::spawn(async move {
+    let mut prompt = mj_core::runtime::spawn(async move {
         submitting
             .submit(
                 new_command_id("after-write").unwrap(),
@@ -3787,7 +3790,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL.to_string(),
     );
     let targets = channels.targets.clone();
-    let restore_actor = tokio::spawn(async move {
+    let restore_actor = mj_core::runtime::spawn(async move {
         tokio::time::timeout(Duration::from_secs(10), async move {
             loop {
                 let state = crate::database::load_session_record(LATCH_RELAY_SESSION)

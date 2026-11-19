@@ -519,3 +519,15 @@ fn a_released_root_with_a_live_worker_is_stopped_by_the_staged_control_worker() 
     drop(WorkerRootOwner::acquire(&root).expect("the lock is free after the stop"));
     assert_eq!(std::fs::read(root.join("hel")).unwrap(), released_bytes);
 }
+
+// Hard-won: #1603: a worker built with test features carried the test
+// identity's build stamp beside its own, and was refused as conflicting.
+#[test]
+fn the_worker_executable_carries_one_build_stamp() {
+    let worker = std::fs::read(HEL).unwrap();
+    let build = mj_core::worker_build::worker_build_from_bytes(&worker).unwrap();
+    assert!(
+        !build.ends_with("+0000000000000000000000000000000000000000"),
+        "the worker carries the test identity's stamp, not its own: {build}"
+    );
+}

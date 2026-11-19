@@ -95,7 +95,7 @@ pub async fn install_keychain_login_if_newer(
     validate_credential_payload(kind, bytes)?;
     let guard = CredentialWriteGuard::acquire(kind, lock_marker).await?;
     let bytes = bytes.to_owned();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         // Blocking writes cannot be cancelled: ownership follows the write.
         let _guard = guard;
         let (snapshot, current) = match read_claude_keychain_login(&*security)? {

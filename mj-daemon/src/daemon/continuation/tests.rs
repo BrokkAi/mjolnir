@@ -1122,7 +1122,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             }
         };
         let retry_environment = environment.clone();
-        let mut task = Some(tokio::spawn(async move {
+        let mut task = Some(mj_core::runtime::spawn(async move {
             quota::schedule(&environment, "one", blocked.clone(), plan).await
         }));
         let mut unknown_fallback = None;
@@ -1223,7 +1223,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 let env = retry_environment.clone();
                 let view = blocked.clone();
                 let recovery = fallback.clone();
-                task = Some(tokio::spawn(async move {
+                task = Some(mj_core::runtime::spawn(async move {
                     quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
                 }));
                 continue;
@@ -1243,7 +1243,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 let env = retry_environment.clone();
                 let view = blocked.clone();
                 let recovery = fallback.clone();
-                task = Some(tokio::spawn(async move {
+                task = Some(mj_core::runtime::spawn(async move {
                     quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
                 }));
             }
@@ -1281,7 +1281,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 "destination",
             )
             .expect("a failed Move reports a conversation notice");
-            let recording = tokio::spawn(async move {
+            let recording = mj_core::runtime::spawn(async move {
                 crate::daemon::session_move::record_quota_move_failure(
                     &failure_control,
                     "one",
@@ -2271,7 +2271,7 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
     };
     std::fs::write(root.path().join("block-quota-submit"), b"hold").unwrap();
     let recovery = recovery_for(&blocked, None);
-    let scheduling = tokio::spawn(async move {
+    let scheduling = mj_core::runtime::spawn(async move {
         quota::schedule(&environment, ID, blocked, quota::Plan::Wait(recovery)).await
     });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -2289,7 +2289,7 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
     );
     tokio::time::resume();
     let moving = (mode == "move").then(|| {
-        tokio::spawn({
+        mj_core::runtime::spawn({
             let gate = session_gate.clone();
             let handle = handle.clone();
             async move {
@@ -2375,7 +2375,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             .publish("one".into(), blocked.clone())
             .await
             .unwrap();
-        let first = tokio::spawn({
+        let first = mj_core::runtime::spawn({
             let env = environment.clone();
             let view = blocked.clone();
             async move {
@@ -2490,7 +2490,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             .publish("one".into(), blocked.clone())
             .await
             .unwrap();
-        let second = tokio::spawn({
+        let second = mj_core::runtime::spawn({
             let env = environment.clone();
             let view = blocked.clone();
             async move {
@@ -2540,7 +2540,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             second.await.unwrap().is_err(),
             "reconciling the earlier completion must leave the newer one retryable"
         );
-        let third = tokio::spawn({
+        let third = mj_core::runtime::spawn({
             let env = environment.clone();
             let view = blocked.clone();
             async move {

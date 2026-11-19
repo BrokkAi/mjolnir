@@ -11,7 +11,7 @@ pub(super) async fn execute(
         DaemonAction::InstallMbx { machine } => Some(machine.clone()),
         _ => None,
     };
-    let reply = tokio::task::spawn_blocking(move || {
+    let reply = mj_core::runtime::spawn_blocking(move || {
         let quit = cancelled.clone();
         let executor = CancellableProcessExecutor::new(cancelled);
         // Preserve the dashboard's existing command deadlines, including the

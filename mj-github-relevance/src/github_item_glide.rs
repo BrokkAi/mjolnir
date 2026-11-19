@@ -57,7 +57,7 @@ mod tests {
                 listener.local_addr().unwrap()
             );
             let expected = serde_json::to_vec(&evidence).unwrap();
-            let server = tokio::spawn(async move {
+            let server = mj_core::runtime::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let header_end = loop {

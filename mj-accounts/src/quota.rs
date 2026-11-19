@@ -1065,7 +1065,7 @@ async fn refresh_profile_with_cache_root(
     if crate::database::database_writer_installed() {
         let observed = report.clone();
         let identity = cache_identity.clone();
-        match tokio::task::spawn_blocking(move || {
+        match mj_core::runtime::spawn_blocking(move || {
             crate::database::save_quota_report(&identity, &observed)
         })
         .await

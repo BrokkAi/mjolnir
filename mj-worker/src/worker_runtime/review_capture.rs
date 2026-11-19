@@ -20,7 +20,7 @@ impl ReviewCapture {
         request: mj_core::relay::ReviewerRequest,
     ) -> Result<RelayResponseBody> {
         let capture = self.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let result = capture.run(request).await;
             if let Err(error) = &result {
                 tracing::warn!(%error, "review capture operation failed");
@@ -42,7 +42,7 @@ impl ReviewCapture {
                 repositories,
             } => self.capture_delta(repositories).await,
             mj_core::relay::ReviewerRequest::RecordReviewed { trees } => {
-                tokio::task::spawn_blocking(move || -> Result<()> {
+                mj_core::runtime::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
                         crate::review::capture::record_review_base(
                             &mj_checkpoint::archive::SystemGit,
@@ -60,7 +60,7 @@ impl ReviewCapture {
                 })
             }
             mj_core::relay::ReviewerRequest::RecordOverridden { trees } => {
-                tokio::task::spawn_blocking(move || -> Result<()> {
+                mj_core::runtime::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
                         mj_checkpoint::archive::record_overridden_tree(
                             &mj_checkpoint::archive::SystemGit,
@@ -97,7 +97,7 @@ impl ReviewCapture {
         let roots = self.roots();
         let cwd = self.cwd.clone();
         let session_id = self.session_id.clone();
-        let repositories = tokio::task::spawn_blocking(move || {
+        let repositories = mj_core::runtime::spawn_blocking(move || {
             let discovered = crate::review::capture::discover_repositories(
                 &mj_checkpoint::archive::SystemGit,
                 &roots,
@@ -144,7 +144,7 @@ impl ReviewCapture {
     ) -> Result<RelayResponseBody> {
         let roots = self.roots();
         let cwd = self.cwd.clone();
-        let (root, commit, tree, changed) = tokio::task::spawn_blocking(move || {
+        let (root, commit, tree, changed) = mj_core::runtime::spawn_blocking(move || {
             let git = &mj_checkpoint::archive::SystemGit;
             let discovered = crate::review::capture::discover_repositories(git, &roots);
             let (repositories, _) =

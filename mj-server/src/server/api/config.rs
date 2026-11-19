@@ -33,7 +33,7 @@ pub(super) async fn subagent_options(
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::subagent::SubagentOptions>, ApiFailure> {
     crate::server::require_named_profile(&state.snapshot_rx.borrow(), &profile_id)?;
-    let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
+    let config = mj_core::runtime::spawn_blocking(mj_core::config::Config::load)
         .await
         .map_err(|error| ApiFailure::unavailable(error.to_string()))?
         .map_err(|error| ApiFailure::unavailable(error.to_string()))?;

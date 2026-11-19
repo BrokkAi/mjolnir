@@ -39,7 +39,7 @@ pub fn spawn_remote_dashboard_worker_poller(
         .map(|cursor| cursor.subagent_parents.clone())
         .unwrap_or_default();
     let (subagent_parents, scopes) = tokio::sync::watch::channel(initial_scope);
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let replica = Arc::new(tokio::sync::Mutex::new(bootstrap));
         let tails = Arc::clone(&replica);
         let mut feed = spawn_runtime_feed_with(
@@ -427,7 +427,7 @@ mod expired_tail_cursor_tests {
         let (scopes, scope_rx) = tokio::sync::watch::channel(BTreeSet::new());
         let held = Arc::new(tokio::sync::Notify::new());
         let server_held = held.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut old_poll, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope =
                 mj_client::daemon::read_frame(&mut old_poll).await.unwrap();
@@ -540,7 +540,7 @@ mod expired_tail_cursor_tests {
                 .unwrap();
             }
         });
-        let poll = tokio::spawn(poll_daemon_runtime(replica.clone(), 7, scope_rx));
+        let poll = mj_core::runtime::spawn(poll_daemon_runtime(replica.clone(), 7, scope_rx));
         tokio::time::timeout(Duration::from_secs(2), held.notified())
             .await
             .unwrap();
@@ -635,7 +635,7 @@ mod expired_tail_cursor_tests {
         )
         .expect("publish fake daemon metadata");
 
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept tail request");
             let request: RequestEnvelope = mj_client::daemon::read_frame(&mut stream)
                 .await

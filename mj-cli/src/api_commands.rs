@@ -1871,7 +1871,7 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
     let fetched = client.fetch(&args.session, &args.path, args.ls).await?;
     if args.ls {
         let listing: mj_checkpoint::archive::SessionListing =
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 serde_json::from_reader(fetched.reader()).context("decode the listing")
             })
             .await??;
@@ -1882,7 +1882,7 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
         return Ok(());
     }
     let session = args.session.clone();
-    let saved = tokio::task::spawn_blocking(
+    let saved = mj_core::runtime::spawn_blocking(
         move || -> Result<Option<mj_checkpoint::archive::SavedFetch>> {
             if args.stdout {
                 let mut stdout = std::io::stdout().lock();
@@ -2340,7 +2340,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
             let imported = {
                 let native_session_id = native_session_id.clone();
                 let tool = info.tool.clone();
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     crate::import::import_named_native_session(
                         harness,
                         native_session_id.clone(),
@@ -3625,7 +3625,7 @@ mod tests {
             ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         let client = ApiClient::new(format!("http://{address}"), "test-token".into()).unwrap();
@@ -3709,7 +3709,7 @@ mod tests {
     async fn serve_api(app: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
         url
@@ -5110,7 +5110,7 @@ mod tests {
             placement: DaemonPlacement::Host,
         };
         let (received, waiting) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut control, _) = listener.accept().await.unwrap();
             let (mut feed, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = read_frame(&mut feed).await.unwrap();

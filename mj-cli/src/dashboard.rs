@@ -649,13 +649,13 @@ pub(crate) async fn run_dashboard_for_workspace(
     }
     let mut restart_executable = None;
     if go.is_none() {
-        let launch = tokio::task::spawn_blocking(launch_repository_top_level)
+        let launch = mj_core::runtime::spawn_blocking(launch_repository_top_level)
             .await
             .context("find the repository mj was started in")?;
         context.dashboard.set_launch_project_directory(launch);
     }
     if let Some((mode, setup)) = go {
-        let modes = tokio::task::spawn_blocking(crate::go::saved_workspace_modes)
+        let modes = mj_core::runtime::spawn_blocking(crate::go::saved_workspace_modes)
             .await
             .context("load project workspace settings task failed")??;
         context.dashboard.register_go_workspaces(modes);

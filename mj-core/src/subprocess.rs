@@ -180,8 +180,8 @@ impl SupervisedChild {
         let captured = stderr.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let (finished, done) = tokio::sync::watch::channel(None);
-        tokio::spawn(async move {
-            let reader = tokio::spawn(async move {
+        crate::runtime::spawn(async move {
+            let reader = crate::runtime::spawn(async move {
                 let mut bytes = [0; 8192];
                 loop {
                     let count = pipe.read(&mut bytes).await?;
@@ -1362,7 +1362,7 @@ mod tests {
         let log_path = temp.path().join("log");
         let output = std::fs::File::create(&log_path).unwrap();
         let child_pid_file = pid_file.clone();
-        let command = tokio::spawn(async move {
+        let command = crate::runtime::spawn(async move {
             let mut command = tokio::process::Command::new("sh");
             command.args(["-c", "head -c 131072 /dev/zero; echo diagnostics >&2; echo $$ > \"$1\"; sleep 60 & wait", "logged-fixture"])
                 .arg(child_pid_file);

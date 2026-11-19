@@ -94,7 +94,7 @@ where
 {
     let cancelled = Arc::new(AtomicBool::new(false));
     let executor_cancelled = cancelled.clone();
-    let mut task = tokio::task::spawn_blocking(move || {
+    let mut task = mj_core::runtime::spawn_blocking(move || {
         let executor = CancellableProcessExecutor::new(executor_cancelled)
             .with_deadline(TAILSCALE_COMMAND_TIMEOUT);
         operation(&executor)
@@ -114,7 +114,7 @@ pub(super) fn spawn_tailscale_cert_renewer(
     rustls: axum_server::tls_rustls::RustlsConfig,
     termination: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut interval = tokio::time::interval(TAILSCALE_RENEW_INTERVAL);
         interval.tick().await;
         loop {

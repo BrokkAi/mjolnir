@@ -441,7 +441,7 @@ where
                         let pending = permission_elicitations.clone();
                         let events = permission_events.clone();
                         let cancellation = responder.cancellation();
-                        tokio::spawn(async move {
+                        mj_core::runtime::spawn(async move {
                             if events
                                 .send(RuntimeEvent::ElicitationRequested { request: review.clone() })
                                 .await
@@ -593,7 +593,7 @@ where
                     let pending = permission_elicitations.clone();
                     let events = permission_events.clone();
                     let cancellation = responder.cancellation();
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
                             await_elicitation_response(&pending, &id, answer_rx, cancellation.cancelled()).await
                         } else {
@@ -728,7 +728,7 @@ where
                 };
                 // Handlers run on the dispatch loop, so awaiting the child here
                 // would stop every other message until it exits.
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     let exit = crate::terminal::wait_for_exit(exit).await;
                     if let Err(error) = responder.respond(WaitForTerminalExitResponse::new(
                         terminal_exit_status(&exit),
@@ -777,7 +777,7 @@ where
                 };
                 // Reap off the dispatch loop: the supervisor still has to watch
                 // the killed child exit before it reports the terminal closed.
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     if let Err(error) = supervisor.await {
                         tracing::warn!(
                             %terminal_id,
@@ -842,7 +842,7 @@ where
                     let pending = handler_elicitations.clone();
                     let events = elicitation_events.clone();
                     let cancellation = responder.cancellation();
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         if events
                             .send(RuntimeEvent::ElicitationRequested { request: request.clone() })
                             .await
@@ -939,7 +939,7 @@ where
                     let pending = handler_elicitations.clone();
                     let events = ext_events.clone();
                     let cancellation = responder.cancellation();
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         if events
                             .send(RuntimeEvent::ElicitationRequested { request: review.clone() })
                             .await
@@ -1711,7 +1711,7 @@ pub(super) fn start_steer(
     let response = Box::pin(async move {
         let mut prompt = steering_prompt.prompt;
         if let Some(root) = steering_prompt.attachment_root {
-            prompt = tokio::task::spawn_blocking(move || -> Result<Vec<ContentBlock>> {
+            prompt = mj_core::runtime::spawn_blocking(move || -> Result<Vec<ContentBlock>> {
                 mj_core::attachment::AttachmentStore::worker(&root).resolve(&mut prompt)?;
                 Ok(prompt)
             })

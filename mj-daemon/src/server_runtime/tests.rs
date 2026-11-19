@@ -2605,7 +2605,7 @@ async fn browser_projection_enqueue_does_not_wait_for_a_blocking_permit() {
 
     dispatcher.enqueue(materialized_at(1));
     let (progress, progress_done) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         progress.send(()).expect("control task is still alive");
     });
 

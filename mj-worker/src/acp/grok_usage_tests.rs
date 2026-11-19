@@ -51,7 +51,7 @@ fn report() -> serde_json::Value {
 #[tokio::test]
 async fn grok_usage_crosses_acp_with_metadata_duplicates_and_late_notifications() {
     let (client, bridge) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(async move {
+    let bridge = mj_core::runtime::spawn(async move {
         let (read, mut write) = tokio::io::split(bridge);
         let mut lines = BufReader::new(read).lines();
         let mut prompts = 0;
@@ -116,7 +116,7 @@ async fn grok_usage_crosses_acp_with_metadata_duplicates_and_late_notifications(
     let transport = ByteStreams::new(write.compat_write(), read.compat());
     let (requests, mut request_rx) = mpsc::channel(4);
     let (events, mut event_rx) = mpsc::channel(16);
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec(
@@ -201,7 +201,7 @@ async fn grok_live_usage_reaches_runtime_completion() {
     let (events, mut event_rx) = mpsc::channel(64);
     let shutdown = tokio_util::sync::CancellationToken::new();
     let stop = shutdown.clone();
-    let driver = tokio::spawn(run_with_shutdown(spec, request_rx, events, stop));
+    let driver = mj_core::runtime::spawn(run_with_shutdown(spec, request_rx, events, stop));
     requests
         .send(CommandRequest::Prompt {
             request_id: "live-usage".into(),
@@ -227,7 +227,7 @@ async fn grok_live_usage_reaches_runtime_completion() {
     .await;
     shutdown.cancel();
     // Keep draining while cleanup sends its final events.
-    let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let drain = mj_core::runtime::spawn(async move { while event_rx.recv().await.is_some() {} });
     tokio::time::timeout(Duration::from_secs(30), driver)
         .await
         .unwrap()

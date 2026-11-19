@@ -99,7 +99,7 @@ pub fn spawn_gc_on(
         loop {
             interval.tick().await;
             let root = root.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::runtime::spawn_blocking(move || {
                 collect_obsolete_installs(&root.join(harness.id()), pin(harness).install_id)
             })
             .await;
@@ -238,7 +238,7 @@ pub async fn locate(
                 );
             } else {
                 let search = environment.clone();
-                let available = tokio::task::spawn_blocking(move || {
+                let available = crate::runtime::spawn_blocking(move || {
                     target_native_harness_is_available(harness, &search)
                 })
                 .await
@@ -320,7 +320,7 @@ async fn locate_in_image(
     };
     let search = environment.clone();
     let names = [bridge_name, entry_name, cli_name];
-    let found = tokio::task::spawn_blocking(move || {
+    let found = crate::runtime::spawn_blocking(move || {
         names
             .iter()
             .map(|name| find_command(Path::new(name), &search))
@@ -427,7 +427,7 @@ async fn compatible_bridge(
 ) -> Result<Option<PathBuf>> {
     let search = environment.clone();
     let selected =
-        tokio::task::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
+        crate::runtime::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
             .await
             .context("find target bridge task failed")??;
     let Some(selected) = selected else {
@@ -1042,7 +1042,7 @@ async fn install_antigravity_from_metadata(
     let archive_for_extract = archive.clone();
     let output = executable.clone();
     let cancellation = crate::subprocess::preparation_cancellation();
-    tokio::task::spawn_blocking(move || {
+    crate::runtime::spawn_blocking(move || {
         extract_archive_file(
             &archive_for_extract,
             Path::new("antigravity"),
@@ -1123,7 +1123,7 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
     let cancellation = crate::subprocess::preparation_cancellation();
-    tokio::task::spawn_blocking(move || {
+    crate::runtime::spawn_blocking(move || {
         extract_archive_file(
             &archive_for_extract,
             Path::new("package/bin/opencode"),
@@ -1203,7 +1203,7 @@ async fn download_verified_async(
         // which also serve the daemon's clients. It only reads, so a
         // cancellation that abandons it is safe.
         let path = destination.to_owned();
-        let actual = tokio::task::spawn_blocking(move || {
+        let actual = crate::runtime::spawn_blocking(move || {
             crate::worker_launch::worker_executable_digest(&path)
         })
         .await
@@ -1469,7 +1469,7 @@ async fn install_managed_node(
         let staging_root = staging.path().to_path_buf();
         let folder_for_extract = folder.clone();
         let cancellation = crate::subprocess::preparation_cancellation();
-        tokio::task::spawn_blocking(move || {
+        crate::runtime::spawn_blocking(move || {
             extract_node_archive(&archive, &staging_root, &folder_for_extract, &cancellation)
         })
         .await
@@ -1952,7 +1952,7 @@ async fn install_grok_from_metadata(
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
     let cancellation = crate::subprocess::preparation_cancellation();
-    tokio::task::spawn_blocking(move || {
+    crate::runtime::spawn_blocking(move || {
         extract_zstd_file(&archive_for_extract, &entrypoint_for_extract, &cancellation)
     })
     .await

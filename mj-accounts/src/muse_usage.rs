@@ -664,7 +664,7 @@ mod tests {
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), server)
@@ -942,7 +942,8 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base_url = format!("http://{address}");
         let gate = Gate::default();
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -1069,7 +1070,8 @@ mod tests {
             .route("/oidc/device/token/", post(token));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{address}"), server)
     }
 
@@ -1145,7 +1147,7 @@ mod tests {
             .open(raced.path().join(".auth.json.lock"))
             .unwrap();
         muse.lock().unwrap();
-        let query = tokio::spawn({
+        let query = mj_core::runtime::spawn({
             let home = raced.path().to_owned();
             let auth_base_url = base_url;
             async move { fresh_access_token(&reqwest::Client::new(), &home, &auth_base_url, None).await }

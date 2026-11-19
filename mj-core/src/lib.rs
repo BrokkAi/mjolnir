@@ -8,6 +8,7 @@ pub mod archive;
 pub mod assessment;
 pub mod attachment;
 pub mod aws_credentials;
+pub mod backoff;
 pub mod bounded_frame;
 pub mod codex_catalog;
 pub mod codex_provider;

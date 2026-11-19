@@ -907,7 +907,7 @@ pub(super) async fn serve_session(
                 mut prompt,
                 root,
             } => {
-                match tokio::task::spawn_blocking(move || -> Result<Vec<ContentBlock>> {
+                match mj_core::runtime::spawn_blocking(move || -> Result<Vec<ContentBlock>> {
                     mj_core::attachment::AttachmentStore::worker(&root).resolve(&mut prompt)?;
                     Ok(prompt)
                 })

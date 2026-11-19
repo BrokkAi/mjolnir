@@ -12,10 +12,12 @@ use anyhow::Result;
 use super::MoveSourceRelay;
 pub(crate) use super::test_fixtures::*;
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
+#[cfg(unix)]
+use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
-    IsolatedTest, RefusingExecutor, checkout_with_network_remote, checkpoint_test_session,
-    committed_repository, local_bundle, managed_raw_session, raw_session_on,
-    resume_compatibility_config, ssh_worktree_target,
+    RefusingExecutor, checkout_with_network_remote, checkpoint_test_session, committed_repository,
+    local_bundle, managed_raw_session, raw_session_on, resume_compatibility_config,
+    ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{
@@ -26,7 +28,9 @@ use mj_checkpoint::archive::{
 use mj_core::config::{Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 #[cfg(unix)]
 use mj_core::state::CheckpointMetadata;
-use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition};
+use mj_core::state::MovePhase;
+#[cfg(unix)]
+use mj_core::state::{MoveOperation, MoveSelection, ResumeQueueDisposition};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 #[cfg(unix)]
@@ -916,7 +920,10 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
                 .env("MJ_MOVE_QUEUE_REPLAY_CHILD", "1")
                 .env(MOVE_QUEUE_GOAL, goal)
                 .isolated_store(directory.path())
-                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+                .env(
+                    "MJ_WORKER_BINARY",
+                    mj_core::worker_build::test_worker_executable(),
+                )
                 .run();
         }
         return;

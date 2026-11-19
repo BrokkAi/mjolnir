@@ -479,7 +479,7 @@ impl Controller {
         // durable conversation at the verified checkpoint cut.
         let materialized = if barrier.window.omitted_items > 0 {
             let session_id = barrier.materialized.session_id.clone();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 crate::database::load_materialized_session(&session_id)?
                     .context("checkpoint durable projection disappeared")
             })

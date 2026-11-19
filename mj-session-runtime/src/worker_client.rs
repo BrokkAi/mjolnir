@@ -1,0 +1,179 @@
+//! Controller-side client for a session relay's JSON-lines proxy.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, watch};
+
+use crate::targets::{CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SshSessionLease, ssh_refusal};
+use mj_core::credentials::{
+    CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
+    CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, StepFailure, SyncAction, SyncStep,
+    SyncTrigger, enqueue, profiles_with_targets, read_credential_file, reconcile,
+    validate_credential_payload,
+};
+use mj_core::elicitation::ElicitationResponse;
+use mj_core::relay::{
+    MAX_FRAME_BYTES, RELAY_EVENT_GENESIS_DIGEST, RELAY_MIN_PROTOCOL_VERSION,
+    RELAY_PROTOCOL_VERSION, RelayCommand, RelayCursor, RelayErrorCode, RelayEvent,
+    RelayOperationalState, RelayProtocolError, RelayRequest, RelayRequestEnvelope,
+    RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload, RelayVersionRange,
+    ReviewerRequest, validate_relay_event,
+};
+
+pub use mj_client::session::RelayAttachment;
+
+pub type SubagentQueueSnapshot = (
+    mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
+    mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
+);
+
+const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
+/// Starting a target-side proxy may page the full worker executable in and
+/// traverse a container runtime before the relay sees `hello`. This 60-second
+/// budget applies to both initial connects and reconnect handshakes.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+/// An attachment can decompress a transport-sized page from cold journal
+/// segments. It remains bounded by the relay frame budget, but cold or loaded
+/// storage needs a filesystem deadline rather than an in-memory RPC deadline.
+const RELAY_HISTORY_TIMEOUT: Duration = Duration::from_secs(900);
+/// Advancing an acknowledgement can durably prune a large relay journal. The
+/// worker performs that maintenance before replying, so it needs a deadline
+/// sized for filesystem work rather than ordinary relay bookkeeping.
+const RELAY_ACKNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Capturing a review delta runs Git over every workspace repository, which is
+/// filesystem work on a possibly large tree rather than relay bookkeeping.
+const REVIEW_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
+const RELAY_PROXY_DETACH_GRACE: Duration = Duration::from_millis(500);
+const RELAY_PROXY_REAP_POLL: Duration = Duration::from_millis(10);
+
+/// How many trailing stderr lines a failed connect reports back to its caller.
+const RELAY_PROXY_STDERR_TAIL: usize = 10;
+
+/// The waits between connection attempts while the worker has not bound its
+/// control socket yet, 1.55 s in all. The daemon connects about 34 ms after
+/// starting a worker, and the worker binds its socket within about a second:
+/// on launch-r9 the next attempt, half a second later, got in every time
+/// (R9-2).
+const WORKER_SOCKET_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
+
+/// The proxy's last [`RELAY_PROXY_STDERR_TAIL`] non-empty stderr lines, shared
+/// with whoever has to report them.
+///
+/// The drain publishes each line here as it reads it, rather than returning
+/// the whole tail when it finishes. A failed connect has to bound how long it
+/// waits for the drain, because a proxy that leaves a grandchild holding
+/// stderr never reaches EOF. Reading the tail from here means that bound costs
+/// only the lines not yet read, instead of discarding every line already
+/// collected.
+type ProxyStderrTail = Arc<std::sync::Mutex<VecDeque<String>>>;
+
+/// Forward a relay proxy's stderr to the log, one line at a time, until the
+/// child closes it, keeping the tail in `tail`. Reporting rather than dropping
+/// keeps connect failures diagnosable now that the controller no longer shares
+/// its terminal, and lets a failed connect put the proxy's own complaint in
+/// the error the caller sees rather than only in the log.
+///
+/// Raw stderr stays at debug. Connect errors carry a one-line cause to the
+/// lifecycle or actor owner that reports the failure.
+async fn drain_proxy_stderr(
+    errors: proxy::ProxyReader,
+    purpose: String,
+    session_id: String,
+    tail: ProxyStderrTail,
+) {
+    let mut lines = BufReader::new(errors).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) if line.trim().is_empty() => continue,
+            Ok(Some(line)) => {
+                tracing::debug!(%session_id, %purpose, %line, "relay proxy stderr");
+                let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                if tail.len() == RELAY_PROXY_STDERR_TAIL {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%session_id, %purpose, %error, "read relay proxy stderr");
+                return;
+            }
+        }
+    }
+}
+
+mod errors;
+pub use errors::*;
+mod connect;
+mod exchange;
+use crate::streamed_child as proxy;
+mod relay;
+mod reviewer;
+mod transport;
+use transport::*;
+mod credential_sync;
+pub use credential_sync::*;
+mod credential_targets;
+pub use credential_targets::*;
+
+/// Controller-side connection to the durable ACP relay protocol.
+///
+/// This type does not construct transcript state or request unbounded history.
+/// Callers persist bounded attachment pages, then acknowledge only a frontier
+/// that is already durable locally.
+pub struct RelayClient {
+    child: Option<proxy::ProxyChild>,
+    input: Option<proxy::ProxyWriter>,
+    output: BufReader<proxy::ProxyReader>,
+    request_timeout: Duration,
+    /// Why this connection can no longer be used, once a call gave up on a
+    /// reply that is still in flight. See [`RelayClient::exchange`].
+    abandoned: Option<String>,
+    /// Set while a job runs under a gate admission: a lifecycle operation that
+    /// cancels the admission cancels the job's exchanges too.
+    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    next_request: u64,
+    connection_nonce: u64,
+    protocol_version: u32,
+    session_id: String,
+    relay_version: String,
+    /// Content address of the executable the worker is running, as reported in
+    /// hello. `None` from a worker built before the field existed.
+    worker_build: Option<String>,
+    latest_ordinal: u64,
+    latest_digest: String,
+    subagent_acknowledged: Option<u64>,
+    subagent_queue: BTreeMap<String, mj_core::subagent::SubagentQueueChange>,
+    /// Invalidated under this connection's exclusive borrow before applying
+    /// queue changes; partial-page failures cannot leave a valid stale view.
+    subagent_publication: Option<SubagentQueueSnapshot>,
+    /// The operational state the worker last sent on this connection and its
+    /// digest. A protocol-57 worker skips resending a state that matches it.
+    known_state: Option<(
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    )>,
+    /// The shared-connection session the proxy runs on, held for as long as
+    /// the proxy runs.
+    ssh_session: Option<SshSessionLease>,
+}
+
+#[cfg(test)]
+mod tests;
+// Shared with mj-daemon's tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_fixtures;

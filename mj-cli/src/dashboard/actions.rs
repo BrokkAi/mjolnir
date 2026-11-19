@@ -154,7 +154,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::CheckGitIdentity => {
             // The daemon reads Git in the environment its sessions inherit.
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = async { daemon::connect_or_start().await?.git_identity().await }
                     .await
                     .map_err(|e: anyhow::Error| format!("{e:#}"));
@@ -252,7 +252,7 @@ pub(crate) async fn apply_dashboard_action(
             before,
         } => {
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
                         .await?
@@ -272,7 +272,7 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::StopNativeAgent { owner, child } => {
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = async {
                     let mut client = daemon::connect_existing().await?;
                     client
@@ -300,7 +300,7 @@ pub(crate) async fn apply_dashboard_action(
             // one update.
             let guard = context.critical_operations.begin("notification dismissals");
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let results = futures::future::join_all(dismissals.into_iter().map(
                     |(session_id, target)| async move {
                         let deadline = std::time::Duration::from_secs(30);
@@ -335,7 +335,7 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::InterruptAll { targets } => {
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let failures = interrupt_all(&targets).await;
                 if let Err(error) =
                     updates.send(DashboardIoUpdate::InterruptAllFinished { targets, failures })
@@ -1323,7 +1323,7 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             context.dashboard.set_notice("Checking container upgrade…");
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
                         .await?
@@ -1348,7 +1348,7 @@ pub(crate) async fn apply_dashboard_action(
             let guard = context
                 .critical_operations
                 .begin("submitting container upgrade");
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
                         .await?
@@ -1743,7 +1743,7 @@ pub(crate) async fn apply_dashboard_action(
             }
             let daemon_session_id = session_id.clone();
             let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
                         .await?
@@ -1791,7 +1791,7 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
         return;
     };
     let updates = context.dashboard_io_tx.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = async {
             let mut daemon = daemon::connect_or_start().await?;
             daemon
@@ -2140,7 +2140,7 @@ fn spawn_daemon_restart(context: &mut DashboardContext) {
     context
         .dashboard
         .set_notice("Restarting the Mjolnir daemon...");
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = daemon::restart_daemon().await.map_or_else(
             |error| Err(format!("Could not restart the Mjolnir daemon: {error:#}")),
             |restarted| {
@@ -2173,7 +2173,7 @@ pub(super) fn spawn_daemon_placement(context: &mut DashboardContext) {
     context
         .dashboard
         .set_notice("Moving the Mjolnir daemon where Settings say...");
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = daemon::connect_or_start().await.map_or_else(
             |error| Err(format!("Could not move the Mjolnir daemon: {error:#}")),
             |_| Ok("The Mjolnir daemon runs where Settings say.".to_owned()),
@@ -2194,7 +2194,7 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
     let updates = context.dashboard_io_tx.clone();
     let task_updates = updates.clone();
     let inspecting = matches!(action, DashboardAction::InspectWebListener);
-    let mut task = tokio::spawn(async move {
+    let mut task = mj_core::runtime::spawn(async move {
         let mut daemon = daemon::connect_existing().await?;
         match action {
             DashboardAction::RecoverWebViewer(recovery) => {
@@ -2226,7 +2226,7 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     });
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let result = tokio::select! {
             result = &mut task => result.context("web viewer request task failed").and_then(std::convert::identity),
             _ = cancellation.cancelled() => {
@@ -2421,7 +2421,7 @@ mod tests {
             instance_id: String::new(),
             placement: crate::daemon::DaemonPlacement::Host,
         };
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
             assert!(matches!(

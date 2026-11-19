@@ -197,7 +197,7 @@ fn project_memory_socket(
 ) {
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
     let (wake, _) = mpsc::channel(1);
-    let task = tokio::spawn(unix::serve_client_with_memory(
+    let task = mj_core::runtime::spawn(unix::serve_client_with_memory(
         server,
         relay,
         wake,
@@ -248,7 +248,7 @@ async fn oversized_legacy_delegation_history_replays_only_completion_receipts() 
     ));
     let (wake, _) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let task = tokio::spawn(unix::serve_client_with_memory(
+    let task = mj_core::runtime::spawn(unix::serve_client_with_memory(
         server,
         relay,
         wake,
@@ -411,7 +411,7 @@ pub(super) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
 }
 
 async fn expect_daemon_launch_failure(root: &Path, config: WorkerLaunchConfig) {
-    let daemon = tokio::spawn(unix::run_daemon(root.to_owned(), config));
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.to_owned(), config));
     let observed = tokio::time::timeout(crate::test_support::IO_TIMEOUT, async {
         loop {
             if daemon.is_finished() {
@@ -1056,7 +1056,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
     let endpoint = credential_endpoint(&launch_config(&temp.path().to_string_lossy())).unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay.clone(),
         wake_tx,
@@ -1414,7 +1414,7 @@ async fn protocol_v1_cannot_respond_to_elicitation() {
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (commands_tx, mut commands_rx) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay,
         wake_tx,
@@ -1462,7 +1462,7 @@ async fn incompatible_protocol_cannot_read_or_mutate_credentials() {
     let replacement = codex_credentials("2026-08-06T02:51:00Z");
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay,
         wake_tx,
@@ -1845,7 +1845,7 @@ async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
         let (events, event_rx) = mpsc::channel(16);
         let (wakes, wake_rx) = mpsc::channel(1);
         let (commands, mut command_rx) = mpsc::channel(8);
-        let coordinator = tokio::spawn(run_relay_coordinator(
+        let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
             relay.clone(),
             event_rx,
             wake_rx,
@@ -1860,7 +1860,7 @@ async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
 
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (fatal, _failures) = fatal_reports();
-        let serving = tokio::spawn(unix::serve_client(
+        let serving = mj_core::runtime::spawn(unix::serve_client(
             server,
             relay.clone(),
             wakes,
@@ -2046,7 +2046,7 @@ async fn a_stalled_login_read_does_not_block_relay_events_or_shutdown() {
     let (events, event_rx) = mpsc::channel(4);
     let (_wakes, wake_rx) = mpsc::channel(1);
     let (commands, _command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2660,7 +2660,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2722,7 +2722,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2806,7 +2806,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2911,7 +2911,7 @@ async fn proxy_transport_does_not_expire_an_idle_connection() {
     let (proxy_relay, mut relay_peer) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(proxy_client);
     let (relay_read, relay_write) = tokio::io::split(proxy_relay);
-    let proxy = tokio::spawn(unix::forward_proxy_streams(
+    let proxy = mj_core::runtime::spawn(unix::forward_proxy_streams(
         client_read,
         client_write,
         relay_read,
@@ -2951,7 +2951,7 @@ async fn proxy_transport_expires_while_waiting_for_its_first_request() {
     let (proxy_relay, _relay_peer) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(proxy_client);
     let (relay_read, relay_write) = tokio::io::split(proxy_relay);
-    let proxy = tokio::spawn(unix::forward_proxy_streams(
+    let proxy = mj_core::runtime::spawn(unix::forward_proxy_streams(
         client_read,
         client_write,
         relay_read,
@@ -2984,7 +2984,8 @@ async fn prompt_dispatch_preserves_the_complete_acp_content_vector() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
+    let coordinator =
+        mj_core::runtime::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -3033,7 +3034,8 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
+    let coordinator =
+        mj_core::runtime::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -3125,7 +3127,8 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
+    let coordinator =
+        mj_core::runtime::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -3191,7 +3194,7 @@ async fn out_of_band_sends_cannot_steal_reserved_dispatch_capacity() {
     let (claiming_tx, claiming_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let holder_relay = relay.clone();
-    let holder = tokio::task::spawn_blocking(move || {
+    let holder = mj_core::runtime::spawn_blocking(move || {
         let mut held = holder_relay.lock().expect("relay state lock poisoned");
         submit(&mut held, "prompt-batched", prompt("second turn"));
         submit(&mut held, "cancel-batched", RelayCommand::Cancel);
@@ -3202,7 +3205,7 @@ async fn out_of_band_sends_cannot_steal_reserved_dispatch_capacity() {
         let _ = release_rx.blocking_recv();
     });
     claiming_rx.await.unwrap();
-    let dispatch = tokio::task::spawn_blocking(move || {
+    let dispatch = mj_core::runtime::spawn_blocking(move || {
         unix::dispatch_pending(
             &relay,
             &command_tx,
@@ -3254,7 +3257,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
     let (command_tx, mut command_rx) = mpsc::channel(2);
     command_tx.try_send(elicitation_request()).unwrap();
     command_tx.try_send(elicitation_request()).unwrap();
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3324,7 +3327,7 @@ async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() 
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3381,7 +3384,8 @@ async fn different_command_types_dispatch_in_acceptance_order() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
+    let coordinator =
+        mj_core::runtime::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -3439,7 +3443,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3496,7 +3500,7 @@ async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3571,7 +3575,7 @@ async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3627,7 +3631,7 @@ async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mod
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3710,7 +3714,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4287,7 +4291,7 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4449,7 +4453,7 @@ async fn a_bridge_restart_releases_a_held_prompt_after_session_readiness() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4539,7 +4543,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4597,7 +4601,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4634,7 +4638,7 @@ async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once(
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4778,7 +4782,7 @@ async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4895,7 +4899,7 @@ async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4965,7 +4969,7 @@ async fn checkpoint_waits_for_an_in_flight_config_command() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -5073,7 +5077,7 @@ async fn a_released_checkpoint_barrier_is_not_cancelled_when_its_connection_drop
 
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let served = tokio::spawn(unix::serve_client(
+    let served = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay.clone(),
         wake_tx,
@@ -5147,7 +5151,7 @@ async fn checkpoint_wake_records_already_queued_runtime_events_first() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -5238,7 +5242,7 @@ async fn checkpoint_wake_is_not_starved_by_a_runtime_event_flood() {
     wake_tx.try_send(()).unwrap();
     let (command_tx, _command_rx) = mpsc::channel(1);
     let flood_tx = event_tx.clone();
-    let flood = tokio::spawn(async move {
+    let flood = mj_core::runtime::spawn(async move {
         let mut sequence = 7_u64;
         loop {
             if flood_tx
@@ -5253,7 +5257,7 @@ async fn checkpoint_wake_is_not_starved_by_a_runtime_event_flood() {
             sequence += 1;
         }
     });
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -5313,7 +5317,7 @@ async fn checkpoint_freezes_effectful_commands_submitted_after_the_barrier() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -5381,7 +5385,7 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (fatal_tx, mut fatal_rx) = fatal_reports();
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let served = tokio::spawn(unix::serve_client(
+    let served = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay.clone(),
         wake_tx,
@@ -5474,7 +5478,7 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
         let (event_tx, event_rx) = runtime_event_channel();
         let (wake_tx, wake_rx) = mpsc::channel(1);
         let (command_tx, mut command_rx) = mpsc::channel(1);
-        let coordinator = tokio::spawn(run_relay_coordinator(
+        let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
             relay.clone(),
             event_rx,
             wake_rx,
@@ -5503,7 +5507,7 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
         let blocked_io = if queued {
             let io = endpoint.io.clone();
             let block = block.clone();
-            Some(tokio::spawn(async move {
+            Some(mj_core::runtime::spawn(async move {
                 unix::run_serialized_project_memory_io(
                     &io,
                     &tokio_util::sync::CancellationToken::new(),
@@ -5530,7 +5534,7 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
             .with_ansi(false)
             .with_writer(move || writer.clone())
             .finish();
-        let server_task = tokio::spawn(
+        let server_task = mj_core::runtime::spawn(
             unix::serve_client_with_memory(
                 server,
                 relay.clone(),
@@ -5780,7 +5784,7 @@ async fn relay_client_rejects_unknown_envelope_fields_without_disconnect() {
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay,
         wake_tx,
@@ -5840,7 +5844,7 @@ async fn an_unknown_relay_method_is_named_in_its_rejection() {
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay,
         wake_tx,
@@ -5904,7 +5908,7 @@ async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -5916,7 +5920,7 @@ async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
         })
         .unwrap();
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay.clone(),
         wake_tx.clone(),
@@ -6005,7 +6009,7 @@ async fn relay_v1_client_disconnect_does_not_own_command_execution() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -6017,7 +6021,7 @@ async fn relay_v1_client_disconnect_does_not_own_command_execution() {
         })
         .unwrap();
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay,
         wake_tx.clone(),
@@ -6127,7 +6131,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
     let (wake_tx, wake_rx) = mpsc::channel(1);
     drop(wake_rx);
     let (fatal_tx, fatal_rx) = fatal_reports();
-    let terminal = tokio::spawn(unix::serve_terminal_relay(
+    let terminal = mj_core::runtime::spawn(unix::serve_terminal_relay(
         listener,
         relay.clone(),
         wake_tx,
@@ -6234,7 +6238,7 @@ async fn daemon_restart_serves_a_closed_relay_without_starting_acp() {
     config.bridge_command = temp.path().join("missing-acp-bridge");
     config.cwd = temp.path().to_owned();
     let root = temp.path().to_owned();
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
     let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match tokio::net::UnixStream::connect(root.join("control.sock")).await {
@@ -6736,7 +6740,7 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
         node_lease: Some(lease_path.clone()),
     };
     let (supervisor_stdin, held_stdin) = tokio::io::duplex(64);
-    let task = tokio::spawn(unix::run_acp_supervisor_with_streams(
+    let task = mj_core::runtime::spawn(unix::run_acp_supervisor_with_streams(
         spec,
         supervisor_stdin,
         tokio::io::sink(),
@@ -6767,7 +6771,7 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     parent.set_nonblocking(true).unwrap();
     let mut parent = tokio::net::UnixStream::from_std(parent).unwrap();
     let parent_fd = parent.as_raw_fd();
-    let unrelated = tokio::task::spawn_blocking(move || {
+    let unrelated = mj_core::runtime::spawn_blocking(move || {
         // `/bin/true` does not exist on macOS; `/usr/bin/true` is on every
         // Unix under test (Windows CI compiles tests without running them).
         let mut command = std::process::Command::new("/usr/bin/true");
@@ -6987,7 +6991,7 @@ async fn coordinator_failure_waits_for_peer_cleanup_and_preserves_the_cause() {
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let peer_shutdown = shutdown.clone();
     let peer_stopped = stopped.clone();
-    let mut peer = tokio::spawn(async move {
+    let mut peer = mj_core::runtime::spawn(async move {
         peer_shutdown.cancelled().await;
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         peer_stopped.store(true, std::sync::atomic::Ordering::Release);
@@ -7166,7 +7170,7 @@ impl LiveRecorder {
         const RECORD_LIMIT: u64 = 512;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let recorder_stop = stop.clone();
-        let task = tokio::task::spawn_blocking(move || {
+        let task = mj_core::runtime::spawn_blocking(move || {
             let mut samples = 0_u64;
             let mut recorded = 0_u64;
             let mut worst_wait = std::time::Duration::ZERO;
@@ -7211,7 +7215,7 @@ async fn a_replaying_controller_does_not_stall_live_event_recording() {
 
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let served = tokio::spawn(unix::serve_client(
+    let served = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay.clone(),
         wake_tx,
@@ -7304,7 +7308,7 @@ async fn a_catch_up_completes_while_the_journal_keeps_sealing_under_it() {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let writer_relay = relay.clone();
     let writer_stop = stop.clone();
-    let writer = tokio::task::spawn_blocking(move || {
+    let writer = mj_core::runtime::spawn_blocking(move || {
         let mut written = 0_u64;
         while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) && written < 24 {
             writer_relay
@@ -8312,7 +8316,7 @@ async fn abandoned_project_memory_requests_do_not_overlap_blocking_io() {
     let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
     let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
     let first_gate = gate.clone();
-    let first = tokio::spawn(async move {
+    let first = mj_core::runtime::spawn(async move {
         unix::run_serialized_project_memory_io(
             &first_gate,
             &tokio_util::sync::CancellationToken::new(),
@@ -8332,7 +8336,7 @@ async fn abandoned_project_memory_requests_do_not_overlap_blocking_io() {
     first.abort();
     let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
     let second_gate = gate.clone();
-    let second = tokio::spawn(async move {
+    let second = mj_core::runtime::spawn(async move {
         unix::run_serialized_project_memory_io(
             &second_gate,
             &tokio_util::sync::CancellationToken::new(),
@@ -8374,7 +8378,7 @@ async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
+    let server_task = mj_core::runtime::spawn(unix::serve_client(
         server,
         relay.clone(),
         wake_tx,
@@ -8499,7 +8503,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -8572,7 +8576,7 @@ async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
     config.harness_runtime = mj_core::worker_launch::HarnessRuntimePolicy::Managed;
     config.bridge_command = temp.path().join("nonexistent-harness");
     config.cwd = temp.path().to_owned();
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
     let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if let Ok(stream) = tokio::net::UnixStream::connect(root.join("control.sock")).await {
@@ -8873,7 +8877,8 @@ while True: time.sleep(1)
         } else {
             Box::new(tokio::io::sink())
         };
-        let task = tokio::spawn(unix::run_acp_supervisor_with_streams(spec, input, output));
+        let task =
+            mj_core::runtime::spawn(unix::run_acp_supervisor_with_streams(spec, input, output));
         crate::test_support::wait_for("descendant readiness", async {
             let (mut child, _) = ready.accept().await.unwrap();
             assert_eq!(child.read_u8().await.unwrap(), b'x');
@@ -8944,7 +8949,7 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let mut config = launch_config("profile-home-that-must-not-be-used");
     config.run_mode = mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     config.cwd = temp.path().to_owned();
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
 
     let socket = root.join("control.sock");
     let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -9108,7 +9113,7 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
 
     let mut config = launch_config("profile-home");
     config.cwd = workspace.path().to_owned();
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
 
     let appeared = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
@@ -9161,7 +9166,7 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
         format!("{}:/usr/bin:/bin", temp.path().display()),
     );
     config.cwd = temp.path().to_owned();
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
 
     let steps = || -> Vec<String> {
         std::fs::read(root.join(mj_core::relay::WORKER_STARTUP_FILE))
@@ -9229,7 +9234,7 @@ async fn coordinator_behind_a_ready_barrier(
     let (event_tx, event_rx) = mpsc::channel(capacity);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -9395,7 +9400,7 @@ async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -9524,7 +9529,7 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     let (fatal, _errors) = mpsc::channel(1);
     let (cpu, receiver) = tokio::sync::watch::channel(Ok(None));
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let task = tokio::spawn(unix::serve_client_with_memory(
+    let task = mj_core::runtime::spawn(unix::serve_client_with_memory(
         server,
         relay.clone(),
         wake,
@@ -9694,7 +9699,7 @@ async fn a_sub_agents_prompt_outcome_carries_its_facts_and_the_next_prompt_waits
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_capturing_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_capturing_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -9757,7 +9762,7 @@ async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_capturing_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_capturing_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -9817,7 +9822,7 @@ async fn a_cancellation_accepted_during_a_capture_ends_it() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_capturing_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_capturing_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -9884,7 +9889,7 @@ async fn a_cancellation_accepted_before_a_capture_starts_ends_it() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_capturing_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_capturing_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -9939,7 +9944,7 @@ async fn an_ordinary_sessions_prompt_outcome_carries_no_facts() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,

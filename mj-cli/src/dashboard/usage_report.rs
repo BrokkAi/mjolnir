@@ -25,37 +25,40 @@ impl UsageReportLoader {
         };
         self.generation = Some(generation);
         let updates = updates.clone();
-        self.task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-            loop {
-                let query = query.clone();
-                let child = AbortOnDropHandle::new(tokio::spawn(async move {
-                    crate::api_client::ApiClient::connect()
-                        .await?
-                        .usage_report(&query)
-                        .await
-                }));
-                let result =
-                    match tokio::time::timeout(std::time::Duration::from_secs(20), child).await {
-                        Ok(Ok(result)) => result.map_err(|error| format!("{error:#}")),
-                        Ok(Err(error)) => Err(format!("usage reader failed: {error}")),
-                        Err(_) => Err("usage request timed out".into()),
-                    };
-                let failed = result.is_err();
-                if let Err(error) = &result {
-                    tracing::warn!(%error, "usage report unavailable");
+        self.task = Some(AbortOnDropHandle::new(mj_core::runtime::spawn(
+            async move {
+                loop {
+                    let query = query.clone();
+                    let child = AbortOnDropHandle::new(mj_core::runtime::spawn(async move {
+                        crate::api_client::ApiClient::connect()
+                            .await?
+                            .usage_report(&query)
+                            .await
+                    }));
+                    let result =
+                        match tokio::time::timeout(std::time::Duration::from_secs(20), child).await
+                        {
+                            Ok(Ok(result)) => result.map_err(|error| format!("{error:#}")),
+                            Ok(Err(error)) => Err(format!("usage reader failed: {error}")),
+                            Err(_) => Err("usage request timed out".into()),
+                        };
+                    let failed = result.is_err();
+                    if let Err(error) = &result {
+                        tracing::warn!(%error, "usage report unavailable");
+                    }
+                    report(
+                        "session usage",
+                        &updates,
+                        DashboardIoUpdate::SessionUsageFinished { generation, result },
+                    );
+                    // Errors wait for an explicit Refresh; successful reads are serial.
+                    if failed {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 }
-                report(
-                    "session usage",
-                    &updates,
-                    DashboardIoUpdate::SessionUsageFinished { generation, result },
-                );
-                // Errors wait for an explicit Refresh; successful reads are serial.
-                if failed {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            }
-        })));
+            },
+        )));
     }
 
     pub(super) fn cancel(&mut self) {

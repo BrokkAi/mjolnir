@@ -185,7 +185,7 @@ fn reconcile_pass(
         reconcile.mark_started(key.clone(), sessions);
         let cancelled = cancelled.clone();
         jobs.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            let result = mj_core::runtime::spawn_blocking(move || {
                 let executor = targets::CancellableProcessExecutor::new(cancelled)
                     .with_deadline(Duration::from_secs(30));
                 apply_machine_build_cache(&machine, &directories, &executor)

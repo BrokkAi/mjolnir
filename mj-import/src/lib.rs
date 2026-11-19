@@ -19,8 +19,6 @@
 pub(crate) use mj_accounts::{kimi_auth, quota};
 pub(crate) use mj_store::{database, upgrade};
 pub(crate) use mj_targets::targets;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use mj_targets::test_isolation;
 
 pub mod compaction;
 pub mod handoff;

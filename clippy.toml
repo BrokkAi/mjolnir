@@ -24,6 +24,12 @@ disallowed-methods = [
     # which feeds stdin from a thread while draining output concurrently, or
     # justify a scoped #[allow(clippy::disallowed_methods)] when stdin is
     # Stdio::null() (nothing writes while output drains, so it cannot deadlock).
+    # Tokio generates its task machinery again for every future or closure type
+    # it is handed, which was over half of the code generated for mj-daemon's
+    # tests. mj_core::runtime::spawn and spawn_blocking box the task first, so
+    # that code is generated once for each output type.
+    { path = "tokio::spawn", reason = "use mj_core::runtime::spawn, which boxes the future so tokio's task code is generated once per output type" },
+    { path = "tokio::task::spawn_blocking", reason = "use mj_core::runtime::spawn_blocking, which boxes the closure so tokio's task code is generated once per output type" },
     { path = "std::process::Child::wait_with_output", reason = "write-then-wait deadlocks once a pipe buffer fills; use the shared run_with_input helper (or justify with an explicit allow)" },
     # On Windows `dirs::home_dir` ignores USERPROFILE, so mj and the agents
     # it starts could disagree about the home, and a test could not relocate

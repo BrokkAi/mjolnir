@@ -65,7 +65,7 @@ async fn host_program(
     let name = harness.cli_binary_name();
     let path = environment_value(environment, "PATH");
     let home = environment_value(environment, "GROK_HOME");
-    tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+    mj_core::runtime::spawn_blocking(move || -> Result<Option<String>> {
         let selected = mj_core::program_path::find_executable_on_path(name, path.as_deref())
             .or_else(|| {
                 if harness != HarnessKind::Grok {

@@ -39,7 +39,7 @@ impl DashboardContext {
     pub(crate) fn request_transcript_tail_seed(&mut self, session_id: &str) {
         let session_id = session_id.to_owned();
         let updates = self.dashboard_io_tx.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let seeded = async {
                 crate::daemon::connect_or_start()
                     .await?
