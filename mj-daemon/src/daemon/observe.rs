@@ -37,17 +37,28 @@ async fn run(state: Arc<RuntimeState>, cancellation: CancellationToken) -> Resul
             paths.root.display()
         )
     })?;
+    let config = ObserveDeliveryConfig::load();
+    if matches!(config, Ok(None)) {
+        return Ok(());
+    }
     let delivery = {
         let path = paths.state.clone();
-        Arc::new(std::sync::Mutex::new(
-            tokio::task::spawn_blocking(move || {
-                ObserveDeliveryState::load(&path, mj_core::clock::epoch_millis())
-            })
-            .await
-            .context("Observe state load task panicked")??,
-        ))
+        let loading_cancellation = cancellation.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            ObserveDeliveryState::load_cancellable(
+                &path,
+                mj_core::clock::epoch_millis(),
+                &loading_cancellation,
+            )
+        })
+        .await
+        .context("Observe state load task panicked")?;
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        Arc::new(std::sync::Mutex::new(loaded?))
     };
-    let config = match ObserveDeliveryConfig::load() {
+    let config = match config {
         Ok(Some(config)) => config,
         Ok(None) => return Ok(()),
         Err(error) => {
@@ -567,7 +578,9 @@ fn enqueue_envelopes(
         if let Err(error) = spool.enqueue(&envelope) {
             ids.append(session_id, &appended)
                 .context(UndurableObserveIds)?;
-            return Err(error);
+            // Failure can follow the final link: the current envelope may
+            // already be queued even though enqueue did not acknowledge it.
+            return Err(error.context(UndurableObserveIds));
         }
         emitted.insert(envelope.meta.event_id.clone());
         appended.push(envelope.meta.event_id.clone());
@@ -800,8 +813,15 @@ async fn flush_spool(
     client: &reqwest::Client,
     cancellation: &CancellationToken,
 ) -> Result<usize> {
-    let spool = ObserveSpool::open(&paths.spool)?;
-    let pending = spool.pending()?;
+    let spool_path = paths.spool.clone();
+    let preparing_cancellation = cancellation.clone();
+    let (spool, pending) = tokio::task::spawn_blocking(move || {
+        let spool = ObserveSpool::open(spool_path)?;
+        let pending = spool.pending_cancellable(&preparing_cancellation)?;
+        Ok::<_, anyhow::Error>((spool, Arc::new(pending)))
+    })
+    .await
+    .context("Observe spool preparation task panicked")??;
     if pending.is_empty() {
         return Ok(0);
     }
@@ -835,11 +855,28 @@ async fn flush_spool(
         .filter(|bytes| *bytes > 0)
         .context("Brokk Observe ping did not provide max_body_bytes")?;
 
+    // Ping first: an unavailable server should not make every retry resync
+    // the backlog. Reconcile ids before the first batch can leave the spool.
+    let preparing_spool = spool.clone();
+    let preparing_paths = Arc::clone(&pending);
+    let preparing_cancellation = cancellation.clone();
+    tokio::task::spawn_blocking(move || {
+        preparing_spool.prepare_delivery(&preparing_paths, &preparing_cancellation)
+    })
+    .await
+    .context("Observe queued-id recovery task panicked")??;
+    if cancellation.is_cancelled() {
+        return Ok(0);
+    }
     let started = Instant::now();
     let mut delivered = 0_usize;
     let mut index = 0_usize;
     while index < pending.len() {
-        let (body, end) = batch_from(&pending, index, limit)?;
+        let batch_paths = Arc::clone(&pending);
+        let (body, end) =
+            tokio::task::spawn_blocking(move || batch_from(&batch_paths, index, limit))
+                .await
+                .context("Observe batch read task panicked")??;
         let exchange = async {
             let response = client
                 .post(format!("{}/api/v1/ingest/batch", config.url))
@@ -863,9 +900,16 @@ async fn flush_spool(
                 response_body.chars().take(300).collect::<String>()
             );
         }
-        for path in &pending[index..end] {
-            spool.remove(path)?;
-        }
+        let removing_spool = spool.clone();
+        let removing_paths = Arc::clone(&pending);
+        tokio::task::spawn_blocking(move || {
+            for path in &removing_paths[index..end] {
+                removing_spool.remove(path)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("Observe spool removal task panicked")??;
         delivered += end - index;
         index = end;
     }
@@ -1036,6 +1080,93 @@ mod tests {
         delivery = ObserveDeliveryState::load(&path, 1).unwrap();
         assert_eq!(replay_stop(&spool, &mut delivery, changed), 0);
         assert!(spool.pending().unwrap().is_empty());
+        // Another crash-left session cannot be projected at all. Delivery
+        // recovers its id from the queued envelope before removing that file.
+        let unprojectable = projected_stop("unprojectable-session", "queued before crash");
+        spool.enqueue(&unprojectable).unwrap();
+        assert!(
+            spool
+                .emitted_ids()
+                .load("unprojectable-session")
+                .unwrap()
+                .is_empty()
+        );
+        let pending = spool.pending().unwrap();
+        spool
+            .prepare_delivery(&pending, &CancellationToken::new())
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            spool.emitted_ids().load("unprojectable-session").unwrap(),
+            BTreeSet::from([unprojectable.meta.event_id.clone()])
+        );
+        spool.remove(&pending[0]).unwrap();
+        assert_eq!(replay_stop(&spool, &mut delivery, unprojectable), 0);
+    }
+
+    // Hard-won: 66409e7c5: a post-link sync failure let delivery outrun its id log.
+    #[cfg(unix)]
+    #[test]
+    fn observe_post_link_failure_retains_spool_until_ids_are_durable() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root bypasses the permission error this filesystem regression needs.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("requires an unprivileged Unix user to exercise directory fsync denial");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("delivery.json");
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let session_id = "post-link-sync-failure";
+        let envelope = projected_stop(session_id, "first answer");
+        let mut delivery = ObserveDeliveryState::load(&path, 1).unwrap();
+        // Prime the lazy identity index before denying directory reads.
+        let earlier = spool
+            .enqueue(&projected_stop("earlier-session", "earlier answer"))
+            .unwrap();
+        spool.remove(&earlier).unwrap();
+        let permissions = std::fs::metadata(spool.root()).unwrap().permissions();
+        // Creating/removing directory entries still works, but opening this
+        // directory for its fsync fails after the final spool link is visible.
+        std::fs::set_permissions(spool.root(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = enqueue_envelopes(
+            session_id,
+            vec![envelope.clone()],
+            ObserveBatch {
+                revision: "before-sync",
+                materialized_event_ordinal: 1,
+                execution: MaterializedExecutionState::Idle,
+                historical: false,
+                checkpoint_sha256: None,
+                reported_git: None,
+            },
+            &spool,
+            &mut delivery,
+            BTreeSet::new(),
+        );
+        std::fs::set_permissions(spool.root(), permissions).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<UndurableObserveIds>()
+                .is_some()
+        );
+        assert!(!delivery.sessions.contains_key(session_id));
+        assert!(spool.emitted_ids().load(session_id).unwrap().is_empty());
+        let queued = spool.pending().unwrap();
+        assert_eq!(queued.len(), 1);
+        let mut replay = projected_stop(session_id, "longer answer");
+        replay.meta.ts += 1;
+        assert_eq!(replay_stop(&spool, &mut delivery, replay), 1);
+        assert_eq!(spool.pending().unwrap(), queued);
+        assert_eq!(
+            std::fs::read_to_string(&queued[0]).unwrap(),
+            envelope.to_ndjson().unwrap()
+        );
+        assert_eq!(
+            spool.emitted_ids().load(session_id).unwrap(),
+            BTreeSet::from([envelope.meta.event_id])
+        );
     }
 
     #[test]
