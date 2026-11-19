@@ -1,4 +1,8 @@
-"""Compare independent Stage 1 labels by repo and overall."""
+"""Compare independent Stage 1 labels by repo and overall.
+
+Facts match by cited code sites. Comparing whether their claims agree would
+require a judge.
+"""
 import argparse
 from collections import defaultdict
 import json
@@ -8,33 +12,51 @@ from census_label import LABELS, RUST, exclude_families, item_sets, rows
 
 
 def match_facts(primary, replication):
-    """Match facts one to one when the smaller site set is contained in the other."""
-    sites = [set(fact["sites"]) for fact in replication]
-    edges = []
-    for fact in primary:
-        left = set(fact["sites"])
-        candidates = [(len(left & right), i) for i, right in enumerate(sites)
-                      if left <= right or right <= left]
-        edges.append([i for _, i in sorted(candidates, key=lambda pair: (-pair[0], pair[1]))])
+    """Maximize paired facts, then maximize pairs that cite identical sites."""
+    left = [set(fact["sites"]) for fact in primary]
+    right = [set(fact["sites"]) for fact in replication]
+    # Vertex indices for the replication side start after the primary side.
+    edges = [(i, j, int(a != b))
+             for i, a in enumerate(left)
+             for j, b in enumerate(right, start=len(left))
+             if a <= b or b <= a]
     assigned = {}
-
-    def assign(i, visited):
-        for j in edges[i]:
-            if j in visited:
-                continue
-            visited.add(j)
-            if j not in assigned or assign(assigned[j], visited):
-                assigned[j] = i
-                return True
-        return False
-
-    for i in range(len(primary)):
-        assign(i, set())
-    return [(primary[i], replication[j]) for j, i in sorted(assigned.items())]
+    vertex_count = len(left) + len(right)
+    while True:
+        # Find the cheapest augmenting path from any unpaired primary fact.
+        # A containment pair costs one and an exact pair costs zero. Reversing
+        # an assigned edge refunds its cost, so each augmentation maximizes
+        # exact pairs among matchings of the resulting size.
+        paired_left = set(assigned.values())
+        distance = {i: 0 for i in range(len(left)) if i not in paired_left}
+        previous = {}
+        residual = [(j, i, -cost) if assigned.get(j) == i else (i, j, cost)
+                    for i, j, cost in edges]
+        for _ in range(vertex_count - 1):
+            changed = False
+            for source, target, cost in residual:
+                if source not in distance:
+                    continue
+                candidate = distance[source] + cost
+                if target not in distance or candidate < distance[target]:
+                    distance[target] = candidate
+                    previous[target] = source
+                    changed = True
+            if not changed:
+                break
+        end = min((j for j in range(len(left), vertex_count) if j in distance and j not in assigned),
+                  key=distance.__getitem__, default=None)
+        if end is None:
+            break
+        while end is not None:
+            i = previous[end]
+            assigned[end] = i
+            end = previous.get(i)
+    return [(primary[i], replication[j - len(left)]) for j, i in sorted(assigned.items())]
 
 
 def overlap(primary, replication):
-    """Mean best Jaccard overlap in both directions, preserving alternative sets."""
+    """Mean best site-based Jaccard overlap in both directions across alternative sets."""
     scores = []
     for left, right in ((primary, replication), (replication, primary)):
         for facts in left:
@@ -61,7 +83,7 @@ def categories(fact):
     }
 
 
-def comparison(pairs, cohort_size):
+def comparison(pairs):
     categories_by_fact = {category: {"agree": 0, "n": 0}
                           for category in ("rql.class", "kind", "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
@@ -79,10 +101,11 @@ def comparison(pairs, cohort_size):
                     stats = categories_by_fact[category]
                     stats["n"] += 1
                     stats["agree"] += value == other
+    paired = len(pairs)
     return {
-        "relation_bug": {"agree": relation, "n": cohort_size},
-        "decisive_set_overlap": {"mean": total_overlap / cohort_size if cohort_size else None,
-                                 "n": cohort_size},
+        "relation_bug": {"agree": relation if paired else None, "n": paired},
+        "decisive_set_site_overlap": {"mean": total_overlap / paired if paired else None,
+                                     "n": paired},
         "matched_facts": matched,
         **categories_by_fact,
     }
@@ -115,8 +138,7 @@ def compare_split(directory, split, cohort):
         replication = keys & second.keys()
         both = primary & replication
         pairs = [(first[key], second[key]) for key in sorted(both)]
-        # A missing label contributes no observed agreement or overlap.
-        return {**comparison(pairs, len(keys)), "paired": len(both),
+        return {**comparison(pairs), "paired": len(both),
                 "missing_both": len(keys - (primary | replication)),
                 "missing_primary_only": len(replication - primary),
                 "missing_replication_only": len(primary - replication)}
@@ -132,8 +154,15 @@ def main():
     args = parser.parse_args()
     cohorts, _, _ = item_sets()
     exclude_families(cohorts, args.check_clones)
-    print(json.dumps({split: compare_split(args.labels_dir, split, cohort)
-                      for split, cohort in cohorts.items()}, indent=2))
+    report = {
+        "field_descriptions": {
+            "decisive_set_site_overlap": "Facts match by their cited sites. This measures whether "
+                                         "labellers point at the same code. Comparing claim text "
+                                         "would require a judge.",
+        },
+        **{split: compare_split(args.labels_dir, split, cohort) for split, cohort in cohorts.items()},
+    }
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

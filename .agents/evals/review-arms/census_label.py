@@ -120,15 +120,28 @@ def line_count(repo, revision, path):
 
 
 def vocabulary():
-    """Load spellings and row signatures from the pinned documentation extract."""
+    """Load spellings, row signatures and option requirements from the catalogue."""
     forms = {}
     reference = (CENSUS / "rql-documented-steps.md").read_text()
     for line in reference.splitlines():
         if not line.startswith("| `"):
             continue
-        first, second, signature, *_ = (cell.strip() for cell in line.split("|")[1:])
+        first, second, signature, details, *_ = (cell.strip() for cell in line.split("|")[1:])
+        required, selectors = [], []
         if second.startswith("`"):
             names, use = second, "step"
+            for clause in details.split(";"):
+                match = re.search(r"\((?:both |all )?required\)", clause)
+                if match:
+                    groups, text = required, clause[:match.start()]
+                elif clause.strip().startswith("exactly one of "):
+                    groups, text = selectors, clause
+                else:
+                    continue
+                aliases = [re.findall(r"`(:[\w-]+)`", group) for group in text.split(",")]
+                if not all(aliases):
+                    raise ValueError(f"Malformed documented options for {names}: {clause}")
+                groups.extend(aliases)
         else:
             names, use = first, second
         inputs, separator, output = signature.partition(" -> ")
@@ -137,7 +150,7 @@ def vocabulary():
         for name in re.findall(r"`([\w/-]+)`", names):
             if name in forms:
                 raise ValueError(f"Duplicate documented form {name}")
-            forms[name] = use, inputs, output
+            forms[name] = use, inputs, output, required, selectors
     if not forms:
         raise ValueError("No documented RQL forms")
     return forms
@@ -188,7 +201,7 @@ def check_query(query, allowed):
         name = form[0]
         if name not in allowed:
             errors.append(f"undocumented RQL form {name!r}")
-            return "unknown", "", ""
+            return "unknown", "", "", (), ()
         return allowed[name]
 
     def arguments(form):
@@ -199,6 +212,8 @@ def check_query(query, allowed):
                 value = next(args, None)
                 if value is None or (isinstance(value, str) and value.startswith(":")):
                     raise ValueError(f"{form[0]}: {arg} needs a value")
+                if arg in options:
+                    raise ValueError(f"{form[0]}: duplicate option {arg}")
                 options[arg] = value
             else:
                 positional.append(arg)
@@ -212,7 +227,7 @@ def check_query(query, allowed):
                 embedded(item)
 
     def pattern(form, *, nested=False):
-        use, _, _ = form_signature(form)
+        use, *_ = form_signature(form)
         if use not in ("pattern", "unknown") and not (nested and use == "operand"):
             errors.append(f"{form[0]}: expected a structural pattern")
             return
@@ -237,7 +252,7 @@ def check_query(query, allowed):
 
     def infer(form):
         nonlocal untyped
-        use, inputs, output = form_signature(form)
+        use, inputs, output, required, selectors = form_signature(form)
         name = form[0]
         if use == "unknown":
             return set()
@@ -248,6 +263,11 @@ def check_query(query, allowed):
             errors.append(f"{name}: expected a query form")
             return set()
         args, options = arguments(form)
+        missing = [aliases[0] for aliases in required if not any(option in options for option in aliases)]
+        if missing:
+            errors.append(f"{name}: missing required options {', '.join(missing)}")
+        if selectors and sum(option in options for aliases in selectors for option in aliases) != 1:
+            errors.append(f"{name}: expected exactly one of {', '.join(aliases[0] for aliases in selectors)}")
         input_kinds = set()
         if use in ("step", "ancestor"):
             if use == "ancestor":
@@ -271,7 +291,7 @@ def check_query(query, allowed):
             expected = dict(part.strip().split(" = ") for part in inputs.split(";"))
             if name == "correlate":
                 relation = options.get(":relation")
-                relation_use, relation_inputs, _ = form_signature(relation)
+                relation_use, relation_inputs, *_ = form_signature(relation)
                 if relation_use == "relation":
                     key, signature = relation_inputs.split(" = ")
                     expected[key] = signature
@@ -620,7 +640,12 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
         # The host unit retains the input and output evidence after suspension.
         try:
             driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
-        except Exception as error:  # report it without hiding a failure from the batch itself
+            waited = driver.mj("wait", "--session", sid, "--timeout", 900, timeout=930)
+            session = waited["session"]
+            if (waited["outcome"] != "stopped" or session["lifecycle"] != "suspended"
+                    or session.get("error") is not None):
+                raise RuntimeError(f"{title}: suspension did not complete: {waited}")
+        except Exception as error:
             log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
             raise
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
@@ -650,9 +675,12 @@ def main():
     excluded = exclude_families(items, args.check_clones)
     counts = {split: dict(Counter(item["repo"] for item in rows)) for split, rows in items.items()}
     allowed = vocabulary()
-    query_forms = [output for use, _, output in allowed.values() if use not in ("operand", "relation")]
+    query_forms = [output for use, _, output, _, _ in allowed.values() if use not in ("operand", "relation")]
+    checked_forms = sorted(name for name, (_, _, _, required, selectors) in allowed.items()
+                           if required or selectors)
     summary = {"rql_vocabulary": {"documented_forms": len(allowed), "query_forms": len(query_forms),
-                                  "typed_query_forms": sum(output != "unknown" for output in query_forms)},
+                                  "typed_query_forms": sum(output != "unknown" for output in query_forms),
+                                  "required_option_forms": checked_forms},
                "counts": counts, "totals": {split: sum(count.values()) for split, count in counts.items()},
                "excluded": excluded, "rust_development_not_confirmed": unconfirmed_dev}
     if args.inspect:
