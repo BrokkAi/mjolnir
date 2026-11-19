@@ -1199,7 +1199,15 @@ async fn download_verified_async(
     }
     let work = async {
         download_verified_inner(url, destination, environment).await?;
-        let actual = crate::worker_launch::worker_executable_digest(destination)?;
+        // Hashing reads the whole artifact; keep it off the async workers,
+        // which also serve the daemon's clients. It only reads, so a
+        // cancellation that abandons it is safe.
+        let path = destination.to_owned();
+        let actual = tokio::task::spawn_blocking(move || {
+            crate::worker_launch::worker_executable_digest(&path)
+        })
+        .await
+        .context("hash downloaded artifact task failed")??;
         anyhow::ensure!(
             actual == expected,
             "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
