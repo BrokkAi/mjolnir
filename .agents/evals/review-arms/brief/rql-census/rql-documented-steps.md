@@ -319,7 +319,7 @@ changed the terminal row kind.
 | `limit` | step | any row -> same row | `docs/src/content/docs/reference/code-query.md:69` | Limit terminal results. |
 | `result-detail`, `result_detail` | step | any row -> same row | `docs/src/content/docs/reference/code-query.md:70` | Select row detail. |
 | `profile` | step | any row -> same row | `docs/src/content/docs/reference/code-query.md:71` | Attach execution measurements to ordinary results. |
-| `explain` | step | any row -> unknown | `docs/src/content/docs/reference/code-query.md:71` | Describe the plan without executing it. |
+| `explain` | step | any row -> no rows | `docs/src/content/docs/reference/code-query.md:71` | Describe the plan without executing it. |
 | `inside` | ancestor | structurally seeded query -> same row | `docs/src/content/docs/reference/code-query.md:65` | Require a matching ancestor. |
 | `inside-decl`, `inside_decl` | ancestor | structurally seeded query -> same row | `docs/src/content/docs/reference/code-query.md:66` | Require a matching ancestor within the nearest callable boundary. |
 | `not-inside` | ancestor | structurally seeded query -> same row | `docs/src/content/docs/reference/code-query.md:67` | Exclude a matching ancestor. |

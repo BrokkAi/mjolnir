@@ -42,7 +42,7 @@ A positive result shows that the information helps when it's delivered this way.
 
 ## Stage 1: census (no reviewers)
 
-Two labellers from different families (Sol/high primary, Opus/high replication) see the bug record, fix and introducing diff. For each bug they record:
+Two labellers from different families (Sol/high primary, Opus/high replication) see the bug record, fix and introducing diff. They label independently: the replication labeller runs on an isolated container target that holds only its own batch and checkout, so it can't read the primary's labels or raw outputs (`census_label.py`, `label-SPEC.md`). For each bug they record:
 - **Decisive facts,** as minimal sufficient sets: several sets when more than one fact decides the bug.
 - **Relation kind and RQL expression:** a documented step, a missing step (with its semantics), or not expressible.
 - **Anchoring:** whether the canonical query anchors on a symbol the diff touches, and the hops from it.

@@ -195,7 +195,7 @@ def row_kinds(signature):
     return set(re.findall(r"`(\w+)`", signature))
 
 
-def check_query(query, allowed):
+def check_query(query, allowed, *, query_heads=None):
     """Check documented form names and propagate their known terminal row kinds."""
     errors = []
     untyped = False
@@ -260,6 +260,8 @@ def check_query(query, allowed):
         nonlocal untyped
         use, inputs, output, required, selectors = form_signature(form)
         name = form[0]
+        if query_heads is not None:
+            query_heads.add(name)
         if use == "unknown":
             return set()
         if use == "pattern":
@@ -318,6 +320,9 @@ def check_query(query, allowed):
         for option in (":route", ":routes"):
             if option in options:
                 embedded(options[option])
+        if output == "no rows":
+            errors.append(f"{name}: describes a plan without executing and returns no rows")
+            return set()
         if output == "unknown":
             untyped = True
             return set()
@@ -437,6 +442,18 @@ def validate_fact(fact, split, where, errors, query_checks, allowed):
     elif fields(step, "name input output semantics", f"{where} missing_step", errors):
         if any(not string(step[key]) for key in ("name", "input", "output", "semantics")):
             errors.append(f"{where}: missing_step fields must be nonempty strings")
+        else:
+            name = step["name"].strip()
+            spellings = (name, name.replace("_", "-"), name.replace("-", "_"))
+            if any(spelling in allowed for spelling in spellings):
+                errors.append(f"{where}: missing_step {name!r} is already documented")
+            if string(query):
+                # The proposed step has no documented signature. Inspect query
+                # positions without applying the documented-only checks.
+                query_heads = set()
+                check_query(query, allowed, query_heads=query_heads)
+                if name not in query_heads:
+                    errors.append(f"{where}: query must invoke missing_step {name!r}")
     # Step 5 is outside the development task. The output example includes
     # anchoring, so accept a well-formed object there as well as null.
     if split == "development" and anchoring is None:
@@ -591,10 +608,10 @@ def run_batch(args, split, role, repo, batch, pins, allowed):
                     "--review", "off", "--no-project-memory", "--no-github-events",
                     "--no-github-credentials", "--subagents", "none", "--title", title,
                     timeout=900)["session_id"]
-    log(args.labels_dir, "launched", title=title, session=sid)
     # Every exit after launch suspends the session, so a failed batch leaves no worker running
     # a turn while a rerun starts another one for the same items.
     try:
+        log(args.labels_dir, "launched", title=title, session=sid)
         driver.wait_idle(sid)
         for key, value in (("model", model), ("effort", "high")):
             while True:
@@ -694,7 +711,7 @@ def main():
     checked_forms = sorted(name for name, (_, _, _, required, selectors) in allowed.items()
                            if required or selectors)
     summary = {"rql_vocabulary": {"documented_forms": len(allowed), "query_forms": len(query_forms),
-                                  "typed_query_forms": sum(output != "unknown" for output in query_forms),
+                                  "typed_query_forms": sum(output not in ("unknown", "no rows") for output in query_forms),
                                   "required_option_forms": checked_forms},
                "counts": counts, "totals": {split: sum(count.values()) for split, count in counts.items()},
                "excluded": excluded, "rust_development_not_confirmed": unconfirmed_dev}

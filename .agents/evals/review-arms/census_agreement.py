@@ -87,8 +87,13 @@ def comparison(pairs):
     categories_by_fact = {category: {"agree": 0, "n": 0}
                           for category in ("rql.class", "kind", "anchors_on_touched")}
     relation, total_overlap, matched = 0, 0, 0
+    defects = {"both_confirmed": 0, "both_not_confirmed": 0, "split": 0}
     for first, second in pairs:
         relation += first["relation_bug"] == second["relation_bug"]
+        if first["defect_check"] == second["defect_check"]:
+            defects[f"both_{first['defect_check']}"] += 1
+        else:
+            defects["split"] += 1
         left, right = ([item["facts"] for item in label["decisive_sets"]] for label in (first, second))
         total_overlap += overlap(left, right)
         aligned = match_facts(unique_facts(left), unique_facts(right))
@@ -104,6 +109,7 @@ def comparison(pairs):
     paired = len(pairs)
     return {
         "relation_bug": {"agree": relation if paired else None, "n": paired},
+        "defect_check": {"agree": paired - defects["split"] if paired else None, "n": paired, **defects},
         "decisive_set_site_overlap": {"mean": total_overlap / paired if paired else None,
                                      "n": paired},
         "matched_facts": matched,
