@@ -450,8 +450,8 @@ impl ReviewerHost {
             .kill_on_drop(true);
         // Register the bridge with the worker's orphan reaper as it spawns,
         // so the reaper never takes the exit status its owner awaits.
-        let mut child = mj_core::subprocess::spawn_async_child(&mut command)
-            .with_context(|| {
+        let mut child =
+            mj_core::subprocess::spawn_async_child(&mut command).with_context(|| {
                 format!(
                     "start the reviewer's {} bridge {}",
                     spec.harness.display_name(),

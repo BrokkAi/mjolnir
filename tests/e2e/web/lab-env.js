@@ -73,10 +73,11 @@ function fixtureSession(row, sessions) {
       destroy: 'destroying', stop: 'stopping', cleanup: 'destroying' })[operation] || 'starting'
     : null;
   const live = ['live', 'starting', 'suspending'].includes(row.lifecycle);
-  const working = (row.subagent_session_ids || []).filter(id =>
-    sessions.some(child => child.id === id && child.chat_phase === 'running')).length
-    + new Set((row.native_subagents || []).filter(child => child.state === 'running')
-      .map(child => child.stable_id || child.session_id)).size;
+  const reviewers = new Set(row.reviewer_session_ids || []);
+  const runningChildren = (row.subagent_session_ids || []).filter(id =>
+    sessions.some(child => child.id === id && child.chat_phase === 'running'));
+  const nativeWorking = new Set((row.native_subagents || []).filter(child => child.state === 'running')
+    .map(child => child.stable_id || child.session_id)).size;
   const queueHeld = row.move_recovery?.queue_admission_started
     && !row.move_recovery?.queue_admission_finished;
   const unrecoverable = ['lost', 'destroyed-with-data-loss'].includes(row.state);
@@ -90,8 +91,8 @@ function fixtureSession(row, sessions) {
       live_dashboard: live || Boolean(transition),
       needs_person: ['needs_input', 'important', 'unread', 'failed', 'unreachable'].includes(row.attention),
       resume,
-      working_children: working,
-      unfinished_children: working,
+      working_children: runningChildren.filter(id => !reviewers.has(id)).length + nativeWorking,
+      unfinished_children: runningChildren.length + nativeWorking,
     },
   };
 }

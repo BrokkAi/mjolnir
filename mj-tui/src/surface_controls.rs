@@ -703,6 +703,7 @@ mod tests {
         second.id = "another-session".into();
         second.session_title_override = Some("Menu target B".into());
         dashboard.state.sessions.insert(second.id.clone(), second);
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.conversation_area = Some(Rect::new(0, 0, 120, 40));
         let pinned = dashboard.browse_pane();
         dashboard.set_pane_session(pinned, Some("session-1"));
@@ -906,6 +907,7 @@ mod tests {
         ] {
             dashboard.state.sessions.insert(session.id.clone(), session);
         }
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.select_active_session("c-name");
         dashboard.focus_sessions();
         let ids = |dashboard: &DashboardState| {

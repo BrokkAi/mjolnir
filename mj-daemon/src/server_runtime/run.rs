@@ -290,10 +290,9 @@ pub(crate) async fn run_server(
         // The transcript tails the browser's conversations are projected
         // from: the same daemon-owned tails the terminal feed serves, so one
         // owner decides what changed in every client's transcript.
-        let mut cache_transcripts: Option<mj_core::snapshot_map::SnapshotMap<
-            String,
-            mj_client::runtime_feed::SessionTail,
-        >> = None;
+        let mut cache_transcripts: Option<
+            mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionTail>,
+        > = None;
         macro_rules! publish_snapshot {
             ($control:lifetime, $revision:expr) => {
                 let runtime = match daemon_runtime.runtime_publication() {

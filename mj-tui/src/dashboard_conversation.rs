@@ -453,6 +453,7 @@ mod pin_tests {
             session.id = format!("session-{i}");
             dashboard.state.sessions.insert(session.id.clone(), session);
         }
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.conversation_area = Some(Rect::new(0, 0, 160, 60));
         dashboard.set_current_session(Some("session-1"));
         dashboard

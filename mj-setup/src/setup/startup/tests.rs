@@ -419,5 +419,6 @@ fn cancelled_setup_does_not_wait_for_another_owner() {
         || panic!("cancelled setup accepted"),
         || panic!("cancelled setup discovered"),
     );
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    // The setup context wraps the shared file lock's cancellation error.
+    assert!(format!("{:#}", result.unwrap_err()).contains("cancelled"));
 }

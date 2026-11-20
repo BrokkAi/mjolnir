@@ -415,6 +415,7 @@ mod tests {
         );
 
         stopped.lifecycle = ViewerLifecycleCategory::Live;
+        stopped.verdict.live_dashboard = true;
         let delta = feed.update(snapshot(11, vec![stopped])).unwrap();
         let frame = decode(&delta[0]);
         assert_eq!(frame["kind"], "delta");

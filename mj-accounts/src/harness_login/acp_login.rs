@@ -870,17 +870,13 @@ fn parse_method(value: &Value) -> Option<AuthMethod> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
-    /// Writing and executing a fixture script can race another test's fork
-    /// with `ETXTBSY`. These tests spawn real processes, so keep them serial.
+    // Serialize the sign-in tests that share the process-wide SIGINT handler.
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn write_script(directory: &Path, name: &str, body: &str) -> PathBuf {
-        let path = directory.join(name);
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        mj_core::test_hooks::install_fake_command(directory, name, body);
+        directory.join(name)
     }
 
     fn home(directory: &Path) -> BTreeMap<String, String> {
@@ -1049,8 +1045,11 @@ mod tests {
         let cli_path = install.join(selected.cli_entrypoint);
         std::fs::create_dir_all(bridge_path.parent().unwrap()).unwrap();
         std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
-        let script = bridge(root, r#"[{"id":"chat-gpt","name":"ChatGPT"}]"#);
-        std::fs::copy(script, &bridge_path).unwrap();
+        write_script(
+            bridge_path.parent().unwrap(),
+            bridge_path.file_name().unwrap().to_str().unwrap(),
+            &bridge_script(root, r#"[{"id":"chat-gpt","name":"ChatGPT"}]"#),
+        );
         write_script(
             cli_path.parent().unwrap(),
             cli_path.file_name().unwrap().to_str().unwrap(),
@@ -1130,6 +1129,10 @@ mod tests {
     /// A bridge that answers initialize with `methods` and records every later
     /// request in `requests`.
     fn bridge(directory: &Path, methods: &str) -> PathBuf {
+        write_script(directory, "bridge.sh", &bridge_script(directory, methods))
+    }
+
+    fn bridge_script(directory: &Path, methods: &str) -> String {
         let response = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1138,11 +1141,8 @@ mod tests {
                 "authMethods": serde_json::from_str::<Value>(methods).unwrap(),
             },
         });
-        write_script(
-            directory,
-            "bridge.sh",
-            &format!(
-                "#!/bin/sh\n\
+        format!(
+            "#!/bin/sh\n\
                  read -r line\n\
                  printf '%s\\n' '{response}'\n\
                  while read -r line; do\n\
@@ -1151,9 +1151,8 @@ mod tests {
                      *'\"id\":2'*) printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{}}}}' ;;\n\
                    esac\n\
                  done\n",
-                response = response,
-                requests = directory.join("requests").display(),
-            ),
+            response = response,
+            requests = directory.join("requests").display(),
         )
     }
 
@@ -1207,7 +1206,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, Outcome::SignedIn { method } if method == "muse-login"));
+        assert!(
+            matches!(&outcome, Outcome::SignedIn { method } if method == "muse-login"),
+            "{outcome:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(marker).unwrap(),
             format!("{}:from-bridge", directory.path().display())

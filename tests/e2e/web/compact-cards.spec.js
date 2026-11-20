@@ -169,6 +169,7 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
     }
     if (pathname === '/api/actions') {
       const body = route.request().postDataJSON();
+      if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
       state.actions.push(body);
       if (state.failAction?.action === body.action) {
         return route.fulfill({
@@ -1622,6 +1623,7 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
     title: 'Parent session',
     subagentSessionIds: ['worker', 'review-open', 'review-done'],
     reviewerSessionIds: ['review-open', 'review-done'],
+    capabilities: { suspend: true },
   });
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
   const worker = child('worker', { title: 'Worker', attention: 'working', isIdle: false });
@@ -1630,6 +1632,14 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   reviewOpen.chat_phase = 'running';
   const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', active: false, capabilities: { open: false, read_history: true, resume: true } });
   const state = await mount(page, [parent, worker, reviewOpen, reviewDone]);
+  await card(page, 'parent').locator('button[aria-label^="Actions for"]').click();
+  let suspendWarning;
+  page.once('dialog', async dialog => {
+    suspendWarning = dialog.message();
+    await dialog.dismiss();
+  });
+  await card(page, 'parent').getByRole('menuitem', { name: 'Suspend session…' }).click();
+  expect(suspendWarning).toContain('2 sub-agents have not handed back');
   await card(page, 'parent').click();
   await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
   await expect(page.locator('#reviewers-button')).toHaveText('Reviewers · 1');

@@ -1224,6 +1224,7 @@ fn a_starting_session_keeps_one_preview_across_incomplete_state_publications() {
     let mut publication = dashboard.state.clone();
     publication.sessions.insert(id.clone(), ready);
     dashboard.set_state(publication);
+    publish_fixture_verdicts(&mut dashboard);
     assert_eq!(drawn_session_rows(&dashboard, 60)[0].content_height(), 1);
     dashboard.finish_session_operation(&id);
     assert!(drawn_session_rows(&dashboard, 60)[0].content_height() > 1);
