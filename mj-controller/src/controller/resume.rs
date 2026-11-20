@@ -686,7 +686,6 @@ impl Controller {
                 worker_root_reset,
                 retire_after_ready,
             } = restore;
-            let archive_manifest = &archive.manifest;
             let canonical_session = &archive.canonical_session;
             let retain_native = matches!(
                 &worker_root_reset,
@@ -1051,18 +1050,19 @@ impl Controller {
             let (mut relay, native_session_id) = readiness
                 .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
             if native_continuity {
-                if !restored_native_session_accepted(
-                    &archive_manifest.session.native_session_id,
-                    &native_session_id,
-                    relay
-                        .operational()
-                        .replaced_unused_native_session_id
-                        .as_deref(),
-                ) {
-                    bail!(
-                        "ACP loaded native session {native_session_id}, expected {}",
-                        archive_manifest.session.native_session_id
-                    );
+                // With nothing to load, the harness opened a new session and
+                // any identity it reports is the session's from now on.
+                if let Some(archived) = archive.native_session_to_load(native_continuity)
+                    && !restored_native_session_accepted(
+                        archived,
+                        &native_session_id,
+                        relay
+                            .operational()
+                            .replaced_unused_native_session_id
+                            .as_deref(),
+                    )
+                {
+                    bail!("ACP loaded native session {native_session_id}, expected {archived}");
                 }
             } else {
                 relay
@@ -1189,6 +1189,22 @@ pub(super) struct VerifiedResumeArchive {
     pub archive_path: PathBuf,
     pub manifest: mj_checkpoint::archive::ArchiveManifest,
     pub canonical_session: Arc<CanonicalSessionSnapshot>,
+}
+
+impl VerifiedResumeArchive {
+    /// The native session a restore from this archive asks its harness to
+    /// load: the archived one, when the restore continues the same harness and
+    /// the archive holds that session's conversation.
+    ///
+    /// The archive's inventory decides, not its transcript. A session that
+    /// never received a prompt can have no native files at all, and Codex
+    /// cannot load a thread it never wrote, so the restored harness opens a
+    /// new native session instead (#1618).
+    pub(super) fn native_session_to_load(&self, native_continuity: bool) -> Option<&str> {
+        (native_continuity
+            && mj_checkpoint::checkpoint::archive_holds_native_conversation(&self.manifest))
+        .then_some(self.manifest.session.native_session_id.as_str())
+    }
 }
 
 fn load_in_place_subagent_prompt_data(
@@ -1957,8 +1973,9 @@ impl Controller {
         record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.target = None;
-        record.native_session_id =
-            native_continuity.then(|| archive_manifest.session.native_session_id.clone());
+        record.native_session_id = verified_archive
+            .native_session_to_load(native_continuity)
+            .map(str::to_owned);
         record.state = SessionState::Provisioning;
         record.updated_at = now();
         record.last_error = None;

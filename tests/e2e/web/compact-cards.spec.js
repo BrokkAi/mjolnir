@@ -1119,7 +1119,7 @@ test('dismiss clears the input glyph once the daemon lowers attention; ignoring 
   await expect(page.locator('#notifications-badge')).toHaveText('1 notification');
 });
 
-test('the notifications screen clears and skips one card at a time and Clear all ! leaves questions', async ({ page }) => {
+test('the notifications screen clears and skips one card at a time and offers no bulk clear', async ({ page }) => {
   const q = session('card-q', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
   const i1 = session('card-i1', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
   const i2 = session('card-i2', 'c', 'C', { attention: 'working', activity: SERVER_TIME_MS });
@@ -1144,7 +1144,7 @@ test('the notifications screen clears and skips one card at a time and Clear all
   const skip = page.getByRole('button', { name: 'Skip', exact: true });
   const message = page.locator('.inbox-message');
   await expect(message).toContainText('card-i2');
-  await expect(page.getByRole('button', { name: 'Clear all ! (2)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Clear all/ })).toHaveCount(0);
 
   // The older Important card comes first, even though its session posted output more recently.
   // Skipping rotates each card to the back.
@@ -1159,20 +1159,14 @@ test('the notifications screen clears and skips one card at a time and Clear all
   await expect(page.locator('.inbox-card .error')).toHaveText('notification target is stale');
   state.failAction = null;
 
-  await page.getByRole('button', { name: 'Clear all ! (2)' }).click();
-  await expect.poll(() => state.actions.filter(action => action.action === 'dismiss-notification' && action.session_id !== 'card-q').length).toBe(2);
-  const dismissed = Object.fromEntries(state.actions
-    .filter(action => action.action === 'dismiss-notification' && action.session_id !== 'card-q')
-    .map(action => [action.session_id, action.target]));
-  expect(dismissed).toEqual({ 'card-i1': { read_through: 4 }, 'card-i2': { read_through: 5 } });
-  await expect(page.locator('#notifications-badge')).toHaveCount(1);
-  await expect(page.locator('.inbox-message')).toContainText('card-q');
-
   await page.getByRole('button', { name: 'Clear & Next' }).click();
   await expect.poll(() => state.actions.filter(action => action.session_id === 'card-q' && action.action === 'dismiss-notification').length).toBe(2);
   expect(state.actions.at(-1).target).toEqual({ stack: { revision: 10 } });
-  await expect(page.locator('.inbox-message')).toHaveText('Failed');
-  await page.getByRole('button', { name: 'Clear & Next' }).click();
+  // Each remaining card clears on its own; nothing clears several cards at once.
+  for (let dismissals = 3; dismissals <= 5; dismissals += 1) {
+    await page.getByRole('button', { name: 'Clear & Next' }).click();
+    await expect.poll(() => state.actions.filter(action => action.action === 'dismiss-notification').length).toBe(dismissals);
+  }
   await expect(page.locator('#inbox')).toContainText('No notifications.');
 });
 

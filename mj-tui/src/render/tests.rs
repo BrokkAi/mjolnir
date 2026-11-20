@@ -4428,6 +4428,7 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
             total_bytes: 100 << 30,
             reserved_bytes: 0,
             paths: vec![format!("/srv/volume-{index:02}")],
+            quota_limited: false,
         })
         .collect::<Vec<_>>();
     dashboard.set_target_storage(vec![TargetStorageView::evaluate(

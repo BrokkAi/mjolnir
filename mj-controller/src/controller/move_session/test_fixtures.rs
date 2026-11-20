@@ -516,6 +516,8 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
         2,
         source_kind,
         IN_PLACE_SOURCE_PROFILE,
+        // The source has a conversation, which a same-harness move continues.
+        true,
     );
     install_in_place_worker_script(&worker_root, checkpoint.event_frontier, &"a".repeat(64));
 

@@ -96,7 +96,7 @@
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││Quick reply:                                                                                        Send │
-│                                                   ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                                  │
+│                                                   ││ Go to Session   Clear & Next   Skip   Ignore Session                                                    │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
 layout: sessions=Rect { x: 0, y: 3, width: 53, height: 96 }; transcript=Rect { x: 53, y: 0, width: 107, height: 62 }; prompt=Rect { x: 53, y: 62, width: 107, height: 4 }; targets=Rect { x: 53, y: 66, width: 107, height: 11 }; quota=Rect { x: 53, y: 77, width: 107, height: 11 }; notifications=Rect { x: 53, y: 88, width: 107, height: 11 }
@@ -130,7 +130,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 53, height: 96 }; transcript=Rect { x
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││Quick reply:                                                                                        Send │
-│                                                   ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                                  │
+│                                                   ││ Go to Session   Clear & Next   Skip   Ignore Session                                                    │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
 layout: sessions=Rect { x: 0, y: 3, width: 53, height: 27 }; transcript=Rect { x: 53, y: 0, width: 107, height: 3 }; prompt=Rect { x: 53, y: 3, width: 107, height: 4 }; targets=Rect { x: 53, y: 7, width: 107, height: 7 }; quota=Rect { x: 53, y: 14, width: 107, height: 7 }; notifications=Rect { x: 53, y: 21, width: 107, height: 9 }
@@ -1591,25 +1591,25 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ Loading form…                                                                │
 │                                      ││ Choose a path                                                                │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?1) · b panes · : / ? palette
 
 === compact form attachment status (120x8) ===
 ╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│? ACP pretty name · hel · age unknown                                                                           1 of 1│
 │ Loading form…                                                                                                        │
 │ Choose a path                                                                                                        │
 │                                                                                                                      │
 │                                                                                                                      │
-│ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                                               │
+│ Go to Session   Clear & Next   Skip   Ignore Session                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 === notification form attachment fails visibly (120x44) ===
@@ -1647,25 +1647,25 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 │                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ Could not load form: Worker unavailable. Use Go to Session to answer it      │
 │                                      ││ there.                                                                       │
 │                                      ││ Choose a path                                                                │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?1) · b panes · : / ? palette
 
 === compact form attachment status (120x8) ===
 ╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│? ACP pretty name · hel · age unknown                                                                           1 of 1│
 │ Could not load form: Worker unavailable. Use Go to Session to answer it there.                                       │
 │ Choose a path                                                                                                        │
 │                                                                                                                      │
 │                                                                                                                      │
-│ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)                                               │
+│ Go to Session   Clear & Next   Skip   Ignore Session                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 === notification and conversation share an inline form (120x44) ===
@@ -1698,7 +1698,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 │                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │Keep the question visible on short terminals.                             │ │
@@ -1710,7 +1710,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 │                                      ││ │                                                                          │ │
 │                                      ││ │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ question│ │
 │                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
 
@@ -1756,7 +1756,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││ │                                                                          │ │
 │                                      ││ │Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ question│ │
 │                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰ Could not clear: permission denied ──────────────────────────────────────────╯
 Could not dismiss 1 notification: permission denied
 
@@ -1774,12 +1774,12 @@ Could not dismiss 1 notification: permission denied
 │                                      ││ANTHROPIC                                                                     ▐
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │>                                                                         │ │
 │                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
 
@@ -1797,7 +1797,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││ANTHROPIC                                                                     ▐
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │                                                                          │ │
@@ -1806,7 +1806,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││ │                                                                          │ │
 │                                      ││ │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt│ │
 │                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
 
@@ -1830,7 +1830,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │                                                                          │ │
@@ -1839,7 +1839,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││ │                                                                          │ │
 │                                      ││ │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt│ │
 │                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
 
@@ -1871,7 +1871,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
+│                                      ││? ACP pretty name · hel · age unknown                                   1 of 1│
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │                                                                          │ │
@@ -1880,7 +1880,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││ │                                                                          │ │
 │                                      ││ │Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt│ │
 │                                      ││ ╰──────────────────────────────────────────────────────────────────────────╯ │
-│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session   Clear all ! (0)       │
+│                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes · q detach · u web · : / ? palette
 
