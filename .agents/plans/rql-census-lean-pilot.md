@@ -10,12 +10,10 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 
 ## Progress
 
-- [ ] Slice 1: pilot manifest (selection and job matrix), frozen and committed before any writer runs.
-- [ ] Slice 2: menu-step semantics, written and frozen before any engine answer. Drafting by helper f2e01f94 is in progress.
-- [ ] Slice 3: mock engine (host side): parse, answer, cache, provenance, fidelity sample.
-- [ ] Slice 4: RQL tool transport into sealed writer sessions (the Oz pattern), with the display budget and R-loc reduction at the delivery boundary.
-- [ ] Slice 5: launch harness: writer arms G, R and R-loc with replicates, then reviewers for N and every brief.
-- [ ] Slice 6: judging and readout: catch, per-fact recovery, containment and leak audit, the hand-check queue, and the contrasts.
+- [x] Slices 1 to 6 built and integrated (2026-11-20): selection and freeze (`brief/rql-census/pilot/select_pilot.py`), menu-step semantics (`menu-steps.md`, with worked cases kept apart in `menu-steps-cases.md`), the mock engine (`rql_mock/engine/`), the transport (`rql_mock/server.py`, `client.py`), the launch harness (`pilot_run.py`, `pilot_review.py`) and judging and readout (`pilot_judge.py`, `pilot_readout.py`), plus the fidelity gate (`rql_mock/fidelity*.py`).
+- [ ] Re-freeze the manifest under the plan commit that adds pooled prescience, and commit it before any writer runs.
+- [ ] Deploy the private instance `rql-census-pilot` and run the engine-only smoke on Fable.
+- [ ] Run the live fidelity gate and commit `fidelity/gate-report.json`'s summary; re-freeze with `--served-steps` if a step fails.
 - [ ] Smoke: one diff end to end, on codex3 just after its reset. codex2 (22%) is below the study's 25% floor.
 - [ ] Launch: on codex3 after its reset (about 2026-11-22 14Z), then codex4 after its reset (about 2026-11-24 15Z), both above the 25% floor, running whole diffs in turn.
 
@@ -62,6 +60,8 @@ Terms: an **arm** is one condition (N, G, R, R-loc). A **replicate** is an indep
 
 Selection: sort eligible keys, seeded shuffle within each repo, take 17 from mjolnir and 18 from bifrost-dev (proportional to 26:28, rounded to 35). Seeded draws, also within repo, pick the 10 replicate diffs (5 and 5). The script records the eligible pool, its hash and every draw.
 
+**Served steps and the fidelity gate**: the manifest's `served_steps` lists the added menu steps the engine and writers serve (by default all three). The engine's registry and prompt, and the writer prompts, include only those. Before any R or R-loc writer, the fidelity run writes `/mnt/optane/review-arms-pilot/fidelity/gate-report.json`: `{"manifest_sha256", "served_steps", "steps": {step: {"pass", "reasons", "decisive_n", "random_n", "prescience": "estimated"|"not_estimable", "metrics"}}, "documented": {"reported_only": true, ...}, "created_at"}`. pilot_run admits R and R-loc only when that report matches the current manifest's hash and `served_steps`, and passes every served step. A failing step is removed by re-freezing with `select_pilot.py --served-steps` (a new manifest hash, so the gate runs again for the remaining steps before writers start).
+
 **Run layout**: `/mnt/optane/review-arms-pilot/runs/<diff key>/<arm>/r<rep>/`, holding `writer/` (brief.md, usage.json, transcript pointer, query log for R and R-loc) and `reviewers/<slot>/` (handback, usage.json). N has only `reviewers/`.
 
 **Engine** (host side, Slice 3): `answer(commit, query_text) -> {"status": "ok"|"parse_error"|"engine_error", "rows": [...], "total": int, "coverage": {"complete": bool, "open": [{"reason": str, "site": {...}}]}, "provenance": {...}}`. `coverage` is answer-level: an answer with an open frontier (unresolved dispatch, an unsupported transformation, a depth boundary) says so, so an open answer with no rows is never mistaken for a complete empty one. The engine's instructions are `menu-steps.md` and the catalogue only, never `menu-steps-cases.md`. They tell it that the catalogue's budget, exhaustion and cancellation outcomes are Bifrost's execution limits: it answers completely, and reports `open` only for a semantic boundary. Rows are complete under the step's semantics and sorted in a stable order. The cache key is `(commit, normalized query, engine inputs hash)`, shared by R and R-loc. The engine inputs hash covers the RQL reference, the frozen menu-step semantics, the engine model's resolved version and the engine prompt, so a rerun after any of them changes never reuses an answer made under the old rules. A query that doesn't parse against the frozen grammar (documented forms from the catalogue, plus the Slice 2 steps) gets `parse_error` with the parser's message, and no free text is answered. Provenance records the engine model, tokens and the steps answered, for H's later token matching.
@@ -94,7 +94,8 @@ Builds are Python only. Tests use hand-written fakes for the engine and the sess
 
 - The manifest's draws are reproducible: rerunning `select_pilot.py` reproduces the file byte for byte.
 - Smoke: for one diff, every arm's writer and both reviewers run, the R and R-loc query logs show paging and the R-loc reduction, and judges produce records for every output.
-- Before launch, the engine's fidelity sample is measured live and reported, as the study plan's pilot gate defines it: for each added step, every available in-scope decisive query plus 10 random ones; for documented steps, one pooled random sample of 20. About 100 engine answers in all. An added step that fails is removed before the manifest is re-frozen.
+- Before launch, the engine's fidelity sample is measured live and reported, as the study plan's pilot gate defines it: for each added step, every available in-scope decisive query plus 10 random ones; for documented steps, one pooled random sample of 20. That is about 72 engine answers (about 22 decisive, 30 random from added steps, 20 documented). An added step that fails its accuracy bars is removed by re-freezing with `--served-steps`. Prescience is pooled across the added steps; a pooled gap above 10 points stops the pilot before any writer.
+- Tests, run from `.agents/evals/review-arms/`: `python3 -B -m pytest -q -p no:cacheprovider test_*.py rql_mock/test_server.py rql_mock/engine/test_engine.py` and `python3 -B -m unittest rql_mock.test_fidelity` (the fidelity tests use package-relative imports, so they run as a module).
 - The readout reproduces every number from stored inputs alone: the judgments, the writers' delivery logs (queries.jsonl, which site coverage needs), the manifest, and `pilot/labels-snapshot.jsonl`, a frozen copy of the 35 diffs' census labels committed with the manifest, whose hash the manifest records. The readout reads census sites and facts only from that snapshot.
 
 ## Idempotence and Recovery
