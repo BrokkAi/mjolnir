@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // GraphemeGraphemeIndices is the crate's `GraphemeIndices`:
@@ -103,7 +104,7 @@ var _ = rs.RegisterStruct[GraphemeGraphemes]("Graphemes")
 //	iter.Next()
 //	iter.AsStr() // ""
 func (s *GraphemeGraphemes) AsStr() string {
-	return strSlice(s.string_, s.cursor.CurCursor(), s.cursorBack.CurCursor())
+	return strs.Slice(s.string_, s.cursor.CurCursor(), s.cursorBack.CurCursor())
 }
 
 // Clone is the derived `Clone`.
@@ -124,7 +125,7 @@ func (s *GraphemeGraphemes) Next() rs.Option[string] {
 		return rs.None[string]()
 	}
 	next := rs.Unwrap(s.cursor.NextBoundary(s.string_, 0)).Unwrap()
-	return rs.Some(strSlice(s.string_, start, next))
+	return rs.Some(strs.Slice(s.string_, start, next))
 }
 
 // NextBack is `DoubleEndedIterator::next_back`: the next cluster from the
@@ -135,7 +136,7 @@ func (s *GraphemeGraphemes) NextBack() rs.Option[string] {
 		return rs.None[string]()
 	}
 	prev := rs.Unwrap(s.cursorBack.PrevBoundary(s.string_, 0)).Unwrap()
-	return rs.Some(strSlice(s.string_, prev, end))
+	return rs.Some(strs.Slice(s.string_, prev, end))
 }
 
 func graphemeNewGraphemes(s string, isExtended bool) *GraphemeGraphemes {
@@ -711,7 +712,7 @@ func (s *GraphemeCursor) IsBoundary(chunk string, chunkStart int) (bool, error) 
 	}
 	offsetInChunk := saturatingSub(s.offset, chunkStart)
 	if s.catAfter.IsNone() {
-		ch, _, ok := strNextChar(strSliceFrom(chunk, offsetInChunk))
+		ch, _, ok := strNextChar(strs.SliceFrom(chunk, offsetInChunk))
 		if !ok {
 			optionUnwrapNone()
 		}
@@ -735,7 +736,7 @@ func (s *GraphemeCursor) IsBoundary(chunk string, chunkStart int) (bool, error) 
 		}
 	}
 	if s.catBefore.IsNone() {
-		ch, _, ok := strNextBackChar(strSliceTo(chunk, offsetInChunk))
+		ch, _, ok := strNextBackChar(strs.SliceTo(chunk, offsetInChunk))
 		if !ok {
 			optionUnwrapNone()
 		}
@@ -750,16 +751,16 @@ func (s *GraphemeCursor) IsBoundary(chunk string, chunkStart int) (bool, error) 
 		isExtended := s.isExtended
 		return s.decision(!isExtended)
 	case graphemePairResult_InCbConsonant:
-		s.handleIncbConsonant(strSliceTo(chunk, offsetInChunk), chunkStart)
+		s.handleIncbConsonant(strs.SliceTo(chunk, offsetInChunk), chunkStart)
 		return s.isBoundaryResult()
 	case graphemePairResult_Regional:
 		if risCount, ok := s.risCount.Get(); ok {
 			return s.decision((risCount % 2) == 0)
 		}
-		s.handleRegional(strSliceTo(chunk, offsetInChunk), chunkStart)
+		s.handleRegional(strs.SliceTo(chunk, offsetInChunk), chunkStart)
 		return s.isBoundaryResult()
 	case graphemePairResult_Emoji:
-		s.handleEmoji(strSliceTo(chunk, offsetInChunk), chunkStart, false)
+		s.handleEmoji(strs.SliceTo(chunk, offsetInChunk), chunkStart, false)
 		return s.isBoundaryResult()
 	default:
 		panic(rs.Unreachable())
@@ -799,7 +800,7 @@ func (s *GraphemeCursor) NextBoundary(chunk string, chunkStart int) (rs.Option[i
 	if s.offset == s.len {
 		return rs.None[int](), nil
 	}
-	iter := strSliceFrom(chunk, saturatingSub(s.offset, chunkStart)) // .chars()
+	iter := strs.SliceFrom(chunk, saturatingSub(s.offset, chunkStart)) // .chars()
 	ch, size, ok := strNextChar(iter)
 	if !ok {
 		return rs.None[int](), &GraphemeIncomplete_NextChunk{}
@@ -896,7 +897,7 @@ func (s *GraphemeCursor) PrevBoundary(chunk string, chunkStart int) (rs.Option[i
 	if s.offset == chunkStart {
 		return rs.None[int](), &GraphemeIncomplete_PrevChunk{}
 	}
-	iter := strSliceTo(chunk, saturatingSub(s.offset, chunkStart)) // .chars().rev()
+	iter := strs.SliceTo(chunk, saturatingSub(s.offset, chunkStart)) // .chars().rev()
 	ch, size, ok := strNextBackChar(iter)
 	if !ok {
 		optionUnwrapNone()
@@ -977,97 +978,4 @@ func saturatingSub(a, b int) int {
 // code holds the option as a comma-ok pair.
 func optionUnwrapNone() {
 	rs.PanicAt(1, "called `Option::unwrap()` on a `None` value")
-}
-
-// strIsCharBoundary is `str::is_char_boundary`.
-func strIsCharBoundary(s string, index int) bool {
-	// 0 is always ok.
-	if index == 0 {
-		return true
-	}
-
-	if index >= len(s) {
-		return index == len(s)
-	} else {
-		// u8::is_utf8_char_boundary: not a continuation byte.
-		return int8(s[index]) >= -0x40
-	}
-}
-
-// strSliceFrom is `&s[begin..]`, with Rust's panic when begin is not the
-// offset of a character in s.
-func strSliceFrom(s string, begin int) string {
-	if !strIsCharBoundary(s, begin) {
-		strSliceErrorFail(s, begin, len(s))
-	}
-	return s[begin:]
-}
-
-// strSliceTo is `&s[..end]`, with Rust's panic when end is not the offset of a
-// character in s.
-func strSliceTo(s string, end int) string {
-	if !strIsCharBoundary(s, end) {
-		strSliceErrorFail(s, 0, end)
-	}
-	return s[:end]
-}
-
-// strSlice is `&s[begin..end]`, with Rust's panics.
-func strSlice(s string, begin, end int) string {
-	if begin > end || !strIsCharBoundary(s, begin) || !strIsCharBoundary(s, end) {
-		strSliceErrorFail(s, begin, end)
-	}
-	return s[begin:end]
-}
-
-// strSliceErrorFail is `core::str::slice_error_fail` of Rust 1.99.1: the
-// panic for a string slice whose ends are not both offsets of characters.
-func strSliceErrorFail(s string, begin, end int) {
-	len_ := len(s)
-
-	// 1. begin is OOB.
-	if begin > len_ {
-		rs.PanicAt(2, "start byte index "+strconv.Itoa(begin)+" is out of bounds for string of length "+strconv.Itoa(len_))
-	}
-
-	// 2. end is OOB.
-	if end > len_ {
-		rs.PanicAt(2, "end byte index "+strconv.Itoa(end)+" is out of bounds for string of length "+strconv.Itoa(len_))
-	}
-
-	// 3. range is backwards.
-	if begin > end {
-		rs.PanicAt(2, "byte range starts at "+strconv.Itoa(begin)+" but ends at "+strconv.Itoa(end))
-	}
-
-	// 4. begin is inside a character.
-	if !strIsCharBoundary(s, begin) {
-		rs.PanicAt(2, "start byte index "+strconv.Itoa(begin)+" is not a char boundary; it is inside "+strCharAround(s, begin))
-	}
-
-	// 5. end is inside a character.
-	if !strIsCharBoundary(s, end) {
-		rs.PanicAt(2, "end byte index "+strconv.Itoa(end)+" is not a char boundary; it is inside "+strCharAround(s, end))
-	}
-
-	// 6. end is OOB and range is inclusive (end == len).
-	// This test cannot be combined with 2. above because for cases like
-	// `"abcαβγ"[4..9]` the error is that 4 is inside 'α', not that 9 is OOB.
-	rs.PanicAt(2, "end byte index "+strconv.Itoa(end)+" is out of bounds for string of length "+strconv.Itoa(len_))
-}
-
-// strCharAround is the part of the slicing panic that names the character an
-// index falls inside: `{ch:?} (bytes {range:?} of string)`.
-func strCharAround(s string, index int) string {
-	// str::floor_char_boundary and str::ceil_char_boundary
-	floor := index
-	for floor > 0 && !strIsCharBoundary(s, floor) {
-		floor--
-	}
-	ceil := index
-	for ceil < len(s) && !strIsCharBoundary(s, ceil) {
-		ceil++
-	}
-	ch, _ := utf8.DecodeRuneInString(s[floor:ceil])
-	return rs.DebugString(rs.Char(ch)) + " (bytes " + strconv.Itoa(floor) + ".." + strconv.Itoa(ceil) + " of string)"
 }

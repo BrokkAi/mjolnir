@@ -23,9 +23,9 @@
 //!   `{"op":"float_to_float","from":F,"bits":..}`
 //! - `{"op":"float","ty":F,"f":method,"a":bits,"b":bits,"c":bits,"n":i32}`
 //!   calls a float method whose result is exact.
-//! - `{"op":"libm","ty":F,"f":method,"a":bits,"b":bits,"go":bits}` calls a
-//!   method that Rust delegates to the C library and says whether the Go
-//!   result it was given is within one unit in the last place.
+//! - `{"op":"libm","ty":F,"f":method,"a":bits,"b":bits,"go":bits,"tol":n}`
+//!   calls a method that Rust delegates to the C library and says whether
+//!   the Go result it was given is within `tol` units in the last place.
 //! - `{"op":"wide_text","ty":"u128"|"i128","a":..}` formats in every base.
 //! - `{"op":"consts"}`
 
@@ -672,9 +672,9 @@ fn ordinal(bits: u64, sign_bit: u32) -> i128 {
 }
 
 /// Compares a C-library method's result with the Go result in the request.
-/// `"libm"` replies only whether they are within one unit in the last place,
-/// which is what the Go tests require; `"libm_ulps"` replies the distance,
-/// for measuring.
+/// `"libm"` replies only whether they are within the tolerance the request
+/// names, which is what the Go tests require; `"libm_ulps"` replies the
+/// distance, for measuring.
 fn libm(request: &Value, measure: bool) -> Value {
     let (rust_bits, go_bits, sign_bit, rust_nan, go_nan) = match text(request, "ty") {
         "f32" => {
@@ -697,7 +697,8 @@ fn libm(request: &Value, measure: bool) -> Value {
     if measure {
         return json!({ "ulps": ulps.to_string(), "rust": rust_bits.to_string() });
     }
-    if ulps <= 1 {
+    let tolerance = request.get("tol").and_then(Value::as_u64).unwrap_or(1);
+    if ulps <= tolerance {
         json!({ "close": true })
     } else {
         json!({ "close": false, "ulps": ulps.to_string(), "rust": rust_bits.to_string() })
@@ -755,6 +756,10 @@ fn consts() -> Value {
 }
 
 pub fn handle(request: &Value) -> Value {
+    // Many of the cases panic on purpose; the reply carries the message, so
+    // the default hook's report on standard error is only noise.
+    static QUIET: std::sync::Once = std::sync::Once::new();
+    QUIET.call_once(|| std::panic::set_hook(Box::new(|_| {})));
     match text(request, "op") {
         "int" => int_method(request),
         "usize63" => usize63(request),

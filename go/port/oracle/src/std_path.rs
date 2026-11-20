@@ -16,7 +16,9 @@
 //! - `cmp_components {p, q, fp, bp, fq, bq}`: `Components` compared after
 //!   taking some from the front and the back of each.
 //! - `os_str {p, q}`: `OsStr` and `OsString` methods.
+//! - `debug_classes {}`: how the `Debug` form writes every `char`.
 //! - `absolute {p, cwd}`: `std::path::absolute` from a given directory.
+//! - `absolute_deleted_cwd {p}`: the same from a directory that is gone.
 //! - `split_paths {s}`, `join_paths {parts}`: `std::env`.
 //! - `var_error {s}`: `VarError` texts.
 //! - `env_set_get {k, v}`, `env_get {k}`, `env_remove {k}`: the environment.
@@ -45,7 +47,9 @@ pub fn handle(request: &Value) -> Value {
         "walk" => walk(&path(request, "p"), crate::text(request, "steps")),
         "cmp_components" => cmp_components(request),
         "os_str" => os_str(&os(request, "p"), &os(request, "q")),
+        "debug_classes" => debug_classes(),
         "absolute" => absolute(request),
+        "absolute_deleted_cwd" => absolute_deleted_cwd(request),
         "split_paths" => Value::Array(
             std::env::split_paths(&os(request, "s"))
                 .map(|part| hex(part.as_os_str()))
@@ -401,6 +405,60 @@ fn wide(text: &OsStr) -> Value {
 #[cfg(not(windows))]
 fn wide(_text: &OsStr) -> Value {
     Value::Null
+}
+
+/// How `{:?}` of an `OsStr` writes each `char`: as itself (0), as `\u{..}` (1)
+/// or with a backslash escape (2, listed in `specials`). Runs of code points
+/// of one class are given as `[first, last, class]`.
+fn debug_classes() -> Value {
+    let mut ranges: Vec<[u32; 3]> = Vec::new();
+    let mut specials = serde_json::Map::new();
+    for code in 0..=0x10FFFF_u32 {
+        let Some(c) = char::from_u32(code) else {
+            continue;
+        };
+        let mut buffer = [0_u8; 4];
+        let text: &str = c.encode_utf8(&mut buffer);
+        let shown = format!("{:?}", OsStr::new(text));
+        let class = if shown == format!("\"{c}\"") {
+            0
+        } else if shown == format!("\"\\u{{{code:x}}}\"") {
+            1
+        } else {
+            specials.insert(code.to_string(), Value::String(shown));
+            2
+        };
+        match ranges.last_mut() {
+            Some(last) if last[2] == class && last[1] + 1 == code => last[1] = code,
+            _ => ranges.push([code, code, class]),
+        }
+    }
+    json!({ "ranges": ranges, "specials": specials })
+}
+
+/// `std::path::absolute` when the current directory no longer exists. The
+/// process is left in the root directory.
+fn absolute_deleted_cwd(request: &Value) -> Value {
+    let directory = std::env::temp_dir().join(format!("mj-oracle-gone-{}", std::process::id()));
+    if let Err(error) = std::fs::create_dir(&directory)
+        .and_then(|()| std::env::set_current_dir(&directory))
+        .and_then(|()| std::fs::remove_dir(&directory))
+    {
+        return json!({ "oracle_error": format!("cannot prepare a deleted directory: {error}") });
+    }
+    let reply = match std::path::absolute(path(request, "p")) {
+        Ok(absolute) => json!({ "ok": hex(absolute.as_os_str()) }),
+        Err(error) => io_error(&error),
+    };
+    let current = match std::env::current_dir() {
+        Ok(current) => json!({ "ok": hex(current.as_os_str()) }),
+        Err(error) => io_error(&error),
+    };
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    if let Err(error) = std::env::set_current_dir(root) {
+        return json!({ "oracle_error": format!("cannot leave the deleted directory: {error}") });
+    }
+    json!({ "absolute": reply, "current_dir": current })
 }
 
 fn absolute(request: &Value) -> Value {

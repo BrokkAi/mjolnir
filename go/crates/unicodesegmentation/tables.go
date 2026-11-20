@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // UnicodeVersion is `unicode_segmentation::UNICODE_VERSION`:
@@ -31,10 +32,6 @@ import (
 var UnicodeVersion = rs.Tuple3[uint64, uint64, uint64]{F0: 17, F1: 0, F2: 0}
 
 var tablesUnicodeVersionU8 = rs.Tuple3[uint8, uint8, uint8]{F0: 17, F1: 0, F2: 0}
-
-// charUnicodeVersion is `char::UNICODE_VERSION` of the Rust toolchain Mjolnir
-// is built with (1.99.1, core/src/unicode/unicode_data.rs).
-var charUnicodeVersion = rs.Tuple3[uint8, uint8, uint8]{F0: 17, F1: 0, F2: 0}
 
 // mod util
 
@@ -53,12 +50,12 @@ func tablesUtilBsearchRangeTable(c rune, r []rs.Tuple2[rune, rune]) bool {
 }
 
 func tablesUtilIsAlphabetic(c rune) bool {
-	if tablesUnicodeVersionU8 == charUnicodeVersion {
-		// Rust calls `c.is_alphabetic()` here, the standard library's own
-		// table for the same Unicode version. It holds the same characters
-		// as the crate's table (TestDiffAgainstRustWordProbes compares every
-		// scalar value with the Rust build), so the crate's table answers.
-		return charIsAlphabetic(c)
+	// The Rust toolchain Mjolnir is built with has the crate's Unicode
+	// version (17.0.0), so this takes the first branch, the standard
+	// library's table, as the Rust build does. The two tables hold the same
+	// characters (TestTables_std_and_crate_tables_agree).
+	if tablesUnicodeVersionU8 == strs.CharUnicodeVersion {
+		return strs.IsAlphabetic(c)
 	} else {
 		switch {
 		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
@@ -72,9 +69,8 @@ func tablesUtilIsAlphabetic(c rune) bool {
 }
 
 func tablesUtilIsNumeric(c rune) bool {
-	if tablesUnicodeVersionU8 == charUnicodeVersion {
-		// Rust calls `c.is_numeric()` here; see tablesUtilIsAlphabetic.
-		return charIsNumeric(c)
+	if tablesUnicodeVersionU8 == strs.CharUnicodeVersion {
+		return strs.IsNumeric(c)
 	} else {
 		switch {
 		case c >= '0' && c <= '9':
@@ -89,34 +85,6 @@ func tablesUtilIsNumeric(c rune) bool {
 
 func tablesUtilIsAlphanumeric(c rune) bool {
 	return tablesUtilIsAlphabetic(c) || tablesUtilIsNumeric(c)
-}
-
-// charIsAlphabetic is `char::is_alphabetic` of Rust 1.99.1
-// (core/src/char/methods.rs), reading the crate's Alphabetic table where Rust
-// reads `core::unicode::Alphabetic`. Both tables are the Alphabetic property
-// of Unicode 17.0.0.
-func charIsAlphabetic(c rune) bool {
-	switch {
-	case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
-		return true
-	case c >= 0 && c <= 0xA9:
-		return false
-	default:
-		return tablesDerivedPropertyAlphabetic(c)
-	}
-}
-
-// charIsNumeric is `char::is_numeric` of Rust 1.99.1, reading the crate's
-// table of General_Category=N where Rust reads `core::unicode::N`.
-func charIsNumeric(c rune) bool {
-	switch {
-	case c >= '0' && c <= '9':
-		return true
-	case c >= 0 && c <= 0xB1:
-		return false
-	default:
-		return tablesGeneralCategoryN(c)
-	}
 }
 
 // mod general_category

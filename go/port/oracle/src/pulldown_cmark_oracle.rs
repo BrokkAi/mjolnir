@@ -8,10 +8,11 @@
 //! iterator yields the same events. With `"callback": true` the parser is
 //! given a broken link callback, and the reply also lists the calls it got.
 //!
-//! `digest` parses `"text"` once for each option set in `"options"` and
-//! replies with a 32-bit FNV-1a hash of the JSON text `events` would reply
-//! with, so that a large generated corpus does not make the recorded file
-//! large. A mismatch is investigated by sending the same text to `events`.
+//! `digest` parses each document in `"texts"` once for each option set in
+//! `"options"` and replies, for each document, with the 32-bit FNV-1a hashes
+//! of the JSON texts `events` would reply with, so that a large generated
+//! corpus does not make the recorded file large. A mismatch is investigated
+//! by sending the same text to `events`.
 //!
 //! An event is an array: start, end, the event's name, then its fields. Tags
 //! are flattened into the array the same way, and no objects are used, so
@@ -101,20 +102,25 @@ fn events(request: &Value) -> Value {
 }
 
 fn digest(request: &Value) -> Value {
-    let text = crate::text(request, "text");
     let empty = Vec::new();
+    let texts = request["texts"].as_array().unwrap_or(&empty);
     let sets = request["options"].as_array().unwrap_or(&empty);
-    let mut digests = Vec::with_capacity(sets.len());
-    for bits in sets {
-        let options = options(bits);
-        // One option set panicking must not hide what the others do.
-        let digest = match catch_unwind(AssertUnwindSafe(|| parse(text, options))) {
-            Ok(reply) => format!("{:08x}", fnv1a_32(reply.to_string().as_bytes())),
-            Err(payload) => format!("panic: {}", panic_message(payload)),
-        };
-        digests.push(digest);
+    let mut replies = Vec::with_capacity(texts.len());
+    for text in texts {
+        let text = text.as_str().unwrap_or_default();
+        let mut digests = Vec::with_capacity(sets.len());
+        for bits in sets {
+            let options = options(bits);
+            // One option set panicking must not hide what the others do.
+            let digest = match catch_unwind(AssertUnwindSafe(|| parse(text, options))) {
+                Ok(reply) => format!("{:08x}", fnv1a_32(reply.to_string().as_bytes())),
+                Err(payload) => format!("panic: {}", panic_message(payload)),
+            };
+            digests.push(digest);
+        }
+        replies.push(digests.join(" "));
     }
-    json!({ "d": digests.join(" ") })
+    json!({ "d": replies })
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {

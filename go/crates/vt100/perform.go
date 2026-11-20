@@ -37,7 +37,7 @@ func performWrappedScreenNewWithCallbacks[CB Callbacks](
 }
 
 func (self *performWrappedScreen[CB]) Print(c rune) {
-	if c == '�' || (c >= '\u0080' && c < ' ') {
+	if c == '\ufffd' || (c >= '\u0080' && c < '\u00a0') {
 		self.callbacks.UnhandledChar(&self.screen, c)
 	} else {
 		self.screen.text(c)

@@ -165,6 +165,9 @@ type shape struct {
 	// NoReflectClone type, or a struct holding one). A pointer to it is
 	// shared.
 	pinned bool
+	// stdlib is a struct of the Go standard library, whose fields belong to
+	// the library.
+	stdlib bool
 	// opaque is a struct copied by assignment: pinned, or from the Go
 	// standard library.
 	opaque bool
@@ -478,6 +481,7 @@ func (b *shapeBuilder) resolveValueFlags(s *shape, done map[*shape]bool) {
 				}
 			}
 		}
+		s.stdlib = stdlib
 		s.opaque = s.pinned || stdlib
 		s.sharedBehindPointer = s.pinned || (stdlib && !t.Comparable())
 	}

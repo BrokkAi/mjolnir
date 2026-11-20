@@ -518,7 +518,7 @@ fn delta(request: &Value) -> Value {
         "checked_mul" => one(&|a| describe_opt_delta(a.checked_mul(n))),
         "checked_div" => one(&|a| describe_opt_delta(a.checked_div(n))),
         "describe" => one(&describe_delta),
-        "floats" => one(&|a| json!([a.as_seconds_f64(), a.as_seconds_f32() as f64])),
+        "floats" => one(&|a| json!([a.as_seconds_f64().to_bits(), a.as_seconds_f32().to_bits()])),
         _ => crate::unknown(request),
     }
 }
@@ -759,7 +759,7 @@ fn naive(request: &Value) -> Value {
                 json!([
                     describe_delta(date.signed_duration_since(other)),
                     option_json(date.years_since(other)),
-                    date.abs_diff(other) == Days::new(uint(request, "v")),
+                    format!("{:?}", date.abs_diff(other)),
                     date.cmp(&other) as i8
                 ])
             })

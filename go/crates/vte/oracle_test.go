@@ -363,8 +363,8 @@ type streamBuilder struct {
 var textSamples = []string{
 	"hello", "The quick brown fox", "a", " ", "~", "\x7f",
 	"é", "ñ", "ß", "Ω", "я", "ש", "ع", "ह", "ก", "한", "デ", "ネ", "中文", "ｆｕｌｌ",
-	"é", "ǟ", "​", "‍", "️", "­", "🎉", "🦀", "👨‍👩‍👧", "🇫🇷",
-	"៘", "�", "\u0085", "\u009b", " ",
+	"e\u0301", "a\u0308\u0304", "\u200b", "\u200d", "\ufe0f", "\u00ad", "🎉", "🦀", "👨\u200d👩\u200d👧", "🇫🇷",
+	"\u17d8", "\ufffd", "\u0085", "\u009b", "\u2028",
 }
 
 func (self *streamBuilder) number() string {

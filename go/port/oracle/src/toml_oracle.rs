@@ -16,7 +16,9 @@ pub fn handle(request: &Value) -> Value {
     let op = crate::text(request, "op");
     match op {
         // toml_edit: parse a document and print it back.
-        "edit_parse" => edit_parse(crate::text(request, "text")),
+        "edit_parse" => edit_parse(crate::text(request, "text"), false),
+        // toml_edit: parse a document and describe everything the parser kept.
+        "edit_dump" => edit_parse(crate::text(request, "text"), true),
         // toml_edit: parse a key, a dotted key or a value on its own.
         "edit_key" => match toml_edit::Key::from_str(crate::text(request, "text")) {
             Ok(key) => json!({"ok": {"key": key.get(), "display": key.to_string()}}),
@@ -168,13 +170,14 @@ fn from_canonical(value: &Value) -> Result<toml::Value, String> {
 
 // toml_edit
 
-fn edit_parse(text: &str) -> Value {
+fn edit_parse(text: &str, dump: bool) -> Value {
     match text.parse::<Document>() {
-        Ok(document) => json!({
+        Ok(document) if dump => json!({
             "ok": document.to_string(),
             "dump": dump_table(document.as_table()),
             "trailing": document.trailing().as_str(),
         }),
+        Ok(document) => json!({"ok": document.to_string()}),
         Err(error) => json!({
             "err": error.to_string(),
             "message": error.message(),

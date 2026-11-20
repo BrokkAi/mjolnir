@@ -187,3 +187,128 @@ func TestPattern_double_ended_regression_test(t *testing.T) {
 		[]string{"next_match", "next", "next_match_back", "next_back", "next_match"},
 		[]string{"InRange(10, 13)", "Rejects(13, 14)", "InRange(37, 40)", "Rejects(34, 37)", "Done"})
 }
+
+// Port of alloctests 1.99.1 tests/str.rs, `mod pattern`: the whole sequence of
+// steps of a searcher, forwards and backwards.
+
+// cmpSearchToVec is cmp_search_to_vec: the steps of the searcher, taken from
+// the front or (reversed) from the back, must be `right`, which must cover
+// the haystack without gaps.
+func cmpSearchToVec(t *testing.T, rev bool, searcher searcher, haystack string, right []searchStep) {
+	t.Helper()
+	var v []searchStep
+	for {
+		var step searchStep
+		if !rev {
+			step = searcher.next()
+		} else {
+			step = searcher.nextBack()
+		}
+		if step.kind == stepDone {
+			break
+		}
+		v = append(v, step)
+	}
+	if rev {
+		slices.Reverse(v)
+	}
+
+	firstIndex := 0
+	for i, e := range right {
+		if e.a <= e.b && e.a == firstIndex {
+			firstIndex = e.b
+		} else {
+			t.Fatalf("Input skipped range at %d", i)
+		}
+	}
+	if firstIndex != len(haystack) {
+		t.Fatal("Did not cover whole input")
+	}
+
+	if !slices.Equal(v, right) {
+		t.Errorf("rev=%v: got %v, want %v", rev, v, right)
+	}
+}
+
+func TestStrPattern_searcher_steps(t *testing.T) {
+	match := func(a, b int) searchStep { return searchStep{stepMatch, a, b} }
+	reject := func(a, b int) searchStep { return searchStep{stepReject, a, b} }
+	type makeTest struct {
+		name     string
+		searcher func(haystack string) searcher
+		haystack string
+		steps    []searchStep
+	}
+	str := func(needle string) func(string) searcher {
+		return func(haystack string) searcher { return newStrSearcher(haystack, needle) }
+	}
+	chr := func(needle rune) func(string) searcher {
+		return func(haystack string) searcher { return newCharSearcher(haystack, needle) }
+	}
+	for _, c := range []makeTest{
+		{"str_searcher_ascii_haystack", str("bb"), "abbcbbd",
+			[]searchStep{reject(0, 1), match(1, 3), reject(3, 4), match(4, 6), reject(6, 7)}},
+		{"str_searcher_ascii_haystack_seq", str("bb"), "abbcbbbbd",
+			[]searchStep{reject(0, 1), match(1, 3), reject(3, 4), match(4, 6), match(6, 8), reject(8, 9)}},
+		{"str_searcher_empty_needle_ascii_haystack", str(""), "abbcbbd",
+			[]searchStep{
+				match(0, 0), reject(0, 1), match(1, 1), reject(1, 2), match(2, 2), reject(2, 3), match(3, 3), reject(3, 4),
+				match(4, 4), reject(4, 5), match(5, 5), reject(5, 6), match(6, 6), reject(6, 7), match(7, 7),
+			}},
+		{"str_searcher_multibyte_haystack", str(" "), "├──", []searchStep{reject(0, 3), reject(3, 6), reject(6, 9)}},
+		{"str_searcher_empty_needle_multibyte_haystack", str(""), "├──",
+			[]searchStep{match(0, 0), reject(0, 3), match(3, 3), reject(3, 6), match(6, 6), reject(6, 9), match(9, 9)}},
+		{"str_searcher_empty_needle_empty_haystack", str(""), "", []searchStep{match(0, 0)}},
+		{"str_searcher_nonempty_needle_empty_haystack", str("├"), "", nil},
+		{"char_searcher_ascii_haystack", chr('b'), "abbcbbd",
+			[]searchStep{reject(0, 1), match(1, 2), match(2, 3), reject(3, 4), match(4, 5), match(5, 6), reject(6, 7)}},
+		{"char_searcher_multibyte_haystack", chr(' '), "├──", []searchStep{reject(0, 3), reject(3, 6), reject(6, 9)}},
+		{"char_searcher_short_haystack", chr('\U0001F4A9'), "* \t", []searchStep{reject(0, 1), reject(1, 2), reject(2, 3)}},
+	} {
+		t.Run(c.name+"/fwd", func(t *testing.T) { cmpSearchToVec(t, false, c.searcher(c.haystack), c.haystack, c.steps) })
+		t.Run(c.name+"/bwd", func(t *testing.T) { cmpSearchToVec(t, true, c.searcher(c.haystack), c.haystack, c.steps) })
+	}
+}
+
+func TestStrPattern_str_searcher_empty_needle_after_done(t *testing.T) {
+	match := func(a, b int) searchStep { return searchStep{stepMatch, a, b} }
+	reject := func(a, b int) searchStep { return searchStep{stepReject, a, b} }
+	done := searchStep{kind: stepDone}
+
+	// Empty needle and haystack
+	{
+		searcher := newStrSearcher("", "")
+
+		eq(t, searcher.next(), match(0, 0))
+		eq(t, searcher.next(), done)
+		eq(t, searcher.next(), done)
+		eq(t, searcher.next(), done)
+
+		searcher = newStrSearcher("", "")
+
+		eq(t, searcher.nextBack(), match(0, 0))
+		eq(t, searcher.nextBack(), done)
+		eq(t, searcher.nextBack(), done)
+		eq(t, searcher.nextBack(), done)
+	}
+	// Empty needle and non-empty haystack
+	{
+		searcher := newStrSearcher("a", "")
+
+		eq(t, searcher.next(), match(0, 0))
+		eq(t, searcher.next(), reject(0, 1))
+		eq(t, searcher.next(), match(1, 1))
+		eq(t, searcher.next(), done)
+		eq(t, searcher.next(), done)
+		eq(t, searcher.next(), done)
+
+		searcher = newStrSearcher("a", "")
+
+		eq(t, searcher.nextBack(), match(1, 1))
+		eq(t, searcher.nextBack(), reject(0, 1))
+		eq(t, searcher.nextBack(), match(0, 0))
+		eq(t, searcher.nextBack(), done)
+		eq(t, searcher.nextBack(), done)
+		eq(t, searcher.nextBack(), done)
+	}
+}

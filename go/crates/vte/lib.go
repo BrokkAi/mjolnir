@@ -589,7 +589,7 @@ func (self *Parser) advanceGround(performer Perform, bytes_ []uint8) int {
 		if len_ == 1 && bytes_[validBytes] <= 0x9F {
 			performer.Execute(bytes_[validBytes])
 		} else {
-			performer.Print('�')
+			performer.Print('\ufffd')
 		}
 
 		// Restart processing after the invalid bytes.
@@ -602,7 +602,7 @@ func (self *Parser) advanceGround(performer Perform, bytes_ []uint8) int {
 
 	if plainChars < numBytes {
 		// Process bytes cut off by escape.
-		performer.Print('�')
+		performer.Print('\ufffd')
 		self.state = state_Escape
 		self.resetParams()
 		return plainChars + 1
@@ -650,7 +650,7 @@ func (self *Parser) advancePartialUtf8(performer Perform, bytes_ []uint8) int {
 	if invalidLen, ok := errorLen.Get(); ok {
 		// If the partial character was also invalid, emit the replacement
 		// character.
-		performer.Print('�')
+		performer.Print('\ufffd')
 
 		self.partialUtf8Len = 0
 		return invalidLen - oldBytes

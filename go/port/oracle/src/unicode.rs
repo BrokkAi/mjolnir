@@ -413,7 +413,27 @@ fn segment_one(s: &str) -> Value {
 }
 
 fn segment(request: &Value) -> Value {
-    Value::Array(strings(request).into_iter().map(segment_one).collect())
+    // A panic while one string is segmented (the crate unwraps what its
+    // cursors return) is that string's answer, not the whole request's.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let replies = strings(request)
+        .into_iter()
+        .map(|s| {
+            std::panic::catch_unwind(|| segment_one(s))
+                .unwrap_or_else(|payload| json!({ "panic": panic_message(payload) }))
+        })
+        .collect();
+    std::panic::set_hook(hook);
+    Value::Array(replies)
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_else(|| "non-string panic payload".to_owned())
 }
 
 fn incomplete(error: &GraphemeIncomplete) -> Value {
@@ -525,12 +545,7 @@ fn cursor(request: &Value) -> Value {
     }));
     std::panic::set_hook(hook);
     if let Err(payload) = outcome {
-        let message = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
-            .unwrap_or_else(|| "non-string panic payload".to_owned());
-        trace.push(json!({ "panic": message }));
+        trace.push(json!({ "panic": panic_message(payload) }));
     }
     Value::Array(trace)
 }

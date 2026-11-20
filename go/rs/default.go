@@ -150,7 +150,7 @@ func (b *defaultBuilder) apply(s *shape, dst unsafe.Pointer, rust bool) bool {
 		}
 		return false
 	case kindStruct:
-		if s.opaque {
+		if s.stdlib {
 			return false
 		}
 		ported := TypeInfoOf(s.typ) != nil

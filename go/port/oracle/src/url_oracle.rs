@@ -128,8 +128,26 @@ fn dump(url: &Url) -> Value {
     })
 }
 
-fn parse_result(result: Result<Url, ParseError>) -> Value {
+/// The components of a `Url`, for the cases that are too many to record a
+/// whole `dump` of.
+fn brief(url: &Url) -> Value {
+    json!([
+        url.as_str(),
+        url.scheme(),
+        url.username(),
+        url.password(),
+        url.host_str(),
+        url.host().as_ref().map(host_value),
+        url.port(),
+        url.path(),
+        url.query(),
+        url.fragment(),
+    ])
+}
+
+fn parse_result(result: Result<Url, ParseError>, request: &Value) -> Value {
     match result {
+        Ok(url) if request["brief"].as_bool().unwrap_or(false) => json!({ "ok": brief(&url) }),
         Ok(url) => json!({ "ok": dump(&url) }),
         Err(error) => error_value(error),
     }
@@ -330,10 +348,10 @@ pub fn handle(request: &Value) -> Value {
             let input = crate::text(request, "input");
             match option_text(request, "base") {
                 Some(base) => match Url::parse(&base) {
-                    Ok(base) => parse_result(base.join(input)),
+                    Ok(base) => parse_result(base.join(input), request),
                     Err(error) => json!({ "base": error_value(error) }),
                 },
-                None => parse_result(Url::parse(input)),
+                None => parse_result(Url::parse(input), request),
             }
         }
         "violations" => {
@@ -353,7 +371,7 @@ pub fn handle(request: &Value) -> Value {
             fn encode(text: &str) -> std::borrow::Cow<'_, [u8]> {
                 text.to_ascii_uppercase().into_bytes().into()
             }
-            parse_result(Url::options().encoding_override(Some(&encode)).parse(input))
+            parse_result(Url::options().encoding_override(Some(&encode)).parse(input), request)
         }
         "parse_with_params" => {
             let pairs: Vec<(String, String)> = request["params"]
@@ -362,7 +380,7 @@ pub fn handle(request: &Value) -> Value {
                 .iter()
                 .map(|pair| (pair[0].as_str().unwrap().to_owned(), pair[1].as_str().unwrap().to_owned()))
                 .collect();
-            parse_result(Url::parse_with_params(crate::text(request, "input"), pairs))
+            parse_result(Url::parse_with_params(crate::text(request, "input"), pairs), request)
         }
         "set" => {
             let mut url = match Url::parse(crate::text(request, "href")) {
@@ -375,7 +393,11 @@ pub fn handle(request: &Value) -> Value {
                 results.push(apply_setter(&mut url, step));
                 states.push(json!(url.as_str()));
             }
-            json!({ "results": results, "states": states, "final": dump(&url) })
+            if request["brief"].as_bool().unwrap_or(false) {
+                json!({ "results": results, "states": states, "final": brief(&url) })
+            } else {
+                json!({ "results": results, "states": states, "final": dump(&url) })
+            }
         }
         "make_relative" => {
             let base = Url::parse(crate::text(request, "base"));
@@ -505,12 +527,20 @@ pub fn handle(request: &Value) -> Value {
         },
         "serde" => {
             let input = crate::text(request, "input");
-            let to_json = Url::parse(input).ok().map(|url| serde_json::to_string(&url).unwrap());
-            let from_json = match serde_json::from_str::<Url>(&serde_json::to_string(input).unwrap()) {
+            // What the Serialize impl hands to the serializer, and what the
+            // Deserialize impl answers for a string: the URL, or its custom
+            // message (serde_json appends " at line L column C" to it).
+            let serialized = Url::parse(input).ok().map(|url| serde_json::to_value(&url).unwrap());
+            let deserialized = match serde_json::from_str::<Url>(&serde_json::to_string(input).unwrap()) {
                 Ok(url) => json!({ "ok": url.as_str() }),
-                Err(error) => json!({ "err": error.to_string() }),
+                Err(error) => {
+                    let message = error.to_string();
+                    let end = message.rfind(" at line ").unwrap_or(message.len());
+                    json!({ "err": &message[..end] })
+                }
             };
-            json!({ "to_json": to_json, "from_json": from_json })
+            let wrong_type = serde_json::from_str::<Url>("17").unwrap_err().to_string();
+            json!({ "serialized": serialized, "deserialized": deserialized, "wrong_type": wrong_type })
         }
         "debug" => match Url::parse(crate::text(request, "input")) {
             Ok(url) => json!({

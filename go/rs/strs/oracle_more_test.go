@@ -273,7 +273,7 @@ func TestDiffAgainstRust_pattern(t *testing.T) {
 		haystacks := []string{
 			"", "a", "X", "aXb", "XaX", "XX", "aXXb", "Mary had a little lamb", "lion::tiger::leopard", "abcXdefXghi",
 			"A.B.", "A..B..", "aaa", "aaaa", "ababa", "abababab", "aabaaabaaaab", "é", "éé", "aéa", "日本語", "😀a😀",
-			"a\nb\n", "  a  b  ", " a ", "ΑΣ", "x=1;y=2;", "ꁁaꁁ", "\U0010ffff￿",
+			"a\nb\n", "  a  b  ", "\u00a0a\u2003", "ΑΣ", "x=1;y=2;", "ꁁaꁁ", "\U0010ffff\uffff",
 		}
 		needles := []string{"", "a", "X", "XX", "aa", "aaa", "ab", "aba", "abab", "é", "::", ".", "aab", "ba", "日", "語",
 			"😀", "ꁁ", "little", "Mary had a little lamb", "Mary had a little lamb!", "éa", "\n"}
@@ -386,7 +386,7 @@ func answerString(t *testing.T, raw json.RawMessage) any {
 func TestDiffAgainstRust_string(t *testing.T) {
 	oracle.Check(t, "std_str", "string", func(yield func(any)) {
 		huge := []uint64{1<<64 - 1, 1 << 63}
-		for _, s := range []string{"", "a", "aé", "éa", "日本", "a😀b", "éx", "ab"} {
+		for _, s := range []string{"", "a", "aé", "éa", "日本", "a😀b", "e\u0301x", "ab"} {
 			var offsets []uint64
 			for i := 0; i <= len(s)+2; i++ {
 				offsets = append(offsets, uint64(i))
@@ -562,7 +562,7 @@ func TestDiffAgainstRust_parse_int(t *testing.T) {
 		}
 		for _, s := range []string{
 			"", "+", "-", "+-", "-+", "++1", "--1", "+-1", "-+1", " 1", "1 ", " ", "1_000", "_1", "0x10", "0b1", "0o7",
-			"1e3", "1.0", "1.", ".1", "12a", "a12", "1a2", "a", "-a", "+a", "１２３", "٣", "1 ", " 1", "1é",
+			"1e3", "1.0", "1.", ".1", "12a", "a12", "1a2", "a", "-a", "+a", "１２３", "٣", "1\u00a0", "\u00a01", "1é",
 			"1\x00", "\x001", "0-1", "1-", "1+", "256x", "99x", "999x", "-129x", "-99x", "9999999999999999999x",
 			"99999999999999999999x", "340282366920938463463374607431768211455x",
 			"340282366920938463463374607431768211456x", "x340282366920938463463374607431768211456",
@@ -623,7 +623,7 @@ func TestDiffAgainstRust_parse_int(t *testing.T) {
 		}
 
 		for _, s := range []string{"", "true", "false", "True", "FALSE", "true ", " false", "t", "f", "1", "0", "yes",
-			"truefalse", "a", "é", "ab", "😀", "é", "́", "\x00", "\U0010ffff", "aa", "日本"} {
+			"truefalse", "a", "é", "ab", "😀", "e\u0301", "\u0301", "\x00", "\U0010ffff", "aa", "日本"} {
 			misc(s)
 		}
 

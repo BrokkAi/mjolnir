@@ -7,8 +7,9 @@ document lists every place where product code writes compressed or archived
 bytes, follows those bytes to whoever hashes, measures or compares them, and
 says for each whether a difference matters.
 
-Read at commit `9f24e3da9`. "Product code" is every `*.rs` file under `mj-*/`
-and `voice-worker/`; `voice-worker/` has no hit.
+Read at commit `6f77b633f` (line numbers are those of that commit). "Product
+code" is every `*.rs` file under `mj-*/` and `voice-worker/`; `voice-worker/`
+has no hit.
 
 ## 0. Summary
 
@@ -52,7 +53,7 @@ followed through their callers:
 snappy use exists. Shell-level archiving was found with a second grep for
 `tar`, `gzip`, `zstd`, `sha256sum` and `shasum` in command strings and scripts.
 Digest comparisons were found with a grep for `sha256`/`digest` next to `==`
-or `!=` (85 production lines), and fixed digests with a grep for 64-digit
+or `!=` (87 production lines), and fixed digests with a grep for 64-digit
 hexadecimal literals (24 lines) and for the same pattern in checked-in golden
 and fixture files (7 files).
 
@@ -105,7 +106,7 @@ What is hashed or measured:
 
 | What | Where | Over which bytes | Compared by |
 | --- | --- | --- | --- |
-| `archive_sha256` | written at `:328-332`; recomputed at `:392`, `:402`, `:411`, `:518`, `:566`; `checkpoint_sha256` in `mj-checkpoint/src/checkpoint.rs:488` | the whole zip file | Stored as `CheckpointMetadata.sha256` (`mj-core/src/state.rs:1441-1447`) and checked whenever the file is used again: `mj-controller/src/controller/publication.rs:290`, `network_git.rs:514`, `resume.rs:1237`, `checkpoint/staging.rs:572`, `checkpoint/latched.rs:760`, `move_session.rs:1026` and `:2723`, `mj-daemon/src/daemon/serve.rs:502`, `mj-session-runtime/src/session_manager/standalone.rs:384`. After a download from a target, `mj-session-runtime/src/checkpoint_transfer.rs:166-168` hashes the downloaded file and compares it with the digest the target reported for the file it wrote |
+| `archive_sha256` | written at `:328-332`; recomputed at `:392`, `:402`, `:411`, `:518`, `:566`; `checkpoint_sha256` in `mj-checkpoint/src/checkpoint.rs:493` | the whole zip file | Stored as `CheckpointMetadata.sha256` (`mj-core/src/state.rs:1429-1435`) and checked whenever the file is used again: `mj-controller/src/controller/publication.rs:290`, `network_git.rs:514`, `resume.rs:1237`, `checkpoint/staging.rs:572`, `checkpoint/latched.rs:756`, `move_session.rs:1026` and `:2723`, `mj-daemon/src/daemon/serve.rs:670`, `mj-session-runtime/src/session_manager/standalone.rs:112` and `:607`. After a download from a target, `mj-session-runtime/src/checkpoint_transfer.rs:166-168` hashes the downloaded file and compares it with the digest the target reported for the file it wrote |
 | payload `sha256` and `size` in the manifest | `:1064-1094` | the uncompressed payload | the reader, per entry (`read_verified_entry`, `:1797-1863`; `:475`, `:656`, `:704`, `:1897`) |
 | part `sha256` and `size` | `:1245` | each uncompressed 16 MiB slice | the reader, per part |
 | manifest digest | `:1271` | the manifest JSON | the writer only, while copying |
@@ -319,26 +320,26 @@ Writer and settings: `GzEncoder::new(Vec::new(), Compression::default())` over
 `gzip` of a JSON value.
 
 What is measured: the length of the encoded value. A snapshot is serialized
-once and served in pages (`mj-worker/src/worker_runtime/unix/requests.rs:599-625`
+once and served in pages (`mj-worker/src/worker_runtime/unix/requests.rs:598-623`
 reports `total_bytes`; uploads do the same from the daemon,
 `mj-session-runtime/src/worker_client/relay.rs:612-640`). The page count and
 byte count appear in a log line (`relay.rs:592-600`). The receiver reassembles
 and decodes; nothing compares the bytes with anything else.
 
-Tests: `mj-worker/src/worker_runtime/relay_tests.rs:7823-7875` asserts that 10
+Tests: `mj-worker/src/worker_runtime/relay_tests.rs:7908-7960` asserts that 10
 MiB of incompressible text encodes to more than `MAX_FRAME_BYTES` (8 MiB).
 
 ### 2.10 Sealed relay journal segments: verdict (A)
 
-`mj-worker/src/relay/journal.rs:319-340` (`seal_active_relay_segment`).
+`mj-worker/src/relay/journal.rs:330-351` (`seal_active_relay_segment`).
 
 Writer and settings: `GzEncoder::new(file, Compression::default())` over one
 JSON event per line, to `segment-<first>-<last>.jsonl.gz`.
 
 Consumer: the worker itself, later, including a worker of the other
 implementation that takes over the same journal directory
-(`visit_relay_journal_file`, `:447-465`). Sealing is triggered by the size of
-the *uncompressed* active file (`:877`); the size of a sealed segment is not
+(`visit_relay_journal_file`, `:458-476`). Sealing is triggered by the size of
+the *uncompressed* active file (`:896`); the size of a sealed segment is not
 read anywhere. A Move transfers the files and checks them by digest as in 2.6.
 
 ### 2.11 Packed transcript text: verdict (B), in memory only
@@ -424,7 +425,7 @@ These read bytes written by something else and need a conforming decoder only.
 | `mj-core/src/harness_install.rs:1975` | a `.zst` release file, with `ruzstd::decoding::StreamingDecoder` |
 | `mj-import/src/import/codex.rs:456` | Zstandard-compressed Codex session files, with `ruzstd` |
 | `mj-github-relevance/src/github_student/runtime.rs:276`, `:287` | zip and tar.gz runtime downloads |
-| `mj-checkpoint/src/resources.rs:142`, `mj-core/src/skills/mod.rs:340`, `mj-core/src/relay/protocol.rs:77`, `mj-worker/src/relay/journal.rs:458` | the gzip streams of section 2 |
+| `mj-checkpoint/src/resources.rs:142`, `mj-core/src/skills/mod.rs:340`, `mj-core/src/relay/protocol.rs:77`, `mj-worker/src/relay/journal.rs:469` | the gzip streams of section 2 |
 | `mj-checkpoint/src/archive.rs:1503-1525` and its callers, `mj-checkpoint/src/archive/git.rs:3367`, `:3407`, `archive/git/operation.rs:705`, `:734`, `:820`, `mj-worker/src/move_workspace.rs:578`, `mj-worker/src/microvm/tarcopy.rs:118` | the zips and tars of section 2 |
 | `mj-client/src/image.rs:45-62` | JPEG, PNG and WebP images |
 
@@ -458,7 +459,7 @@ implementations send the same command text.
 | `mj-checkpoint/src/archive/tests.rs:997`, `1078`, `1176` | damaged entry data fails verification; the error names the part | a decoder that reports corruption |
 | `mj-server/src/server/tests.rs:4043` `viewer_responses_negotiate_fast_compression`; `:4100-4130` | ETag equals SHA-256 of the compressed body it was served; compressed is smaller | gzip and Brotli encoders |
 | `mj-core/src/skills/mod.rs:936-939`, `1058`, `1086`, `1217`, `1248` | gzip smaller than plain; a random 1.2 MB file is skipped; a large HTML file is collected; an incompressible tree fails; 65 MiB of zeros at `Compression::fast()` stays under 4 MiB | a reasonable deflate at levels 1 and 6 |
-| `mj-worker/src/worker_runtime/relay_tests.rs:7865`, `7875` | 10 MiB of incompressible text is over 8 MiB after gzip and base64 | any gzip |
+| `mj-worker/src/worker_runtime/relay_tests.rs:7950`, `7960` | 10 MiB of incompressible text is over 8 MiB after gzip and base64 | any gzip |
 | `mj-worker-staging/src/worker_binary/install.rs:2483-2512` | a stored (`Compression::none()`) gzip is over 64 KiB; the system `tar` rejects it when truncated | gzip level 0 |
 | `mj-client/src/image.rs:344` `noisy_image_is_resized_to_fit_output_budget` | JPEG, within 700 KiB, smaller than the input | a JPEG encoder and Lanczos3 resize |
 
@@ -470,7 +471,7 @@ in the code are digests of third-party downloads (`mj-build-cache/src/mbx/instal
 `mj-cli/src/ec2.rs:1685-1691`, `mj-cli/src/image_commands.rs:242`), of relay
 events, or placeholders, and the attachment digest in
 `mj-daemon/tests/golden/daemon-upload-exchange.txt` is over literal bytes the
-test builds (`mj-daemon/src/daemon/tests.rs:15017-15018`), not encoder output.
+test builds (`mj-daemon/src/daemon/tests.rs:14855-14856`), not encoder output.
 
 Encoders that only tests call, and which the Go test code therefore needs in
 some form: `ruzstd::encoding::compress_to_vec(.., CompressionLevel::Fastest)`
