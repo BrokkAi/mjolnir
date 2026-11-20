@@ -22,6 +22,12 @@ def run(lab, args):
     release = lab.runtime_root / "fail-load-now"
     branch = '    elif method in ("session/new", "session/load"):\n'
     script = bridge.read_text()
+    # A completed turn makes the first recovery copy due immediately. Leave
+    # Codex's goal state unsynchronized so checkpoint admission defers the
+    # copy regardless of when the daemon observes the turn.
+    clear_goal = 'report_execution("idle", goal_cleared=True)'
+    assert script.count(clear_goal) == 1
+    script = script.replace(clear_goal, 'report_execution("idle")')
     assert script.count(branch) == 1
     script = script.replace(branch, branch + f"""
         if method == "session/load" and not os.path.exists({str(entered)!r}):
@@ -77,9 +83,25 @@ def run(lab, args):
             "--target", "localhost", "--project-directory", str(lab.project),
             "--subagents", "none", "--json",
         ))["session_id"]
-        lab.wait_snapshot(
-            lambda snapshot: (lab.session(snapshot, session) or {}).get("capabilities", {}).get("prompt"),
-            "the original worker's configured session",
+        before = "prompt before the startup fault"
+        lab.submit_prompt(session, before)
+        reply = f"reliability reply: {before}"
+
+        # The viewer accepts the action before the relay receives it. Wait
+        # for the reply to appear before asking whether the turn has ended.
+        def original_reply_visible(_snapshot):
+            status, body = lab.request("GET", f"/api/conversations/{session}")
+            return status == 200 and any(reply in entry["lines"] for entry in body["entries"])
+
+        lab.wait_snapshot(original_reply_visible, "the original worker's reply")
+        completed = json.loads(cli("wait", "--session", session, "--json"))
+        assert completed["outcome"] == "finished", completed
+        assert completed["final_message"] == reply, completed
+        original_row = lab.session(lab.snapshot(), session)
+        assert not original_row["has_checkpoint"], original_row
+        lab.record_action(
+            "original-turn-completed", reply=completed["final_message"],
+            has_checkpoint=original_row["has_checkpoint"],
         )
         original = record()
         assert original["native_session_id"], original
