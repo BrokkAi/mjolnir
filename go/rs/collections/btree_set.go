@@ -20,7 +20,8 @@ type btreeSetVal struct{}
 //
 // The zero value is an empty set. Like BTreeMap it is changed through a
 // pointer, and a plain assignment shares the storage instead of copying it;
-// `set.clone()` is rs.Clone(s) (or s.Clone()). Elements are passed and
+// `set.clone()` is rs.Clone(s), which rebuilds the set through
+// rs.ReflectSeq as BTreeMap describes. Elements are passed and
 // returned by value: an element of a set cannot be changed in place. The
 // sequences yield elements in order and must not have their set changed
 // while they run, except that the element just yielded may be removed.
@@ -80,16 +81,6 @@ func btreeSetFromSortedIter[T any](sorted iter.Seq[T]) BTreeSet[T] {
 		pairs = append(pairs, rs.Tuple2[T, btreeSetVal]{F0: element, F1: btreeSetVal{}})
 	}
 	return BTreeSet[T]{m: btreeBulkBuildFromSortedIter(pairs)}
-}
-
-// Clone is BTreeSet::clone: a set with a copy of every element, cloned by
-// rs.Clone in order.
-func (s BTreeSet[T]) Clone() BTreeSet[T] {
-	return s.cloneWith(rs.Clone[T])
-}
-
-func (s BTreeSet[T]) cloneWith(cloneElement func(T) T) BTreeSet[T] {
-	return BTreeSet[T]{m: s.m.cloneWith(cloneElement, func(value btreeSetVal) btreeSetVal { return value })}
 }
 
 // Equal is BTreeSet's PartialEq: the same number of elements, equal (by

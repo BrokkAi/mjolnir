@@ -1681,7 +1681,7 @@ func usizeMethod(request numRequest) any {
 }
 
 // ---------------------------------------------------------------------------
-// Conversions: try_from, from_str_radix, bytes, casts
+// Conversions: try_from, bytes, casts (parsing is strs's)
 
 func TestNumConvertAgainstRust(t *testing.T) {
 	generate := func(yield func(any)) {
@@ -1705,38 +1705,6 @@ func TestNumConvertAgainstRust(t *testing.T) {
 					seen[candidate.String()] = true
 					yield(numRequest{Op: "try_from", From: from.name, To: to.name, A: candidate.String()})
 				}
-			}
-		}
-		// from_str_radix.
-		sources := []string{"", "+", "-", "0", "+0", "-0", "1", "+1", "-1", "00012", "12 ", " 12", "1_000", "0x10",
-			"a", "A", "z", "Z", "ff", "FF", "-ff", "7f", "80", "-80", "-81", "127", "128", "-128", "-129", "255",
-			"256", "++1", "--1", "+-1", "1e3", "１２", "9", "g", "10", "-10"}
-		for _, t := range allIntTypes {
-			for _, source := range sources {
-				for _, radix := range []uint32{10, 16, 2, 36} {
-					if radix != 10 && rng.IntN(3) != 0 {
-						continue
-					}
-					yield(numRequest{Op: "from_str_radix", Ty: t.name, S: source, Radix: radix})
-				}
-			}
-			// The bounds and one past them, in several radices.
-			for _, value := range []*big.Int{t.max(), new(big.Int).Add(t.max(), big.NewInt(1)), t.min(),
-				new(big.Int).Sub(t.min(), big.NewInt(1)), t.random(rng), t.random(rng)} {
-				// A usize above isize::MAX is too large for the port.
-				if t.name == "usize" && value.Cmp(isizeType.max()) > 0 {
-					continue
-				}
-				for _, radix := range []int{2, 8, 10, 16, 36} {
-					yield(numRequest{Op: "from_str_radix", Ty: t.name, S: value.Text(radix), Radix: uint32(radix)})
-				}
-				yield(numRequest{Op: "from_str_radix", Ty: t.name, S: value.String() + "x", Radix: 10})
-				yield(numRequest{Op: "from_str_radix", Ty: t.name, S: value.String() + "00", Radix: 10})
-				yield(numRequest{Op: "from_str_radix", Ty: t.name, S: value.String() + "00x", Radix: 10})
-			}
-			for _, radix := range []uint32{0, 1, 37, 100} {
-				yield(numRequest{Op: "from_str_radix", Ty: t.name, S: "1", Radix: radix})
-				yield(numRequest{Op: "from_str_radix", Ty: t.name, S: "", Radix: radix})
 			}
 		}
 		// The byte conversions.
@@ -1936,7 +1904,7 @@ func tryFromError(err error) reply {
 	if !ok {
 		return reply{"go_error": fmt.Sprintf("error is a %T, not a TryFromIntError", err)}
 	}
-	return reply{"err": conversion.Error(), "debug": "TryFromIntError(" + conversion.Kind().String() + ")"}
+	return reply{"err": conversion.Error(), "debug": rs.DebugString(conversion)}
 }
 
 func tryFromReply[T any](value T, err error) reply {
@@ -2067,62 +2035,7 @@ func answerTryFrom(request numRequest) any {
 	return unknownRequest(request)
 }
 
-func parseReply[T any](value T, err error, text func(T) string) reply {
-	if err != nil {
-		parse, ok := err.(*rs.ParseIntError)
-		if !ok {
-			return reply{"go_error": fmt.Sprintf("error is a %T, not a *ParseIntError", err)}
-		}
-		kind := parse.Kind().String()
-		return reply{"err": parse.Error(), "kind": kind, "debug": "ParseIntError { kind: " + kind + " }"}
-	}
-	return reply{"r": text(value)}
-}
-
 func sprint[T any](v T) string { return fmt.Sprint(v) }
-
-func answerFromStrRadix(request numRequest) any {
-	source, radix := request.S, request.Radix
-	switch request.Ty {
-	case "u8":
-		v, err := rs.U8FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "u16":
-		v, err := rs.U16FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "u32":
-		v, err := rs.U32FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "u64":
-		v, err := rs.U64FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "usize":
-		v, err := rs.UsizeFromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "i8":
-		v, err := rs.I8FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "i16":
-		v, err := rs.I16FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "i32":
-		v, err := rs.I32FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "i64":
-		v, err := rs.I64FromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "isize":
-		v, err := rs.IsizeFromStrRadix(source, radix)
-		return parseReply(v, err, sprint)
-	case "u128":
-		v, err := rs.U128FromStrRadix(source, radix)
-		return parseReply(v, err, func(x rs.U128) string { return bigU128(x).String() })
-	case "i128":
-		v, err := rs.I128FromStrRadix(source, radix)
-		return parseReply(v, err, func(x rs.I128) string { return bigI128(x).String() })
-	}
-	return unknownRequest(request)
-}
 
 func hexBytes(bytes []byte) reply { return reply{"hex": fmt.Sprintf("%x", bytes)} }
 
@@ -2388,8 +2301,6 @@ func answerConvert(request numRequest) any {
 	switch request.Op {
 	case "try_from":
 		return answerTryFrom(request)
-	case "from_str_radix":
-		return answerFromStrRadix(request)
 	case "bytes":
 		return answerBytes(request)
 	case "float_to_int":

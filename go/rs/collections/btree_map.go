@@ -22,7 +22,11 @@ import (
 // entries: both values then share the storage, and changing one corrupts the
 // other. That is what a Rust move leaves behind (the source is not used
 // again), so a plain assignment is the right translation of a move, and
-// `map.clone()` is rs.Clone(m) (or m.Clone()).
+// `map.clone()` is rs.Clone(m). rs.Clone rebuilds the map through
+// rs.ReflectMap, cloning keys and values as their own types say: a pointer
+// that stands for an Arc, under an `arc` tag, is shared and not copied. (The
+// map has no Clone method, which rs.Clone would call instead and which could
+// not know about the tag.) A clone of an empty map has no root, as in Rust.
 //
 // Pointers into the map. Get, GetMut, Entry, the first and last accessors and
 // the iterators hand out a *V that points at the value stored in the map, so
@@ -117,23 +121,6 @@ func btreeBulkBuildFromSortedIter[K, V any](sorted []rs.Tuple2[K, V]) BTreeMap[K
 		})
 	}
 	return BTreeMap[K, V]{root: btreeBuild(nodes, nil), length: len(nodes), rooted: true}
-}
-
-// Clone is BTreeMap::clone: a map with a copy of every entry, keys and values
-// cloned by rs.Clone in key order.
-func (m BTreeMap[K, V]) Clone() BTreeMap[K, V] {
-	return m.cloneWith(rs.Clone[K], rs.Clone[V])
-}
-
-func (m BTreeMap[K, V]) cloneWith(cloneKey func(K) K, cloneValue func(V) V) BTreeMap[K, V] {
-	if m.length == 0 {
-		return BTreeMapNew[K, V]()
-	}
-	return BTreeMap[K, V]{
-		root:   btreeCloneSubtree(m.root, nil, cloneKey, cloneValue),
-		length: m.length,
-		rooted: true,
-	}
 }
 
 // Clear is BTreeMap::clear: it removes every entry.

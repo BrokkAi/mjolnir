@@ -17,8 +17,8 @@ import (
 //
 // The zero value is an empty map, the same as HashMapNew. It is changed
 // through a pointer, and a plain assignment shares the storage instead of
-// copying it (the translation of a Rust move); `map.clone()` is rs.Clone(m)
-// (or m.Clone()).
+// copying it (the translation of a Rust move); `map.clone()` is rs.Clone(m),
+// which rebuilds the map through rs.ReflectMap as BTreeMap describes.
 //
 // Keys. Two keys are the same key when Rust's Eq says so, which is decided
 // in one of three ways, chosen once for the key type:
@@ -500,21 +500,6 @@ func (m *HashMap[K, V]) RemoveEntry(key K) rs.Option[rs.Tuple2[K, V]] {
 		return rs.Some(rs.Tuple2[K, V]{F0: entry.key, F1: entry.value})
 	}
 	return rs.None[rs.Tuple2[K, V]]()
-}
-
-// Clone is HashMap::clone: a map with a copy of every entry, keys and values
-// cloned by rs.Clone.
-func (m HashMap[K, V]) Clone() HashMap[K, V] {
-	return m.cloneWith(rs.Clone[K], rs.Clone[V])
-}
-
-func (m HashMap[K, V]) cloneWith(cloneKey func(K) K, cloneValue func(V) V) HashMap[K, V] {
-	cloned := HashMapWithCapacity[K, V](m.Len())
-	m.each(func(entry *hashMapEntry[K, V]) bool {
-		cloned.store(&hashMapEntry[K, V]{key: cloneKey(entry.key), value: cloneValue(entry.value)})
-		return true
-	})
-	return cloned
 }
 
 // Equal is HashMap's PartialEq: the same number of entries, and for every

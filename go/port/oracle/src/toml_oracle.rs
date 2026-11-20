@@ -73,6 +73,10 @@ pub fn handle(request: &Value) -> Value {
                 },
             }
         }
+        // toml with serde-derived types: read a document into the type named
+        // by "type" and write it back out every way toml writes.
+        "derive" => derived::run(crate::text(request, "type"), crate::text(request, "text"))
+            .unwrap_or_else(|| crate::unknown(request)),
         "datetime" => match toml::value::Datetime::from_str(crate::text(request, "text")) {
             Ok(datetime) => json!({"ok": datetime.to_string()}),
             Err(error) => json!({"err": error.to_string()}),
@@ -750,5 +754,198 @@ fn place(item: &mut Item, next_position: &mut usize) {
             }
         }
         _ => {}
+    }
+}
+
+// Types defined the same way in go/crates/toml/oracle_derive_test.go, in the
+// shapes Mjolnir's configuration uses: options with defaults and
+// skip_serializing_if, renamed fields and aliases, deny_unknown_fields,
+// enums in each representation, flatten inside an internally tagged
+// variant, nested tables, arrays of tables, datetimes and toml values.
+mod derived {
+    use std::collections::BTreeMap;
+    use std::fmt::Debug;
+
+    use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+
+    pub fn run(type_name: &str, text: &str) -> Option<Value> {
+        Some(match type_name {
+            "Config" => round_trip::<Config>(text),
+            "Profile" => round_trip::<Profile>(text),
+            "Target" => round_trip::<Target>(text),
+            "Theme" => round_trip::<Theme>(text),
+            "Daemon" => round_trip::<Daemon>(text),
+            "Adjacent" => round_trip::<Adjacent>(text),
+            "Holder" => round_trip::<Holder>(text),
+            _ => return None,
+        })
+    }
+
+    fn round_trip<T: Serialize + DeserializeOwned + Debug>(text: &str) -> Value {
+        match toml::from_str::<T>(text) {
+            Ok(value) => json!({"ok": {
+                "debug": format!("{value:?}"),
+                "to_string": super::ser_result(toml::to_string(&value)),
+                "to_string_pretty": super::ser_result(toml::to_string_pretty(&value)),
+                "value": match toml::Value::try_from(&value) {
+                    Ok(value) => json!({"ok": super::to_canonical(&value)}),
+                    Err(error) => json!({"err": error.to_string()}),
+                },
+            }}),
+            Err(error) => super::de_error(&error),
+        }
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+
+    fn is_true(value: &bool) -> bool {
+        *value
+    }
+
+    fn default_port() -> u16 {
+        22
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Config {
+        pub version: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        #[serde(default = "default_port")]
+        pub port: u16,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub profiles: BTreeMap<String, Profile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub targets: Vec<Target>,
+        #[serde(default)]
+        pub daemon: Daemon,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub theme: Option<Theme>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ratio: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub when: Option<toml::value::Datetime>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub binding: Option<Binding>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub adjacent: Option<Adjacent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub extra: Option<toml::Table>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Profile {
+        pub harness: Harness,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        pub enabled: bool,
+        #[serde(default, rename = "max-turns", alias = "max_turns", skip_serializing_if = "Option::is_none")]
+        pub max_turns: Option<i64>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum Harness {
+        ClaudeCode,
+        Codex,
+        OpenCode,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct SshConnection {
+        pub host: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub user: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub port: Option<u16>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum Target {
+        Local {
+            name: String,
+        },
+        Ssh {
+            name: String,
+            #[serde(flatten)]
+            ssh: SshConnection,
+        },
+        Container {
+            name: String,
+            image: String,
+            #[serde(default)]
+            args: Vec<String>,
+        },
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct Daemon {
+        pub remote_command: Option<String>,
+        pub listen: Option<Listen>,
+        pub verbose: bool,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum Listen {
+        Port(u16),
+        Address(String),
+        Detailed { host: String, port: u16 },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum Binding {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub enum Theme {
+        Dark,
+        Light,
+        Custom(String),
+        Rgb(u8, u8, u8),
+        Named {
+            name: String,
+            #[serde(default)]
+            bold: bool,
+        },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "t", content = "c")]
+    pub enum Adjacent {
+        A,
+        B(i64),
+        C { x: i64 },
+    }
+
+    /// Each enum as the value of a key, where toml reads it through its
+    /// value deserializer rather than the document's.
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Holder {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub theme: Option<Theme>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub target: Option<Target>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub adjacent: Option<Adjacent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub harness: Option<Harness>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub listen: Option<Listen>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub themes: Vec<Theme>,
     }
 }

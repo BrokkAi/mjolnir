@@ -33,11 +33,17 @@
 // same as its New. A collection is changed through a pointer to it. Assigning
 // a collection to another variable does not copy its contents: both values
 // then share the storage, which is what a Rust move leaves behind (the
-// source is not used again). `x.clone()` is rs.Clone(x) or x.Clone(), which
-// clones keys, values and elements with rs.Clone. The pointer types
-// implement rs.ReflectMap (BTreeMap, HashMap) and rs.ReflectSeq (BTreeSet,
-// HashSet, VecDeque), through which the formatter, rs.Clone, rs.Eq, rs.Cmp
-// and serde reach them.
+// source is not used again). The pointer types implement rs.ReflectMap
+// (BTreeMap, HashMap) and rs.ReflectSeq (BTreeSet, HashSet, VecDeque),
+// through which the formatter, rs.Clone, rs.Eq, rs.Cmp and serde reach them.
+// `x.clone()` is rs.Clone(x), which rebuilds the collection through those
+// interfaces, cloning keys, values and elements as their own types say; a
+// pointer that stands for an Arc, under an `arc` tag on the field holding the
+// collection, is shared and not copied, as Rust's clone shares an Arc. The
+// collections have no Clone method on purpose: rs.Clone would call it in
+// place of the rebuild, and it could not see the tag. A cloned VecDeque has
+// the same elements in a buffer grown by pushes, where Rust's clone
+// allocates exactly the length.
 //
 // Get, GetMut, the entry methods, the first and last accessors and the
 // iterators of the maps hand out a *V that points at the value stored in the
@@ -55,7 +61,11 @@
 //
 // BTreeMap and BTreeSet order keys by rs.Cmp and by nothing else, so a
 // derived Ord, a hand-written Compare method, numbers and strings (byte by
-// byte) order exactly as in Rust. Iteration is a Go range-over-func
+// byte) order exactly as in Rust. Paths are the exception to watch: Rust
+// orders and compares a PathBuf by its components ("a/b" before "a-b", and
+// "a//b" equal to "a/b"), and a path held as a Go string orders by bytes. A
+// collection keyed by paths needs a key type whose Compare and HashKey call
+// rspath.Cmp and rspath.HashKey. Iteration is a Go range-over-func
 // sequence, in key order: `for k, v := range m.Iter()` yields each key and a
 // pointer to its value. HashMap and HashSet iterate in Go's map order, which
 // changes from one loop to the next as Rust's does from one run to the next;
@@ -132,13 +142,18 @@
 //
 // # Tests
 //
-// btree_map_test.go and btree_set_test.go are the B-tree suites of alloc
-// (src/collections/btree/map/tests.rs and set/tests.rs), each file listing
-// the tests that have no port and why. The differential tests
-// (oracle_cases_test.go, with the Go side of each operation in
-// oracle_test.go) run seeded random scripts of operations on every
-// collection, with integer and string keys (i64 and u8 elements for the
-// deque), on both sides, comparing every return value and the full content
-// (the deque's layout and capacity included) after every step, against the
-// oracle module go/port/oracle/src/std_collections.rs.
+// btree_map_test.go, btree_set_test.go and vec_deque_test.go are alloc's
+// suites (src/collections/btree/map/tests.rs, set/tests.rs and
+// vec_deque/tests.rs), each file listing the tests that have no port and
+// why. std's HashMap and HashSet suites are not ported; the differential
+// tests cover those types. The differential tests (oracle_cases_test.go,
+// with the Go side of each operation in oracle_test.go) run seeded random
+// scripts of operations on every collection, with integer and string keys
+// (i64 and u8 elements for the deque), on both sides, comparing every
+// return value and the full content (the deque's layout and capacity
+// included) after every step, against the oracle module
+// go/port/oracle/src/std_collections.rs. btree_check_test.go checks the
+// port's own tree after every step of those scripts and of a model test,
+// hash_keys_test.go checks how hash keys are told apart, and clone_test.go
+// how rs.Clone treats the pointers inside a collection.
 package collections

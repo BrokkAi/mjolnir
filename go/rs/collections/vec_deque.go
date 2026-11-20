@@ -19,7 +19,10 @@ import (
 //
 // The zero value is an empty deque. It is changed through a pointer, and a
 // plain assignment shares the buffer instead of copying it (the translation
-// of a Rust move); `deque.clone()` is rs.Clone(d) (or d.Clone()).
+// of a Rust move); `deque.clone()` is rs.Clone(d), which rebuilds the deque
+// through rs.ReflectSeq as BTreeMap describes, pushing the clones of the
+// elements onto a new deque: the copy holds the same elements in a buffer
+// grown as pushes grow it, where Rust's clone allocates exactly the length.
 //
 // Elements are stored inline in the buffer, as in Rust and as in a Go slice.
 // Get, GetMut, Front, Back, Index and the iterators return pointers into the
@@ -1693,29 +1696,6 @@ func (d *VecDeque[T]) resize(newLen int, value T, clone func(T) T) bool {
 	}
 	d.Truncate(newLen)
 	return true
-}
-
-// Clone is VecDeque::clone: a deque with a clone (rs.Clone) of every
-// element.
-func (d VecDeque[T]) Clone() VecDeque[T] {
-	return d.cloneWith(rs.Clone[T])
-}
-
-func (d VecDeque[T]) cloneWith(clone func(T) T) VecDeque[T] {
-	deq := VecDequeWithCapacity[T](d.length)
-	a, b := d.AsSlices()
-	index := 0
-	deq.extendTrustedLen(d.length, func() T {
-		var element T
-		if index < len(a) {
-			element = a[index]
-		} else {
-			element = b[index-len(a)]
-		}
-		index++
-		return clone(element)
-	})
-	return deq
 }
 
 // Equal is VecDeque's PartialEq: the same length and equal elements (by

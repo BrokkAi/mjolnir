@@ -317,7 +317,7 @@ func jsonUnexpected(unexp serde.DeUnexpected) string {
 	case *serde.DeUnexpectedUnit:
 		return "null"
 	case *serde.DeUnexpectedFloat:
-		return "floating point `" + formatF64(u.F0) + "`"
+		return "floating point `" + formatF64Display(u.F0) + "`"
 	}
 	return unexp.String()
 }

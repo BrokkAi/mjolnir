@@ -15,22 +15,16 @@ type RenderStringElement interface {
 	rune | string
 }
 
-// renderStringDefaultColor is Element::default_color.
+// renderStringDefaultColor is Element::default_color: U+2588 FULL BLOCK for
+// a dark module and a space for a light one.
 func renderStringDefaultColor[P RenderStringElement](color Color) P {
 	var pixel P
-	switch any(pixel).(type) {
-	case rune:
-		return P(ColorSelect[rune](color, '█', ' '))
-	default:
-		return renderStringPixelFromString[P](ColorSelect(color, "█", " "))
+	switch p := any(&pixel).(type) {
+	case *rune:
+		*p = ColorSelect(color, '\u2588', ' ')
+	case *string:
+		*p = ColorSelect(color, "\u2588", " ")
 	}
-}
-
-// renderStringPixelFromString makes a string pixel of P from s.
-func renderStringPixelFromString[P RenderStringElement](s string) P {
-	var pixel P
-	p := any(&pixel)
-	*(p.(*string)) = s
 	return pixel
 }
 

@@ -33,8 +33,8 @@ import (
 //   - bool, the integer types (int is isize, uint and uintptr are usize, a
 //     bare rune is i32), float32 and float64, and string (also for a Path or
 //     an OsStr: a byte that is not UTF-8 prints as `\xNN` under `{:?}`, as a
-//     Path does). Char is a char. A type implementing fmtInt128 (U128,
-//     I128) is a u128 or an i128.
+//     Path does). Char is a char. U128 and I128 are u128 and i128 once they
+//     implement fmtInt128 (fmt_num.go).
 //   - A slice or an array is a slice or an array; []byte is a Vec<u8>.
 //   - A pointer is a reference or a Box: it prints what it points to. `{:p}`
 //     prints the address of a pointer, a map, a func or a channel, and the

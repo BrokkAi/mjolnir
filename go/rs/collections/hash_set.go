@@ -293,16 +293,6 @@ func (s *HashSet[T]) Take(value T) rs.Option[T] {
 	return rs.None[T]()
 }
 
-// Clone is HashSet::clone: a set with a copy of every element, cloned by
-// rs.Clone.
-func (s HashSet[T]) Clone() HashSet[T] {
-	return s.cloneWith(rs.Clone[T])
-}
-
-func (s HashSet[T]) cloneWith(cloneElement func(T) T) HashSet[T] {
-	return HashSet[T]{base: s.base.cloneWith(cloneElement, func(value struct{}) struct{} { return value })}
-}
-
 // Equal is HashSet's PartialEq: the same number of elements, and every
 // element of s in other.
 func (s HashSet[T]) Equal(other *HashSet[T]) bool {

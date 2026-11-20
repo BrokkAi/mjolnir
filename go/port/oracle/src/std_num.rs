@@ -17,7 +17,6 @@
 //! - `{"op":"usize63","f":method,"a":..,"b":..}` calls a usize method and
 //!   applies the port's rule for usize (an int, so never above isize::MAX).
 //! - `{"op":"try_from","from":S,"to":T,"a":..}`
-//! - `{"op":"from_str_radix","ty":T,"s":..,"radix":u32}`
 //! - `{"op":"bytes","ty":T,"f":"to_le"|..|"from_ne","a":..|"hex":..}`
 //! - `{"op":"float_to_int","from":F,"to":T,"bits":..}`, `{"op":"int_to_float",..}`,
 //!   `{"op":"float_to_float","from":F,"bits":..}`
@@ -444,27 +443,6 @@ fn try_from(request: &Value) -> Value {
     sources!(u8, u16, u32, u64, usize, u128, i8, i16, i32, i64, isize, i128)
 }
 
-fn from_str_radix(request: &Value) -> Value {
-    let source = text(request, "s");
-    let radix = number_u32(request, "radix");
-    macro_rules! types {
-        ($($t:ident),*) => {
-            match text(request, "ty") {
-                $(stringify!($t) => match <$t>::from_str_radix(source, radix) {
-                    Ok(value) => val(value),
-                    Err(error) => json!({
-                        "err": error.to_string(),
-                        "kind": format!("{:?}", error.kind()),
-                        "debug": format!("{error:?}"),
-                    }),
-                },)*
-                _ => crate::unknown(request),
-            }
-        };
-    }
-    types!(u8, u16, u32, u64, usize, u128, i8, i16, i32, i64, isize, i128)
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -764,7 +742,6 @@ pub fn handle(request: &Value) -> Value {
         "int" => int_method(request),
         "usize63" => usize63(request),
         "try_from" => try_from(request),
-        "from_str_radix" => from_str_radix(request),
         "bytes" => bytes(request),
         "float_to_int" => float_to_int(request),
         "int_to_float" => int_to_float(request),

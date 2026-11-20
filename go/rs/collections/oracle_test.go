@@ -2,7 +2,8 @@ package collections
 
 // The Go side of the oracle module go/port/oracle/src/std_collections.rs:
 // each script of operations that the Rust collections ran is run on the
-// port, and what every step returns and leaves behind must be the same.
+// port, and what every step returns and leaves behind must be the same. The
+// scripts are generated in oracle_cases_test.go.
 
 import (
 	"encoding/binary"
@@ -497,7 +498,7 @@ func btreeMapStep[K any](item oracleItem[K], m *BTreeMap[K, int64], name string,
 		m.Clear()
 		return nil
 	case "clone":
-		*m = m.cloneWith(identity[K], identity[int64])
+		*m = rs.Clone(*m)
 		return nil
 	case "take":
 		taken := *m
@@ -616,7 +617,7 @@ func btreeSetStep[T any](item oracleItem[T], s *BTreeSet[T], name string, args [
 		s.Clear()
 		return nil
 	case "clone":
-		*s = s.cloneWith(identity[T])
+		*s = rs.Clone(*s)
 		return nil
 	case "iter_rev":
 		return jsonList(s.IterRev())
@@ -796,7 +797,7 @@ func hashMapStep[K comparable](item oracleItem[K], m *HashMap[K, int64], name st
 		m.Clear()
 		return nil
 	case "clone":
-		*m = m.cloneWith(identity[K], identity[int64])
+		*m = rs.Clone(*m)
 		return nil
 	case "keys":
 		return sortedItems(m.Keys())
@@ -873,7 +874,7 @@ func hashSetStep[T comparable](item oracleItem[T], s *HashSet[T], name string, a
 		s.Clear()
 		return nil
 	case "clone":
-		*s = s.cloneWith(identity[T])
+		*s = rs.Clone(*s)
 		return nil
 	case "len":
 		return []any{s.Len(), s.IsEmpty()}
@@ -1131,7 +1132,13 @@ func vecDequeStep[T any](item oracleItem[T], d *VecDeque[T], name string, args [
 		*d = VecDequeNew[T]()
 		return nil
 	case "clone":
-		*d = d.cloneWith(identity[T])
+		// rs.Clone gives the same elements; Rust's own clone, which the
+		// script continues from, also has its capacity.
+		cloned := rs.Clone(*d)
+		if !cloned.Equal(d) {
+			panic("rs.Clone of a VecDeque does not hold the same elements")
+		}
+		*d = d.cloneExact(identity[T])
 		return nil
 	case "into_vec":
 		taken := *d

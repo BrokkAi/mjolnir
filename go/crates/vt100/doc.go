@@ -115,7 +115,10 @@
 // characters, every control and escape sequence with random parameters,
 // OSC and DCS strings, malformed and truncated sequences and random bytes,
 // cut into chunks at random places with resizes and scrollback changes
-// between them. Every code point is printed through both to compare widths.
-// MJ_ORACLE=live adds the full matrix on every screen and 60,000 fresh
-// streams.
+// between them. It also holds the recorded sessions of the crate's test
+// data: every fixture's inputs, the first 500 frames of the crawl recording
+// (with and without a scrollback and resizes) and the weechat typescript in
+// chunks. Every code point is printed through both to compare widths.
+// MJ_ORACLE=live adds the full matrix on every screen, all 7,625 crawl
+// frames and 60,000 fresh streams.
 package vt100

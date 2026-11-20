@@ -21,6 +21,3 @@ func FmtTestInt128(hi, lo uint64, signed bool) any {
 // FmtTestIsWhitespace is char::is_whitespace as the format-string parser
 // uses it.
 func FmtTestIsWhitespace(c rune) bool { return fmtCharIsWhitespace(c) }
-
-// FmtTestUnicodeVersion is core::unicode::UNICODE_VERSION of the tables.
-func FmtTestUnicodeVersion() [3]uint8 { return fmtUnicodeVersion }

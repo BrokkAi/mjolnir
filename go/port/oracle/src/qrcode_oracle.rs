@@ -265,7 +265,16 @@ pub fn handle(request: &Value) -> Value {
             let data = data_of(request);
             let version = version_of(&request["version"]).unwrap();
             match ec::construct_codewords(&data, version, level_of(&request["level"]).unwrap()) {
-                Ok((blocks, ec)) => json!({ "data": hex(&blocks), "ec": hex(&ec) }),
+                // Digests, with the first bytes to show where a difference
+                // starts.
+                Ok((blocks, ec)) => json!({
+                    "data": fnv(blocks.iter().copied()),
+                    "data_head": hex(&blocks[..blocks.len().min(12)]),
+                    "data_len": blocks.len(),
+                    "ec": fnv(ec.iter().copied()),
+                    "ec_head": hex(&ec[..ec.len().min(12)]),
+                    "ec_len": ec.len(),
+                }),
                 Err(error) => json!({ "err": format!("{error:?}") }),
             }
         }
@@ -287,7 +296,7 @@ pub fn handle(request: &Value) -> Value {
             let version = version_of(&request["version"]).unwrap();
             let level = level_of(&request["level"]).unwrap();
             let data = data_of(request);
-            let ec = unhex(crate::text(request, "ec_hex"));
+            let ec = data_of(&request["ec"]);
             let mut canvas = Canvas::new(version, level);
             canvas.draw_all_functional_patterns();
             canvas.draw_data(&data, &ec);

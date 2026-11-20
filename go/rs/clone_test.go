@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"errors"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -864,6 +865,61 @@ func TestCloneRebuildsCollections(t *testing.T) {
 	if keyedClone.keys[0] == probeShape(key) || keyedClone.keys[0].(*probeShape_Rect).Width != 1 {
 		t.Fatal("an enum key must be copied")
 	}
+}
+
+// probeMethodMap is a collection with Clone, Equal and Compare methods of
+// its own, as those of go/rs/collections have for direct calls. The
+// structural operations must go through ReflectMap instead.
+type probeMethodMap[K cmp.Ordered, V any] struct {
+	probeTreeMap[K, V]
+}
+
+func (m probeMethodMap[K, V]) Clone() probeMethodMap[K, V] {
+	panic("the structural clone called the collection's own Clone")
+}
+
+func (m probeMethodMap[K, V]) Equal(other *probeMethodMap[K, V]) bool {
+	panic("the structural equality called the collection's own Equal")
+}
+
+func (m probeMethodMap[K, V]) Compare(other *probeMethodMap[K, V]) int {
+	panic("the structural order called the collection's own Compare")
+}
+
+// Hard-won: e641657c7: a collection's own Clone and Compare hid its elements from an arc tag and from partial_cmp.
+func TestCloneEqAndCmpReachThroughACollectionsOwnMethods(t *testing.T) {
+	shared := &probeBox{values: []int{1}}
+	type holder struct {
+		Shared probeMethodMap[string, *probeBox] `rs:"shared,arc"`
+		Owned  probeMethodMap[string, *probeBox] `rs:"owned"`
+	}
+	var original holder
+	original.Shared.Insert("k", shared)
+	original.Owned.Insert("k", shared)
+	cloned := Clone(original)
+	if *cloned.Shared.Get("k") != shared {
+		t.Fatal("an arc tag must reach the Arcs in a collection")
+	}
+	if *cloned.Owned.Get("k") == shared || (*cloned.Owned.Get("k")).values[0] != 1 {
+		t.Fatal("a Box in a collection is a new allocation")
+	}
+	if top := Clone(original.Owned); *top.Get("k") == shared {
+		t.Fatal("Clone of the collection itself copies its boxes")
+	}
+	if !Eq(original, cloned) || Cmp(original, cloned) != 0 || !Eq(original.Owned, cloned.Owned) {
+		t.Fatal("a collection is equal to its clone")
+	}
+
+	var nan, one probeMethodMap[string, float64]
+	nan.Insert("a", math.NaN())
+	one.Insert("a", 1)
+	if PartialCmp(nan, one).IsSome() || PartialCmp(probeFloatHolder{nan}, probeFloatHolder{one}).IsSome() || Eq(nan, nan) {
+		t.Fatal("a NaN in a collection leaves it unordered and unequal to itself")
+	}
+}
+
+type probeFloatHolder struct {
+	values probeMethodMap[string, float64]
 }
 
 // probeHandle is a runtime handle: it embeds the marker.

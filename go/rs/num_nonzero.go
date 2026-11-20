@@ -30,7 +30,7 @@ func NonZeroUsizeNew(n int) Option[NonZeroUsize] {
 // NonZeroUsizeTryFrom is `NonZeroUsize::try_from(n)`.
 func NonZeroUsizeTryFrom(n int) (NonZeroUsize, error) {
 	if n == 0 {
-		return 0, TryFromIntError{kind: IntErrorKind_Zero}
+		return 0, TryFromIntError{kind: intErrorKind_Zero}
 	}
 	return NonZeroUsize(n), nil
 }

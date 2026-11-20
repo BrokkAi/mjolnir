@@ -4,12 +4,12 @@ import (
 	"cmp"
 )
 
-// The bodies below are placeholders so that packages built on rs compile
-// while the formatter and the structural operations are being written. Each
-// is replaced by its real implementation (fmt_*.go, clone.go, eq.go, cmp.go).
+// This file held the placeholders that let packages built on rs compile
+// while the formatter and the structural operations were being written; they
+// have been replaced by fmt_*.go, clone.go, eq.go and cmp.go.
 
-// compareOrdered orders the built-in ordered types. It stays when the
-// structural comparison replaces the placeholders above: it is the fast path.
+// compareOrdered orders the built-in ordered types: the fast path of Eq and
+// Cmp (eq.go, cmp.go) for values whose type is exactly one of them.
 func compareOrdered(a, b any) (int, bool) {
 	switch x := a.(type) {
 	case string:

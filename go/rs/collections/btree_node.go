@@ -334,20 +334,6 @@ func btreeBuild[K, V any](nodes []*btreeNode[K, V], parent *btreeNode[K, V]) *bt
 	return n
 }
 
-// btreeCloneSubtree copies the subtree rooted at n, cloning keys and values
-// in key order as clone_subtree in map.rs does.
-func btreeCloneSubtree[K, V any](n, parent *btreeNode[K, V], cloneKey func(K) K, cloneValue func(V) V) *btreeNode[K, V] {
-	if n == nil {
-		return nil
-	}
-	copied := &btreeNode[K, V]{parent: parent, height: n.height}
-	copied.left = btreeCloneSubtree(n.left, copied, cloneKey, cloneValue)
-	copied.key = cloneKey(n.key)
-	copied.value = cloneValue(n.value)
-	copied.right = btreeCloneSubtree(n.right, copied, cloneKey, cloneValue)
-	return copied
-}
-
 // ascend calls yield with each node from first to last in key order. A nil
 // last means the end of the map. The node after the current one is found
 // before yield runs, so yield may remove the node it was given.

@@ -32,7 +32,8 @@ import (
 //     collections and sequences (BTreeMap, BTreeSet, VecDeque) are compared
 //     element by element in iteration order.
 //   - A type with a method `Equal(other T) bool` or `Equal(other *T) bool` is
-//     compared by it wherever it appears.
+//     compared by it wherever it appears, except a collection, which is
+//     compared through ReflectMap or ReflectSeq.
 //   - Funcs and channels are equal when they are the same func value or
 //     channel. So are two pointers to a type that Clone never copies (a lock,
 //     a NoReflectClone type): Rust cannot compare those at all.
@@ -54,13 +55,16 @@ func equalValues[T any](a, b T) bool {
 			return order == 0
 		}
 	}
-	if equaler, ok := any(&a).(interface{ Equal(T) bool }); ok {
-		return equaler.Equal(b)
+	s := shapeOf(t)
+	if s.equal.ok {
+		if equaler, ok := any(&a).(interface{ Equal(T) bool }); ok {
+			return equaler.Equal(b)
+		}
+		if equaler, ok := any(&a).(interface{ Equal(*T) bool }); ok {
+			return equaler.Equal(&b)
+		}
 	}
-	if equaler, ok := any(&a).(interface{ Equal(*T) bool }); ok {
-		return equaler.Equal(&b)
-	}
-	return shapeOf(t).equalAt(unsafe.Pointer(&a), unsafe.Pointer(&b))
+	return s.equalAt(unsafe.Pointer(&a), unsafe.Pointer(&b))
 }
 
 // equalAt compares the values at a and b, which both point to memory of the

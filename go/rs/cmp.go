@@ -29,7 +29,8 @@ import (
 //   - Ordered collections (BTreeMap, BTreeSet, VecDeque) compare entry by
 //     entry in iteration order, as slices do.
 //   - A type with a method `Compare(other T) int` or `Compare(other *T) int`
-//     is ordered by it wherever it appears.
+//     is ordered by it wherever it appears, except a collection, which is
+//     ordered through ReflectMap or ReflectSeq.
 //
 // Floats have only a partial order: a NaN is neither less than, equal to nor
 // greater than anything. PartialCmp reports that as None, exactly as
@@ -157,13 +158,16 @@ func partialCompareValues[T any](a, b T) (int, bool) {
 			return order, true
 		}
 	}
-	if comparer, ok := any(&a).(interface{ Compare(T) int }); ok {
-		return sign(int64(comparer.Compare(b))), true
+	s := shapeOf(t)
+	if s.compare.ok {
+		if comparer, ok := any(&a).(interface{ Compare(T) int }); ok {
+			return sign(int64(comparer.Compare(b))), true
+		}
+		if comparer, ok := any(&a).(interface{ Compare(*T) int }); ok {
+			return sign(int64(comparer.Compare(&b))), true
+		}
 	}
-	if comparer, ok := any(&a).(interface{ Compare(*T) int }); ok {
-		return sign(int64(comparer.Compare(&b))), true
-	}
-	return shapeOf(t).compareAt(unsafe.Pointer(&a), unsafe.Pointer(&b))
+	return s.compareAt(unsafe.Pointer(&a), unsafe.Pointer(&b))
 }
 
 func sign(order int64) int {

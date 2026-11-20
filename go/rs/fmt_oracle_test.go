@@ -491,6 +491,14 @@ func TestFmtOracleF64(t *testing.T) {
 			specs := [][]any{{"", "", nil, nil, 0}, {"", "?", nil, nil, 0}, {"", "e", nil, nil, 0}}
 			yield(oracleFmtRequest([]any{"f64", strconv.FormatUint(bits, 10)}, append(specs, r.floatSpecs(oracleSpecs(5))...)))
 		}
+		// The longest outputs: every digit of the smallest and the largest
+		// values, and the largest precision and width a u16 holds.
+		for _, bits := range []uint64{1, 0x000FFFFFFFFFFFFF, 0x0010000000000000, math.Float64bits(math.MaxFloat64), math.Float64bits(-0.1)} {
+			yield(oracleFmtRequest([]any{"f64", strconv.FormatUint(bits, 10)}, [][]any{
+				{"", "", nil, 1074, 0}, {"", "?", nil, 1100, 1}, {"", "e", nil, 767, 2}, {"", "E", nil, 65535, 3},
+				{"+", "", 65535, 65535, 1}, {"0", "e", 65535, nil, 2},
+			}))
+		}
 		for i := 0; i < oracleRandoms(1500); i++ {
 			// Any bit pattern: every exponent is as likely as another.
 			specs := [][]any{{"", "", nil, nil, 0}, {"", "?", nil, nil, 0}}
@@ -520,6 +528,13 @@ func TestFmtOracleF32(t *testing.T) {
 		for _, bits := range oracleF32Edges() {
 			specs := [][]any{{"", "", nil, nil, 0}, {"", "?", nil, nil, 0}, {"", "e", nil, nil, 0}}
 			yield(oracleFmtRequest([]any{"f32", strconv.FormatUint(uint64(bits), 10)}, append(specs, r.floatSpecs(oracleSpecs(5))...)))
+		}
+		// The longest outputs, as for f64.
+		for _, bits := range []uint32{1, 0x007FFFFF, 0x00800000, math.Float32bits(math.MaxFloat32), math.Float32bits(-0.1)} {
+			yield(oracleFmtRequest([]any{"f32", strconv.FormatUint(uint64(bits), 10)}, [][]any{
+				{"", "", nil, 149, 0}, {"", "?", nil, 200, 1}, {"", "e", nil, 112, 2}, {"", "E", nil, 65535, 3},
+				{"+", "", 65535, 65535, 1}, {"0", "e", 65535, nil, 2},
+			}))
 		}
 		for i := 0; i < oracleRandoms(1500); i++ {
 			specs := [][]any{{"", "", nil, nil, 0}, {"", "?", nil, nil, 0}}

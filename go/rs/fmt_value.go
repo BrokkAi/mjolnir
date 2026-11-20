@@ -339,6 +339,13 @@ func fmtDisplay(value any, f *Formatter) error {
 		return fmtFloatToDecimalDisplay(f, fmtFloatOfF64(math.Float64bits(v)))
 	case float32:
 		return fmtFloatToDecimalDisplay(f, fmtFloatOfF32(math.Float32bits(v)))
+	case fmtInt128:
+		// u128 and i128: the formatter's own, before any method of theirs.
+		if fmtIsNil(reflect.ValueOf(value)) {
+			return f.buf.writeStr(fmtNilText)
+		}
+		hi, lo, signed := v.fmtInt128()
+		return fmtDisplayInt128(hi, lo, signed, f)
 	case Display:
 		if fmtIsNil(reflect.ValueOf(value)) {
 			return f.buf.writeStr(fmtNilText)
@@ -359,6 +366,12 @@ func fmtDisplayReflect(v reflect.Value, f *Formatter) error {
 	}
 	info := fmtTypeInfoOf(t)
 
+	// u128 and i128: the formatter's own, before any method of theirs.
+	if info.int128.any() {
+		hi, lo, signed := fmtInt128Of(v, info)
+		return fmtDisplayInt128(hi, lo, signed, f)
+	}
+
 	// impl Display
 	if info.display.direct {
 		return v.Interface().(Display).FmtDisplay(f)
@@ -369,11 +382,6 @@ func fmtDisplayReflect(v reflect.Value, f *Formatter) error {
 	if kind == reflect.Pointer {
 		// impl<T: Display> Display for &T, and for Box<T>, Rc<T>, Arc<T>
 		return fmtDisplayReflect(v.Elem(), f)
-	}
-
-	if info.int128.any() {
-		hi, lo, signed := fmtInt128Of(v, info)
-		return fmtDisplayInt128(hi, lo, signed, f)
 	}
 
 	// Duration and SystemTime have no Display in Rust; their Go types have a
@@ -474,6 +482,13 @@ func fmtDebug(value any, f *Formatter) error {
 		return fmtFloatToGeneralDebug(f, fmtFloatOfF64(math.Float64bits(v)))
 	case float32:
 		return fmtFloatToGeneralDebug(f, fmtFloatOfF32(math.Float32bits(v)))
+	case fmtInt128:
+		// u128 and i128: the formatter's own, before any method of theirs.
+		if fmtIsNil(reflect.ValueOf(value)) {
+			return f.buf.writeStr(fmtNilText)
+		}
+		hi, lo, signed := v.fmtInt128()
+		return fmtDebugInt128(hi, lo, signed, f)
 	case Debug:
 		if fmtIsNil(reflect.ValueOf(value)) {
 			return f.buf.writeStr(fmtNilText)
@@ -498,6 +513,12 @@ func fmtDebugReflect(v reflect.Value, f *Formatter) error {
 	}
 	info := fmtTypeInfoOf(t)
 
+	// u128 and i128: the formatter's own, before any method of theirs.
+	if info.int128.any() {
+		hi, lo, signed := fmtInt128Of(v, info)
+		return fmtDebugInt128(hi, lo, signed, f)
+	}
+
 	// A hand-written impl Debug.
 	if info.debug.direct {
 		return v.Interface().(Debug).FmtDebug(f)
@@ -515,11 +536,6 @@ func fmtDebugReflect(v reflect.Value, f *Formatter) error {
 		return fmtDebugDuration(time.Duration(v.Int()), f)
 	case fmtTimeType:
 		return fmtDebugSystemTime(v.Interface().(time.Time), f)
-	}
-
-	if info.int128.any() {
-		hi, lo, signed := fmtInt128Of(v, info)
-		return fmtDebugInt128(hi, lo, signed, f)
 	}
 
 	// The collections describe themselves.

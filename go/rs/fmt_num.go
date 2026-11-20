@@ -199,7 +199,14 @@ func fmtIlog10U64(n uint64) int {
 // through fmtInt128; the arithmetic that 64 bits cannot hold is done with
 // math/big, since these forms are rare and exactness is all that matters.
 
-// fmtInt128 is implemented by the 128-bit integer types.
+// fmtInt128 is how the 128-bit integer types of this package present
+// themselves to the formatter. A type that implements it prints as Rust
+// prints u128 or i128 under every trait (Display; Debug, with `{:x?}`; the
+// radix forms; LowerExp and UpperExp), ahead of any FmtDisplay or FmtDebug
+// method of its own:
+//
+//	func (x U128) fmtInt128() (hi, lo uint64, signed bool) { return x.hi, x.lo, false }
+//	func (x I128) fmtInt128() (hi, lo uint64, signed bool) { return x.hi, x.lo, true }
 type fmtInt128 interface {
 	// fmtInt128 returns the value's two's-complement bits as two halves and
 	// whether the type is signed.

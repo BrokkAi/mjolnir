@@ -20,79 +20,52 @@ import "math"
 //     The oracle tests pin this.
 //   - `x as T` between integer types is Go's conversion.
 
-// IntErrorKind is core::num::IntErrorKind: why an integer could not be
-// parsed or converted.
-type IntErrorKind uint8
+// intErrorKind is the core::num::IntErrorKind a TryFromIntError holds, which
+// chooses its Display text and shows in its Debug form. The exported type is
+// strs.IntErrorKind, which ParseIntError carries; go/rs cannot import strs,
+// and `TryFromIntError::kind` is unstable, so no Rust code reads this kind
+// and it stays private. A TryFromIntError never holds Empty or InvalidDigit.
+type intErrorKind uint8
 
 const (
-	// IntErrorKind_Empty is the value being parsed is empty.
-	IntErrorKind_Empty IntErrorKind = iota
-	// IntErrorKind_InvalidDigit is a character that is not a digit of the
-	// radix, including a sign on its own.
-	IntErrorKind_InvalidDigit
-	// IntErrorKind_PosOverflow is an integer too large for the target type.
-	IntErrorKind_PosOverflow
-	// IntErrorKind_NegOverflow is an integer too small for the target type.
-	IntErrorKind_NegOverflow
-	// IntErrorKind_Zero is zero where the target type cannot be zero.
-	IntErrorKind_Zero
-	// IntErrorKind_NotAPowerOfTwo is a value that had to be a power of two.
-	IntErrorKind_NotAPowerOfTwo
+	intErrorKind_PosOverflow intErrorKind = iota + 2
+	intErrorKind_NegOverflow
+	intErrorKind_Zero
+	intErrorKind_NotAPowerOfTwo
 )
 
-var _ = RegisterEnum[IntErrorKind]("IntErrorKind",
-	Const(IntErrorKind_Empty, "Empty"),
-	Const(IntErrorKind_InvalidDigit, "InvalidDigit"),
-	Const(IntErrorKind_PosOverflow, "PosOverflow"),
-	Const(IntErrorKind_NegOverflow, "NegOverflow"),
-	Const(IntErrorKind_Zero, "Zero"),
-	Const(IntErrorKind_NotAPowerOfTwo, "NotAPowerOfTwo"),
-)
-
-// String is the variant's name, which is its derived Debug form.
-func (k IntErrorKind) String() string {
+// FmtDebug is the derived Debug of the variant: its name.
+func (k intErrorKind) FmtDebug(f *Formatter) error {
 	switch k {
-	case IntErrorKind_Empty:
-		return "Empty"
-	case IntErrorKind_InvalidDigit:
-		return "InvalidDigit"
-	case IntErrorKind_PosOverflow:
-		return "PosOverflow"
-	case IntErrorKind_NegOverflow:
-		return "NegOverflow"
-	case IntErrorKind_Zero:
-		return "Zero"
-	case IntErrorKind_NotAPowerOfTwo:
-		return "NotAPowerOfTwo"
+	case intErrorKind_PosOverflow:
+		return f.WriteStr("PosOverflow")
+	case intErrorKind_NegOverflow:
+		return f.WriteStr("NegOverflow")
+	case intErrorKind_Zero:
+		return f.WriteStr("Zero")
+	case intErrorKind_NotAPowerOfTwo:
+		return f.WriteStr("NotAPowerOfTwo")
 	default:
 		panic(Unreachable(uint8(k)))
 	}
 }
 
-// FmtDebug is the derived Debug of a data-free enum: the variant's name.
-func (k IntErrorKind) FmtDebug(f *Formatter) error {
-	return f.WriteStr(k.String())
-}
-
 // TryFromIntError is core::num::TryFromIntError: the error of a checked
 // conversion between integer types.
 type TryFromIntError struct {
-	kind IntErrorKind
+	kind intErrorKind
 }
-
-// Kind is TryFromIntError::kind.
-func (e TryFromIntError) Kind() IntErrorKind { return e.kind }
 
 // String is the error's Display text.
 func (e TryFromIntError) String() string {
 	switch e.kind {
-	case IntErrorKind_PosOverflow:
+	case intErrorKind_PosOverflow:
 		return "number too large to fit in target type"
-	case IntErrorKind_NegOverflow:
+	case intErrorKind_NegOverflow:
 		return "number too small to fit in target type"
-	case IntErrorKind_Zero:
+	case intErrorKind_Zero:
 		return "number would be zero for non-zero type"
-	case IntErrorKind_NotAPowerOfTwo:
+	case intErrorKind_NotAPowerOfTwo:
 		return "number is not a power of two"
 	default:
 		panic(Unreachable())
@@ -115,12 +88,12 @@ func (e TryFromIntError) FmtDebug(f *Formatter) error {
 func tryFromInt[T, S anyInt](v S) (T, error) {
 	if intIsSigned[S]() && v < 0 {
 		if !intIsSigned[T]() || int64(v) < int64(intMin[T]()) {
-			return 0, TryFromIntError{kind: IntErrorKind_NegOverflow}
+			return 0, TryFromIntError{kind: intErrorKind_NegOverflow}
 		}
 		return T(v), nil
 	}
 	if uint64(v) > uint64(intMax[T]()) {
-		return 0, TryFromIntError{kind: IntErrorKind_PosOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_PosOverflow}
 	}
 	return T(v), nil
 }
@@ -157,10 +130,10 @@ func IsizeTryFrom[S anyInt](v S) (int, error) { return tryFromInt[int](v) }
 // length or index reaches).
 func UsizeTryFrom[S anyInt](v S) (int, error) {
 	if intIsSigned[S]() && v < 0 {
-		return 0, TryFromIntError{kind: IntErrorKind_NegOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_NegOverflow}
 	}
 	if uint64(v) > uint64(UsizeMax) {
-		return 0, TryFromIntError{kind: IntErrorKind_PosOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_PosOverflow}
 	}
 	return int(v), nil
 }

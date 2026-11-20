@@ -25,7 +25,7 @@ func TestBTreeSet_test_clone_eq(t *testing.T) {
 	m.Insert(1)
 	m.Insert(2)
 
-	expectEq(t, m.Clone(), m)
+	expectEq(t, rs.Clone(m), m)
 }
 
 func TestBTreeSet_test_iter_min_max(t *testing.T) {
@@ -473,7 +473,7 @@ func TestBTreeSet_test_ord_absence(t *testing.T) {
 	}
 
 	setClone := func(set BTreeSet[nonOrd]) {
-		set = set.Clone()
+		set = rs.Clone(set)
 	}
 
 	setFn(BTreeSetNew[nonOrd]())
@@ -532,7 +532,7 @@ func TestBTreeSet_test_first_last(t *testing.T) {
 	expectEq(t, a.PopFirst(), rs.Some(6))
 	expectEq(t, a.PopFirst(), rs.Some(7))
 	expectEq(t, a.PopFirst(), rs.Some(8))
-	cloned := a.Clone()
+	cloned := rs.Clone(a)
 	expectEq(t, cloned.PopLast(), rs.Some(9))
 	expectEq(t, a.PopFirst(), rs.Some(9))
 	expectEq(t, a.PopFirst(), rs.None[int]())

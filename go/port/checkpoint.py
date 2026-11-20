@@ -83,6 +83,16 @@ def compress_corpora() -> None:
             os.remove(plain)
 
 
+def own_pathspecs(directory: str, all_candidates: list[str]) -> list[str]:
+    """Git pathspecs for `directory` without the candidate directories nested
+    in it (go/rs holds go/rs/strs, which is checked and staged on its own)."""
+    specs = [directory]
+    for other in all_candidates:
+        if other != directory and other.startswith(directory + "/"):
+            specs.append(f":(exclude){other}")
+    return specs
+
+
 def go_dirs(snapshot: str, directory: str) -> list[str]:
     """Package directories under `directory` in the snapshot. `go/rs` itself
     is one package; its subdirectories are candidates of their own."""
@@ -117,11 +127,16 @@ def check(snapshot: str, directory: str, env: dict) -> str | None:
             if result.returncode != 0:
                 lines = [l for l in (result.stderr + result.stdout).splitlines() if l and not l.startswith("#")]
                 return f"{step[1]}: " + (lines[0] if lines else "failed")
-        for goos in ("darwin", "windows"):
-            result = run(["go", "build", f"./{package}/"], cwd=snapshot, env={**env, "GOOS": goos})
-            if result.returncode != 0:
-                lines = [l for l in (result.stderr + result.stdout).splitlines() if l and not l.startswith("#")]
-                return f"build for {goos}: " + (lines[0] if lines else "failed")
+        # The Go CI lane builds and vets every package for these targets, and
+        # vet compiles the tests too.
+        for goos in ("linux", "darwin", "windows"):
+            for goarch in ("amd64", "arm64"):
+                target = {**env, "GOOS": goos, "GOARCH": goarch}
+                for step in (["go", "build", f"./{package}/"], ["go", "vet", f"./{package}/"]):
+                    result = run(step, cwd=snapshot, env=target)
+                    if result.returncode != 0:
+                        lines = [l for l in (result.stderr + result.stdout).splitlines() if l and not l.startswith("#")]
+                        return f"{step[1]} for {goos}/{goarch}: " + (lines[0] if lines else "failed")
         try:
             result = run(["go", "test", "-count=1", "-tags", TAGS, f"./{package}/"], cwd=snapshot, env=env, timeout=1200)
         except subprocess.TimeoutExpired:
@@ -148,7 +163,10 @@ def main(argv: list[str]) -> int:
             return 2
         staged = [d for d in staged if d in wanted]
     compress_corpora()
-    run(["git", "add", "--", *staged, *[e for e in EXTRA if os.path.exists(os.path.join(ROOT, e))]])
+    every = candidates()
+    for directory in staged:
+        run(["git", "add", "--", *own_pathspecs(directory, every)])
+    run(["git", "add", "--", *[e for e in EXTRA if os.path.exists(os.path.join(ROOT, e))]])
     dropped: dict[str, str] = {}
     for _ in range(8):
         snapshot = tempfile.mkdtemp(prefix="mj-go-checkpoint-")
@@ -168,7 +186,7 @@ def main(argv: list[str]) -> int:
             break
         for directory, reason in failed.items():
             dropped[directory] = reason
-            run(["git", "reset", "-q", "--", directory])
+            run(["git", "reset", "-q", "--", *own_pathspecs(directory, every)])
         staged = [d for d in staged if d not in failed]
     else:
         print("checkpoint: did not settle", file=sys.stderr)

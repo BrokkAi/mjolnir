@@ -54,3 +54,24 @@ func (d VecDeque[T]) checkInvariants() error {
 	}
 	return nil
 }
+
+// cloneExact is VecDeque::clone as Rust does it: a buffer of exactly the
+// length, filled as a TrustedLen iterator fills it. rs.Clone, which product
+// code calls, gives the same elements in a buffer grown by pushes; the oracle
+// scripts compare the capacity after a clone, so they clone this way.
+func (d VecDeque[T]) cloneExact(clone func(T) T) VecDeque[T] {
+	deq := VecDequeWithCapacity[T](d.length)
+	a, b := d.AsSlices()
+	index := 0
+	deq.extendTrustedLen(d.length, func() T {
+		var element T
+		if index < len(a) {
+			element = a[index]
+		} else {
+			element = b[index-len(a)]
+		}
+		index++
+		return clone(element)
+	})
+	return deq
+}

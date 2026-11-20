@@ -11,6 +11,10 @@ import (
 
 // U128 is Rust's u128. The zero value is 0, and two values compare with ==.
 //
+// Parsing one (`s.parse::<u128>()`, `u128::from_str_radix`) is strs's, as
+// for every integer type: strs.ParseU128Parts and strs.U128FromStrRadixParts
+// return the two halves, and U128FromParts makes the value.
+//
 // Operators are methods named after Rust's operator traits: `a + b` is
 // a.Add(b), `a << n` is a.Shl(n), `a < b` is a.Lt(b). As in Rust, the
 // operators panic on overflow when DebugAssertions is on and wrap when it is
@@ -225,7 +229,7 @@ func CastF32ToI128(x float32) I128 { return CastF64ToI128(float64(x)) }
 // negative value.
 func U128TryFrom[S anyInt](v S) (U128, error) {
 	if intIsSigned[S]() && v < 0 {
-		return U128{}, TryFromIntError{kind: IntErrorKind_NegOverflow}
+		return U128{}, TryFromIntError{kind: intErrorKind_NegOverflow}
 	}
 	return U128{lo: uint64(v)}, nil
 }
@@ -233,7 +237,7 @@ func U128TryFrom[S anyInt](v S) (U128, error) {
 // U128TryFromI128 is `u128::try_from(v)` for an i128.
 func U128TryFromI128(v I128) (U128, error) {
 	if v.IsNegative() {
-		return U128{}, TryFromIntError{kind: IntErrorKind_NegOverflow}
+		return U128{}, TryFromIntError{kind: intErrorKind_NegOverflow}
 	}
 	return U128(v), nil
 }
@@ -241,7 +245,7 @@ func U128TryFromI128(v I128) (U128, error) {
 // I128TryFromU128 is `i128::try_from(v)` for a u128.
 func I128TryFromU128(v U128) (I128, error) {
 	if v.hi>>63 != 0 {
-		return I128{}, TryFromIntError{kind: IntErrorKind_PosOverflow}
+		return I128{}, TryFromIntError{kind: intErrorKind_PosOverflow}
 	}
 	return I128(v), nil
 }
@@ -250,7 +254,7 @@ func I128TryFromU128(v U128) (I128, error) {
 // type T: rs.TryFromU128[uint64](v).
 func TryFromU128[T FixedInt](v U128) (T, error) {
 	if v.hi != 0 || v.lo > uint64(intMax[T]()) {
-		return 0, TryFromIntError{kind: IntErrorKind_PosOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_PosOverflow}
 	}
 	return T(v.lo), nil
 }
@@ -262,12 +266,12 @@ func TryFromI128[T FixedInt](v I128) (T, error) { return tryFromI128[T](v) }
 func tryFromI128[T anyInt](v I128) (T, error) {
 	if v.IsNegative() {
 		if !intIsSigned[T]() || v.hi != math.MaxUint64 || int64(v.lo) >= 0 || int64(v.lo) < int64(intMin[T]()) {
-			return 0, TryFromIntError{kind: IntErrorKind_NegOverflow}
+			return 0, TryFromIntError{kind: intErrorKind_NegOverflow}
 		}
 		return T(int64(v.lo)), nil
 	}
 	if v.hi != 0 || v.lo > uint64(intMax[T]()) {
-		return 0, TryFromIntError{kind: IntErrorKind_PosOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_PosOverflow}
 	}
 	return T(v.lo), nil
 }
@@ -276,7 +280,7 @@ func tryFromI128[T anyInt](v I128) (T, error) {
 // UsizeMax.
 func UsizeTryFromU128(v U128) (int, error) {
 	if v.hi != 0 || !usizeFits(v.lo) {
-		return 0, TryFromIntError{kind: IntErrorKind_PosOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_PosOverflow}
 	}
 	return int(v.lo), nil
 }
@@ -284,7 +288,7 @@ func UsizeTryFromU128(v U128) (int, error) {
 // UsizeTryFromI128 is `usize::try_from(v)` for an i128.
 func UsizeTryFromI128(v I128) (int, error) {
 	if v.IsNegative() {
-		return 0, TryFromIntError{kind: IntErrorKind_NegOverflow}
+		return 0, TryFromIntError{kind: intErrorKind_NegOverflow}
 	}
 	return UsizeTryFromU128(U128(v))
 }
@@ -946,6 +950,10 @@ func (x U128) Text(base int) string {
 // String is x in decimal, its Display form.
 func (x U128) String() string { return x.Text(10) }
 
+// fmtInt128 is how the formatter (fmt_num.go) prints a u128 under every
+// formatting trait, as Rust does.
+func (x U128) fmtInt128() (hi, lo uint64, signed bool) { return x.hi, x.lo, false }
+
 // FmtDisplay is `impl Display for u128`.
 func (x U128) FmtDisplay(f *Formatter) error { return f.PadIntegral(true, "", x.Text(10)) }
 
@@ -974,48 +982,6 @@ func upperHex(text string) string {
 		}
 	}
 	return string(upper)
-}
-
-// U128FromStrRadix is `u128::from_str_radix(src, radix)`. It panics when
-// radix is not in 2..=36.
-func U128FromStrRadix(src string, radix uint32) (U128, error) {
-	checkRadix(1, radix)
-	return u128FromStrRadix(src, radix)
-}
-
-// U128FromStr is `u128::from_str(src)`, which is what
-// `src.parse::<u128>()` calls.
-func U128FromStr(src string) (U128, error) { return u128FromStrRadix(src, 10) }
-
-func u128FromStrRadix(src string, radix uint32) (U128, error) {
-	if len(src) == 0 {
-		return U128{}, parseIntError(IntErrorKind_Empty)
-	}
-	digits := src
-	switch {
-	case src == "+" || src == "-":
-		return U128{}, parseIntError(IntErrorKind_InvalidDigit)
-	case src[0] == '+':
-		digits = src[1:]
-	}
-	var result U128
-	base := U128{lo: uint64(radix)}
-	for index := 0; index < len(digits); index++ {
-		mul, mulOverflow := wideMul(result, base)
-		x, ok := toDigit(digits[index], radix)
-		if !ok {
-			return U128{}, parseIntError(IntErrorKind_InvalidDigit)
-		}
-		if mulOverflow {
-			return U128{}, parseIntError(IntErrorKind_PosOverflow)
-		}
-		sum, overflow := wideAdd(mul, U128{lo: uint64(x)})
-		if overflow {
-			return U128{}, parseIntError(IntErrorKind_PosOverflow)
-		}
-		result = sum
-	}
-	return result, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,6 +1526,10 @@ func (x I128) String() string {
 	return U128(x).Text(10)
 }
 
+// fmtInt128 is how the formatter (fmt_num.go) prints an i128 under every
+// formatting trait, as Rust does.
+func (x I128) fmtInt128() (hi, lo uint64, signed bool) { return x.hi, x.lo, true }
+
 // FmtDisplay is `impl Display for i128`.
 func (x I128) FmtDisplay(f *Formatter) error {
 	return f.PadIntegral(!x.IsNegative(), "", x.UnsignedAbs().Text(10))
@@ -1581,58 +1551,3 @@ func (x I128) FmtOctal(f *Formatter) error { return U128(x).FmtOctal(f) }
 
 // FmtBinary is `impl Binary for i128`.
 func (x I128) FmtBinary(f *Formatter) error { return U128(x).FmtBinary(f) }
-
-// I128FromStrRadix is `i128::from_str_radix(src, radix)`. It panics when
-// radix is not in 2..=36.
-func I128FromStrRadix(src string, radix uint32) (I128, error) {
-	checkRadix(1, radix)
-	return i128FromStrRadix(src, radix)
-}
-
-// I128FromStr is `i128::from_str(src)`, which is what
-// `src.parse::<i128>()` calls.
-func I128FromStr(src string) (I128, error) { return i128FromStrRadix(src, 10) }
-
-func i128FromStrRadix(src string, radix uint32) (I128, error) {
-	if len(src) == 0 {
-		return I128{}, parseIntError(IntErrorKind_Empty)
-	}
-	isPositive, digits := true, src
-	switch {
-	case src == "+" || src == "-":
-		return I128{}, parseIntError(IntErrorKind_InvalidDigit)
-	case src[0] == '+':
-		digits = src[1:]
-	case src[0] == '-':
-		isPositive, digits = false, src[1:]
-	}
-	var result I128
-	base := I128{lo: uint64(radix)}
-	for index := 0; index < len(digits); index++ {
-		mul, mulOverflow := signedMul(result, base)
-		x, ok := toDigit(digits[index], radix)
-		if !ok {
-			return I128{}, parseIntError(IntErrorKind_InvalidDigit)
-		}
-		if isPositive {
-			if mulOverflow {
-				return I128{}, parseIntError(IntErrorKind_PosOverflow)
-			}
-			sum, overflow := signedAdd(mul, I128{lo: uint64(x)})
-			if overflow {
-				return I128{}, parseIntError(IntErrorKind_PosOverflow)
-			}
-			result = sum
-		} else {
-			if mulOverflow {
-				return I128{}, parseIntError(IntErrorKind_NegOverflow)
-			}
-			difference, overflow := signedSub(mul, I128{lo: uint64(x)})
-			if overflow {
-				return I128{}, parseIntError(IntErrorKind_NegOverflow)
-			}
-			result = difference
-		}
-	}
-	return result, nil
-}

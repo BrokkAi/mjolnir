@@ -300,6 +300,11 @@ func buildStandard(c *codec) {
 			if value < 0 {
 				panic(rs.Panicf("serde: a negative usize (" + strconv.Itoa(value) + "); a Go int stands for a usize unless its field is tagged `rust=isize`"))
 			}
+			if value == rs.UsizeMax {
+				// usize::MAX, which the port holds as the largest int, is
+				// written as Rust writes it (translation-rules.md, rule 3).
+				return serializer.SerializeU64(rs.UsizeMaxU64)
+			}
 			return serializer.SerializeU64(uint64(value))
 		}
 		c.de = func(p unsafe.Pointer, deserializer Deserializer) error {
@@ -477,6 +482,12 @@ func (v intVisitor[T]) VisitI64(value int64) (any, error) {
 
 func (v intVisitor[T]) VisitU64(value uint64) (any, error) {
 	_, _, max := intLimits[T]()
+	if out, usize := any(v.out).(*usizeInt); usize && value == rs.UsizeMaxU64 {
+		// usize::MAX is the largest int in the port (translation-rules.md,
+		// rule 3). The usizes between that and usize::MAX cannot be held.
+		*out = usizeInt(rs.UsizeMax)
+		return nil, nil
+	}
 	if value > max {
 		return nil, DeErrorInvalidValue(&DeUnexpectedUnsigned{F0: value}, v)
 	}
@@ -688,7 +699,8 @@ func (v *sliceVisitor) Expecting() string { return "a sequence" }
 func (v *sliceVisitor) VisitSeq(seq DeSeqAccess) (any, error) {
 	elemType := v.typ.Elem()
 	capacity := sizeHintCautious(seq.SizeHint(), elemType.Size())
-	values := reflect.MakeSlice(v.typ, 0, capacity)
+	values := reflect.New(v.typ).Elem()
+	values.Set(reflect.MakeSlice(v.typ, 0, capacity))
 	seed := &placeSeed{codec: v.elem}
 	for {
 		// Read the element into a fresh slot at the end, and keep it only

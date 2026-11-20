@@ -744,7 +744,7 @@ func TestBTreeMap_test_extract_if_consumed_removing_some(t *testing.T) {
 	m := BTreeMapFromIter(identityPairs(0, 3))
 	for x := range 3 {
 		for y := range 3 {
-			m := m.Clone()
+			m := rs.Clone(m)
 			expectEq(t, collectOwned(m.ExtractIf(Included(x), Excluded(y), func(int, *int) bool { return true })),
 				collectOwned(identityPairs(x, max(x, y))))
 			for i := range 3 {
@@ -754,7 +754,7 @@ func TestBTreeMap_test_extract_if_consumed_removing_some(t *testing.T) {
 	}
 	for x := range 3 {
 		for y := range 2 {
-			m := m.Clone()
+			m := rs.Clone(m)
 			expectEq(t, collectOwned(m.ExtractIf(Included(x), Included(y), func(int, *int) bool { return true })),
 				collectOwned(identityPairs(x, max(x, y+1))))
 			for i := range 3 {
@@ -1085,21 +1085,21 @@ func TestBTreeMap_test_clone(t *testing.T) {
 		expectEq(t, m.Insert(i, 10*i), rs.None[int]())
 		expectEq(t, m.Len(), i+1)
 		m.check(t)
-		expectEq(t, m, m.Clone())
+		expectEq(t, m, rs.Clone(m))
 	}
 
 	for i := range size {
 		expectEq(t, m.Insert(i, 100*i), rs.Some(10*i))
 		expectEq(t, m.Len(), size)
 		m.check(t)
-		expectEq(t, m, m.Clone())
+		expectEq(t, m, rs.Clone(m))
 	}
 
 	for i := range size / 2 {
 		expectEq(t, m.Remove(i*2), rs.Some(i*200))
 		expectEq(t, m.Len(), size-i-1)
 		m.check(t)
-		expectEq(t, m, m.Clone())
+		expectEq(t, m, rs.Clone(m))
 	}
 
 	for i := range size / 2 {
@@ -1107,16 +1107,16 @@ func TestBTreeMap_test_clone(t *testing.T) {
 		expectEq(t, m.Remove(2*i+1), rs.Some(i*200+100))
 		expectEq(t, m.Len(), size/2-i-1)
 		m.check(t)
-		expectEq(t, m, m.Clone())
+		expectEq(t, m, rs.Clone(m))
 	}
 
 	// Test a tree with 2 semi-full levels and a tree with 3 levels.
 	m = BTreeMapFromIter(identityPairs(1, minInsertsHeight2))
 	expectEq(t, m.Len(), minInsertsHeight2-1)
-	expectEq(t, m, m.Clone())
+	expectEq(t, m, rs.Clone(m))
 	m.Insert(0, 0)
 	expectEq(t, m.Len(), minInsertsHeight2)
-	expectEq(t, m, m.Clone())
+	expectEq(t, m, rs.Clone(m))
 	m.check(t)
 }
 
@@ -1130,15 +1130,15 @@ func TestBTreeMap_test_clone_from(t *testing.T) {
 	for i := 0; i <= maxSize; i++ {
 		var map2 BTreeMap[int, int]
 		for j := range i {
-			map1Copy := map2.Clone()
-			map1Copy = map1.Clone() // small cloned from large
+			map1Copy := rs.Clone(map2)
+			map1Copy = rs.Clone(map1) // small cloned from large
 			expectEq(t, map1Copy, map1)
-			map2Copy := map1.Clone()
-			map2Copy = map2.Clone() // large cloned from small
+			map2Copy := rs.Clone(map1)
+			map2Copy = rs.Clone(map2) // large cloned from small
 			expectEq(t, map2Copy, map2)
 			map2.Insert(100*j+1, 2*j+1)
 		}
-		map2 = map1.Clone() // same length
+		map2 = rs.Clone(map1) // same length
 		map2.check(t)
 		expectEq(t, map2, map1)
 		map1.Insert(i, 10*i)
@@ -1169,7 +1169,7 @@ func TestBTreeMap_test_ord_absence(t *testing.T) {
 	}
 
 	mapClone := func(m BTreeMap[nonOrd, rs.Unit]) {
-		m = m.Clone()
+		m = rs.Clone(m)
 	}
 
 	mapFn(BTreeMapNew[nonOrd, rs.Unit]())

@@ -25,7 +25,8 @@ import (
 //     are copied element by element and field by field, unexported fields
 //     included. A nil slice or map stays nil.
 //   - A collection that implements ReflectMap or ReflectSeq is rebuilt, entry
-//     by entry in iteration order, in a new zero value of its type.
+//     by entry in iteration order, in a new zero value of its type, even
+//     when it has a Clone method of its own (findMethods says why).
 //   - A pointer is a Box<T>: the copy points to a new allocation holding a
 //     clone of the pointee.
 //   - A struct field tagged `rs:"name,arc"` holds an Arc<T> or Rc<T>, and what
@@ -81,8 +82,12 @@ type NoReflectClone struct{}
 
 func (NoReflectClone) rsNoReflectClone() {}
 
-// noReflectCloner is what embedding NoReflectClone implements.
-type noReflectCloner interface{ rsNoReflectClone() }
+// NoReflectCloner is the marker interface: what embedding NoReflectClone
+// implements, and the only way to implement it outside this package. A
+// runtime package can hold its handle types to it:
+//
+//	var _ rs.NoReflectCloner = (*SyncMpscSender[int])(nil)
+type NoReflectCloner interface{ rsNoReflectClone() }
 
 // shapeKind says which rule applies to a Go type.
 type shapeKind uint8
@@ -228,7 +233,7 @@ const (
 var (
 	rsPkgPath            = reflect.TypeFor[Unit]().PkgPath()
 	noReflectCloneType   = reflect.TypeFor[NoReflectClone]()
-	noReflectClonerType  = reflect.TypeFor[noReflectCloner]()
+	noReflectClonerType  = reflect.TypeFor[NoReflectCloner]()
 	reflectMapType       = reflect.TypeFor[ReflectMap]()
 	reflectSeqType       = reflect.TypeFor[ReflectSeq]()
 	arcValueType         = reflect.TypeFor[arcValue]()
@@ -400,9 +405,16 @@ func isStdlibPackage(path string) bool {
 // Their signatures are those of translation-rules.md, rule 2; a method of the
 // same name with another signature (promoted from an embedded field, for
 // example) is not one of them.
+//
+// A collection that describes itself through ReflectMap or ReflectSeq is
+// cloned, compared and ordered through those, element by element, even when
+// it has Clone, Equal and Compare methods for direct calls: only so does an
+// `arc` tag on the field holding it reach its elements, and only so does a
+// NaN among them leave it unordered, as a Compare method's int cannot say.
 func (s *shape) findMethods() {
 	t := s.typ
-	if t.Name() == "" || t.Kind() == reflect.Interface || t.Kind() == reflect.Pointer {
+	if t.Name() == "" || t.Kind() == reflect.Interface || t.Kind() == reflect.Pointer ||
+		s.kind == kindReflectMap || s.kind == kindReflectSeq {
 		return
 	}
 	pointer := reflect.PointerTo(t)
@@ -586,10 +598,12 @@ func (b *shapeBuilder) resolveCloneFlags(s *shape, valueDone, done map[*shape]bo
 
 // cloneValue is the body of Clone.
 func cloneValue[T any](value T) T {
-	if cloner, ok := any(&value).(interface{ Clone() T }); ok {
-		return cloner.Clone()
-	}
 	s := shapeOf(reflect.TypeFor[T]())
+	if s.clone.ok {
+		if cloner, ok := any(&value).(interface{ Clone() T }); ok {
+			return cloner.Clone()
+		}
+	}
 	if s.plain {
 		return value
 	}
