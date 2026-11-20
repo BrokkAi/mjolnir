@@ -20,7 +20,10 @@ package buildid
 
 import (
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -73,7 +76,45 @@ var resolved = sync.OnceValue(resolveIdentity)
 // Unix seconds) only when `vcs.revision` is the resolved revision: the time
 // belongs to that commit or is unknown, never guessed.
 func resolveIdentity() resolvedIdentity {
-	panic("unported: mj-build-id/build.rs main")
+	vcsRevision, vcsTime := vcsSettings()
+	revision := buildRevision
+	if revision == "" {
+		revision = vcsRevision
+	}
+	if revision == "" {
+		panic("worker build identity needs Git; for a source archive set MJ_BUILD_REVISION to its full Git commit")
+	}
+	if !isFullDigest(revision) {
+		panic("MJ_BUILD_REVISION must be a full 40-character Git commit")
+	}
+	revision = strings.ToLower(revision)
+
+	workerInputs := revision
+	if workerInputsID != "" {
+		identity := strings.TrimSpace(workerInputsID)
+		if !isFullDigest(identity) {
+			panic("worker input identity must be a full 40-character digest")
+		}
+		workerInputs = strings.ToLower(identity)
+	}
+
+	// Empty when unknown: daemon startup then cannot order this build
+	// against a different revision of the same release.
+	commitTime := ""
+	if buildCommitTime != "" {
+		seconds, err := strconv.ParseInt(strings.TrimSpace(buildCommitTime), 10, 64)
+		if err != nil {
+			panic("MJ_BUILD_COMMIT_TIME must be the commit's Unix time in seconds")
+		}
+		commitTime = strconv.FormatInt(seconds, 10)
+	} else if vcsTime != "" && strings.EqualFold(vcsRevision, revision) {
+		// The time Go records is the commit's (`git log --format=%ct`), in
+		// RFC 3339; it belongs to vcs.revision and to no other commit.
+		if at, err := time.Parse(time.RFC3339, vcsTime); err == nil {
+			commitTime = strconv.FormatInt(at.Unix(), 10)
+		}
+	}
+	return resolvedIdentity{revision: revision, commitTime: commitTime, workerInputs: workerInputs}
 }
 
 // vcsSettings returns the binary's `vcs.revision` and `vcs.time` build

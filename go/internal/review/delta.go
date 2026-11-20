@@ -6,6 +6,7 @@ package review
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -25,7 +26,42 @@ type RawDiffSummary struct {
 // added and removed lines inside hunks of patch. A patch with changed lines
 // but no file header counts as one file.
 func RawDiffSummaryFromPatch(patch string) RawDiffSummary {
-	panic("unported: mj-review/src/delta.rs RawDiffSummary::from_patch")
+	var summary RawDiffSummary
+	inHunk := false
+	for _, line := range rustLines(patch) {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			summary.Files++
+			inHunk = false
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case inHunk && strings.HasPrefix(line, "+"):
+			summary.Insertions++
+		case inHunk && strings.HasPrefix(line, "-"):
+			summary.Deletions++
+		}
+	}
+	if summary.Files == 0 && summary.ChangedLineCount() > 0 {
+		summary.Files = 1
+	}
+	return summary
+}
+
+// rustLines splits text as Rust's str::lines does: on "\n", with one
+// trailing "\r" removed from each line and no empty line after a final
+// newline.
+func rustLines(text string) []string {
+	lines := []string{}
+	for text != "" {
+		line := text
+		if index := strings.IndexByte(text, '\n'); index >= 0 {
+			line, text = text[:index], text[index+1:]
+		} else {
+			text = ""
+		}
+		lines = append(lines, strings.TrimSuffix(line, "\r"))
+	}
+	return lines
 }
 
 // ChangedLineCount is the insertions plus the deletions.
@@ -70,7 +106,36 @@ func TreesUnchanged(deltas []core.RepoDelta) bool {
 // counts the whole change, so the table lists every file even where the
 // patch a prompt shows was cut short.
 func ChangedFilesTable(deltas []core.RepoDelta) string {
-	panic("unported: mj-review/src/delta.rs changed_files_table")
+	sections := []string{}
+	for _, delta := range deltas {
+		if strings.TrimSpace(delta.Patch) == "" {
+			continue
+		}
+		lines := []string{fmt.Sprintf("Repository: %s -- %s", delta.Root, delta.Diffstat)}
+		if len(delta.Files) == 0 {
+			lines = append(lines, "  (this worker did not report per-file counts)")
+		}
+		for _, file := range delta.Files {
+			var counts string
+			if file.Binary {
+				counts = fmt.Sprintf("%15s", "binary")
+			} else {
+				counts = fmt.Sprintf("%7s %7s",
+					fmt.Sprintf("+%d", file.Insertions),
+					fmt.Sprintf("-%d", file.Deletions))
+			}
+			path := file.Path
+			if file.OldPath != nil {
+				path = fmt.Sprintf("%s -> %s", *file.OldPath, file.Path)
+			}
+			lines = append(lines, fmt.Sprintf("  %s  %s", counts, path))
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	if len(sections) == 0 {
+		return "No files changed."
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // ChangedLineCount is the total changed lines across every repository in the
