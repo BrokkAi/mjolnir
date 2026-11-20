@@ -133,6 +133,7 @@ def run(lab, args):
         exit_record = json.loads(exit_bytes)
         assert CAUSE in exit_record["harness_startup_failure"]["message"]
         assert CAUSE in exit_record["reason"].splitlines()[0], exit_record["reason"]
+        assert "fixture bridge diagnostic" in exit_record["reason"], exit_record["reason"]
         cli("workspaces", "list")
         authenticate()
         snapshot = lab.wait_snapshot(

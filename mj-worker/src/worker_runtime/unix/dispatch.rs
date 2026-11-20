@@ -822,15 +822,21 @@ fn record_runtime_event_with_startup(
         RuntimeEvent::SessionFault { message }
             if startup.is_some() && *session_configuration == SessionConfiguration::Opening =>
         {
-            Some(mj_core::relay::WorkerHarnessStartupFailure {
-                message: message.lines().next().unwrap_or(message).to_owned(),
+            let (cause, diagnostics) = message.split_once('\n').unwrap_or((message, ""));
+            let failure = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                message: cause.to_owned(),
+            });
+            Some(if diagnostics.is_empty() {
+                failure
+            } else {
+                failure.context(diagnostics.to_owned())
             })
         }
         _ => None,
     };
     let stopped = record_runtime_event_with_facts(relay, in_flight, event, work_facts)?;
     if let Some(failure) = failure {
-        return Err(failure.into());
+        return Err(failure);
     }
     if configured {
         *session_configuration = SessionConfiguration::Ready;

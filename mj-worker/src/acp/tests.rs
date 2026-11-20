@@ -8479,6 +8479,18 @@ fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
     assert_eq!(lines.next(), Some(BRIDGE_STDERR_CONTEXT));
     assert!(reason.ends_with("[session/create] phase=register durationMs=1"));
 
+    // The marker supplies the first line even when cleanup also reported
+    // an error. The bridge stderr remains available below that cause.
+    let error = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+        message: "load ACP session failed".to_owned(),
+    })
+    .context(format!("{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic"))
+    .context("ACP cleanup also failed");
+    assert_eq!(
+        worker_exit_reason(&error),
+        format!("load ACP session failed\n{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic")
+    );
+
     // A failure with no stderr is the chain on one line.
     let error = anyhow::anyhow!("durable relay open failed").context("start worker");
     assert_eq!(

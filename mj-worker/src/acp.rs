@@ -116,11 +116,18 @@ pub fn worker_exit_reason(error: &anyhow::Error) -> String {
         .chain()
         .map(ToString::to_string)
         .partition(|text| text.starts_with(BRIDGE_STDERR_CONTEXT));
-    let cause = causes
-        .iter()
-        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join(": ");
+    let cause = error
+        .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+        .map_or_else(
+            || {
+                causes
+                    .iter()
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join(": ")
+            },
+            |failure| failure.message.clone(),
+        );
     tails
         .into_iter()
         .fold(cause, |reason, tail| format!("{reason}\n{tail}"))
