@@ -232,7 +232,7 @@ action: None
 │       │ Attached directories: 0                                                          │       │
 │       │                                                                                  │  ─────╯
 │       │                                                                                  │  ─────╮
-│       │ Delegation Native ▾                                                              │       │
+│       │ Sub-agents Native ▾                                                              │       │
 │       │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │  d    │
 ╰─────  │ subagents on all targets")                                                       │  ─────╯
 ╭ Targ  │                                                                                  │     ▄ ╮

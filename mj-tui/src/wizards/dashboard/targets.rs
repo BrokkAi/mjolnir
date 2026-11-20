@@ -1,6 +1,60 @@
 use super::*;
+use mj_core::config::{GuardianReviewer, PermissionMode, is_container_target};
+
+pub(crate) struct SandboxOffer {
+    pub(crate) warning: String,
+    pub(crate) alternative: Option<usize>,
+}
 
 impl DashboardState {
+    pub(crate) fn sandbox_offer<W: WizardDraft>(&self, wizard: &W) -> Option<SandboxOffer> {
+        let (_, target) = self.config.targets.iter().nth(wizard.target())?;
+        if target.permission_mode() != Some(PermissionMode::Guardian) {
+            return None;
+        }
+        let kind = wizard.review_harness(self)?;
+        if kind.guardian() != GuardianReviewer::Mjolnir {
+            return None;
+        }
+        let offered = self.offered_target_indices();
+        let alternative =
+            self.config
+                .targets
+                .iter()
+                .enumerate()
+                .find_map(|(index, (id, target))| {
+                    (offered.contains(&index)
+                        && is_container_target(target)
+                        && wizard.target_rejection(self, id).is_none()
+                        && wizard.target_compatible(self, id))
+                    .then_some(index)
+                });
+        Some(SandboxOffer {
+            warning: format!(
+                "{} runs directly on the host. Use a sandbox to isolate its actions.",
+                kind.display_name(),
+            ),
+            alternative,
+        })
+    }
+
+    pub(super) fn select_wizard_target<W: WizardDraft>(
+        &mut self,
+        mut wizard: W,
+        index: usize,
+    ) -> DashboardAction {
+        if wizard.target() != index {
+            wizard.note_draft_change(self, DraftChange::TargetSelected);
+            wizard.set_target(index);
+            if wizard.prepares_target_on_select(self) {
+                let action = self.prepare_wizard_target(&mut wizard);
+                self.mode = wizard.into_mode();
+                return action;
+            }
+        }
+        self.keep(wizard)
+    }
+
     /// Start checks for the local directories of configured projects that
     /// have no current answer. A check in flight is never repeated.
     pub(in crate::wizards) fn begin_project_directory_checks(&mut self) -> Option<DashboardAction> {

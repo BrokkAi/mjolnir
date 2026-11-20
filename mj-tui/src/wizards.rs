@@ -105,6 +105,7 @@ pub(crate) enum WizardControl {
     Subagents,
     Oracle,
     CreateManagedWorktree,
+    UseSandboxedTarget,
     DiscardQueue,
     ChooseMoveFiles,
     MoveFile(usize),
