@@ -2323,7 +2323,12 @@ else:
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        // The fake host must not find the developer's own mbx (for example
+        // in ~/.cargo/bin), which mj refuses to manage; CI has none.
+        paths.extend(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .filter(|directory| !directory.join("mbx").exists()),
+        );
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", name, "--nocapture"])
