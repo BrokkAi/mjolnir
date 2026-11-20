@@ -3059,7 +3059,7 @@ func (r *SessionRecord) ExecutionEnforcement(config *Config) (ExecutionEnforceme
 	if err != nil {
 		return ExecutionEnforcement{}, false
 	}
-	choices := ApprovalChoices{ClaudePermissionMode: ClaudePermissionModeAuto}
+	choices := DefaultApprovalChoices()
 	if profile, ok := config.Profiles[r.LastProfile]; ok {
 		choices = profile.ApprovalChoices()
 	}
