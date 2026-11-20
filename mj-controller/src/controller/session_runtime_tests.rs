@@ -486,6 +486,18 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
+    let home = tempfile::tempdir().unwrap();
+    mj_core::config::Config::update(|config| {
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_owned(),
+            ),
+        );
+        Ok(())
+    })
+    .unwrap();
     fail_if_the_actor_stalls("serialized readiness failure stalled");
     for worker_deadline in [false, true] {
         register_leased_relay_session();
@@ -493,9 +505,7 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
         if worker_deadline {
             let failure = mj_core::relay::HarnessPreparation::Failed {
                 step: "session-open".into(),
-                error:
-                    "the harness did not open its session within 300s; use Restart agent to retry"
-                        .into(),
+                error: "create ACP session: Your access token could not be refreshed".into(),
                 at_ms: 1,
             };
             std::fs::write(
@@ -606,7 +616,15 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
             .unwrap()
             .unwrap();
         assert_eq!(record.state, mj_core::state::SessionState::Error);
-        assert!(record.last_error.unwrap().contains("Restart agent"));
+        let error = record.last_error.unwrap();
+        assert!(error.contains("Restart agent"), "{error}");
+        if worker_deadline {
+            assert!(error.contains("mj login --profile codex"), "{error}");
+            assert!(
+                error.ends_with("Your access token could not be refreshed"),
+                "{error}"
+            );
+        }
         retirement.send(true).unwrap();
         actor.await.unwrap();
         assert!(

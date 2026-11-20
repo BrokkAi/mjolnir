@@ -591,7 +591,21 @@ pub fn worker_probe_diagnosis(
         None => error,
     };
     match diagnose_worker_read_only(executor, locator, worker_root) {
-        Ok(probe) => error.context(probe.to_string()),
+        Ok(probe) => {
+            let diagnostic = probe.to_string();
+            if probe
+                .exit
+                .is_some_and(|exit| exit.harness_startup_failure.is_some())
+            {
+                // The worker may have died after accepting the initial relay
+                // connection. Preserve its startup scope with the probe text.
+                error.context(mj_core::relay::WorkerHarnessStartupFailure {
+                    message: diagnostic,
+                })
+            } else {
+                error.context(diagnostic)
+            }
+        }
         Err(probe_error) => {
             error.context(format!("the worker could not be probed: {probe_error:#}"))
         }

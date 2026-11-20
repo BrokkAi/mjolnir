@@ -833,9 +833,18 @@ impl Controller {
         cause: &str,
         observed_updated_at: &str,
     ) -> Result<bool> {
+        let cause = match self.state.sessions.get(session_id) {
+            Some(record) => super::provisioning::launch_failure_text(
+                &self.config,
+                &record.last_profile,
+                cause,
+                "use Restart agent in the existing session",
+            ),
+            None => cause.to_owned(),
+        };
         let Some(record) = crate::database::fail_unready_session(
             session_id,
-            cause,
+            &cause,
             SessionState::Running,
             observed_updated_at,
         )

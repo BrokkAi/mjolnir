@@ -1103,12 +1103,30 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let mut cleaned = State::default();
     cleaned.sessions.insert(session_id.into(), session.clone());
 
-    let failure =
-        apply_failed_new_session_rollback(&mut cleaned, session_id, "ACP startup failed", None);
+    let original = "create ACP session: Authentication required";
+    let recorded = format!("worker bootstrap failed: {original}");
+    let home = tempfile::tempdir().unwrap();
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert(
+        "kimi".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_owned(),
+        ),
+    );
+    let recorded_with_remedy = launch_failure_text(&config, "kimi", &recorded, "retry the launch");
+    let failure = apply_failed_new_session_rollback(
+        &mut cleaned,
+        session_id,
+        original,
+        &recorded_with_remedy,
+        None,
+    );
 
     let retained = &cleaned.sessions[session_id];
     assert_eq!(retained.state, SessionState::Error);
     assert!(retained.target.is_none());
+    assert_eq!(retained.last_error.as_deref(), Some(recorded.as_str()));
     assert!(failure.to_string().contains("failed session retained"));
 
     session.state = SessionState::Disconnected;
@@ -1117,7 +1135,8 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let failure = apply_failed_new_session_rollback(
         &mut cleanup_failed,
         session_id,
-        "ACP startup failed",
+        original,
+        &recorded,
         Some("ssh unavailable".into()),
     );
     let retained = cleanup_failed.sessions.get(session_id).unwrap();
