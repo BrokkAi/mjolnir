@@ -907,6 +907,24 @@ def suspend_session(sid):
         return str(error)
 
 
+def reconcile_unsuspended(labels_dir):
+    """Check every session recorded in unsuspended.jsonl against mj. A session that is now
+    suspended releases its checkout; the others, including any mj can't report, are returned."""
+    outstanding, path = {}, labels_dir / "unsuspended.jsonl"
+    # No file means no suspension has failed.
+    for entry in rows(path) if path.exists() else ():
+        try:
+            suspended = driver.session(entry["session"])["lifecycle"] == "suspended"
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            suspended = False
+        if suspended:
+            shutil.rmtree(Path(entry["unit"]) / "repo", ignore_errors=True)
+            outstanding.pop(entry["session"], None)
+        else:
+            outstanding[entry["session"]] = entry
+    return list(outstanding)
+
+
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     _, model, _ = ROLES[role]
     ids = [item["id"] for item in batch]
@@ -1050,7 +1068,6 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
                 print(f"suspension of {sid} ({title}) did not finish; suspend it by hand: {problem}",
                       file=sys.stderr, flush=True)
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
-    return unsuspended
 
 
 def main():
@@ -1133,7 +1150,7 @@ def main():
         expected_hashes = {(item["repo"], item["id"]): inputs_sha(item, documents, args.labeller, heads[item["repo"]])
                            for item in selected}
         done, _ = read_current_labels(destination, expected_hashes)
-        by_repo, unsuspended = defaultdict(list), []
+        by_repo = defaultdict(list)
         for item in selected:
             if (item["repo"], item["id"]) not in done:
                 by_repo[item["repo"]].append(item)
@@ -1141,9 +1158,7 @@ def main():
             indexed(subset, f"{args.split}/{repo}")
             for batch in batches(subset, args.batch_size):
                 try:
-                    if left := run_batch(args, args.split, args.labeller, repo, batch, heads[repo],
-                                         allowed, documents):
-                        unsuspended.append(left)
+                    run_batch(args, args.split, args.labeller, repo, batch, heads[repo], allowed, documents)
                 except Exception as error:
                     log(args.labels_dir, "batch-failed", split=args.split, role=args.labeller,
                         repo=repo, ids=[item["id"] for item in batch], error=str(error))
@@ -1155,12 +1170,13 @@ def main():
         if unresolved:
             print(f"{len(unresolved)} selected items have no valid label: {', '.join(unresolved[:20])}",
                   file=sys.stderr)
-        # Sessions whose suspension failed are listed in unsuspended.jsonl; the run isn't clean
-        # until the operator suspends them.
-        if unsuspended:
-            print(f"{len(unsuspended)} sessions still need suspending: "
-                  f"{', '.join(entry['session'] for entry in unsuspended)}", file=sys.stderr)
-        return 1 if unresolved or unsuspended else 0
+        # Every session a run failed to suspend, this run or an earlier one, is in unsuspended.jsonl.
+        # The run isn't clean while any of them is still not suspended.
+        outstanding = reconcile_unsuspended(args.labels_dir)
+        if outstanding:
+            print(f"{len(outstanding)} sessions still need suspending: {', '.join(outstanding)}",
+                  file=sys.stderr)
+        return 1 if unresolved or outstanding else 0
 
 
 if __name__ == "__main__":

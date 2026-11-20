@@ -220,7 +220,12 @@ def main():
         "caveat": "Replication is a trial on a 10% sample with a weaker model than the primary "
                   "(PLAN-rql-census.md, revised 2026-11-20). A disagreement can reflect the "
                   "capability difference as well as labeller dependence, so low agreement here "
-                  "does not by itself show that the labels don't reproduce.",
+                  "does not by itself show that the labels don't reproduce. High agreement on "
+                  "defect_check and relation_bug is partly selected in: the test cohort admitted "
+                  "a bug only when a Claude Sonnet second-family check confirmed its attribution "
+                  "and agreed with the tracer's relation call (PLAN-rql-census.md, corpus), so "
+                  "on those two categories a Sonnet labeller re-reads bugs its family already "
+                  "accepted.",
         "field_descriptions": {
             "sampled": "Bugs in the replication sample (replication_sample in census_label.py). "
                        "Agreement and the missing counts are over these bugs only.",
