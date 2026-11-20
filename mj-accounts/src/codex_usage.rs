@@ -36,6 +36,7 @@ pub enum CodexUsageStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageReport {
+    pub monthly_price_usd: Option<u32>,
     pub paid_credits: Option<mj_client::quota::PaidCredits>,
     pub banked_resets: Option<u64>,
     pub primary: Option<CodexUsageWindow>,
@@ -192,7 +193,8 @@ impl CodexUsageClient {
             .send_request("account/rateLimits/read", Value::Null)
             .await?;
         let limits = self.read_result(limits_id).await?;
-        parse_report(&limits)
+        let account_plan = account.pointer("/account/planType").and_then(Value::as_str);
+        parse_report(&limits, account_plan)
     }
 
     async fn send_request(&mut self, method: &str, params: Value) -> Result<u64, QueryError> {
@@ -641,15 +643,22 @@ fn classify_account(result: &Value) -> Result<(), QueryError> {
     }
 }
 
-fn parse_report(result: &Value) -> Result<CodexUsageReport, QueryError> {
+fn parse_report(
+    result: &Value,
+    account_plan: Option<&str>,
+) -> Result<CodexUsageReport, QueryError> {
     let codex_snapshot = result
         .get("rateLimitsByLimitId")
         .and_then(Value::as_object)
         .and_then(|buckets| buckets.get("codex"));
 
     let mut report = codex_snapshot
-        .and_then(parse_snapshot)
-        .or_else(|| result.get("rateLimits").and_then(parse_snapshot))
+        .and_then(|snapshot| parse_snapshot(snapshot, account_plan))
+        .or_else(|| {
+            result
+                .get("rateLimits")
+                .and_then(|snapshot| parse_snapshot(snapshot, account_plan))
+        })
         .ok_or(QueryError::NoData)?;
     report.banked_resets = result
         .get("rateLimitResetCredits")
@@ -664,8 +673,13 @@ fn parse_report(result: &Value) -> Result<CodexUsageReport, QueryError> {
     Ok(report)
 }
 
-fn parse_snapshot(snapshot: &Value) -> Option<CodexUsageReport> {
+fn parse_snapshot(snapshot: &Value, account_plan: Option<&str>) -> Option<CodexUsageReport> {
+    let plan = snapshot
+        .get("planType")
+        .and_then(Value::as_str)
+        .or(account_plan);
     let report = CodexUsageReport {
+        monthly_price_usd: plan.and_then(plan_monthly_price),
         paid_credits: snapshot.get("credits").and_then(parse_paid_credits),
         banked_resets: None,
         primary: snapshot.get("primary").and_then(parse_window),
@@ -675,6 +689,18 @@ fn parse_snapshot(snapshot: &Value) -> Option<CodexUsageReport> {
         None
     } else {
         Some(report)
+    }
+}
+
+// Codex 0.170.0's status tests identify the personal plan labels:
+// https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/tui/src/status/helpers.rs#L187-L215
+fn plan_monthly_price(plan: &str) -> Option<u32> {
+    match plan {
+        "plus" => Some(20),
+        "prolite" => Some(100),
+        "pro" => Some(200),
+        "promax" => Some(500),
+        _ => None,
     }
 }
 
@@ -812,28 +838,46 @@ read_and_log
 printf '%s\n' '{"method":"account/rateLimits/updated"}' '{"id":1,"result":{}}'
 read_and_log
 read_and_log
-printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","planType":"plus"}}}'
 read_and_log
 printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300},"credits":{"hasCredits":true,"unlimited":false,"balance":"50.25"}}}}'
 read_and_log
-printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt"}}}'
+printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt","planType":"plus"}}}'
 read_and_log
-printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300},"credits":{"hasCredits":false,"unlimited":false,"balance":"50.25"}}}}'
+printf '%s\n' '{"id":5,"result":{"rateLimitsByLimitId":{"codex":{"planType":"promax","primary":{"usedPercent":50,"windowDurationMins":300},"credits":{"hasCredits":false,"unlimited":false,"balance":"50.25"}}}}}'
+read_and_log
+printf '%s\n' '{"id":6,"result":{"account":{"type":"chatgpt","planType":"plus"}}}'
+read_and_log
+printf '%s\n' '{"id":7,"result":{"rateLimits":{"planType":"business","primary":{"usedPercent":50,"windowDurationMins":300}}}}'
+read_and_log
+printf '%s\n' '{"id":8,"result":{"account":{"type":"chatgpt","planType":"prolite"}}}'
+read_and_log
+printf '%s\n' '{"id":9,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300}}}}'
 "#,
         );
         let mut client = None;
 
         let first =
             refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
-        let second = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
+        let second =
+            refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
+        let third =
+            refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
+        let fourth = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
-        for (status, balance) in [(&first, 50.25), (&second, 0.0)] {
+        for (status, balance, price) in [
+            (&first, Some(50.25), Some(20)),
+            (&second, Some(0.0), Some(500)),
+            (&third, None, None),
+            (&fourth, None, Some(100)),
+        ] {
             let CodexUsageStatus::Available(report) = status else {
                 panic!("missing quota report")
             };
+            assert_eq!(report.monthly_price_usd, price);
             assert_eq!(
                 report.paid_credits,
-                mj_client::quota::PaidCredits::limited(balance)
+                balance.and_then(mj_client::quota::PaidCredits::limited)
             );
         }
 
@@ -867,7 +911,7 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("request json"))
             .collect::<Vec<_>>();
-        assert_eq!(messages.len(), 6);
+        assert_eq!(messages.len(), 10);
         assert_eq!(messages[0]["method"], "initialize");
         assert_eq!(messages[0]["id"], 1);
         assert_eq!(messages[1]["method"], "initialized");

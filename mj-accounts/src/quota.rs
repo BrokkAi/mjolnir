@@ -823,7 +823,7 @@ async fn refresh_profile_with_cache_root(
                     match status {
                         CodexUsageStatus::Available(report) => Ok(ProfileQuota {
                             paid_credits: report.paid_credits,
-                            monthly_price_usd: None,
+                            monthly_price_usd: report.monthly_price_usd,
                             banked_resets: report.banked_resets,
                             profile_id: profile_id.clone(),
                             harness,
