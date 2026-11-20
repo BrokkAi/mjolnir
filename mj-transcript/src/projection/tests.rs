@@ -2119,7 +2119,12 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     for restart_first in [false, true] {
-        for original in ["go", "/compact"] {
+        for (original, native_running) in [
+            ("go", false),
+            ("/compact", false),
+            ("go", true),
+            ("/compact", true),
+        ] {
             let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
             let mut session = MaterializedSession::empty("session");
             apply_observation(
@@ -2139,6 +2144,20 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
                     started_at_ms: 20,
                 },
             );
+            // Hard-won: 243c9ecff: a native running update kept an interrupted prompt running.
+            if native_running {
+                apply_observation(&mut session, RelayObservation::SessionUpdate {
+                    update: Box::new(serde_json::from_value(serde_json::json!({
+                        "sessionUpdate":"session_info_update",
+                        "_meta":{"execution":{"version":1,"status":"running","turnId":"prompt"}}
+                    })).unwrap())
+                });
+                apply_observation(
+                    &mut session,
+                    RelayObservation::HarnessTurnStarted { started_at_ms: 21 },
+                );
+                assert!(session.configuration.goal.as_ref().unwrap().running());
+            }
             if restart_first {
                 // Hard-won: b8acf76: a restart before its prompt interruption emitted two rows.
                 apply_observation(&mut session, RelayObservation::SessionRestarted);
@@ -2147,7 +2166,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
                 &mut session,
                 RelayObservation::CommandInterrupted {
                     continuation_id: Some(recovery_id.clone()),
-                    reason: None,
+                    reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
                     command_id: "prompt".into(),
                     command: mj_core::relay::RelayCommandKind::Prompt,
                     message: "worker restarted".into(),
@@ -2155,6 +2174,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
             );
             assert_eq!(session.queued_prompts[0].accepted_ordinal, Some(1));
             let interrupted_at = session.applied_event_ordinal;
+            assert_eq!(session.execution, MaterializedExecutionState::Idle);
             apply_observation(&mut session, RelayObservation::SessionRestarted);
             assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
             assert_eq!(session.unread_interruptions_after(interrupted_at), 0);

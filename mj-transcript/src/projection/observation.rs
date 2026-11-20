@@ -607,12 +607,22 @@ pub(super) fn project_observation(
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }
+            // WorkerRestarted proves the bridge stopped; its last native
+            // execution update cannot keep this interrupted prompt running.
+            let bridge_stopped = matches!(
+                event.observation,
+                RelayObservation::CommandInterrupted {
+                    reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                    ..
+                }
+            );
             if prompt_was_started
-                && !current
-                    .configuration
-                    .goal
-                    .as_deref()
-                    .is_some_and(mj_core::goal::GoalState::running)
+                && (bridge_stopped
+                    || !current
+                        .configuration
+                        .goal
+                        .as_deref()
+                        .is_some_and(mj_core::goal::GoalState::running))
             {
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
