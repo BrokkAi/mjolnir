@@ -44,6 +44,17 @@ impl RelayRejected {
     }
 }
 
+/// Capability refusal, contextualized differently for tracked and orphan workers.
+#[derive(Debug)]
+pub struct LiveBaselineUnsupported;
+
+impl std::fmt::Display for LiveBaselineUnsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("this worker cannot provide a live recovery baseline; restart that worker on the current binary, then adopt")
+    }
+}
+impl std::error::Error for LiveBaselineUnsupported {}
+
 /// A relay transport that can no longer carry requests: the proxy exited, one
 /// of its pipes failed, or the handshake never completed.
 ///

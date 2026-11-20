@@ -28,12 +28,15 @@ use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
+/// The worker root directory holding the OpenCode mailbox plugin.
+pub(super) const OPENCODE_MAILBOX_PLUGIN: &str = "opencode-mailbox";
+
 /// Register a worker-owned OpenCode 2 plugin without editing the user's home.
 pub(super) fn configure_opencode_mailbox_hook(
     root: &Path,
     environment: &mut BTreeMap<String, String>,
 ) -> Result<()> {
-    let directory = root.join("opencode-mailbox");
+    let directory = root.join(OPENCODE_MAILBOX_PLUGIN);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create OpenCode plugin directory {}", directory.display()))?;
     let worker = std::env::current_exe().context("locate worker for OpenCode mailbox transport")?;

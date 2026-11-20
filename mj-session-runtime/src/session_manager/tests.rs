@@ -563,6 +563,8 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
 /// Recovery now reads the dead worker's exit record, tells the storage owner,
 /// and restarts nothing until a later measurement finds room.
 // Hard-won: 540c9202: Full-disk recovery must not upload another worker onto the same full filesystem.
+// Hard-won: e579584b9: a harness that failed to open on a full disk went to Error once space returned.
+// Hard-won: #1620: a room-for-the-worker-root sample restarted a worker whose workspace mount was still full.
 #[tokio::test]
 #[cfg_attr(
     windows,
@@ -575,13 +577,17 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     let restarted = directory.path().join("worker-restarted");
     let stopped_at = chrono::Utc::now() - chrono::Duration::seconds(60);
     let exit_record = format!(
-        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test","recent_log":["failed diagnostic\n"]}}    "#,
+        // The marker says the harness never opened; the full disk is why,
+        // so space returning must restart it rather than end in Error.
+        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test","recent_log":["failed diagnostic\n"],"harness_startup_failure":{{"message":"ACP runtime failed: No space left on device (os error 28)"}}}}    "#,
         stopped_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
     let plan = WorkerRecoveryPlan {
         source_target: mj_core::state::TargetLocator::SshBare {
             host: host.into(),
-            workspace: "/work".into(),
+            // The workspace is on a mount of its own, apart from the worker
+            // root, and the exit record does not say which one was full.
+            workspace: "/home/jonathan/Projects/app".into(),
             worker_id: None,
         },
         target: None,
@@ -634,6 +640,23 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     ));
     assert!(!restarted.exists());
 
+    // The worker root has room, but the workspace's mount is still full: a
+    // restart would fail the same way.
+    crate::target_storage::record_samples(
+        &[crate::target_storage::test_storage_sample(
+            host,
+            40 << 30,
+            0,
+        )],
+        now,
+    );
+    let outcome = recover_worker(plan.clone(), false).await.unwrap();
+    let WorkerRecoveryOutcome::StorageFull { problem, .. } = &outcome else {
+        panic!("expected a wait on the workspace's mount, got {outcome:?}");
+    };
+    assert!(problem.contains("/home/jonathan/Projects"), "{problem}");
+    assert!(!restarted.exists());
+
     // Space was freed. The old exit record predates this measurement, so it
     // no longer holds recovery back.
     crate::target_storage::record_samples(
@@ -652,6 +675,107 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
         restarted.exists(),
         "recovery did not resume once space was free"
     );
+}
+
+#[cfg(unix)]
+// Hard-won: 58e37a647: A disconnected session with a marked exit kept polling.
+#[test]
+fn recovery_stops_at_a_marked_harness_startup_failure() {
+    const CHILD: &str = "MJ_STARTUP_FAILURE_RECOVERY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(CHILD, "recovery_stops_at_a_marked_harness_startup_failure");
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let id = LEASED_RELAY_SESSION;
+    let mut record = crate::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+
+    let directory = tempfile::tempdir().unwrap();
+    let worker_root = directory.path().join("worker root");
+    let exit_path = worker_root.join(mj_core::relay::WORKER_EXIT_FILE);
+    let worker_root_text = worker_root.to_str().unwrap();
+    let backend = mj_core::targets::TargetLocator::LocalBare {
+        worker_root: worker_root_text.to_owned(),
+    };
+    let exit_record =
+        mj_worker_staging::worker_binary::worker_exit_record_command(&backend, worker_root_text);
+    let executor = crate::targets::ProcessExecutor;
+    let absent = executor.execute(&exit_record).unwrap();
+    assert_eq!(absent.status, 0);
+    assert!(
+        mj_worker_staging::worker_binary::read_worker_exit_record(&absent.stdout)
+            .unwrap()
+            .is_none()
+    );
+    std::fs::create_dir(&worker_root).unwrap();
+
+    let restarted = directory.path().join("worker-restarted");
+    let cause = "ACP runtime failed: fixture transient load failure";
+    let plan = WorkerRecoveryPlan {
+        source_target: recovery_source_target(),
+        target: None,
+        workspace: None,
+        exit_record: Some(exit_record),
+        liveness_probe: CommandSpec::new("printf", ["dead"]).into(),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "restart test worker".into(),
+            commands: vec![CommandSpec::new(
+                "touch",
+                [restarted.to_string_lossy().into_owned()],
+            )],
+        }
+        .into(),
+    };
+    let recover = || recover_worker_controlled(plan.clone(), false, Some(id), &executor);
+    use mj_core::state::SessionState;
+    for state in [SessionState::Running, SessionState::Disconnected] {
+        record.state = state;
+        crate::database::save_session(&record).unwrap();
+
+        std::fs::create_dir(&exit_path).unwrap();
+        assert!(recover().is_err(), "a failed read must defer recovery");
+        std::fs::remove_dir(&exit_path).unwrap();
+        assert!(!restarted.exists());
+
+        // An interrupted write cannot repair itself, and a legacy record
+        // with the same cause supplies no typed startup marker.
+        for content in [
+            r#"{"reason":"interrupted"#.to_owned(),
+            serde_json::json!({"reason": cause}).to_string(),
+        ] {
+            std::fs::write(&exit_path, content).unwrap();
+            assert_eq!(recover().unwrap(), WorkerRecoveryOutcome::RestartedDead);
+            assert!(crate::database::load_worker_restart(id).unwrap().is_some());
+            std::fs::remove_file(&restarted).unwrap();
+        }
+
+        let marked = serde_json::json!({
+            "reason": "worker exited",
+            "harness_startup_failure": {"message": cause},
+        });
+        std::fs::write(&exit_path, marked.to_string()).unwrap();
+        assert_eq!(
+            recover().unwrap(),
+            WorkerRecoveryOutcome::HarnessStartupFailed
+        );
+        assert!(!restarted.exists());
+        let failed = crate::database::read_durable_session_record(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, SessionState::Error);
+        assert_eq!(failed.last_error.as_deref(), Some(cause));
+        assert!(!session_target_is_pollable(&failed));
+        assert!(crate::database::load_worker_restart(id).unwrap().is_none());
+        assert_eq!(recover().unwrap(), WorkerRecoveryOutcome::Suppressed);
+        assert!(!restarted.exists());
+        std::fs::remove_file(&exit_path).unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1808,6 +1932,32 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
             "an empty catch-up must retain its operational publication"
         );
     }
+    // Model the actor committing and ACKing while a standalone connection
+    // still holds an older projection. Both views share the durable store.
+    let stale = connection.materialized.clone();
+    connection
+        .submit(
+            new_command_id("actor-notice").unwrap(),
+            RelayCommand::RecordNotice {
+                text: "another connection advanced the durable projection".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let durable = connection.materialized.clone();
+    connection.materialized = stale;
+    connection.window = mj_core::state::ProjectionWindow::of(&connection.materialized);
+    // Hard-won: 363ef03: a concurrent ACK sent standalone repair below the retained cursor.
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(
+        connection.materialized.applied_event_ordinal,
+        durable.applied_event_ordinal
+    );
+    assert_eq!(
+        connection.materialized.applied_event_digest,
+        durable.applied_event_digest
+    );
+    connection.detach().await.unwrap();
 }
 
 #[cfg(unix)]

@@ -431,7 +431,7 @@ pub(super) fn upsert(mutation: &mut MaterializedSessionMutation, item: Transcrip
     }
 }
 
-pub(super) fn configuration_values(
+pub fn configuration_values(
     options: &[agent_client_protocol::v1::schema::SessionConfigOption],
 ) -> Result<BTreeMap<String, Value>> {
     anyhow::ensure!(

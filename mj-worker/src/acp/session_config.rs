@@ -111,7 +111,7 @@ pub(super) async fn resolve_session_config_recovery(
     events: &mpsc::Sender<RuntimeEvent>,
     config_options: &mut Vec<SessionConfigOption>,
     grok_models: &mut Option<grok::GrokModelState>,
-    pending: &mut Option<ElicitationRequest>,
+    pending: &mut Option<CommandLoopQuestion>,
     idle: bool,
     elicitation_id: &str,
     response: &ElicitationResponse,

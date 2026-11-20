@@ -30,10 +30,11 @@ but new documentation should not treat the current journal as a single hash
 chain.
 
 The controller materializes journal events into its local session database and
-acknowledges a verified frontier. Acknowledgement alone does not permit the
-worker to discard history. Journal data is eligible for collection only after
-it is both durably acknowledged by the controller and covered by a verified
-checkpoint.
+acknowledges a verified frontier. Current workers can then discard the journal
+history through that acknowledgement. Move retry receipts and native-session
+use evidence have their own durable retention and do not require keeping the
+whole journal. Older workers keep their checkpoint-gated retention policy
+until they are upgraded.
 
 ## Queued work continues in order
 
@@ -50,7 +51,7 @@ last user prompt appears complete.
 ## Codex goals across restarts
 
 An active `/goal` keeps the session busy between native turns, even after the
-initial prompt finishes. Automatic worker upgrades and routine checkpoints wait
+initial prompt finishes. Automatic worker upgrades and live bundle exports wait
 until the goal is paused or ends. Older workers that cannot report goal state
 are not automatically replaced.
 
@@ -105,28 +106,17 @@ floor. If export, transfer, verification, or persistence fails, the previous
 archive remains in place and the live target is left usable. Mjolnir does not
 remove a target merely because checkpointing was attempted.
 
-## Automatic and manual checkpoints
+## Save a recovery checkpoint
 
-The recovery coordinator observes completed turns. When a session is idle and
-its newest checkpoint is at least ten minutes old, it captures the newest
-completed turn. The first eligible completed turn can be captured without
-waiting for an older checkpoint to age.
+Suspend saves a verified recovery checkpoint before releasing the environment.
+Running sessions do not receive automatic recovery copies, and the explicit
+checkpoint command has been removed. To save a recovery point, suspend the
+session and resume it when you want to continue.
 
-A failed automatic checkpoint is reported and retried after a backoff that
-starts at ten minutes and doubles to a two-hour ceiling. An automatic attempt
-has a 15-minute deadline so a wedged transfer cannot own the lifecycle gate
-forever.
-
-Request a fresh checkpoint for an active session with:
-
-```console
-mj checkpoint --session <session-id>
-```
-
-The barrier still waits for a safe capture point. A session with an active
-turn, harness-started work, terminal, background command, queued prompt, or
-another checkpoint operation is not quiet and may defer the copy. See
-[Troubleshooting](/troubleshooting/) if a checkpoint never becomes eligible.
+Move, agent restart, and exporting a live session as a bundle still use their
+existing checkpoint paths. If a target's disk is permanently lost, work since
+the last saved checkpoint is lost with it; daemon restarts and worker crashes
+continue to recover from the worker's durable journal while the disk survives.
 
 ## Detach, suspend, destroy, and resume are different
 
@@ -248,6 +238,17 @@ To find untracked managed resources:
 mj recover scan --json
 mj recover adopt --session <session-id> --target <target-id>
 ```
+
+If the daemon's store was lost and the worker no longer retains its journal
+from the beginning, adoption waits for a quiet point and recovers the worker's
+current operational state at that point. All transcript through that recovery
+cut is omitted, including any unacknowledged events still readable on the worker.
+The recovered transcript shows “History before recovery unavailable.” Adoption
+advances the worker's acknowledgement to the cut, so those omitted events can
+then be discarded. The agent's native conversation, current configuration,
+pending questions and queued work are preserved. Workers whose journal still
+reaches its beginning restore the full transcript instead.
+
 
 Older resources without current ownership metadata may additionally require
 `--profile` and `--bundle`. Adoption is preferable to destruction when the

@@ -23,7 +23,7 @@ pub use mj_client::quota::{
 };
 
 /// Clone a daemon report for a user-facing quota surface, retaining only
-/// unscoped windows, Claude's Fable allowance and Antigravity's two pools.
+/// unscoped windows, Claude's Fable allowance and Antigravity's pools.
 /// Internal selection and health keep the complete report.
 pub fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
     if report.harness == HarnessKind::Antigravity {

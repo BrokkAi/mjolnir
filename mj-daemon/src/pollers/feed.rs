@@ -63,18 +63,6 @@ impl FeedSource for SessionManagerUpdates {
     }
 }
 
-impl FeedSource for RecoveryCoordinator {
-    type Item = RecoveryResult;
-
-    fn wait(&mut self) -> impl Future<Output = Option<RecoveryResult>> {
-        self.result()
-    }
-
-    fn poll_now(&mut self) -> Option<RecoveryResult> {
-        self.try_result()
-    }
-}
-
 impl FeedSource for CredentialSyncCoordinator {
     type Item = mj_core::credentials::CredentialSyncResult;
 

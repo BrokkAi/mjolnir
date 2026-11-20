@@ -211,7 +211,7 @@ pub fn project_memory_transfer_request_chunk_bytes(
             },
         },
     };
-    transfer_chunk_capacity(&envelope)
+    relay_transfer_chunk_capacity(&envelope)
 }
 
 /// Largest raw byte slice that fits in a protocol-59 snapshot-page response,
@@ -235,21 +235,21 @@ pub fn project_memory_transfer_response_chunk_bytes(
             },
         },
     };
-    transfer_chunk_capacity(&envelope)
+    relay_transfer_chunk_capacity(&envelope)
 }
 
-fn transfer_chunk_capacity(envelope: &impl Serialize) -> Result<usize> {
+pub fn relay_transfer_chunk_capacity(envelope: &impl Serialize) -> Result<usize> {
     // The base64 field is empty in the serialized template, so its encoded
     // length can be added without JSON escaping. Include the newline because
     // the worker's bounded reader counts it against the frame budget.
     let overhead = serde_json::to_vec(envelope)?.len().saturating_add(1);
     let remaining = MAX_FRAME_BYTES
         .checked_sub(overhead)
-        .context("project memory transfer envelope exceeds relay frame budget")?;
+        .context("snapshot transfer envelope exceeds relay frame budget")?;
     let capacity = (remaining / 4) * 3;
     anyhow::ensure!(
         capacity > 0,
-        "project memory transfer envelope leaves no room for a chunk"
+        "snapshot transfer envelope leaves no room for a chunk"
     );
     Ok(capacity)
 }
@@ -283,6 +283,26 @@ pub enum RelayRequest {
     Submit {
         command_id: String,
         command: RelayCommand,
+    },
+    CommandRetentionStatus,
+    /// Freeze a coherent current-state recovery cut on this connection.
+    BeginLiveBaseline,
+    ReadLiveBaselinePage {
+        offset: u64,
+    },
+    AbortLiveBaseline,
+    ReadQueuedCommand {
+        command_id: String,
+    },
+    ReadPendingElicitation {
+        elicitation_id: String,
+    },
+    /// Register operation-owned retry receipts before submitting any of its commands.
+    UpdateCommandRetention {
+        operation_id: Option<String>,
+        command_ids: std::collections::BTreeSet<String>,
+        /// Consume upgrade protection once; a late reconciliation cannot undo newer pins.
+        reconcile_legacy: bool,
     },
     Status,
     /// Atomically lease pending mailbox events to a harness tool hook.
@@ -570,6 +590,13 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
+            Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
+            Self::ReadQueuedCommand { .. } => "read_queued_command",
+            Self::BeginLiveBaseline => "begin_live_baseline",
+            Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
+            Self::AbortLiveBaseline => "abort_live_baseline",
+            Self::CommandRetentionStatus => "command_retention_status",
+            Self::UpdateCommandRetention { .. } => "update_command_retention",
             Self::Status => "status",
             Self::DrainMailbox { .. } => "drain_mailbox",
             Self::AckMailbox { .. } => "ack_mailbox",
@@ -649,6 +676,13 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
+            Self::BeginLiveBaseline
+            | Self::ReadLiveBaselinePage { .. }
+            | Self::AbortLiveBaseline => super::RELAY_LIVE_BASELINE_PROTOCOL,
+            Self::ReadPendingElicitation { .. }
+            | Self::ReadQueuedCommand { .. }
+            | Self::CommandRetentionStatus
+            | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -887,6 +921,11 @@ pub enum RelayResponseBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayResponsePayload {
+    CommandRetentionUpdated,
+    CommandRetentionState {
+        legacy_pending: bool,
+        operation_ids: std::collections::BTreeSet<String>,
+    },
     /// `None` means work won the race; no barrier or other mutation occurred.
     IdleReservation {
         ordinal: Option<u64>,
@@ -935,6 +974,23 @@ pub enum RelayResponsePayload {
         ordinal: u64,
     },
     Status(RelayOperationalState),
+    LiveBaselineWaiting {
+        blockers: Vec<String>,
+    },
+    LiveBaselineStarted {
+        total_bytes: u64,
+    },
+    LiveBaselinePage {
+        page: super::FrozenSnapshotPage,
+    },
+    LiveBaselineAborted,
+    QueuedCommand {
+        command: Option<RelayCommand>,
+        accepted_ordinal: Option<u64>,
+    },
+    PendingElicitation {
+        request: Option<crate::elicitation::ElicitationRequest>,
+    },
     MailboxDrained {
         /// Present when mailbox events or a Claude boundary steer are leased.
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -22,7 +22,6 @@ use mj_core::state::{
     ManagedSessionSnapshot, MaterializedSession, SessionRecord, SessionState, State,
 };
 
-use crate::recovery::{RecoveryCoordinator, RecoveryResult};
 use mj_controller::controller::Controller;
 use mj_controller::quota::{QuotaManager, QuotaRefreshOutcome, QuotaRefreshRequest};
 use mj_controller::session_manager::{

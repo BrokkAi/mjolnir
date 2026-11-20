@@ -162,14 +162,6 @@ mj import claude --session 018f2d00-0000-7000-8000-000000000000 \
   --bundle product --title "Finish migration"
 ```
 
-## Create a checkpoint
-
-```text
-mj checkpoint --session <session-id>
-```
-
-Creates and verifies a recovery copy for an active session. It waits for a safe dispatch boundary, then lets normal work continue while the archive is packaged where supported. Mjolnir also checkpoints completed idle turns automatically, throttled to roughly one checkpoint per ten minutes.
-
 ## Move a live session
 
 ```text
@@ -742,7 +734,7 @@ default role selection or the repeated `--role` selection before paging, and
 returns `next_after_seq` and `latest_seq` with the response. `--finished-only`
 filters agent messages and uses the finished-prefix cursor described above.
 `mj events` always prints JSON lines.
-`mj checkpoint`, `mj login`, `mj go`, `mj setup`, and the
+`mj login`, `mj go`, `mj setup`, and the
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these

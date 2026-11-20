@@ -1359,7 +1359,7 @@ image = "ubuntu:24.04"
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
     common::own_test_daemons(&mut command)
-        .args(["checkpoint", "--session", "any"])
+        .args(["interrupt-turn", "--session", "any"])
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", &config);
     let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();

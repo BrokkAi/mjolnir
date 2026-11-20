@@ -38,7 +38,7 @@ use crate::dialogs::{
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
-use crate::wizards::{NewWizard, PickerCell, PickerChoice, ResumeWizard, guardian_warning_marker};
+use crate::wizards::{NewWizard, PickerCell, PickerChoice, ResumeWizard};
 use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
 
 mod actions;

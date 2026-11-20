@@ -273,13 +273,22 @@ pub fn create_or_get_workspace(name: &str) -> Result<WorkspaceRecord> {
 }
 
 pub fn create_or_get_workspace_at(path: &Path, name: &str) -> Result<WorkspaceRecord> {
+    let mut connection = open(path)?;
+    let transaction = connection.transaction()?;
+    let workspace = create_or_get_workspace_with(&transaction, name)?;
+    transaction.commit()?;
+    Ok(workspace)
+}
+
+pub(super) fn create_or_get_workspace_with(
+    connection: &Connection,
+    name: &str,
+) -> Result<WorkspaceRecord> {
     let (name, name_key) = normalize_workspace_name(name)?;
     let id = new_workspace_id()?;
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let mut connection = open(path)?;
-    refuse_legacy_default_name(&connection, &name_key)?;
-    let transaction = connection.transaction()?;
-    transaction
+    refuse_legacy_default_name(connection, &name_key)?;
+    connection
         .execute(
             "INSERT INTO workspaces(workspace_id, name, name_key, created_at, last_opened_at)
              VALUES (?1, ?2, ?3, ?4, ?4)
@@ -287,7 +296,7 @@ pub fn create_or_get_workspace_at(path: &Path, name: &str) -> Result<WorkspaceRe
             params![id, name, name_key, now],
         )
         .with_context(|| format!("create or find workspace {name:?}"))?;
-    let workspace = transaction.query_row(
+    let workspace = connection.query_row(
         "SELECT w.workspace_id, w.name, w.created_at, w.last_opened_at,
                 count(s.session_id) FILTER (
                     WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
@@ -308,7 +317,6 @@ pub fn create_or_get_workspace_at(path: &Path, name: &str) -> Result<WorkspaceRe
             })
         },
     )?;
-    transaction.commit()?;
     Ok(workspace)
 }
 

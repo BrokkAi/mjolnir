@@ -29,37 +29,84 @@ pub enum HarnessKind {
 pub enum AntigravityQuotaPool {
     Gemini,
     Claude,
+    /// Gemini 4 Argon's weekly allowance. Pro plans report it as its own
+    /// group, and an Argon turn draws on it alone; agy says Ultra plans count
+    /// Argon in the Gemini pool instead.
+    Argon,
 }
 
 impl AntigravityQuotaPool {
-    pub const ALL: [Self; 2] = [Self::Gemini, Self::Claude];
+    pub const ALL: [Self; 3] = [Self::Gemini, Self::Claude, Self::Argon];
     pub const fn label(self) -> &'static str {
         match self {
             Self::Gemini => "Ge",
             Self::Claude => "Cl",
+            Self::Argon => "Ar",
         }
     }
+    /// The pool's name where there is room for one, as on a quota bar.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gemini => "Gemini",
+            Self::Claude => "Claude & GPT",
+            Self::Argon => "Argon",
+        }
+    }
+    /// The start of this pool's bucket ids. Argon's (`gemini-argon-`) also
+    /// starts with Gemini's, so a bucket belongs to the longest match.
     pub const fn bucket_prefix(self) -> &'static str {
         match self {
             Self::Gemini => "gemini-",
             Self::Claude => "3p-",
+            Self::Argon => "gemini-argon-",
         }
     }
+    /// The pool's own scope, which also names it in a profile's settings.
     pub const fn model_scope(self) -> &'static str {
         match self {
             Self::Gemini => "gemini",
             Self::Claude => "claude,gpt",
+            // Orchestrator (Argon) is `gemini-pro-orchestrator-g1-pro`. Its
+            // turns draw on the Argon bucket, and it hands implementation to
+            // Gemini 4 Hydrogen, so Gemini's scope keeps it as well.
+            Self::Argon => "argon,g1-pro",
         }
+    }
+    /// The scope a reading of this pool carries. When the account reports a
+    /// separate Argon pool, Gemini 4 Argon draws only on that pool, so
+    /// Gemini's allowance leaves it out.
+    pub const fn reported_scope(self, separate_argon: bool) -> &'static str {
+        match self {
+            Self::Gemini if separate_argon => "gemini,!argon",
+            _ => self.model_scope(),
+        }
+    }
+    /// The pool whose reading carries `scope`.
+    pub fn of_scope(scope: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pool| scope == pool.reported_scope(false) || scope == pool.reported_scope(true))
     }
 }
 
-/// True when `model` contains one of the comma-separated scope fragments.
+/// True when `model` contains one of the comma-separated scope fragments and
+/// none of the fragments written with a leading `!`.
 pub fn model_matches_scope(model: &str, scope: &str) -> bool {
     let model = model.to_ascii_lowercase();
-    scope.split(',').any(|fragment| {
-        let fragment = fragment.trim();
-        !fragment.is_empty() && model.contains(&fragment.to_ascii_lowercase())
-    })
+    let contains = |fragment: &str| model.contains(&fragment.to_ascii_lowercase());
+    let fragments = scope
+        .split(',')
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty());
+    let mut included = false;
+    for fragment in fragments {
+        match fragment.strip_prefix('!') {
+            Some(excluded) if !excluded.is_empty() && contains(excluded) => return false,
+            Some(_) => {}
+            None => included |= contains(fragment),
+        }
+    }
+    included
 }
 
 /// The models Mjolnir offers from a profile: its `models` allow-list (empty
@@ -223,6 +270,16 @@ impl PermissionMode {
             Self::Yolo => ExecutionPolicy::Unconstrained,
         }
     }
+}
+
+/// Who answers a harness's tool approvals on a target that keeps configured
+/// approvals. See [`HarnessKind::guardian`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardianReviewer {
+    /// The harness's own reviewer (Codex's guardian, Claude's Auto mode, …).
+    Harness,
+    /// The Mjolnir worker reviews each permission request the harness sends.
+    Mjolnir,
 }
 
 /// The Claude Code permission mode a Claude profile's sessions run in on
@@ -1269,28 +1326,22 @@ impl HarnessKind {
         Ok(())
     }
 
-    /// Whether this harness confines what it runs and reviews an action that
-    /// would leave that confinement before running it. Only such a harness is
-    /// fit for a raw target, where nothing else contains it.
+    /// Who reviews this harness's tool approvals under configured approvals
+    /// (a raw target), so the person is not asked about every action.
     ///
-    /// A permission prompt alone is not a guardian. OpenCode asks before
-    /// tools according to its permission rules, but runs every command
-    /// directly on the host; its own `SECURITY.md` says its permission system
-    /// is not a sandbox.
-    pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
-    }
-
-    /// Shared warning for selecting a harness without guardian approvals on a
-    /// raw target. Containers and remote instances run unconstrained by design
-    /// and rely on target isolation instead.
-    pub fn unsandboxed_guardian_warning(self) -> Option<String> {
-        (!self.supports_guardian_approvals()).then(|| {
-            format!(
-                "DANGER: {} has no guardian approval mode. Do not run it on a raw, unsandboxed target.",
-                self.display_name()
-            )
-        })
+    /// Codex, Claude Code, Grok Build, Muse Code and Antigravity ship their
+    /// own reviewer, selected through [`Self::execution_enforcement`]. Kimi
+    /// Code, OpenCode and DSH ship none: they only ask, and a permission
+    /// prompt alone is not a guardian. The Mjolnir worker answers their
+    /// permission requests with Codex's guardian policy instead, on a
+    /// read-only session of the same harness and model.
+    pub const fn guardian(self) -> GuardianReviewer {
+        match self {
+            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Antigravity => {
+                GuardianReviewer::Harness
+            }
+            Self::Kimi | Self::OpenCode | Self::Dsh => GuardianReviewer::Mjolnir,
+        }
     }
 
     /// The launch flag the bridge command line carries, if any.
@@ -2063,13 +2114,6 @@ impl HarnessProfile {
             | AuthScheme::NativeLoginStore => None,
             AuthScheme::NativeLogin => crate::credentials::credential_expiry(self.kind, bytes),
         }
-    }
-
-    /// Whether this profile can review actions that leave the sandbox before
-    /// running them. Codex runs its Guardian reviewer against whatever provider
-    /// the profile names, so the answer depends only on the harness kind.
-    pub fn supports_guardian_approvals(&self) -> bool {
-        self.kind.supports_guardian_approvals()
     }
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {

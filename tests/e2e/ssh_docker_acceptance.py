@@ -498,9 +498,8 @@ class AcceptanceLab:
 
     def checkpoint_close_resume(self, session_id: str) -> None:
         before = self.container_id(session_id)
-        result = self.ipc({"action": "checkpoint_session", "arguments": {"session_id": session_id}}, 300)
-        record_json(self.artifact / "checkpoint.json", result)
-        self.ipc({"action": "suspend_session", "arguments": {"session_id": session_id}}, 301)
+        result = self.ipc({"action": "suspend_session", "arguments": {"session_id": session_id}}, 301)
+        record_json(self.artifact / "suspend.json", result)
         self.wait_state(session_id, "suspended", timeout=DEFAULT_TIMEOUT)
         resume = {
             "session_id": session_id,
