@@ -1340,7 +1340,7 @@ pub(crate) async fn run_server(
                     );
                     if let Some(workspace_id) = launch_workspaces.remove(&action_id)
                         && result.is_err()
-                        && session_id.is_none()
+                        && !session_id.as_ref().is_some_and(|id| closing_actions.contains_key(id))
                     {
                         record_launch_failure(
                             &mut launch_failures,

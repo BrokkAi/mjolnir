@@ -29,6 +29,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20) Milestone 3: built viewer rows from the runtime capture and verified a real parent/child session pair on the browser stream in `feeds-m3`.
 - [x] (2026-11-20 18:37Z) Milestone 3: revalidated after merging `origin/master`. The phone golden, owner and viewer regressions, runtime feed tests, API wait and turn tests, Clippy, and a live browser Interrupt All action passed.
 - [x] (2026-11-20 18:50Z) Milestone 3: verified the review fixes for persisted titles, launch preferences, and storage invalidation. The browser published all three restored values in `feeds-m3`, and the named daemon and workers stopped.
+- [x] (2026-11-20 19:06Z) Milestone 3: verified that a stopped worker keeps its last committed title, that a rejected projection page rolls its title back, and that full prompt bodies stay within the browser capture.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
 
@@ -64,7 +65,7 @@ This plan does not add a new public API. A later plan will publish this projecti
   Evidence: `mj-daemon/src/daemon/owner.rs`, `mj-client/src/runtime_feed.rs`, and the existing regression for retiring a relay actor.
 
 
-- Observation: the former viewer relay consumer persisted harness and provisional titles from worker views. This now runs when the runtime owner accepts a worker view. The database commits the title only if the observation still names its materialized frontier. The captured controller state also includes the saved Oracle choice and the recent directories used by the browser launch wizard.
+- Observation: the former viewer relay consumer persisted harness and provisional titles from worker views. The relay actor now saves each title in the same transaction as its projection page, including the last page read during checkpoint or suspend. It backfills titles from older projections when it attaches to an already-current worker. The captured controller state also includes the saved Oracle choice and the recent directories used by the browser launch wizard.
   Evidence: `mj-daemon/src/daemon/snapshot.rs`, `mj-store/src/database/sessions.rs`, and `mj-daemon/src/daemon/feed.rs`.
 
 
@@ -133,7 +134,7 @@ Milestone 1 is implemented and validated in its detached worktree. Both pickers 
 
 Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page showed the pending refresh and then displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
 
-Milestone 3 moved the viewer's worker and session facts into the runtime capture. The test cases cover workspace and storage changes without a session record change, and a child update that publishes operational state and attention together. A browser stream in `feeds-m3` showed the parent change from no Interrupt All offer to offering it after a child started. The browser action was accepted and the existing stream withdrew the offer when the child stopped. The named daemon was stopped and its workers were reaped.
+Milestone 3 moved the viewer's worker and session facts into the runtime capture. The test cases cover workspace and storage changes without a session record change, and a child update that publishes operational state and attention together. The full queues and forms stay in the in-process capture, and terminal clients continue reading them from the transcript tail. A browser stream in `feeds-m3` showed the parent change from no Interrupt All offer to offering it after a child started. The browser action was accepted and the existing stream withdrew the offer when the child stopped. The named daemon was stopped and its workers were reaped.
 
 Follow-ups: publish the unified projection as a versioned `/api/v1` stream including profile availability and "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache; revisit the browser Move picker’s implicit destination when all compatible destinations have a missing verdict. The existing profile-only Move can omit a destination and relies on execution preflight to check the implicit one.
 

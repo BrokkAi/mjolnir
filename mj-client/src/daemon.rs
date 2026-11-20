@@ -450,11 +450,12 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
-    /// Materialized queue and activity survive retirement of a relay actor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// In-process viewers need full queue and form bodies. Terminal clients
+    /// receive them through their transcript tails.
+    #[serde(skip)]
     pub materialized: Option<mj_core::snapshot_map::SharedSnapshot<RuntimeMaterializedSession>>,
     /// A retained projection for a session with no relay view.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip)]
     pub materialized_only: bool,
     pub attention: mj_core::attention::SessionAttention,
     /// Config selectors owned by the target permission policy.
@@ -469,8 +470,7 @@ pub struct RuntimeSessionView {
     pub error: Option<ViewError>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeMaterializedSession {
     pub execution: mj_core::state::MaterializedExecutionState,
     pub last_activity_at_ms: Option<i64>,

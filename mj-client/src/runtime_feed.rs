@@ -1187,6 +1187,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn browser_prompt_bodies_cannot_exhaust_the_control_frame() {
+        let mut first = RuntimeProjection::default();
+        let mut view = session("queued");
+        view.materialized = Some(
+            crate::daemon::RuntimeMaterializedSession {
+                queued_prompts: vec![mj_core::relay::QueuedPrompt {
+                    id: "large".into(),
+                    kind: Default::default(),
+                    text: "x".repeat(crate::daemon::MAX_FRAME_BYTES + 1),
+                    attachments: Vec::new(),
+                    created_at_ms: 8,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        );
+        first.sessions.insert("queued".into(), view);
+        let mut second = first.clone();
+        second.sessions.get_mut("queued").unwrap().connected = true;
+        let replacement = RuntimeDelta::between(&first, &second);
+        let encoded = serde_json::to_vec(&replacement).unwrap();
+        assert!(encoded.len() < crate::daemon::MAX_FRAME_BYTES);
+        let delivered: RuntimeDelta = serde_json::from_slice(&encoded).unwrap();
+        let view = delivered.sessions[0].1.as_ref().unwrap();
+        assert!(view.materialized.is_none());
+        assert!(view.connected);
+    }
+
     // Hard-won: AFK review #3: a coalesced feed hid transitions with equal availability.
     #[test]
     fn replica_applies_add_update_delete_atomically_and_ignores_duplicates() {

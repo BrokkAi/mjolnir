@@ -257,7 +257,7 @@ impl RuntimeState {
             has_snapshot,
             "daemon received a session view"
         );
-        let (recovered_failure, title_update) = {
+        let recovered_failure = {
             let mut owner = self.owner();
             let controller = owner.controller();
             if !controller.state.sessions.contains_key(&session_id)
@@ -279,17 +279,6 @@ impl RuntimeState {
                 let record = controller.state.sessions.get(&session_id)?;
                 let error = record.public_error()?;
                 (start > previous.projection_ordinal).then(|| error.to_owned())
-            });
-            let title_update = view.snapshot.as_ref().and_then(|snapshot| {
-                let title = snapshot.resolved_title();
-                let record = controller.state.sessions.get(&session_id)?;
-                (title != record.acp_session_title).then(|| {
-                    (
-                        snapshot.materialized.applied_event_ordinal,
-                        snapshot.materialized.applied_event_digest.clone(),
-                        title,
-                    )
-                })
             });
             if view.connected
                 && let Some(snapshot) = view.snapshot.as_ref()
@@ -365,29 +354,8 @@ impl RuntimeState {
                 .lock()
                 .expect("rejected logins poisoned")
                 .observe_worker(profile_id, &session_id, publication);
-            (recovered_failure, title_update)
+            recovered_failure
         };
-        if let Some((ordinal, digest, title)) = title_update {
-            let session_id = session_id.clone();
-            mj_core::runtime::spawn(async move {
-                let id = session_id.clone();
-                match mj_core::runtime::spawn_blocking(move || {
-                    mj_controller::database::set_session_acp_title_at_projection(
-                        id, ordinal, digest, title,
-                    )
-                })
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!(%session_id, %error, "could not persist relay title")
-                    }
-                    Err(error) => {
-                        tracing::warn!(%session_id, %error, "relay title persistence task failed")
-                    }
-                }
-            });
-        }
         if let Some(recorded_error) = recovered_failure {
             let state = self.clone();
             match mj_controller::upgrade::activity("lifecycle failure clear") {

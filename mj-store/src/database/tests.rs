@@ -1721,6 +1721,52 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
 }
 
 #[test]
+fn a_relay_title_commits_and_rolls_back_with_its_projection_page() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay-title-page.sqlite3");
+    let record = session("session-1", "project");
+    save_session_to(&path, &record).unwrap();
+    save_materialized_session_to(
+        &path,
+        &mj_core::state::MaterializedSession::empty("session-1"),
+    )
+    .unwrap();
+
+    let rejected: anyhow::Result<()> = apply_projection_page_to(&path, "session-1", |page| {
+        page.set_resolved_title(Some("Rejected title"))?;
+        anyhow::bail!("fail after changing the title");
+    });
+    assert!(rejected.is_err());
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions["session-1"].acp_session_title,
+        record.acp_session_title
+    );
+
+    apply_projection_page_to(&path, "session-1", |page| {
+        page.apply(
+            1,
+            RELAY_EVENT_GENESIS_DIGEST,
+            &event_digest(1),
+            &Default::default(),
+        )?;
+        page.set_resolved_title(Some("Committed title"))
+    })
+    .unwrap();
+    let stored = load_state_from(&path).unwrap();
+    assert_eq!(
+        stored.sessions["session-1"].acp_session_title.as_deref(),
+        Some("Committed title")
+    );
+    assert_eq!(
+        load_materialized_session_from(&path, "session-1")
+            .unwrap()
+            .unwrap()
+            .applied_event_ordinal,
+        1
+    );
+}
+
+#[test]
 fn a_delayed_relay_title_cannot_replace_the_title_of_a_newer_projection() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("relay-title.sqlite3");

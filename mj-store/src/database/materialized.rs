@@ -2220,6 +2220,17 @@ impl ProjectionPage<'_> {
         Ok(ProjectionApplyOutcome::Applied)
     }
 
+    /// Publish a session title with the same SQLite commit as its relay page.
+    /// A checkpoint can retire the actor immediately after this commit.
+    pub fn set_resolved_title(&self, title: Option<&str>) -> Result<()> {
+        self.transaction.execute(
+            "UPDATE sessions SET acp_session_title = ?2
+             WHERE session_id = ?1 AND acp_session_title IS NOT ?2",
+            params![self.session_id, title],
+        )?;
+        Ok(())
+    }
+
     /// Persist the coalesced final state of this page. Intermediate event
     /// frontiers are useful only for chain validation: a page commits or rolls
     /// back as a unit, so writing them individually adds no recovery value.
