@@ -3260,9 +3260,11 @@ async fn a_reviewer_that_ended_behind_a_failing_save_is_settled_from_its_standin
     let gate = SaveGate::new();
     *environment.save_gate.lock().unwrap() = Some(gate.clone());
     *environment.save_error.lock().unwrap() = Some("database busy".into());
+    // The failed save is followed by a repair save of the restored state, and
+    // then by the second reviewer's save; both fail too.
     environment
         .extra_save_failures
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+        .store(2, std::sync::atomic::Ordering::SeqCst);
     let first = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();

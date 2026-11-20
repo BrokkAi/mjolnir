@@ -688,7 +688,7 @@ impl HostState {
         }
         slot.pending_outcome = Some(PendingOutcome { prior, ended });
         let epoch = slot.epoch;
-        let state = match self.compose_for(&session_id, Some(&key)) {
+        let state = match self.compose(&session_id) {
             Ok(state) => state,
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -735,6 +735,7 @@ impl HostState {
         if let Some(slot) = self.reviews.get_mut(&key) {
             let pending = slot.pending_outcome.take();
             let mut ended = None;
+            let mut rolled_back = false;
             if let Some(PendingOutcome { prior, ended: end }) = pending
                 && let Err(error) = &result
             {
@@ -743,8 +744,17 @@ impl HostState {
                 {
                     slot.driver = driver;
                     slot.open = prior;
+                    rolled_back = true;
                 }
                 ended = end.map(|(child, reason)| (child, reason, error.clone()));
+            }
+            if rolled_back {
+                // Another review's save queued while this outcome was being
+                // saved listed it as settled. A save of the restored state
+                // follows it in the lane and takes that back.
+                if let Err(error) = self.persist(&session_id, None) {
+                    tracing::warn!(%session_id, %error, "could not queue the repair of a failed outcome save");
+                }
             }
             if result.is_ok() {
                 self.run(&key, requests);

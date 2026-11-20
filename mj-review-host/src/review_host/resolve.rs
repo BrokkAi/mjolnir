@@ -280,6 +280,14 @@ impl HostState {
                 }
             }
         }
+        if epoch.is_some() {
+            // A save queued while the delivery was in flight left this review
+            // out and carried its tentative findings; the lane runs it after
+            // the failed delivery. A save of the restored state follows it.
+            if let Err(error) = self.persist(&key.session_id, None) {
+                tracing::warn!(session_id = %key.session_id, %error, "could not queue the repair of a failed delivery");
+            }
+        }
         self.close_reviewer_child(key);
         if let Some(epoch) = epoch {
             self.drop_review_if_owner_gone(
