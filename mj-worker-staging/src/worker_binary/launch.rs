@@ -216,6 +216,8 @@ pub fn worker_launch_config_with_checkout(
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
     let mut target_environment = target.environment.clone();
     let podman_container = backend.container_engine() == Some("podman");
+    let nitro_build_cache =
+        session.build_cache.is_some() && matches!(backend, targets::TargetLocator::SshNitro { .. });
     if podman_container {
         // Provisioning writes inherited settings to this file under the
         // container's configured home. A root Podman worker can have
@@ -250,12 +252,16 @@ pub fn worker_launch_config_with_checkout(
             "MBX_CACHE_DIR".into(),
             build_cache.directory.to_string_lossy().into_owned(),
         );
-        target_environment.insert(
-            "MJ_MBX_CONFIG_DIR".into(),
-            mj_core::config::build_cache_configuration_directory(&build_cache.directory)
-                .to_string_lossy()
-                .into_owned(),
-        );
+        if nitro_build_cache {
+            target_environment.remove("MJ_MBX_CONFIG_DIR");
+        } else {
+            target_environment.insert(
+                "MJ_MBX_CONFIG_DIR".into(),
+                mj_core::config::build_cache_configuration_directory(&build_cache.directory)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
         // Compiler symlinks name this worker's private executable. Sharing
         // them lets another container replace them with an unreachable path.
         target_environment.insert(
@@ -272,6 +278,22 @@ pub fn worker_launch_config_with_checkout(
     }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.resolved().clone());
+    // Only the placement may set the Nitro mbx launch directive.
+    let nitro_mbx_directive = mj_core::worker_launch::SESSION_NITRO_MBX_ENV;
+    target_environment.remove(nitro_mbx_directive);
+    environment.remove(nitro_mbx_directive);
+    if nitro_build_cache {
+        target_environment.insert(nitro_mbx_directive.into(), "1".into());
+        // The engine owns the remote settings in the guest process environment.
+        for key in mj_core::worker_launch::MBX_REMOTE_ENVIRONMENT {
+            target_environment.remove(key);
+            environment.remove(key);
+        }
+        for key in ["MBX_CACHE_DIR", "MBX_SHIMS_DIR"] {
+            environment.insert(key.into(), target_environment[key].clone());
+        }
+        environment.remove("MJ_MBX_CONFIG_DIR");
+    }
     if let Some(source) = crate::aws_credentials::source(profile, backend, &target.environment)? {
         environment.remove("AWS_DEFAULT_PROFILE");
         environment.insert(

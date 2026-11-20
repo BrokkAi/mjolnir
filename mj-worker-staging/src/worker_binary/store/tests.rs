@@ -315,14 +315,7 @@ fn a_slow_worker_byte_stream_outlives_the_operation_deadline_but_short_commands_
         worker_id: None,
     };
     let executor = Expired(Default::default());
-    transfer_binary(
-        &executor,
-        &locator,
-        "session",
-        &WorkerInstall::Host(file),
-        "store/.upload/hel",
-    )
-    .unwrap();
+    transfer_binary(&executor, &locator, "session", &file, "store/.upload/hel").unwrap();
     assert_eq!(
         *executor.0.borrow(),
         [

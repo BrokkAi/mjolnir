@@ -922,6 +922,9 @@ pub async fn run_daemon_owned(
         .target_environment
         .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
         .map(PathBuf::from);
+    config
+        .target_environment
+        .remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
     let mut target_environment = config.target_environment.clone();
     target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     target_environment.extend(config.environment);
@@ -2281,6 +2284,7 @@ async fn shutdown_running_harness(mut running: RunningHarness) {
 /// and the supervisor that later uses the same runtime never overlap.
 pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<()> {
     let mut environment = config.target_environment.clone();
+    environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
     environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     environment.extend(config.environment);
     environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);

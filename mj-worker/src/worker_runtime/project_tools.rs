@@ -62,24 +62,28 @@ pub(super) fn apply_environment(
     );
     let shims = data.join("shims");
     let old = environment.get("PATH").cloned().unwrap_or_default();
-    // The build-cache launchers (tool_cache::prepare) wrap tools such as cmake
-    // and must stay ahead of the project's tools; they find the real tool,
-    // here a mise shim, after their own directory.
-    let wrappers = environment
-        .get("MJ_BUILD_TOOL_BIN")
-        .map(PathBuf::from)
-        .filter(|bin| std::env::split_paths(&old).any(|entry| &entry == bin));
+    // Cache launchers must wrap tools provided by mise. Cargo's mbx launcher
+    // lives alongside the session's GitHub CLI even without a host tool mount.
+    let wrappers: Vec<_> = [
+        environment.get("MJ_BUILD_TOOL_BIN"),
+        environment
+            .get(super::GITHUB_CLI_BIN_ENV)
+            .filter(|_| environment.contains_key("MBX_SHIMS_DIR")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    .filter(|bin| std::env::split_paths(&old).any(|entry| &entry == bin))
+    .collect();
     let mise_dir = mise.and_then(Path::parent);
     let path = std::env::join_paths(
         wrappers
-            .clone()
-            .into_iter()
+            .iter()
+            .cloned()
             .chain(std::iter::once(shims.clone()))
             .chain(mise_dir.map(Path::to_owned))
             .chain(std::env::split_paths(&old).filter(|entry| {
-                entry != &shims
-                    && mise_dir != Some(entry.as_path())
-                    && wrappers.as_ref() != Some(entry)
+                entry != &shims && mise_dir != Some(entry.as_path()) && !wrappers.contains(entry)
             })),
     )?;
     environment.insert(
@@ -579,15 +583,17 @@ mod tests {
         let mut environment = BTreeMap::from([
             (
                 "PATH".to_owned(),
-                "/managed-node/bin:/wrap:/usr/bin".to_owned(),
+                "/managed-node/bin:/worker/bin:/wrap:/usr/bin".to_owned(),
             ),
             ("MJ_BUILD_TOOL_BIN".to_owned(), "/wrap".to_owned()),
+            ("MJ_GITHUB_CLI_BIN".to_owned(), "/worker/bin".to_owned()),
+            ("MBX_SHIMS_DIR".to_owned(), "/worker/mbx-shims".to_owned()),
             ("MISE_DATA_DIR".to_owned(), "/data".to_owned()),
         ]);
         apply_environment(&mut environment, &[PathBuf::from("/workspace/repo")], None).unwrap();
         assert_eq!(
             environment["PATH"],
-            "/wrap:/data/shims:/managed-node/bin:/usr/bin"
+            "/wrap:/worker/bin:/data/shims:/managed-node/bin:/usr/bin"
         );
     }
 }

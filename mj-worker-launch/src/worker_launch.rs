@@ -420,8 +420,8 @@ pub fn stage_worker_files_for(
     Ok((Some(launch), None))
 }
 
-/// Refresh and verify the shared-cache copy, then install marked launchers
-/// in the session's `bin` directory on the worker PATH.
+/// Stage and verify the session's mbx, then install marked launchers in
+/// the session's `bin` directory on the worker PATH.
 pub fn install_build_cache_shim(
     config: &Config,
     state: &State,
@@ -434,6 +434,35 @@ pub fn install_build_cache_shim(
         return Ok(());
     };
     let worker_root = targets::worker_root(backend, &session.id)?;
+    if matches!(backend, targets::TargetLocator::SshNitro { .. }) {
+        let _timing = crate::launch_timing::LaunchPhaseTimer::new(&session.id, "stage Nitro mbx");
+        let staged = (|| {
+            let platform = target_platform(backend, executor)?;
+            ensure!(
+                platform.os == targets::TargetOs::Linux,
+                "Nitro guests require Linux mbx"
+            );
+            let artifact =
+                mj_build_cache::mbx::install::pinned_linux_binary(platform.architecture, executor)?;
+            let binary =
+                install_session_executable(executor, backend, &session.id, &artifact, "mbx")?;
+            verify_mbx_binary(executor, backend, &binary, mj_build_cache::mbx::MBX_VERSION)?;
+            Ok::<_, anyhow::Error>(binary)
+        })();
+        return match staged {
+            Ok(binary) => install_mbx_shims(executor, backend, &worker_root, &binary, None, &[]),
+            Err(error) => {
+                disable_mbx_cache_shims(
+                    &session.id,
+                    backend,
+                    &worker_root,
+                    executor,
+                    &format!("{error:#}"),
+                );
+                Ok(())
+            }
+        };
+    }
     let config_roots = build_cache_config_roots(launch);
     let configuration = mj_core::config::build_cache_configuration_directory(&cache.directory);
     if link_legacy_mbx_configuration(
@@ -483,7 +512,7 @@ pub fn install_build_cache_shim(
         backend,
         &worker_root,
         &binary.path,
-        &configuration,
+        Some(&configuration),
         &config_roots,
     )
 }
