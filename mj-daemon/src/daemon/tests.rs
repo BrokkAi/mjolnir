@@ -9286,14 +9286,36 @@ impl LiveParent {
         std::fs::read_to_string(self.relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap()
     }
 
-    fn journal(&self) -> String {
-        std::fs::read_to_string(
-            self.relay_root
-                .join(mj_core::relay::RELAY_JOURNAL_DIR)
-                .join("active.jsonl"),
+    /// The daemon's projected transcript. The worker collects journal files
+    /// once the daemon acknowledges them (b370417ba), so the store is where
+    /// a journaled notice lasts.
+    fn transcript(&self) -> String {
+        use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+        serde_json::to_string(
+            &mj_controller::database::load_materialized_session(LATCH_RELAY_SESSION)
+                .unwrap()
+                .expect("the daemon keeps the parent's projection")
+                .transcript,
         )
         .unwrap()
     }
+}
+
+/// Whether a close sealed the relay at `relay_root`: its own snapshot is
+/// closing or closed. A refused or interrupted close returns it to idle. The
+/// journal cannot answer this, because acknowledged files are collected.
+#[cfg(unix)]
+fn relay_sealed(relay_root: &Path) -> bool {
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    [
+        mj_core::relay::RelayExecutionState::Closing,
+        mj_core::relay::RelayExecutionState::Closed,
+    ]
+    .iter()
+    .any(|sealed| state["execution"] == serde_json::to_value(sealed).unwrap())
 }
 
 /// A live parent with one Mjolnir sub-agent at work ("Review the docs"),
@@ -9509,22 +9531,7 @@ struct LiveClone {
 impl LiveClone {
     /// Whether the session's relay was sealed by a close.
     fn sealed(&self) -> bool {
-        let journal = std::fs::read_to_string(
-            self.relay_root
-                .join(mj_core::relay::RELAY_JOURNAL_DIR)
-                .join("active.jsonl"),
-        )
-        .unwrap();
-        journal.lines().any(|line| {
-            let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
-            matches!(
-                event.observation,
-                mj_core::relay::RelayObservation::CommandQueued {
-                    command: RelayCommand::Close { .. },
-                    ..
-                }
-            )
-        })
+        relay_sealed(&self.relay_root)
     }
 }
 
@@ -9785,7 +9792,7 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
             .is_empty()
     );
     assert!(!parent.relay_state().contains("<mj-stopped-subagents>"));
-    assert!(!parent.journal().contains("Suspend stopped"));
+    assert!(!parent.transcript().contains("Suspend stopped"));
     parent.channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -9873,17 +9880,7 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
     );
 
     // The parent went through a checkpointed close: its relay was sealed.
-    let sealed = parent.journal().lines().any(|line| {
-        let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
-        matches!(
-            event.observation,
-            mj_core::relay::RelayObservation::CommandQueued {
-                command: RelayCommand::Close { .. },
-                ..
-            }
-        )
-    });
-    assert!(sealed, "{}", parent.journal());
+    assert!(relay_sealed(&parent.relay_root), "{}", parent.relay_state());
     parent.channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -10234,10 +10231,10 @@ async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stop
     );
     assert!(
         parent
-            .journal()
+            .transcript()
             .contains("Suspend stopped 1 working sub-agent: \\\"Fix the parser\\\"."),
         "{}",
-        parent.journal()
+        parent.transcript()
     );
     assert!(
         mj_controller::database::load_stopped_subagents(LATCH_RELAY_SESSION)

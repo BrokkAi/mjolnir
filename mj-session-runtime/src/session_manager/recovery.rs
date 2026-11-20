@@ -43,8 +43,12 @@ fn dead_worker_startup_failure(
     let Some(command) = &plan.exit_record else {
         return Ok(None);
     };
-    let (host, worker_root) =
-        crate::target_storage::session_worker_root(&plan.source_target, session_id.unwrap_or(""));
+    let paths = mj_core::targets::storage::session_storage_paths(
+        &plan.source_target,
+        session_id.unwrap_or(""),
+        plan_workspace(plan),
+    );
+    let host = paths.host.as_str();
     let output = executor
         .execute(command)
         .and_then(|output| mj_core::targets::checked_command_output(command, output))
@@ -55,17 +59,19 @@ fn dead_worker_startup_failure(
         Err(error) => {
             // The read succeeded and the owner proved the worker dead. An
             // interrupted in-place write cannot be repaired by retrying it.
-            tracing::warn!(%host, root = %worker_root, error = format!("{error:#}"),
+            tracing::warn!(%host, root = %paths.worker_root, error = format!("{error:#}"),
                 "dead worker left an unreadable exit record; continuing without its exit diagnostic");
             return Ok(None);
         }
     };
     if mj_core::targets::storage::reports_no_space(&record.reason) {
-        // The worker stops when it cannot write its journal, which lives in
-        // the worker root.
-        crate::target_storage::observe_no_space_at(
-            &host,
-            Some(&worker_root),
+        // The record does not say which filesystem refused the write: the
+        // journal is in the worker root, but the harness also writes the
+        // workspace, its profile home and `/tmp`, which can be other mounts.
+        // Hold each of them until a later measurement says which has room.
+        crate::target_storage::observe_no_space_on(
+            host,
+            &paths.all().collect::<Vec<_>>(),
             &format!("the worker stopped: {}", record.reason),
             record
                 .timestamp()
@@ -77,11 +83,30 @@ fn dead_worker_startup_failure(
     Ok(record.harness_failed_to_open().cloned())
 }
 
+fn plan_workspace(plan: &WorkerRecoveryPlan) -> Option<&std::path::Path> {
+    plan.workspace
+        .as_ref()
+        .map(|workspace| workspace.directory.as_path())
+}
+
+/// The host and sentence while a filesystem a restart of `plan`'s worker
+/// writes to is full. Recovery and the actor's storage wait both ask this.
+pub(crate) fn restart_storage_problem(
+    plan: &WorkerRecoveryPlan,
+    session_id: &str,
+) -> Option<(String, String)> {
+    crate::target_storage::worker_restart_problem(
+        &plan.source_target,
+        session_id,
+        plan_workspace(plan),
+    )
+}
+
 fn storage_forbids_restart(
     plan: &WorkerRecoveryPlan,
     session_id: Option<&str>,
 ) -> Option<WorkerRecoveryOutcome> {
-    crate::target_storage::worker_root_problem(&plan.source_target, session_id.unwrap_or(""))
+    restart_storage_problem(plan, session_id.unwrap_or(""))
         .map(|(host, problem)| WorkerRecoveryOutcome::StorageFull { host, problem })
 }
 

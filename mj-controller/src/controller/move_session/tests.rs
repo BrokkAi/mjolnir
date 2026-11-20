@@ -1554,7 +1554,10 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     let error = runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
         .unwrap_err();
-    assert!(format!("{error:#}").contains("storage was replaced"));
+    assert!(
+        format!("{error:#}").contains("storage was replaced"),
+        "{error:#}"
+    );
     assert_eq!(
         operation.destination_store_id.as_deref(),
         Some(destination_store_id.as_str())
@@ -4545,16 +4548,17 @@ fn in_place_profile_move_retains_native_state_and_installed_worker() {
     // Same harness, so the archived native session carries the conversation.
     assert_eq!(moved.native_session_id.as_deref(), Some("native-session"));
 
-    // The conversation says what happened, in the destination's own journal.
-    let journal = fs::read_to_string(
-        worker_root
-            .join(mj_core::relay::RELAY_JOURNAL_DIR)
-            .join(mj_core::relay::RELAY_ACTIVE_SEGMENT),
+    // The conversation says what happened. The worker deletes journal files
+    // once the daemon acknowledges them (b370417ba); the projection keeps it.
+    let journal = serde_json::to_string(
+        &crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap(),
     )
     .unwrap();
     assert!(
         journal.contains("in place because the weekly quota is exhausted"),
-        "the move notice is missing from the destination journal: {journal}"
+        "the move notice is missing from the destination conversation: {journal}"
     );
 }
 

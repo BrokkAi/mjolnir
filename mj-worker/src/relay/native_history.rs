@@ -24,7 +24,7 @@ impl DurableRelay {
                 .snapshot
                 .dispatches
                 .values()
-                .any(prompt_may_have_reached_agent)
+                .any(RelayDispatchRecord::prompt_may_have_reached_agent)
             {
                 self.snapshot.native_session_used = true;
                 NativeSessionUse::Unknown
@@ -181,7 +181,7 @@ impl NativeHistoryEvidence {
                 self.used |= could_be_prompt
                     && dispatches
                         .get(&command_id)
-                        .is_none_or(prompt_may_have_reached_agent);
+                        .is_none_or(RelayDispatchRecord::prompt_may_have_reached_agent);
             }
             RelayObservation::CommandCompleted {
                 command_id,
@@ -256,14 +256,6 @@ impl NativeHistoryEvidence {
             | RelayObservation::Closed => {}
         }
     }
-}
-
-pub(super) fn prompt_may_have_reached_agent(dispatch: &RelayDispatchRecord) -> bool {
-    dispatch.command.prompt_blocks().is_some()
-        && !matches!(
-            dispatch.state,
-            RelayDispatchState::Queued | RelayDispatchState::Pending
-        )
 }
 
 #[cfg(test)]

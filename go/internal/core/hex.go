@@ -1,5 +1,6 @@
-// Package hex renders bytes as lowercase hexadecimal, as mj-core/src/hex.rs does.
-package hex
+// Port of mj-core/src/hex.rs.
+
+package core
 
 import "encoding/hex"
 
