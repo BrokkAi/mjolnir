@@ -875,6 +875,7 @@ mod resume;
 mod snapshot;
 pub(crate) mod startup_followup;
 mod state;
+pub(crate) use state::ChildReview;
 mod subagent_park;
 mod support;
 pub(crate) mod ui_requests;

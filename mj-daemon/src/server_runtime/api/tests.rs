@@ -2926,6 +2926,8 @@ struct ParkingExports {
     defer_unpark: std::sync::atomic::AtomicBool,
     /// What the review host would answer for the child.
     awaiting_review: std::sync::atomic::AtomicBool,
+    /// The review host cannot answer yet; overrides `awaiting_review`.
+    review_unknown: std::sync::atomic::AtomicBool,
     protocol: u32,
 }
 
@@ -2952,6 +2954,7 @@ impl ParkingExports {
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
             awaiting_review: Default::default(),
+            review_unknown: Default::default(),
             protocol: if modern_worker {
                 mj_core::relay::RELAY_PROTOCOL_VERSION
             } else {
@@ -2983,10 +2986,21 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
-    fn child_awaits_review(&self, _: String) -> BoxFuture<'_, bool> {
+    fn child_review(&self, _: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
         Box::pin(async {
-            self.awaiting_review
+            if self
+                .review_unknown
                 .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::daemon::ChildReview::Unknown
+            } else if self
+                .awaiting_review
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::daemon::ChildReview::Open
+            } else {
+                crate::daemon::ChildReview::Closed
+            }
         })
     }
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
@@ -5842,6 +5856,7 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
             steered_into: None,
         });
     let (submitted, _) = mpsc::unbounded_channel();
+    let exports = ParkingExports::new(SessionState::Running, None);
     let backend = Arc::new(ApiBackend::new(
         SessionControl::new(FakeControl(FakeSession {
             session_id: "child-1".into(),
@@ -5850,7 +5865,7 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
             view: Some(view),
         })),
         running_states(),
-        ParkingExports::new(SessionState::Running, None),
+        exports.clone(),
     ));
     let request = mj_core::subagent::SubagentToolRequest {
         originating_command_id: Some("original-turn".into()),
@@ -5860,6 +5875,26 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
             message: "original report".into(),
         },
     };
+    // While the review host restores reviews, a queued handback stays
+    // unanswered and is retried; it is not refused for good.
+    exports
+        .review_unknown
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        backend
+            .execute_subagent_tool_durable("child-1".into(), request.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        mj_controller::database::load_delegation("child-1", "delayed-report")
+            .unwrap()
+            .is_some_and(|(_, result)| result.is_none()),
+        "the deferred handback stays unanswered"
+    );
+    exports
+        .review_unknown
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     let result = backend
         .execute_subagent_tool_durable("child-1".into(), request)
         .await
@@ -8055,7 +8090,7 @@ async fn the_first_question_starts_one_oracle_like_a_spawn_and_a_later_one_asks_
         }),
     };
     let replay = backend
-        .execute_subagent_tool_prepared("parent-1".into(), first.clone(), Some(&prepared))
+        .execute_subagent_tool_prepared("parent-1".into(), first.clone(), Some(&prepared), None)
         .await;
     assert!(!replay.is_error, "{}", replay.message);
     assert_eq!(exports.requests().len(), 1);

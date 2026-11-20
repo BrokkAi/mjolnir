@@ -432,7 +432,7 @@ pub fn set_review_base(
     )?;
     anyhow::ensure!(
         !recorded.is_empty(),
-        "commit {commit} was never reviewed or overridden in {}; call request_review first, then call set_review_baseline once the verdict is clean or you have overridden it",
+        "commit {commit} was never reviewed or overridden in {}; call request_review first, then call set_baseline once the verdict is clean or you have overridden it",
         root.display()
     );
     record_review_base(runner, root, &tree, &commit)?;
