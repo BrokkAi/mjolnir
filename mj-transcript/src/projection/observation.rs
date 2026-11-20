@@ -597,7 +597,10 @@ pub(super) fn project_observation(
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }
-            if active.is_some()
+            // The active turn names the command it belongs to. Stores
+            // projected before turn identity was kept (revision 28) have no
+            // active turn, so their started user row is the evidence instead.
+            if (active.is_some() || (current.active_turn.is_none() && prompt_was_started))
                 && !current
                     .configuration
                     .goal

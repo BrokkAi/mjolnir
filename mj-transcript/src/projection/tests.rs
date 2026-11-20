@@ -1596,6 +1596,50 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
             message: "transport failed".into()
         }
     );
+
+    apply_observation(&mut session, agent_chunk("partial output", "answer"));
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running { .. }
+    ));
+    assert!(session.transcript.iter().any(|item| {
+        matches!(
+            &item.body,
+            TranscriptBody::Agent {
+                streaming: true,
+                ..
+            }
+        )
+    }));
+    // A store projected before revision 28 has a user row but no active turn.
+    session.active_turn = None;
+    assert!(
+        session
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "user:running")
+    );
+
+    // Hard-won: 566f76395: rejecting a prompt started before upgrade left execution running.
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            reason: None,
+            command_id: "running".into(),
+            command: RelayCommandKind::Prompt,
+            message: "transport failed".into(),
+        },
+    );
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert!(!session.transcript.iter().any(|item| {
+        matches!(
+            &item.body,
+            TranscriptBody::Agent {
+                streaming: true,
+                ..
+            }
+        )
+    }));
 }
 
 #[test]
