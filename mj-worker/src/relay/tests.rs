@@ -10850,3 +10850,57 @@ fn autonomous_reply_after_completed_prompt_has_its_own_judgment_tail() {
     let relay = DurableRelay::open(temp.path(), SESSION, "autonomous-reopen").unwrap();
     check(&relay);
 }
+
+// Hard-won: c82699f02: Codex native markers split the reply of a still-running ACP prompt.
+#[test]
+fn prompted_reply_survives_native_start_and_settle_markers() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "prompted-native").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    submit_relay(&mut relay, "prompt-native-turn", prompt("answer this"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"prompt-reply",
+                "content":{"type":"text","text":"before start; "}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 100 })
+        .unwrap();
+    assert!(!relay.snapshot.harness_turn.unwrap().autonomous);
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after start; "}
+    })).unwrap()).unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            origin: None,
+            prompt_in_flight: true,
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after settle"}
+    })).unwrap()).unwrap();
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "before start; after start; after settle"
+        )
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "prompted-native-reopen").unwrap();
+    check(&relay);
+}

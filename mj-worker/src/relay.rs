@@ -1066,10 +1066,24 @@ impl DurableRelay {
                     prompt_text(&dispatch.command).map(|text| (id.clone(), Some(text)))
                 })
                 .collect();
+            // The relay owner persists autonomous identity in the open turn
+            // and its settled record; native starts inside prompts are not
+            // assistant-message boundaries.
+            let mut autonomous_starts = BTreeSet::new();
+            if let Some(turn) = relay.snapshot.autonomous_harness_turn() {
+                autonomous_starts.insert(turn.first_ordinal);
+            }
             // Terminal records retain command kinds after dispatch bodies are
             // gone. Their starts still establish boundaries; an unavailable
             // body stays distinct from an empty prompt.
             for event in &relay.hot_events {
+                if let RelayObservation::HarnessTurnSettled {
+                    autonomous: Some(turn),
+                    ..
+                } = &event.observation
+                {
+                    autonomous_starts.insert(turn.start_ordinal);
+                }
                 let command_id = match &event.observation {
                     RelayObservation::CommandCompleted {
                         command_id,
@@ -1113,6 +1127,9 @@ impl DurableRelay {
                 relay.turn_context.mark_earlier_history_omitted();
             }
             for event in &relay.hot_events {
+                if autonomous_starts.contains(&event.ordinal) {
+                    relay.turn_context.observe_autonomous_turn_start();
+                }
                 if let RelayObservation::CommandQueued {
                     command_id,
                     command,

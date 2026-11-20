@@ -794,6 +794,13 @@ impl DurableRelay {
         if self.classifies_turns() && self.snapshot.assessment != previous_assessment {
             self.publish_assessment_diagnostic();
         }
+        if matches!(
+            event.observation,
+            RelayObservation::HarnessTurnStarted { .. }
+        ) && self.snapshot.autonomous_harness_turn().is_some()
+        {
+            self.turn_context.observe_autonomous_turn_start();
+        }
         self.turn_context
             .observe_relay(&event.observation, summary_prompt.as_deref());
         let authorization_changed = match &event.observation {

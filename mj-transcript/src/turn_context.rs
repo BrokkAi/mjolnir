@@ -148,6 +148,15 @@ impl TurnContext {
         }
     }
 
+    /// Begin a turn the relay owner has identified as autonomous.
+    pub fn observe_autonomous_turn_start(&self) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.assistant_text_tail.clear();
+        state.last_completed_message.clear();
+        state.message_id = None;
+        state.generation = state.generation.wrapping_add(1);
+    }
+
     /// Record durable transcript observations through the same path during live work and replay.
     pub fn observe_relay(
         &self,
@@ -177,15 +186,11 @@ impl TurnContext {
                 outcome: RelayCommandOutcome::Prompt { .. },
                 ..
             }
-            | RelayObservation::HarnessTurnSettled { .. } => {
+            | RelayObservation::HarnessTurnSettled {
+                prompt_in_flight: false,
+                ..
+            } => {
                 complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
-            }
-            RelayObservation::HarnessTurnStarted { .. } => {
-                let mut state = self.0.lock().expect("turn context lock poisoned");
-                state.assistant_text_tail.clear();
-                state.last_completed_message.clear();
-                state.message_id = None;
-                state.generation = state.generation.wrapping_add(1);
             }
             RelayObservation::SessionUpdate { update } => self.observe(update),
             RelayObservation::TerminalOutput {
