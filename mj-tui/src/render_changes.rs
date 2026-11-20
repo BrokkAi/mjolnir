@@ -227,8 +227,8 @@ impl DashboardState {
         self.capacity_details
             .iter()
             .filter_map(|(id, detail)| {
-                let sampled_at = detail.state.sampled_at_epoch_seconds?;
-                if detail.state.probe_error.is_some()
+                let sampled_at = detail.reading.sampled_at_epoch_seconds?;
+                if detail.reading.probe_error.is_some()
                     || !mj_core::targets::capacity_sample_is_stale(sampled_at, now)
                 {
                     return None;

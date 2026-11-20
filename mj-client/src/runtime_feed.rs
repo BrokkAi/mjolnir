@@ -324,6 +324,13 @@ pub struct RuntimeContainerCapacity {
     pub capacity: mj_core::state::HostContainerCapacity,
 }
 
+/// One host or fleet and whether the daemon owes it a manual refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHostCapacity {
+    pub reading: mj_core::targets::HostCapacityRow,
+    pub refreshing: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationCard {
     /// Time of the oldest visible item.
@@ -537,6 +544,9 @@ pub struct RuntimeMetadata {
     /// sends none.
     #[serde(default)]
     pub storage: SharedSnapshot<Vec<mj_core::targets::storage::TargetStorageView>>,
+    /// CPU, memory and filesystem readings from the daemon capacity service.
+    #[serde(default)]
+    pub host_capacities: SharedSnapshot<Vec<RuntimeHostCapacity>>,
     /// Hard container headroom for each probed deployment host. The daemon
     /// includes in-memory resume and move reservations; terminal surfaces
     /// must not recompute this from records they happen to have loaded.

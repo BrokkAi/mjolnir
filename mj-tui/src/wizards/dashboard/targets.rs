@@ -337,9 +337,14 @@ impl DashboardState {
     pub(crate) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
         self.capacity_details
             .values()
-            .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))
-            .and_then(|detail| detail.state.usage.as_ref())
-            .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
+            .find(|detail| detail.reading.target_ids.iter().any(|id| id == target_id))
+            .filter(|detail| detail.reading.has_reading)
+            .map(|detail| {
+                (
+                    detail.reading.logical_cores,
+                    detail.reading.memory_total_bytes,
+                )
+            })
     }
 
     pub(crate) fn host_container_capacity(

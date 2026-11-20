@@ -324,6 +324,11 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
+        full.metadata.host_capacities = self
+            .capacity_feed()
+            .map(|feed| feed.runtime_rows())
+            .unwrap_or_default()
+            .into();
         full.metadata.storage = mj_controller::target_storage::views_snapshot();
         full.metadata.profile_capabilities = self
             .profile_catalog

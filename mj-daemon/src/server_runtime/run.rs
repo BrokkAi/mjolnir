@@ -107,7 +107,7 @@ pub(crate) async fn run_server(
     let mut capacity_targets_rx = capacity_feed.targets.clone();
     let mut capacity_states_rx = capacity_feed.states.clone();
     track_capacity_targets(
-        &capacity_targets_rx.borrow_and_update(),
+        &capacity_targets_rx.borrow_and_update().targets,
         &mut capacity_state,
     );
     let container_capacities = initial.metadata.container_capacities.clone();
@@ -513,7 +513,7 @@ pub(crate) async fn run_server(
                         failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
                         break;
                     }
-                    track_capacity_targets(&capacity_targets_rx.borrow_and_update(), &mut capacity_state);
+                    track_capacity_targets(&capacity_targets_rx.borrow_and_update().targets, &mut capacity_state);
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }

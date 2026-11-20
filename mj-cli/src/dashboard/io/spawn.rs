@@ -1041,6 +1041,16 @@ pub(crate) fn spawn_quota_refresh_request(updates: UnboundedSender<DashboardIoUp
     );
 }
 
+pub(crate) fn spawn_capacity_refresh_request(updates: UnboundedSender<DashboardIoUpdate>) {
+    spawn_background_async(
+        "asking the daemon to refresh capacity",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move { daemon::connect_existing().await?.refresh_capacity().await },
+        DashboardIoUpdate::CapacityRefreshRequested,
+    );
+}
+
 /// Asks the daemon to probe one profile's quota now, even a disabled
 /// profile's. The answer arrives through the runtime feed like any other.
 pub(crate) fn spawn_quota_probe_request(

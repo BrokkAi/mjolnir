@@ -4,10 +4,13 @@
 //! with one command that samples CPU, memory and the free space on the
 //! filesystems Mjolnir writes to. The free space goes to
 //! [`mj_controller::target_storage`], which decides whether a host is full; the whole
-//! reading goes to whoever subscribes, today the web viewer. A host that does
+//! reading goes to the terminal dashboard and web viewer. A host that does
 //! not answer holds only its own probe slot, for at most the probe timeout.
 
 use super::*;
+use crate::pollers::CapacityProbeSet;
+use mj_client::runtime_feed::RuntimeHostCapacity;
+use mj_controller::targets::HostCapacityRow;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityInput {
@@ -77,18 +80,13 @@ impl Drop for ContainerCapacityLease {
 
 /// What the capacity service shares with the surfaces that show capacity.
 pub(crate) struct CapacityFeed {
-    pub(crate) targets:
-        tokio::sync::watch::Receiver<Vec<mj_controller::targets::DeploymentCapacityTarget>>,
+    pub(crate) targets: tokio::sync::watch::Receiver<CapacityProbeSet>,
     /// The one owner of each target's last good reading, sample time, latest
     /// failure and empty-fleet answer. The poller updates an entry in a single
     /// `send_modify`, so every reader sees a whole entry.
     pub(crate) states:
         tokio::sync::watch::Receiver<BTreeMap<String, mj_controller::targets::TargetCapacityState>>,
-    refresh: tokio::sync::mpsc::Sender<()>,
-    /// Refresh requests made so far. The poller reads it when a probe starts
-    /// and reports the value with the result, so the feed owns the one
-    /// numbering of requests.
-    refresh_requests: Arc<std::sync::atomic::AtomicU64>,
+    refresh: tokio::sync::watch::Sender<u64>,
 }
 
 impl CapacityFeed {
@@ -106,6 +104,7 @@ impl CapacityFeed {
         let target = self
             .targets
             .borrow()
+            .targets
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))?
             .clone();
@@ -121,6 +120,7 @@ impl CapacityFeed {
     ) -> Option<mj_controller::targets::DeploymentCapacityTarget> {
         self.targets
             .borrow()
+            .targets
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))
             .cloned()
@@ -133,40 +133,42 @@ impl CapacityFeed {
         self.reading_for_target(target_id).map(|(_, usage)| usage)
     }
 
-    /// Every host and fleet with its latest reading and storage verdicts, in
-    /// the order the capacity service lists them. Reads what the service
-    /// already holds; it never probes.
-    pub(crate) fn host_rows(&self) -> Vec<mj_controller::targets::HostCapacityRow> {
-        let storage = mj_controller::target_storage::views();
+    /// Every host and fleet with its latest reading and storage verdicts.
+    pub(crate) fn host_rows(&self) -> Vec<HostCapacityRow> {
+        self.runtime_rows()
+            .into_iter()
+            .map(|row| row.reading)
+            .collect()
+    }
+
+    pub(crate) fn runtime_rows(&self) -> Vec<RuntimeHostCapacity> {
         let states = self.states.borrow();
-        self.targets
-            .borrow()
+        let storage = mj_controller::target_storage::views_snapshot();
+        let inputs = self.targets.borrow();
+        let empty = mj_controller::targets::TargetCapacityState::default();
+        inputs
+            .targets
             .iter()
             .map(|target| {
-                mj_controller::targets::HostCapacityRow::new(
-                    target,
-                    &states.get(&target.id).cloned().unwrap_or_default(),
-                    &storage,
-                )
+                let state = states.get(&target.id).unwrap_or(&empty);
+                RuntimeHostCapacity {
+                    reading: HostCapacityRow::new(target, state, &storage),
+                    refreshing: state.answered_refresh < inputs.refresh_generation,
+                }
             })
             .collect()
     }
 
-    /// Ask for a new reading of every host. Returns the request's generation:
-    /// the target's `answered_refresh` reaches it once a probe that started
-    /// after this call has produced a result. A request that arrives while one
-    /// is queued is the same request. `None` means the poller has stopped.
+    /// Ask for a new reading of every host. The service coalesces requests
+    /// and publishes the latest generation together with freshly derived
+    /// definitions. Only probes started with those inputs can answer it.
     pub(crate) fn request_refresh(&self) -> Option<u64> {
-        // Count first, then trigger: a probe that counts this request starts
-        // after it was made.
-        let generation = self
-            .refresh_requests
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-        match self.refresh.try_send(()) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => Some(generation),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => None,
-        }
+        let mut generation = 0;
+        self.refresh.send_modify(|requested| {
+            *requested += 1;
+            generation = *requested;
+        });
+        (!self.refresh.is_closed()).then_some(generation)
     }
 }
 
@@ -664,6 +666,7 @@ impl ContainerCapacityProjection {
                 let states = feed.states.borrow();
                 feed.targets
                     .borrow()
+                    .targets
                     .iter()
                     .filter(|target| {
                         target.kind == mj_controller::targets::DeploymentCapacityKind::Host
@@ -715,15 +718,18 @@ pub(super) fn spawn_capacity_service(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let refresh_requests = Arc::<std::sync::atomic::AtomicU64>::default();
-    let (targets_tx, refresh, mut readings) =
-        crate::pollers::spawn_daemon_capacity_poller(refresh_requests.clone());
+    let (targets_tx, storage_refresh, mut readings) =
+        crate::pollers::spawn_daemon_capacity_poller();
+    let (refresh, mut refresh_requests) = tokio::sync::watch::channel(0);
     mj_controller::target_storage::install_no_space_observer();
-    mj_controller::target_storage::attach_refresh(refresh.clone());
+    mj_controller::target_storage::attach_refresh(storage_refresh);
     let initial = state
         .active_controller_projection()
         .deployment_capacity_targets();
-    targets_tx.send_replace(initial);
+    targets_tx.send_replace(CapacityProbeSet {
+        targets: initial,
+        refresh_generation: 0,
+    });
     let (states_tx, states_rx) = tokio::sync::watch::channel(BTreeMap::<
         String,
         mj_controller::targets::TargetCapacityState,
@@ -732,7 +738,6 @@ pub(super) fn spawn_capacity_service(
         targets: targets_tx.subscribe(),
         states: states_rx,
         refresh,
-        refresh_requests,
     };
     if state.capacity.set(feed).is_err() {
         tracing::error!("the daemon capacity service was started twice");
@@ -741,34 +746,31 @@ pub(super) fn spawn_capacity_service(
         let mut revisions = state.revisions();
         let mut storage = mj_controller::target_storage::subscribe();
         let mut full_hosts = BTreeSet::new();
+        let mut target_refresh_at = None;
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
-                changed = revisions.changed() => {
+                changed = revisions.changed(), if target_refresh_at.is_none() => {
                     if changed.is_err() {
                         break;
                     }
-                    tokio::select! {
-                        _ = cancellation.cancelled() => break,
-                        _ = tokio::time::sleep(TARGET_REFRESH_GAP) => {}
+                    target_refresh_at = Some(tokio::time::Instant::now() + TARGET_REFRESH_GAP);
+                }
+                _ = async {
+                    if let Some(at) = target_refresh_at {
+                        tokio::time::sleep_until(at).await;
                     }
+                }, if target_refresh_at.is_some() => {
+                    target_refresh_at = None;
                     revisions.borrow_and_update();
-                    let targets = state
-                        .active_controller_projection()
-                        .deployment_capacity_targets();
-                    states_tx.send_if_modified(|states| {
-                        let before = states.len();
-                        states.retain(|id, _| targets.iter().any(|target| target.id == *id));
-                        states.len() != before
-                    });
-                    targets_tx.send_if_modified(|current| {
-                        if *current == targets {
-                            false
-                        } else {
-                            *current = targets;
-                            true
-                        }
-                    });
+                    refresh_probe_targets(&state, &targets_tx, &states_tx, None);
+                }
+                changed = refresh_requests.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let generation = *refresh_requests.borrow_and_update();
+                    refresh_probe_targets(&state, &targets_tx, &states_tx, Some(generation));
                 }
                 changed = storage.changed() => {
                     if changed.is_err() {
@@ -783,29 +785,63 @@ pub(super) fn spawn_capacity_service(
                         tracing::error!("the daemon capacity poller stopped");
                         break;
                     };
+                    // The service may have rebuilt the targets after the
+                    // poller queued this result.
+                    if !targets_tx.borrow().targets.contains(&reading.target) {
+                        continue;
+                    }
                     states_tx.send_modify(|states| {
                         states
-                            .entry(reading.target_id.clone())
+                            .entry(reading.target.id)
                             .or_default()
                             .apply(
                                 &reading.result,
                                 reading.sampled_at_epoch_seconds,
                                 reading.refresh_generation,
                             );
+                        if let Ok(Some(usage)) = &reading.result {
+                            mj_controller::target_storage::record_samples(
+                                &usage.storage,
+                                reading.sampled_at_epoch_seconds,
+                            );
+                        }
                     });
-                    if let Ok(Some(usage)) = &reading.result {
-                        mj_controller::target_storage::record_samples(
-                            &usage.storage,
-                            reading.sampled_at_epoch_seconds,
-                        );
-                    }
-                    // The runtime feed carries the reservation-adjusted
-                    // headroom to terminal surfaces.
                     state.publish_revision();
                 }
             }
         }
     })
+}
+
+/// Re-read probe inputs, including mbx's paths, before scheduling a refresh.
+fn refresh_probe_targets(
+    state: &RuntimeState,
+    targets_tx: &tokio::sync::watch::Sender<CapacityProbeSet>,
+    states_tx: &tokio::sync::watch::Sender<
+        BTreeMap<String, mj_controller::targets::TargetCapacityState>,
+    >,
+    refresh_generation: Option<u64>,
+) {
+    let targets = state
+        .active_controller_projection()
+        .deployment_capacity_targets();
+    states_tx.send_if_modified(|states| {
+        let before = states.len();
+        states.retain(|id, _| targets.iter().any(|target| target.id == *id));
+        states.len() != before
+    });
+    if targets_tx.send_if_modified(|current| {
+        if refresh_generation.is_none() && current.targets == targets {
+            return false;
+        }
+        current.targets = targets;
+        if let Some(generation) = refresh_generation {
+            current.refresh_generation = generation;
+        }
+        true
+    }) {
+        state.publish_revision();
+    }
 }
 
 /// Tell every surface once when a filesystem on a host becomes full.
@@ -944,7 +980,10 @@ mod tests {
             disk_total_bytes: None,
             storage: Vec::new(),
         };
-        let (targets, _) = tokio::sync::watch::channel(vec![target]);
+        let (targets, _) = tokio::sync::watch::channel(CapacityProbeSet {
+            targets: vec![target],
+            refresh_generation: 0,
+        });
         let (_states, states) = tokio::sync::watch::channel(BTreeMap::from([(
             "local".to_owned(),
             mj_controller::targets::TargetCapacityState {
@@ -952,7 +991,7 @@ mod tests {
                 ..Default::default()
             },
         )]));
-        let (refresh, _) = tokio::sync::mpsc::channel(1);
+        let (refresh, _) = tokio::sync::watch::channel(0);
         assert!(
             state
                 .capacity
@@ -960,7 +999,6 @@ mod tests {
                     targets: targets.subscribe(),
                     states,
                     refresh,
-                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
@@ -1534,7 +1572,10 @@ mod tests {
             disk_total_bytes: None,
             storage: Vec::new(),
         };
-        let (targets, _targets_rx) = tokio::sync::watch::channel(vec![target]);
+        let (targets, _targets_rx) = tokio::sync::watch::channel(CapacityProbeSet {
+            targets: vec![target],
+            refresh_generation: 0,
+        });
         let (latest, latest_rx) = tokio::sync::watch::channel(BTreeMap::from([(
             "local".to_owned(),
             mj_controller::targets::TargetCapacityState {
@@ -1542,7 +1583,7 @@ mod tests {
                 ..Default::default()
             },
         )]));
-        let (refresh, _) = tokio::sync::mpsc::channel(1);
+        let (refresh, _) = tokio::sync::watch::channel(0);
         assert!(
             state
                 .capacity
@@ -1550,7 +1591,6 @@ mod tests {
                     targets: targets.subscribe(),
                     states: latest_rx,
                     refresh,
-                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
@@ -1635,7 +1675,7 @@ mod tests {
         });
         let resized = publisher.project(&state, &sessions.sessions);
         assert_eq!(resized["local"].capacity.remaining.cpus, 12);
-        targets.send_modify(|targets| targets.clear());
+        targets.send_modify(|inputs| inputs.targets.clear());
         assert!(publisher.project(&state, &sessions.sessions).is_empty());
     }
 }

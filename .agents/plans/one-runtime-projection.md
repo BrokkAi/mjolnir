@@ -20,7 +20,8 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - [x] (2026-11-20 16:40Z) Reconnaissance: compared both pipelines and listed every fact computed twice. Findings are folded into Context and Orientation and the Decision Log. The full report, with file and line references at commit 818e11d0e, is in the parent session's report directory `.mj/agents/08c56cb5893e5e88dd4ff2d329501203/report.md` (not checked in; everything needed is restated here).
 - [ ] Milestone 1: one availability owner (#1372).
-- [ ] Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
+- [x] (2026-11-20) Implement Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
+- [x] (2026-11-20) Verify Milestone 2 in `feeds-m2` with an isolated mbx config.
 - [ ] Milestone 3: web rows built only from the runtime capture.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
@@ -37,6 +38,10 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: the web viewer rebuilds only rows it marks dirty, and some facts a row shows depend on things that never mark it. A parent's Interrupt All offer depends on its children's activity, but a child-only update does not dirty the parent; the "change workspace" offer depends on how many workspaces exist, but creating a workspace dirties no row; a storage-only refresh rebuilds capacity metadata but not the per-row storage problem.
   Evidence: `mj-daemon/src/server_runtime/publication.rs` lines 141–224 and 277–287, `run.rs` lines 499–509 and 579–623, `snapshot.rs` lines 278–284 at 818e11d0e.
+
+
+- Observation: before Milestone 2, both capacity samplers used `Controller::deployment_capacity_targets`. Its host list comes from configured targets, and its session-dependent paths and EC2 instance probes use active records. The daemon already supplies those records. The existing daemon refresh triggered sampling of the old target definitions.
+  Evidence: `mj-controller/src/controller/backend.rs`, `mj-daemon/src/daemon/views.rs`, and the pre-change `CapacityFeed::request_refresh` at acd73e9d9.
 
 
 ## Decision Log
@@ -71,10 +76,17 @@ This plan does not add a new public API. A later plan will publish this projecti
   Date/Author: 2026-11-20, parent session.
 
 
+- Decision: publish the existing `HostCapacityRow` with daemon-owned refresh status in runtime metadata. Both surfaces read the capacity service and storage board. The service publishes each requested generation together with its newly derived probe definitions.
+  Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request.
+  Date/Author: 2026-11-20, Milestone 2 implementation.
+
+
 ## Outcomes & Retrospective
 
 
-Nothing has landed yet. Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
+Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
+
+Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
 
 
 ## Context and Orientation
@@ -186,3 +198,6 @@ None yet.
 
 
 No new crates or external libraries. The shared types live where the current ones do: runtime feed types in `mj-client/src/runtime_feed.rs`, availability types in `mj-client/src/availability.rs`, web snapshot types in `mj-server/src/server/viewer_types.rs`. At the end of Milestone 1 a per-entry availability verdict type with three cases (available, missing with a reason string, unknown) must exist in `mj-client` and be what both `mj-tui` and the web snapshot read. At the end of Milestone 4 a per-session verdict record must exist in `mj-client/src/runtime_feed.rs`, published in `RuntimeProjection` and copied into `ViewerSession`.
+
+
+Milestone 2 update, 2026-11-20. The plan now records the shared target coverage, why the refresh request must rebuild targets, how in-flight probes answer a refresh, and the named-instance outcome.

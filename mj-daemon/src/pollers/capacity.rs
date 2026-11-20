@@ -1,23 +1,18 @@
 use super::*;
 
-pub fn spawn_dashboard_capacity_poller() -> (
-    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
-    tokio::sync::mpsc::Sender<()>,
-    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
-) {
-    spawn_capacity_poller_with(sample_capacity_target, Arc::default())
+/// Probe definitions and the newest manual refresh they were derived for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CapacityProbeSet {
+    pub(crate) targets: Vec<DeploymentCapacityTarget>,
+    pub(crate) refresh_generation: u64,
 }
 
-/// The daemon's poller. `requested` counts refresh requests: a surface adds one
-/// to it, then sends the trigger. Each probe records the count when it starts.
-pub fn spawn_daemon_capacity_poller(
-    requested: Arc<std::sync::atomic::AtomicU64>,
-) -> (
-    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+pub(crate) fn spawn_daemon_capacity_poller() -> (
+    tokio::sync::watch::Sender<CapacityProbeSet>,
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 ) {
-    spawn_capacity_poller_with(sample_capacity_target, requested)
+    spawn_capacity_poller_with(sample_capacity_target)
 }
 
 /// Sample one deployment host now. The periodic poller and launch admission
@@ -40,9 +35,8 @@ pub(crate) async fn sample_capacity_target(
 
 pub(super) fn spawn_capacity_poller_with<F, Fut>(
     collect: F,
-    requested: Arc<std::sync::atomic::AtomicU64>,
 ) -> (
-    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::watch::Sender<CapacityProbeSet>,
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 )
@@ -50,14 +44,13 @@ where
     F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
 {
-    let (targets_tx, mut targets_rx) =
-        tokio::sync::watch::channel(Vec::<DeploymentCapacityTarget>::new());
+    let (targets_tx, mut targets_rx) = tokio::sync::watch::channel(CapacityProbeSet::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
     let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(1);
     mj_core::runtime::spawn(async move {
-        let mut targets = Vec::new();
+        let mut inputs = CapacityProbeSet::default();
         let collect = Arc::new(collect);
-        let mut samples = CapacitySamples::new(requested.clone());
+        let mut samples = CapacitySamples::new();
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + CAPACITY_POLL_INTERVAL,
             CAPACITY_POLL_INTERVAL,
@@ -67,7 +60,7 @@ where
             tokio::select! {
                 _ = updates_tx.closed() => break,
                 _ = interval.tick() => {
-                    samples.schedule(targets.iter().cloned(), &collect);
+                    samples.schedule(inputs.targets.iter().cloned(), inputs.refresh_generation, &collect);
                 }
                 changed = targets_rx.changed() => {
                     if changed.is_err() {
@@ -76,16 +69,20 @@ where
                     }
                     let updated = targets_rx.borrow_and_update().clone();
                     samples.schedule(
-                        updated.iter().filter(|target| !targets.contains(target)).cloned(),
+                        updated.targets.iter().filter(|target| {
+                            updated.refresh_generation != inputs.refresh_generation
+                                || !inputs.targets.contains(target)
+                        }).cloned(),
+                        updated.refresh_generation,
                         &collect,
                     );
-                    targets = updated;
+                    inputs = updated;
                 }
                 trigger = triggers_rx.recv() => {
                     if trigger.is_none() {
                         break;
                     }
-                    samples.schedule(targets.iter().cloned(), &collect);
+                    samples.schedule(inputs.targets.iter().cloned(), inputs.refresh_generation, &collect);
                 }
                 completed = samples.tasks.join_next_with_id(), if !samples.tasks.is_empty() => {
                     let (id, result) = match completed.expect("capacity task exists") {
@@ -99,37 +96,29 @@ where
                     let Ok(permit) = updates_tx.reserve().await else {
                         break;
                     };
-                    // A watch update and completion can become ready together.
-                    // Revalidate after backpressure, with no await between
-                    // reading the latest target and publishing the result.
-                    let current = targets_rx.borrow().iter().find(|target| target.id == sampled.id).cloned();
-                    let Some(current) = current else {
+                    // Revalidate after waiting for output capacity. If an
+                    // input change is pending, changed() will start its probes.
+                    let latest = targets_rx.borrow();
+                    let Some(current) = latest.targets.iter().find(|target| target.id == sampled.id) else {
                         continue;
                     };
-                    if current != sampled {
-                        // A changed target gets one follow-up; its old result
-                        // must not overwrite a reading for the new configuration.
-                        // If changed() is still pending, that arm will start it.
-                        if targets.contains(&current) {
-                            samples.schedule(std::iter::once(current), &collect);
-                        }
-                        continue;
+                    let target_changed = current != &sampled;
+                    if !target_changed {
+                        permit.send(CapacityPollUpdate {
+                            target: sampled,
+                            result,
+                            sampled_at_epoch_seconds: epoch_seconds(),
+                            refresh_generation,
+                        });
                     }
-                    permit.send(CapacityPollUpdate {
-                        target_id: sampled.id,
-                        result,
-                        sampled_at_epoch_seconds: epoch_seconds(),
-                        refresh_generation,
-                    });
-                    // A request that arrived while this probe was already
-                    // running is not answered by it, and the trigger skipped
-                    // the busy target; probe again now rather than wait for the
-                    // next round. The new probe starts after the request, so
-                    // this ends.
-                    if requested.load(std::sync::atomic::Ordering::Acquire) > refresh_generation
-                        && targets.contains(&current)
+                    // A busy probe cannot answer a request with newer inputs.
+                    // If changed() already ran, it skipped this target while
+                    // the old probe was busy, so start the follow-up here.
+                    if (target_changed || latest.refresh_generation > refresh_generation)
+                        && inputs.refresh_generation == latest.refresh_generation
+                        && inputs.targets.contains(current)
                     {
-                        samples.schedule(std::iter::once(current), &collect);
+                        samples.schedule(std::iter::once(current.clone()), latest.refresh_generation, &collect);
                     }
                 }
             }
@@ -152,21 +141,20 @@ pub(super) struct CapacitySamples {
     pub(super) tasks: tokio::task::JoinSet<Result<Option<DeploymentCapacityUsage>>>,
     /// Each running probe's target and the refresh count taken before it began.
     pub(super) targets: std::collections::HashMap<tokio::task::Id, (DeploymentCapacityTarget, u64)>,
-    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacitySamples {
-    fn new(requested: Arc<std::sync::atomic::AtomicU64>) -> Self {
+    fn new() -> Self {
         Self {
             tasks: tokio::task::JoinSet::new(),
             targets: std::collections::HashMap::new(),
-            requested,
         }
     }
 
     pub(super) fn schedule<F, Fut>(
         &mut self,
         targets: impl IntoIterator<Item = DeploymentCapacityTarget>,
+        generation: u64,
         collect: &Arc<F>,
     ) where
         F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
@@ -180,9 +168,6 @@ impl CapacitySamples {
             {
                 continue;
             }
-            // Read the count before the probe exists: any request it counts was
-            // made before the probe started, so the probe answers it.
-            let generation = self.requested.load(std::sync::atomic::Ordering::Acquire);
             let collect = collect.clone();
             let sampled = target.clone();
             let task = self.tasks.spawn(async move {

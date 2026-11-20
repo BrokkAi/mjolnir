@@ -1171,6 +1171,8 @@ pub enum DaemonAction {
     /// Every host and fleet with the capacity service's latest CPU, RAM and
     /// filesystem readings. Added in protocol 101.
     HostCapacity,
+    /// Re-read the daemon probe definitions and sample every host.
+    RefreshCapacity,
     /// Ask the daemon's quota poller to probe now. The daemon is the only
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
@@ -2453,6 +2455,14 @@ impl DaemonClient {
         match self.request(DaemonAction::HostCapacity).await? {
             DaemonReply::HostCapacity(rows) => Ok(rows),
             reply => bail!("unexpected host-capacity reply {reply:?}"),
+        }
+    }
+
+    /// Ask the daemon to refresh host capacity. Readings arrive on the feed.
+    pub async fn refresh_capacity(&mut self) -> Result<()> {
+        match self.request(DaemonAction::RefreshCapacity).await? {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected refresh-capacity reply {reply:?}"),
         }
     }
 
@@ -3860,7 +3870,9 @@ pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 pub const SUSPEND_ONLY_CHECKPOINT_PROTOCOL: u32 = 110;
 /// Adoption streams cancellable quiescence waits before its atomic install.
 pub const QUIESCENT_ADOPTION_PROTOCOL: u32 = SUSPEND_ONLY_CHECKPOINT_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = QUIESCENT_ADOPTION_PROTOCOL;
+/// The runtime feed carries host capacity, and clients can refresh it.
+pub const RUNTIME_HOST_CAPACITY_PROTOCOL: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = RUNTIME_HOST_CAPACITY_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";

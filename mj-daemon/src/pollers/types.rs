@@ -123,8 +123,8 @@ impl WorkerDiagnosisTracker {
 }
 
 #[derive(Debug, Clone)]
-pub struct CapacityPollUpdate {
-    pub target_id: String,
+pub(crate) struct CapacityPollUpdate {
+    pub(crate) target: DeploymentCapacityTarget,
     pub result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
     pub sampled_at_epoch_seconds: u64,
     /// The newest refresh request taken before the probe that produced
