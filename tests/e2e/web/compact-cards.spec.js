@@ -1241,6 +1241,54 @@ test('composer steering survives reconnect and Escape never confirms cancellatio
   await expect(composer).toHaveText('keep this draft');
 });
 
+// Hard-won: f1947384e: worker-issued browser controls stayed visible under a held Move.
+test('a held Move hides worker-issued turn controls', async ({ page }) => {
+  const parent = session('held-move', 'project', 'Project', {
+    capabilities: { prompt: true, interrupt_turn: true },
+  });
+  parent.active_prompt_id = 'turn-one';
+  parent.chat_phase = 'running';
+  parent.turn_controls = {
+    status: 'ready',
+    primary: { kind: 'steer', command: { type: 'steer', data: { active_prompt_id: 'turn-one', queued_prompt_id: 'next' } } },
+    interrupt: { type: 'cancel_turn_for', data: { active_prompt_id: 'turn-one' } },
+  };
+  const state = await mount(page, [parent]);
+  await card(page, parent.id).click();
+  await expect(page.locator('#cancel-turn')).toBeVisible();
+  await expect(page.locator('#turn-actions')).toBeVisible();
+
+  parent.verdict = { live_dashboard: true, move_queue_held: true, interrupt_count: 1, interrupt_member: false };
+  parent.capabilities.interrupt_turn = false;
+  parent.capabilities.interrupt_all = true;
+  await refresh(page, state);
+  await expect(page.locator('#cancel-turn')).toBeHidden();
+  await expect(page.locator('#turn-actions')).toBeHidden();
+  await page.locator('#prompt-text').press('Escape');
+  expect(state.actions).toHaveLength(0);
+
+  parent.steering = {
+    command_id: 'steering-one', active_prompt_id: 'turn-one', queued_prompt_id: 'next',
+    status: 'failed', message: 'The adapter refused to steer.',
+  };
+  await refresh(page, state);
+  const status = page.locator('#turn-control-status');
+  await expect(status).toContainText(parent.steering.message);
+  await expect(status.getByRole('button', { name: 'Interrupt', exact: true })).toHaveCount(0);
+
+  await page.locator('#back').click();
+  const row = card(page, parent.id);
+  await row.getByRole('button', { name: /^Actions for/ }).click();
+  let confirmation;
+  page.once('dialog', async dialog => {
+    confirmation = dialog.message();
+    await dialog.accept();
+  });
+  await row.getByRole('menuitem', { name: 'Interrupt all' }).click();
+  await expect.poll(() => state.actions.some(action => action.action === 'interrupt-all')).toBe(true);
+  expect(confirmation).toContain('Interrupt 1 sub-agent.');
+});
+
 test('a moved parent keeps 23 native histories without claiming any are working', async ({ page }) => {
   const parent = session('native-parent', 'project', 'Project');
   parent.native_subagents = Array.from({ length: 23 }, (_, i) => ({
