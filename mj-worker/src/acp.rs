@@ -597,14 +597,16 @@ async fn run_bridge(
     let stderr_task = tokio::spawn(read_stderr_tail(stderr));
     let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
+    let terminals = TerminalRegistry::new()?;
     let (mut result, child_reaped) = {
-        let drive = drive(
+        let drive = drive_with_terminals(
             transport,
             spec.clone(),
             requests,
             events.clone(),
             opened.clone(),
             replacing_previous_bridge,
+            terminals.clone(),
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -684,6 +686,16 @@ async fn run_bridge(
             }
         }
     }
+    // The bridge lifetime owner also covers cancellation of drive before its
+    // ordinary shutdown path; no terminal from this connection may outlive it.
+    terminals.shutdown(events).await;
+    emit_runtime_event(
+        events,
+        RuntimeEvent::BridgeRetired {
+            terminal_connection_id: terminals.connection_id().to_owned(),
+        },
+    )
+    .await?;
     let stderr_tail = match stderr_task.await {
         Ok(Ok(tail)) => tail,
         Ok(Err(error)) => {

@@ -494,7 +494,7 @@ pub use unix::{
 };
 
 #[cfg(all(test, unix))]
-pub(crate) use unix::record_runtime_event;
+pub(crate) use unix::{record_runtime_event, run_relay_coordinator_with_verdict};
 
 #[cfg(not(unix))]
 pub async fn run_daemon(

@@ -8436,6 +8436,11 @@ for line in sys.stdin:
         })
         .await
         .unwrap();
+    // Hard-won: ad4c24b: bridge retirement must be published before replacement startup.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::BridgeRetired { .. })
+    })
+    .await;
     // Hard-won: 2a0aae9: rollback skipped the old bridge's retirement signal.
     wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event,
@@ -9578,4 +9583,69 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
     }
     assert!(finished, "the turn finished before the reload");
     bridge.abort();
+}
+
+// Hard-won: ad4c24b: worker-local retirement must traverse the real FIFO without serialization.
+#[cfg(unix)]
+#[tokio::test]
+async fn real_bridge_retirement_runs_through_worker_fifo_without_serialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(crate::relay::RelayCell::new(
+        crate::relay::DurableRelay::open(temp.path(), "retirement-fifo", "test").unwrap(),
+    ));
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.harness = HarnessKind::Codex;
+    spec.command = "python3".into();
+    spec.args = vec!["-u".into(), "-c".into(), r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'method' not in request or 'id' not in request: continue
+    method = request['method']
+    result = {'protocolVersion':1} if method == 'initialize' else {'sessionId':'retirement-native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'}]}} if method == 'session/new' else {}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#.into()];
+    spec.cwd = temp.path().to_owned();
+    spec.terminal_owner = Some(Arc::downgrade(&relay));
+    let (commands, requests) = mpsc::channel(1);
+    drop(commands);
+    let (events, received) = mpsc::channel(64);
+    let (_wake, wakes) = mpsc::channel(1);
+    let (unused_commands, _unused_requests) = mpsc::channel(1);
+    let (shell_events, _shell_received) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().to_owned(),
+        BTreeMap::new(),
+        shell_events,
+    );
+    let coordinator = tokio::spawn(crate::worker_runtime::run_relay_coordinator_with_verdict(
+        relay.clone(),
+        received,
+        wakes,
+        unused_commands,
+        shells,
+        None,
+        None,
+        None,
+    ));
+    let runtime = tokio::spawn(run(spec, requests, events));
+    // Join both even if either fails, so the fixture leaves no runtime behind.
+    let (runtime_result, coordinator_result) = tokio::join!(runtime, coordinator);
+    runtime_result.unwrap().unwrap();
+    coordinator_result.unwrap().unwrap();
+    let state = relay.lock().unwrap();
+    assert!(state.operational_state().active_agent_terminals.is_empty());
+    assert!(
+        state
+            .events_after(0, crate::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event.observation,
+                mj_core::relay::RelayObservation::SessionOpened { .. }
+            ))
+    );
 }

@@ -5508,7 +5508,7 @@ fn air_tasks_are_process_local_and_clear_on_teardown() {
     relay
         .set_air_tasks(vec![air_task("design", "Design review")])
         .unwrap();
-    relay.clear_agent_terminals().unwrap();
+    relay.retire_harness_process_state().unwrap();
     assert!(relay.operational_state().background_commands.is_empty());
     relay
         .set_air_tasks(vec![air_task("design", "Design review")])
@@ -10173,5 +10173,95 @@ fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
                 })
             );
         }
+    }
+}
+
+// Hard-won: ad4c24b: delayed old restart erased a new bridge's synchronous terminal reservation.
+#[cfg(unix)]
+#[test]
+fn old_bridge_retirement_preserves_replacement_terminal_admission() {
+    use mj_core::acp::RuntimeEvent;
+    for lifecycle in [
+        RuntimeEvent::HarnessRestarting {
+            message: "old bridge exited".into(),
+        },
+        RuntimeEvent::ContextClearing {
+            request_id: "clear-request".into(),
+        },
+        RuntimeEvent::Stopped,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(temp.path(), SESSION, "test").unwrap(),
+        ));
+        let old = crate::terminal::TerminalRegistry::new().unwrap();
+        let replacement = crate::terminal::TerminalRegistry::new().unwrap();
+        let old_id = old.allocate_id();
+        let replacement_id = replacement.allocate_id();
+        let terminal = |id: &str| mj_core::relay::ActiveAgentTerminal {
+            terminal_id: id.into(),
+            command: "sleep 30".into(),
+            started_at_ms: 1,
+        };
+        let mut in_flight = BTreeMap::new();
+        relay
+            .lock()
+            .unwrap()
+            .agent_terminal_started(terminal(&old_id))
+            .unwrap();
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::TerminalStarted {
+                terminal_id: old_id.clone(),
+                command: "sleep 30".into(),
+                started_at_ms: 1,
+            },
+        )
+        .unwrap();
+        // Replacement registration overtakes queued retirement/lifecycle events,
+        // just as terminal/create reserves before spawn and FIFO application.
+        relay
+            .lock()
+            .unwrap()
+            .agent_terminal_started(terminal(&replacement_id))
+            .unwrap();
+        let mut cut = relay.lock().unwrap().reserve_live_baseline();
+        let retirement = RuntimeEvent::BridgeRetired {
+            terminal_connection_id: old.connection_id().into(),
+        };
+        // Historical RuntimeEvent readers cannot be sent this worker-local event.
+        assert!(serde_json::to_value(&retirement).is_err());
+        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, retirement).unwrap();
+        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, lifecycle).unwrap();
+        assert!(cut.try_recv().is_err());
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals,
+            vec![terminal(&replacement_id)]
+        );
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::TerminalStarted {
+                terminal_id: replacement_id.clone(),
+                command: "sleep 30".into(),
+                started_at_ms: 1,
+            },
+        )
+        .unwrap();
+        assert!(cut.try_recv().is_err());
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::BridgeRetired {
+                terminal_connection_id: replacement.connection_id().into(),
+            },
+        )
+        .unwrap();
+        assert!(cut.try_recv().unwrap().is_ok());
     }
 }

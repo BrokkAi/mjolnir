@@ -1008,10 +1008,15 @@ pub(crate) fn record_runtime_event_with_facts(
                 message: "ACP initialized without capability metadata".into(),
             })?;
         }
+        RuntimeEvent::BridgeRetired {
+            terminal_connection_id,
+        } => {
+            relay.retire_agent_terminal_connection(&terminal_connection_id)?;
+        }
         RuntimeEvent::ContextClearing { .. } => {
             // The previous bridge has exited, including when opening the new
             // conversation fails and /clear rolls back to its native session.
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
         }
         RuntimeEvent::ContextCleared {
             request_id,
@@ -1227,7 +1232,7 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::NativeAgent {
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
             relay.record_observation(RelayObservation::Warning {
                 message: message.clone(),
             })?;
@@ -1302,7 +1307,7 @@ pub(crate) fn record_runtime_event_with_facts(
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
             relay.clear_acp_readiness();
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
             relay.record_observation(RelayObservation::ElicitationsCleared)?;
             if relay.operational_state().execution != mj_core::relay::RelayExecutionState::Closed {
                 relay.record_observation(RelayObservation::Warning {

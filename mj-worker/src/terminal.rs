@@ -184,6 +184,18 @@ impl TerminalRegistry {
         self.create_with_id(self.allocate_id(), spawn, events)
     }
 
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn owns_terminal(connection_id: &str, terminal_id: &str) -> bool {
+        terminal_id
+            .strip_prefix("term-")
+            .and_then(|id| id.strip_prefix(connection_id))
+            .is_some_and(|suffix| suffix.starts_with('-'))
+    }
+
     pub(crate) fn allocate_id(&self) -> String {
         format!(
             "term-{}-{}",

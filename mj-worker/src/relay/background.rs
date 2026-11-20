@@ -747,9 +747,27 @@ impl DurableRelay {
         self.persist_activity_transition()
     }
 
-    pub fn clear_agent_terminals(&mut self) -> Result<()> {
-        self.active_agent_terminals.clear();
-        self.closed_agent_terminals.clear();
+    #[cfg(unix)]
+    pub(crate) fn retire_agent_terminal_connection(&mut self, connection_id: &str) -> Result<()> {
+        // IDs already carry the registry's connection identity. An old FIFO
+        // retirement must preserve a replacement's synchronous reservations.
+        for id in self
+            .active_agent_terminals
+            .keys()
+            .filter(|id| crate::terminal::TerminalRegistry::owns_terminal(connection_id, id))
+        {
+            self.foreground_tools
+                .close(&crate::acp::fallback_terminal_tool_call_id(id));
+        }
+        self.active_agent_terminals
+            .retain(|id, _| !crate::terminal::TerminalRegistry::owns_terminal(connection_id, id));
+        self.closed_agent_terminals
+            .retain(|id| !crate::terminal::TerminalRegistry::owns_terminal(connection_id, id));
+        self.persist_activity_transition()
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn retire_harness_process_state(&mut self) -> Result<()> {
         self.forget_harness_processes();
         self.persist_activity_transition()
     }

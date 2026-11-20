@@ -15,6 +15,9 @@ pub(super) const RAPID_BRIDGE_RESTART_LIMIT: u32 = 3;
 
 pub(super) const RAPID_BRIDGE_WINDOW: Duration = Duration::from_secs(5);
 
+// Tests that drive a connection directly own its registry here; production
+// keeps it in run_bridge through process teardown and retirement publication.
+#[cfg(test)]
 pub(super) async fn drive<T>(
     transport: T,
     spec: LaunchSpec,
@@ -22,6 +25,30 @@ pub(super) async fn drive<T>(
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     replacing_previous_bridge: bool,
+) -> Result<Option<SessionRestart>>
+where
+    T: ConnectTo<Client>,
+{
+    drive_with_terminals(
+        transport,
+        spec,
+        requests,
+        events,
+        opened,
+        replacing_previous_bridge,
+        TerminalRegistry::new()?,
+    )
+    .await
+}
+
+pub(super) async fn drive_with_terminals<T>(
+    transport: T,
+    spec: LaunchSpec,
+    requests: &mut mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    opened: Arc<Mutex<Option<OpenedSession>>>,
+    replacing_previous_bridge: bool,
+    terminals: TerminalRegistry,
 ) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
@@ -111,7 +138,6 @@ where
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
-    let terminals = TerminalRegistry::new()?;
     let create_terminals = terminals.clone();
     let create_terminal_owner = spec.terminal_owner.clone();
     let output_terminals = terminals.clone();

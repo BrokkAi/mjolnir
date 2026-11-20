@@ -540,6 +540,11 @@ pub enum AirTaskUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    /// Worker-local lifetime message, never a persisted adapter event.
+    #[serde(skip)]
+    BridgeRetired {
+        terminal_connection_id: String,
+    },
     /// Ordered before the native request and its updates on the worker FIFO.
     NativeGoalResumeSent {
         resume_id: u64,
