@@ -137,17 +137,75 @@ pub(super) fn collect_native_artifacts_cached(
         collect_claude_memory_artifacts(home, session_id, &mut output)?;
     }
     output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    // agy's `brain` files only support the conversation, which lives in its
-    // database; agy loads a conversation without one and fails at the next
-    // prompt, so the files alone are no history.
-    let holds_conversation = match harness {
-        HarnessKind::Antigravity => output
-            .iter()
-            .any(|artifact| is_sqlite_native_database(harness, &artifact.relative_path)),
-        _ => !output.is_empty(),
-    };
-    ensure!(allow_empty || holds_conversation, NO_SESSION_ARTIFACTS);
+    ensure!(
+        allow_empty
+            || native_artifacts_hold_conversation(
+                harness,
+                output
+                    .iter()
+                    .map(|artifact| artifact.relative_path.as_path())
+            ),
+        NO_SESSION_ARTIFACTS
+    );
     Ok(output)
+}
+
+/// Whether native artifacts, named by their paths in the harness home, hold
+/// a conversation the harness can load. The one rule for both sides: a
+/// capture refuses a prompted session without one, and a restore asks the
+/// harness to load the archived session only when its archive has one.
+///
+/// Only the harness's own session files count. A checkpoint also carries
+/// Mjolnir's attachments, goals and sub-agent reports, and project memory,
+/// none of which is a conversation.
+pub fn native_artifacts_hold_conversation<'a>(
+    harness: HarnessKind,
+    relative_paths: impl IntoIterator<Item = &'a Path>,
+) -> bool {
+    let mut session_files = relative_paths.into_iter().filter(|path| {
+        harness
+            .native_session_dirs()
+            .iter()
+            .any(|root| path.starts_with(root))
+            && !is_project_memory_artifact(path)
+    });
+    match harness {
+        // agy's `brain` files only support the conversation, which lives in
+        // its database; agy loads a conversation without one and fails at the
+        // next prompt, so the files alone are no history.
+        HarnessKind::Antigravity => {
+            session_files.any(|path| is_sqlite_native_database(harness, path))
+        }
+        _ => session_files.next().is_some(),
+    }
+}
+
+/// Whether the archive holds the conversation of the native session it
+/// names. A session that never received a prompt can have none: Codex writes
+/// a thread's rollout only at its first turn, so its archive names a thread
+/// that no harness can load.
+pub fn archive_holds_native_conversation(manifest: &crate::archive::ArchiveManifest) -> bool {
+    native_artifacts_hold_conversation(
+        manifest.session.harness_kind,
+        manifest
+            .payloads
+            .iter()
+            .filter_map(|payload| match &payload.role {
+                PayloadRole::NativeArtifact { relative_path } => Some(relative_path.as_path()),
+                _ => None,
+            }),
+    )
+}
+
+/// `projects/<slug>/memory/...`: Claude's project memory, and Mjolnir's
+/// project-memory replica in every harness home, both live there. Claude
+/// keeps its transcripts under `projects` too, so the memory has to be told
+/// apart from them.
+fn is_project_memory_artifact(relative_path: &Path) -> bool {
+    let mut components = relative_path.components();
+    components.next() == Some(Component::Normal("projects".as_ref()))
+        && components.next().is_some()
+        && components.next() == Some(Component::Normal("memory".as_ref()))
 }
 
 /// Collect native artifacts for an import whose locator already resolved the

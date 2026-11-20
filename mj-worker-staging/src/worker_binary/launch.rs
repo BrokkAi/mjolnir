@@ -419,6 +419,7 @@ pub fn worker_launch_config_with_checkout(
             serde_json::to_string(&roots)?,
         );
     }
+    let approval_choices = profile.approval_choices();
     Ok((
         WorkerLaunchConfig {
             cpu_accounting: backend.cpu_accounting(),
@@ -461,7 +462,8 @@ pub fn worker_launch_config_with_checkout(
             native_session_id: session.native_session_id.clone(),
             project_memory: project_memory.clone(),
             execution_policy,
-            claude_permission_mode: profile.approval_choices().claude_permission_mode,
+            claude_permission_mode: approval_choices.claude_permission_mode,
+            mjolnir_guardian: approval_choices.mjolnir_guardian,
             observe_policy: None,
         },
         project_memory,

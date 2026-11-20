@@ -406,6 +406,7 @@ pub(super) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     }
 }
@@ -6700,7 +6701,7 @@ async fn a_worker_launch_applies_profile_overrides_only_to_managed_subagents() {
             } else {
                 std::fs::write(
                     &claude_settings,
-                    r#"{"promptSuggestionEnabled":true,"disableClaudeAiConnectors":false}"#,
+                    r#"{"promptSuggestionEnabled":true,"disableClaudeAiConnectors":false,"outputStyle":"Explanatory"}"#,
                 )
                 .unwrap();
             }
@@ -6747,10 +6748,21 @@ async fn a_worker_launch_applies_profile_overrides_only_to_managed_subagents() {
                     Some(managed)
                 );
                 assert_eq!(
+                    settings["outputStyle"].as_str(),
+                    Some(if managed { "Concise" } else { "Explanatory" })
+                );
+                assert_eq!(
                     spec.environment
                         .get("DISABLE_AUTOUPDATER")
                         .map(String::as_str),
                     managed.then_some("1"),
+                    "Claude bridge, managed={managed}",
+                );
+                assert_eq!(
+                    spec.environment
+                        .get("CLAUDE_CODE_SILENT_TURN_REMINDER")
+                        .map(String::as_str),
+                    managed.then_some("false"),
                     "Claude bridge, managed={managed}",
                 );
             }
@@ -9387,6 +9399,40 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
     );
     daemon.abort();
     assert!(daemon.await.unwrap_err().is_cancelled());
+}
+
+/// #1617: a harness that cannot be prepared ends the worker with the typed
+/// startup failure its exit record carries, so the daemon stops restarting it
+/// and shows why. It no longer leaves a relay that answers with no harness.
+// Hard-won: #1617: a failed preparation left a live worker that could never run a turn.
+#[tokio::test]
+async fn a_harness_that_cannot_be_prepared_ends_the_worker_with_a_typed_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut config = launch_config("profile-home");
+    // Resolving a bridge that does not exist fails harness preparation.
+    config.bridge_command = temp.path().join("missing-bridge");
+    config.cwd = temp.path().to_owned();
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
+    let error = tokio::time::timeout(std::time::Duration::from_secs(60), daemon)
+        .await
+        .expect("a failed preparation must end the worker")
+        .unwrap()
+        .unwrap_err();
+    let failure = error
+        .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+        .unwrap_or_else(|| panic!("untyped preparation failure: {error:#}"));
+    assert!(
+        failure
+            .message
+            .starts_with("harness preparation failed at harness-resolve: "),
+        "{failure:?}"
+    );
+    assert!(
+        !root.join("control.sock").exists(),
+        "the failed worker left its control socket behind"
+    );
 }
 
 /// Start a coordinator whose session has a ready checkpoint barrier, fed by a

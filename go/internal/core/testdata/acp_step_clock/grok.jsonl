@@ -1,0 +1,13 @@
+{"at_ms":4,"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"First run the sh"}}}
+{"at_ms":6415,"update":{"sessionUpdate":"session_info_update"}}
+{"at_ms":9569,"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"The"}}}
+{"at_ms":9569,"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":" user"}}}
+{"at_ms":9569,"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":" wants"}}}
+{"at_ms":9849,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll"}}}
+{"at_ms":9849,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" list"}}}
+{"at_ms":9890,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" the"}}}
+{"at_ms":10320,"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}
+{"at_ms":10343,"update":{"sessionUpdate":"tool_call","toolCallId":"call-a663fec7-68dd-4eba-89aa-42dfbd612fe5-0","title":"run_terminal_command"}}
+{"at_ms":10368,"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-a663fec7-68dd-4eba-89aa-42dfbd612fe5-0","kind":"execute","title":"Execute `ls -la`","content":[{"type":"content","content":{"type":"text","text":"List all files i"}}]}}
+{"at_ms":10370,"client_request":"terminal/create"}
+{"at_ms":10401,"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-a663fec7-68dd-4eba-89aa-42dfbd612fe5-0","status":"failed","content":[{"type":"content","content":{"type":"text","text":"Tool `run_termin"}}]}}

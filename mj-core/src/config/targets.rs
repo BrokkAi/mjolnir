@@ -11,6 +11,23 @@ use super::{
     Environment, ExecutionPolicy, PermissionMode, validate_id, validate_relative_destination,
 };
 
+pub fn container_memory_limit(text: &str) -> anyhow::Result<i64> {
+    let text = text.trim();
+    let value = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let unit = match text[value.len()..].to_ascii_lowercase().as_str() {
+        "" | "b" => "B",
+        "k" | "kb" | "kib" => "KiB",
+        "m" | "mb" | "mib" => "MiB",
+        "g" | "gb" | "gib" => "GiB",
+        "t" | "tb" | "tib" => "TiB",
+        _ => anyhow::bail!("invalid container memory limit {text:?}"),
+    };
+    let bytes = format!("{value}{unit}")
+        .parse::<bytesize::ByteSize>()
+        .map_err(anyhow::Error::msg)?;
+    Ok(i64::try_from(bytes.as_u64())?)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRepository {
     /// Stable name within the bundle, used by `primary_repo`.

@@ -1,0 +1,28 @@
+{"at_ms":1,"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}
+{"at_ms":43,"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}
+{"at_ms":1499,"update":{"sessionUpdate":"usage_update","used":18719,"size":1000000}}
+{"at_ms":1500,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Running"},"messageId":"msg_011CefmsBg1DhHwicAxvZN5N"}}
+{"at_ms":1635,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" `ls -la` in"},"messageId":"msg_011CefmsBg1DhHwicAxvZN5N"}}
+{"at_ms":1708,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" the working dir"},"messageId":"msg_011CefmsBg1DhHwicAxvZN5N"}}
+{"at_ms":1911,"update":{"toolCallId":"toolu_014yNtG7dQq7jixfpTGKc5jN","sessionUpdate":"tool_call","status":"pending","title":"Terminal","kind":"execute","content":[]}}
+{"at_ms":2856,"update":{"toolCallId":"toolu_014yNtG7dQq7jixfpTGKc5jN","sessionUpdate":"tool_call_update","title":"ls -la","kind":"execute"}}
+{"at_ms":2868,"update":{"toolCallId":"toolu_014yNtG7dQq7jixfpTGKc5jN","sessionUpdate":"tool_call_update","title":"ls -la","kind":"execute","content":[{"type":"content","content":{"type":"text","text":"List all files i"}}]}}
+{"at_ms":2884,"update":{"sessionUpdate":"usage_update","used":18810,"size":1000000}}
+{"at_ms":2888,"update":{"sessionUpdate":"usage_update","used":18810,"size":1000000}}
+{"at_ms":3054,"update":{"toolCallId":"toolu_014yNtG7dQq7jixfpTGKc5jN","sessionUpdate":"tool_call_update"}}
+{"at_ms":3081,"update":{"toolCallId":"toolu_014yNtG7dQq7jixfpTGKc5jN","sessionUpdate":"tool_call_update","status":"completed","content":[{"type":"content","content":{"type":"text","text":"```console\ntotal"}}]}}
+{"at_ms":4562,"update":{"sessionUpdate":"usage_update","used":19088,"size":1000000}}
+{"at_ms":7427,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The directory is"},"messageId":"msg_011CefmsR5QV8owTYgXG28Yb"}}
+{"at_ms":7455,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":", so I'll also p"},"messageId":"msg_011CefmsR5QV8owTYgXG28Yb"}}
+{"at_ms":7455,"update":{"toolCallId":"toolu_01UeLy4QufDnfE8gP5hHJYHq","sessionUpdate":"tool_call","status":"pending","title":"Terminal","kind":"execute","content":[]}}
+{"at_ms":8023,"update":{"toolCallId":"toolu_01UeLy4QufDnfE8gP5hHJYHq","sessionUpdate":"tool_call_update","title":"cat README.md; echo \"-----\"; cat data.cs","kind":"execute"}}
+{"at_ms":8027,"update":{"toolCallId":"toolu_01UeLy4QufDnfE8gP5hHJYHq","sessionUpdate":"tool_call_update","title":"cat README.md; echo \"-----\"; cat data.cs","kind":"execute","content":[{"type":"content","content":{"type":"text","text":"Print contents o"}}]}}
+{"at_ms":8038,"update":{"sessionUpdate":"usage_update","used":19340,"size":1000000}}
+{"at_ms":8087,"update":{"toolCallId":"toolu_01UeLy4QufDnfE8gP5hHJYHq","sessionUpdate":"tool_call_update"}}
+{"at_ms":8117,"update":{"toolCallId":"toolu_01UeLy4QufDnfE8gP5hHJYHq","sessionUpdate":"tool_call_update","status":"completed","content":[{"type":"content","content":{"type":"text","text":"```console\n# Sam"}}]}}
+{"at_ms":16541,"update":{"sessionUpdate":"usage_update","used":19462,"size":1000000}}
+{"at_ms":16543,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The"},"messageId":"msg_011CefmsnprnhR9nw1DV1fDJ"}}
+{"at_ms":16546,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" working"},"messageId":"msg_011CefmsnprnhR9nw1DV1fDJ"}}
+{"at_ms":16546,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" directory is a"},"messageId":"msg_011CefmsnprnhR9nw1DV1fDJ"}}
+{"at_ms":16661,"update":{"sessionUpdate":"usage_update","used":19866,"size":1000000}}
+{"at_ms":16668,"update":{"sessionUpdate":"usage_update","used":19866,"size":1000000,"cost":{"amount":0.23933074999999998,"currency":"USD"}}}

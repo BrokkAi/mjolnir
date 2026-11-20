@@ -1820,7 +1820,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
             &id,
             None,
             vec![mount(&missing)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap_err();
@@ -1843,7 +1843,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
             &id,
             None,
             vec![mount(&present)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -1858,7 +1858,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
                 memory_bytes: 4 << 30,
             }),
             vec![mount(&present)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -1924,7 +1924,7 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
                 memory_bytes: 4 << 30,
             }),
             Vec::new(),
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -3846,6 +3846,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };
@@ -3928,6 +3929,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };

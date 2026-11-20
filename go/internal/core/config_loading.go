@@ -1,5 +1,6 @@
-// Instance names, configuration directories and atomic file writes.
 // Port of mj-core/src/config/loading.rs.
+//
+// Instance names, configuration directories and atomic file writes.
 
 package core
 
@@ -12,8 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
+	"unicode"
+
+	"github.com/BurntSushi/toml"
 )
 
 // ConfigVersion is the config.toml schema version this build reads and writes.
@@ -21,6 +26,112 @@ const ConfigVersion = 23
 
 // ProductDir is the directory name under the platform configuration and data roots.
 const ProductDir = "mjolnir"
+
+// newerVersion is the config version in document when it is above this
+// build's.
+func newerVersion(document map[string]any) (uint32, bool) {
+	version, ok := document["version"].(int64)
+	if !ok || version <= ConfigVersion {
+		return 0, false
+	}
+	if version > int64(^uint32(0)) {
+		return ^uint32(0), true
+	}
+	return uint32(version), true
+}
+
+// NewerVersionOnDisk is the config version at path when it is above this
+// build's. Read tolerantly: a missing or unreadable file never blocks a save.
+func NewerVersionOnDisk(path string) (uint32, bool) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	document, err := decodeTOMLDocument(string(contents))
+	if err != nil {
+		return 0, false
+	}
+	return newerVersion(document)
+}
+
+func rejectRemovedProfileOverrides(contents string) error {
+	value, err := decodeTOMLDocument(contents)
+	if err != nil {
+		return fmt.Errorf("parse Mjolnir config TOML: %w", err)
+	}
+	profiles, ok := value["profiles"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, id := range sortedKeys(profiles) {
+		profile, ok := profiles[id].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"model", "reasoning_effort"} {
+			if _, ok := profile[key]; ok {
+				return fmt.Errorf("profile %s: `%s` is no longer supported; configure it in the harness home or change it per session with `/config`",
+					debugString(id), key)
+			}
+		}
+	}
+	return nil
+}
+
+// removedHarnessKinds is the harness kinds an earlier release accepted in a
+// profile's `kind`.
+var removedHarnessKinds = [1]string{"mimo"}
+
+// isRemovedHarnessProfile reports whether profile, a decoded
+// [profiles.<id>] table, names a removed harness.
+func isRemovedHarnessProfile(profile any) bool {
+	table, ok := profile.(map[string]any)
+	if !ok {
+		return false
+	}
+	kind, ok := table["kind"].(string)
+	if !ok {
+		return false
+	}
+	for _, removed := range removedHarnessKinds {
+		if kind == removed {
+			return true
+		}
+	}
+	return false
+}
+
+// dropRemovedHarnessProfiles takes out every profile whose harness this build
+// no longer supports, and a legacy [review] profile pin naming one, returning
+// the removed profile ids. Such a profile cannot start a session, so the file
+// still loads without it and the next save leaves it out.
+func dropRemovedHarnessProfiles(document map[string]any) []string {
+	profiles, ok := document["profiles"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var removed []string
+	for _, id := range sortedKeys(profiles) {
+		if isRemovedHarnessProfile(profiles[id]) {
+			removed = append(removed, id)
+		}
+	}
+	for _, id := range removed {
+		delete(profiles, id)
+	}
+	if review, ok := document["review"].(map[string]any); ok {
+		if profile, ok := review["profile"].(string); ok && slices.Contains(removed, profile) {
+			// Reviewers are load-balanced across enabled profiles, so an old
+			// model and effort stay usable without the profile pin.
+			delete(review, "profile")
+		}
+	}
+	return removed
+}
+
+// EnvOverrideOS is Rust's env_override_os. Go environment values are strings,
+// so it is EnvOverride.
+func EnvOverrideOS(name string) (string, bool) { return EnvOverride(name) }
 
 // EnvOverride reads a configuration override under its MJ_ name. Mjolnir
 // shares no state or environment with hel installs; there is no legacy fallback.
@@ -326,7 +437,7 @@ func ValidateID(kind, id string) error {
 			b == '-' || b == '_' || b == '.'
 	}
 	if !valid {
-		return fmt.Errorf("invalid %s id %q; use 1-64 ASCII letters, digits, '.', '-' or '_'", kind, id)
+		return fmt.Errorf("invalid %s id %s; use 1-64 ASCII letters, digits, '.', '-' or '_'", kind, debugString(id))
 	}
 	return nil
 }
@@ -355,6 +466,38 @@ func ValidateRelativeDestination(path string) error {
 }
 
 func isSeparator(r rune) bool { return os.IsPathSeparator(uint8(r)) && r < 0x80 }
+
+// isGithubSource reports whether a bundle repository's `github` value may
+// load.
+//
+// The shared GitHub parser is tried first. The looser rule after it keeps
+// loading every value that loaded before the parser existed, because a
+// rejected value here fails the whole configuration: anything with exactly
+// one `/`, such as `git@gitlab.com:o/r`, which resolution uses as a plain Git
+// URL, or a shorthand with a name GitHub would not allow, which resolution
+// rejects when the repository is used.
+func isGithubSource(source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" || strings.HasPrefix(source, "-") || strings.ContainsFunc(source, unicode.IsSpace) {
+		return false
+	}
+	if ParseGithubRemote(source, ShorthandAllowed) != nil {
+		return true
+	}
+	repositoryPath := source
+	for _, prefix := range []string{"https://github.com/", "git@github.com:", "ssh://git@github.com/"} {
+		if rest, ok := strings.CutPrefix(source, prefix); ok {
+			repositoryPath = rest
+			break
+		}
+	}
+	// Rust's trim_end_matches removes every trailing repetition.
+	for strings.HasSuffix(repositoryPath, ".git") {
+		repositoryPath = strings.TrimSuffix(repositoryPath, ".git")
+	}
+	parts := strings.Split(repositoryPath, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
 
 // AtomicWrite replaces path without exposing a partially written
 // configuration or state file.
@@ -449,4 +592,17 @@ func atomicWriteWithParent(path string, body []byte, createParent bool) error {
 		os.Remove(temporary)
 	}
 	return err
+}
+
+// decodeTOMLDocument parses a TOML document into generic values (Rust's
+// `text.parse::<toml::Value>()` on a whole file).
+func decodeTOMLDocument(text string) (map[string]any, error) {
+	var document map[string]any
+	if _, err := toml.Decode(text, &document); err != nil {
+		return nil, err
+	}
+	if document == nil {
+		document = map[string]any{}
+	}
+	return document, nil
 }

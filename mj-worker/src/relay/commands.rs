@@ -2190,6 +2190,17 @@ impl DurableRelay {
         self.close_requested()
     }
 
+    /// Whether an accepted Close has sealed the relay, so no harness may
+    /// start for it. The one predicate both sides of the preparation handoff
+    /// read under the relay lock: the request handler, to cancel preparation,
+    /// and the bridge start, to refuse publishing Started.
+    pub fn sealed_by_close(&self) -> bool {
+        matches!(
+            self.snapshot.execution,
+            RelayExecutionState::Closing | RelayExecutionState::Closed
+        )
+    }
+
     /// Whether a cancellation is accepted but not yet delivered to the harness,
     /// or a Close is accepted and not finished. Work the worker does for its own
     /// purposes, such as observing a finished turn, ends when this is true, so

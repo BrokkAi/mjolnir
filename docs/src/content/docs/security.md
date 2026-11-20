@@ -194,6 +194,10 @@ profile; DSH is usage-priced. Reviews run for seconds to tens of seconds. The
 reviewer's sessions stay in the harness's own session store in the session's
 staged home, so they are part of its checkpoints.
 
+To answer every request yourself, set `mjolnir_guardian = false` on the
+profile; see [Turn off the Mjolnir guardian](/profiles/#turn-off-the-mjolnir-guardian).
+Each request then opens the permission form directly, and no reviewer runs.
+
 A guardian is not a sandbox. It judges each action from the evidence it has,
 and a model can be wrong. For untrusted repositories, choose a container or an
 instance instead.

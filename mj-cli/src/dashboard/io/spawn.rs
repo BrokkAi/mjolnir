@@ -1098,7 +1098,7 @@ pub(crate) fn spawn_dashboard_container_settings(
                 additional_mounts,
                 mount_history,
             } = request;
-            daemon::connect_or_start()
+            let preview = daemon::connect_or_start()
                 .await?
                 .set_session_container_settings(
                     session_id,
@@ -1107,10 +1107,15 @@ pub(crate) fn spawn_dashboard_container_settings(
                     mount_history,
                 )
                 .await?;
+            if let Some(preview) = preview {
+                return Ok(Err(preview));
+            }
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
-            crate::dashboard::io::stored_session_metadata().await
+            crate::dashboard::io::stored_session_metadata()
+                .await
+                .map(Ok)
         },
         move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
     );

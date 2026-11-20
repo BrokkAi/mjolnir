@@ -3020,6 +3020,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
@@ -3108,6 +3109,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
@@ -3204,6 +3206,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }
@@ -3511,6 +3514,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }
@@ -3871,6 +3875,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
@@ -4285,6 +4290,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }
@@ -5351,6 +5357,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     };
 
@@ -5522,6 +5529,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     };
     let locator = targets::TargetLocator::LocalBare {
@@ -5828,6 +5836,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
@@ -5909,6 +5918,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };

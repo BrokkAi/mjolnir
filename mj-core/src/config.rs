@@ -83,11 +83,11 @@ pub fn default_phone_bind_for(instance: Option<&str>) -> String {
     format!("127.0.0.1:{port}")
 }
 
-const fn default_true() -> bool {
+pub(crate) const fn default_true() -> bool {
     true
 }
 
-const fn is_true(value: &bool) -> bool {
+pub(crate) const fn is_true(value: &bool) -> bool {
     *value
 }
 

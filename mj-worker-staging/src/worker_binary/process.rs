@@ -705,6 +705,20 @@ impl WorkerExitRecord {
             .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
             .and_then(|at| u64::try_from(at.timestamp()).ok())
     }
+
+    /// The marked failure of a harness that could not open its session, which
+    /// starting the same harness again would only repeat.
+    ///
+    /// A harness that failed to open for lack of space is a disk-full exit
+    /// instead: the storage owner restarts it once space returns, and the same
+    /// record still holds the marker then. That is judged by the failure's own
+    /// cause, because `reason` also carries the bridge's stderr, which can
+    /// mention an earlier, unrelated full disk.
+    pub fn harness_failed_to_open(&self) -> Option<&mj_core::relay::WorkerHarnessStartupFailure> {
+        self.harness_startup_failure
+            .as_ref()
+            .filter(|failure| !mj_core::targets::storage::reports_no_space(&failure.message))
+    }
 }
 
 impl WorkerProbe {

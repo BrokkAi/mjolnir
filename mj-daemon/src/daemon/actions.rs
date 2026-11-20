@@ -522,25 +522,17 @@ pub(super) async fn handle_action(
             mounts,
             mount_history,
         } => {
-            ensure!(
-                !mj_controller::controller::move_session::move_owns_session(&session_id),
-                "session is moving; change container settings after Move finishes"
-            );
-            state
-                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
-                .await?;
-            blocking(move || {
-                Controller::load()?.update_session_container_settings(
-                    &session_id,
-                    resource_allocation,
-                    mounts,
-                    mount_history,
-                    &mj_controller::targets::ProcessExecutor,
-                )
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
+            let settings = mj_core::state::ContainerSettingsChange {
+                resource_allocation,
+                mounts,
+                mount_history: Some(mount_history),
+            };
+            Ok(
+                match state.set_container_settings(session_id, settings).await? {
+                    Some(preview) => DaemonReply::ContainerUpgradePreview(preview),
+                    None => DaemonReply::Done,
+                },
+            )
         }
         DaemonAction::MarkSessionTargetMissing {
             session_id: _,
@@ -1347,6 +1339,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::AdoptRecovery(_)
             | DaemonAction::WikiSyncWatch { .. }
             | DaemonAction::MoveSession(_)
+            | DaemonAction::SetSessionContainerSettings { .. }
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers

@@ -4782,6 +4782,7 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
                     "upgrade-test",
                     cancelled,
                     mj_controller::targets::container_upgrade_test_plan(&id),
+                    None,
                 )?;
                 state.bind_restart_intent(&id, &intent.operation_id)?;
                 anyhow::bail!("fixture image preparation failure before stopping the worker")
@@ -4868,6 +4869,7 @@ async fn a_pending_container_upgrade_cancels_without_recording_a_session_failure
                     "upgrade-test",
                     cancelled.clone(),
                     mj_controller::targets::container_upgrade_test_plan(&id),
+                    None,
                 )?;
                 state.bind_restart_intent(&id, "upgrade-test")?;
                 ready.notify_one();
@@ -4920,6 +4922,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         "upgrade-test",
         Arc::new(AtomicBool::new(false)),
         mj_controller::targets::container_upgrade_test_plan("session-1"),
+        None,
     )
     .unwrap();
     assert!(
@@ -5122,6 +5125,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
         "upgrade-test",
         Arc::new(AtomicBool::new(false)),
         plan.clone(),
+        None,
     )
     .unwrap();
     let wake = mj_controller::database::WorkerRestartIntent {
@@ -7178,6 +7182,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             models: Default::default(),
             legacy_subagents: None,
@@ -11001,6 +11006,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             "upgrade-after-failed-review",
             Arc::new(AtomicBool::new(false)),
             mj_controller::targets::container_upgrade_test_plan(parent_id),
+            None,
         )
         .unwrap();
         assert_eq!(

@@ -156,10 +156,7 @@ pub enum ControllerAction {
         session_id: String,
         workspace_id: String,
     },
-    /// Record the session's container allocation and attached
-    /// directories. An absent allocation uses the target defaults, and the
-    /// mounts list replaces the whole list. Nothing changes inside a running
-    /// container: the values are read the next time it is created.
+    /// Save settings for the next creation or preview a preserving replacement.
     SetContainerSettings {
         session_id: String,
         #[serde(default)]
@@ -518,7 +515,7 @@ pub enum PreflightResume {
 #[derive(Debug)]
 pub struct MovePreparationRequest {
     pub selection: MoveSelection,
-    pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, String>>,
+    pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, Option<Refusal>>>,
 }
 
 /// A preflight can fail because the requested bare directory is unusable, an
@@ -546,6 +543,14 @@ pub use mj_client::daemon::{PreflightNew, PreflightRepository};
 /// and reload the controller on every keystroke.
 #[derive(Debug)]
 pub enum ClientStateRequest {
+    ContainerSettings {
+        session_id: String,
+        resource_allocation: Option<SessionResourceAllocation>,
+        mounts: Vec<AdditionalMount>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Option<mj_core::state::ContainerUpgradePreview>, ActionOutcome>,
+        >,
+    },
     ContainerUpgradePreview {
         session_id: String,
         reply:

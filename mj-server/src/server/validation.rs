@@ -164,9 +164,11 @@ pub(super) fn validate_move_selection(
     if selection.profile_id.is_none()
         && selection.target_template_id.is_none()
         && selection.resource_allocation.is_none()
+        && selection.additional_mounts.is_none()
+        && !selection.clear_resource_allocation
     {
         return Err(ApiError::bad_request(
-            "move must select a profile, a target, or a container size",
+            "move must select a profile, a target, or container settings",
         ));
     }
     if selection.clear_resource_allocation && selection.resource_allocation.is_some() {
@@ -837,7 +839,11 @@ fn validate_action_against(
         ControllerAction::UpgradeContainer { request } => {
             validate_public_id(&request.selection.session_id)?;
             let session = require_session_record(snapshot, &request.selection.session_id)?;
-            if !session.capabilities.restart || !request.acknowledge_writable_layer_loss {
+            let settings_replacement =
+                request.selection.settings.is_some() && session.container_upgrade_supported;
+            if !(session.capabilities.restart || settings_replacement)
+                || !request.acknowledge_writable_layer_loss
+            {
                 return Err(ApiError::bad_request(
                     "container upgrade is unavailable or writable-layer loss has not been acknowledged",
                 ));

@@ -3652,6 +3652,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         "upgrade-test",
         cancel.clone(),
         plan.clone(),
+        None,
     )
     .unwrap();
     let engine = BusyEngine {

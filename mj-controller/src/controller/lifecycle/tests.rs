@@ -34,6 +34,7 @@ fn a_close_whose_restart_left_no_worker_records_error_and_keeps_the_target() {
         &previous,
         &error,
         "2026-08-14T12:00:00Z".into(),
+        None,
     );
 
     assert_eq!(session.state, SessionState::Error);
@@ -60,6 +61,7 @@ fn a_close_whose_checkpoint_failed_with_a_live_worker_returns_to_its_previous_st
         &previous,
         &error,
         "2026-08-14T12:00:00Z".into(),
+        None,
     );
 
     assert_eq!(session.state, SessionState::Running);
