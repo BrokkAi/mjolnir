@@ -576,6 +576,7 @@ mod tests {
             nano_cpus: 1_000_000_000,
             memory_bytes: 1,
             env: vec![],
+            mbx_remote: None,
             user: String::new(),
             working_dir: String::new(),
             entrypoint: vec![],

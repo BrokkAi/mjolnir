@@ -133,6 +133,9 @@ pub struct ImageRefreshPlan {
     /// Includes images whose pull policy is Never. The host may already have
     /// those images, and their targets still need them.
     pub keep_images: BTreeSet<String>,
+    /// The machine's `build_cache.max_total_size`, which also bounds a Nitro
+    /// host's proxy cache. Unset means mbx's automatic budget.
+    pub mbx_cache_budget: Option<String>,
 }
 
 /// Plan downloads, once per (host, image, platform). Targets that share an
@@ -153,6 +156,13 @@ pub fn image_refresh_plan<'a>(
             continue;
         };
         let platform = container.platform.as_deref().or(native_platform);
+        if let Some(budget) = container
+            .build_cache
+            .as_ref()
+            .and_then(|cache| cache.max_total_size.clone())
+        {
+            plan.mbx_cache_budget = Some(budget);
+        }
         for image in effective_target_images(config, target_id, platform) {
             plan.keep_images.insert(image.to_owned());
             let Some(refresh) = mj_core::targets::image_refresh(

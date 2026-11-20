@@ -803,6 +803,9 @@ pub(super) fn refresh_host_images(
         for image in plan.keep_images {
             args.extend(["--keep-image".into(), image]);
         }
+        if let Some(budget) = plan.mbx_cache_budget {
+            args.push(format!("--mbx-cache-budget={budget}"));
+        }
         let command = host.command(args, "reconcile Nitro sandbox images".into());
         if let Err(error) = run_refresh_command(&command, executor)
             && !executor.cancellation_requested()
