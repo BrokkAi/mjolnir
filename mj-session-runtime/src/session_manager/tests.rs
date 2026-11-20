@@ -718,15 +718,19 @@ fn recovery_stops_at_a_marked_harness_startup_failure() {
         std::fs::create_dir(&exit_path).unwrap();
         assert!(recover().is_err(), "a failed read must defer recovery");
         std::fs::remove_dir(&exit_path).unwrap();
-        std::fs::write(&exit_path, "malformed record").unwrap();
-        assert!(recover().is_err(), "a malformed record must defer recovery");
         assert!(!restarted.exists());
 
-        // The legacy record carries the very same cause, but no typed marker.
-        std::fs::write(&exit_path, serde_json::json!({"reason": cause}).to_string()).unwrap();
-        assert_eq!(recover().unwrap(), WorkerRecoveryOutcome::RestartedDead);
-        assert!(crate::database::load_worker_restart(id).unwrap().is_some());
-        std::fs::remove_file(&restarted).unwrap();
+        // An interrupted write cannot repair itself, and a legacy record
+        // with the same cause supplies no typed startup marker.
+        for content in [
+            r#"{"reason":"interrupted"#.to_owned(),
+            serde_json::json!({"reason": cause}).to_string(),
+        ] {
+            std::fs::write(&exit_path, content).unwrap();
+            assert_eq!(recover().unwrap(), WorkerRecoveryOutcome::RestartedDead);
+            assert!(crate::database::load_worker_restart(id).unwrap().is_some());
+            std::fs::remove_file(&restarted).unwrap();
+        }
 
         let marked = serde_json::json!({
             "reason": "worker exited",

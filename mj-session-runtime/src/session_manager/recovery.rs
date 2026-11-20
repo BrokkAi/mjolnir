@@ -49,9 +49,16 @@ fn dead_worker_startup_failure(
         .execute(command)
         .and_then(|output| mj_core::targets::checked_command_output(command, output))
         .with_context(|| format!("read the dead worker's exit record on {host}"))?;
-    let Some(record) = mj_worker_staging::worker_binary::read_worker_exit_record(&output.stdout)?
-    else {
-        return Ok(None);
+    let record = match mj_worker_staging::worker_binary::read_worker_exit_record(&output.stdout) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            // The read succeeded and the owner proved the worker dead. An
+            // interrupted in-place write cannot be repaired by retrying it.
+            tracing::warn!(%host, root = %worker_root, error = format!("{error:#}"),
+                "dead worker left an unreadable exit record; continuing without its exit diagnostic");
+            return Ok(None);
+        }
     };
     if mj_core::targets::storage::reports_no_space(&record.reason) {
         // The worker stops when it cannot write its journal, which lives in
