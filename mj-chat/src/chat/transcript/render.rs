@@ -1,5 +1,5 @@
 use super::*;
-use mj_transcript::tool_display_title;
+use mj_transcript::transcript::tool_display_title;
 
 /// `title_controls` is the number of columns the host reserves at the right
 /// of the title row for its own chips; the title stops short of them.
