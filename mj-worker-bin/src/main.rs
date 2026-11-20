@@ -263,7 +263,7 @@ enum WorkerCommand {
 }
 
 fn write_worker_exit_record(root: &Path, reason: &str) {
-    write_worker_exit_record_with_refusal(root, reason, None);
+    write_worker_exit_record_details(root, reason, None, None);
 }
 
 /// The exit record, plus the sentence a refusal wants the person who asked to
@@ -273,7 +273,12 @@ fn write_worker_exit_record(root: &Path, reason: &str) {
 /// way to say anything. The controller lifts `refusal` back onto the error
 /// chain, which turns the failure into a 409 carrying this text instead of a
 /// generic 500.
-fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Option<&str>) {
+fn write_worker_exit_record_details(
+    root: &Path,
+    reason: &str,
+    refusal: Option<&str>,
+    startup_failure: Option<&mj_core::relay::WorkerHarnessStartupFailure>,
+) {
     if !root.is_dir() {
         return;
     }
@@ -281,6 +286,7 @@ fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Opt
         root,
         reason,
         refusal,
+        startup_failure,
         &mj_core::logging::stderr_writer().recent_log(),
     ) {
         mj_core::diagnostic_stderr!("Mjolnir: could not write worker exit record: {error:#}");
@@ -533,10 +539,11 @@ fn main() -> Result<()> {
         );
         if let Some(root) = &exit_root {
             let refusal = mj_core::refusal::Refusal::of(error);
-            write_worker_exit_record_with_refusal(
+            write_worker_exit_record_details(
                 root,
                 &mj_worker::acp::worker_exit_reason(error),
                 refusal.as_ref().map(mj_core::refusal::Refusal::message),
+                error.downcast_ref(),
             );
         }
     }

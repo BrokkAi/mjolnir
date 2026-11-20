@@ -1380,6 +1380,7 @@ mod tests {
                     reason: "durable relay open failed".into(),
                     refusal: self.refusal.map(ToOwned::to_owned),
                     at: None,
+                    harness_startup_failure: None,
                 }),
                 pids: if exited || gone { vec![] } else { vec![41] },
             })

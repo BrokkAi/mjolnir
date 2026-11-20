@@ -654,6 +654,80 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn recovery_stops_at_a_marked_harness_startup_failure() {
+    const CHILD: &str = "MJ_STARTUP_FAILURE_RECOVERY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(CHILD, "recovery_stops_at_a_marked_harness_startup_failure");
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let id = LEASED_RELAY_SESSION;
+    let mut record = crate::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+    crate::database::save_session(&record).unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let restarted = directory.path().join("worker-restarted");
+    let cause = "ACP runtime failed: fixture transient load failure";
+    let plan = |exit_record: &str| WorkerRecoveryPlan {
+        source_target: recovery_source_target(),
+        target: None,
+        workspace: None,
+        exit_record: Some(CommandSpec::new("printf", ["%s", exit_record])),
+        liveness_probe: CommandSpec::new("printf", ["dead"]).into(),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "restart test worker".into(),
+            commands: vec![CommandSpec::new(
+                "touch",
+                [restarted.to_string_lossy().into_owned()],
+            )],
+        }
+        .into(),
+    };
+    let recover = |exit_record: serde_json::Value| {
+        recover_worker_controlled(
+            plan(&exit_record.to_string()),
+            false,
+            Some(id),
+            &crate::targets::ProcessExecutor,
+        )
+        .unwrap()
+    };
+    // The legacy record carries the very same cause, but no typed marker.
+    assert_eq!(
+        recover(serde_json::json!({"reason": cause})),
+        WorkerRecoveryOutcome::RestartedDead
+    );
+    assert!(crate::database::load_worker_restart(id).unwrap().is_some());
+    std::fs::remove_file(&restarted).unwrap();
+
+    let marked = serde_json::json!({
+        "reason": "worker exited",
+        "harness_startup_failure": {"message": cause},
+    });
+    assert_eq!(
+        recover(marked.clone()),
+        WorkerRecoveryOutcome::HarnessStartupFailed
+    );
+    assert!(!restarted.exists());
+    let failed = crate::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, mj_core::state::SessionState::Error);
+    assert_eq!(failed.last_error.as_deref(), Some(cause));
+    assert!(!session_target_is_pollable(&failed));
+    assert!(crate::database::load_worker_restart(id).unwrap().is_none());
+    assert_eq!(recover(marked), WorkerRecoveryOutcome::Suppressed);
+    assert!(!restarted.exists());
+}
+
 #[tokio::test]
 #[cfg_attr(
     windows,

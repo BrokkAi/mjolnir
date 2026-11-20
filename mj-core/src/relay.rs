@@ -245,6 +245,20 @@ pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
 pub const WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT: &str = "login-environment";
 /// File a dying worker daemon writes with the reason it stopped.
 pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
+
+/// An ACP failure before this worker first recorded a configured session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerHarnessStartupFailure {
+    pub message: String,
+}
+
+impl std::fmt::Display for WorkerHarnessStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WorkerHarnessStartupFailure {}
 /// File in which a worker records which untracked paths each repository held
 /// when its review baseline was taken, so a restart measures new files against
 /// the same point the baseline belongs to.

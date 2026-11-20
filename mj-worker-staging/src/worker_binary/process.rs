@@ -348,17 +348,14 @@ pub fn worker_exit_record_command(
 /// the output of [`worker_exit_record_command`]. A reserved record that says
 /// `null` means the worker left no reason.
 pub fn recorded_exit_reason(output: &[u8]) -> Option<(String, Option<u64>)> {
-    serde_json::from_slice::<Option<WorkerExitRecord>>(output)
-        .ok()
-        .flatten()
-        .map(|record| {
-            let at = record
-                .at
-                .as_deref()
-                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-                .and_then(|at| u64::try_from(at.timestamp()).ok());
-            (record.reason, at)
-        })
+    read_worker_exit_record(output).map(|record| {
+        let at = record.timestamp();
+        (record.reason, at)
+    })
+}
+
+pub fn read_worker_exit_record(output: &[u8]) -> Option<WorkerExitRecord> {
+    serde_json::from_slice(output).ok().flatten()
 }
 
 pub fn start_worker(
@@ -671,6 +668,17 @@ pub struct WorkerExitRecord {
     /// When the worker stopped, as RFC 3339.
     #[serde(default)]
     pub at: Option<String>,
+    #[serde(default)]
+    pub harness_startup_failure: Option<mj_core::relay::WorkerHarnessStartupFailure>,
+}
+
+impl WorkerExitRecord {
+    pub fn timestamp(&self) -> Option<u64> {
+        self.at
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| u64::try_from(at.timestamp()).ok())
+    }
 }
 
 impl WorkerProbe {
@@ -870,6 +878,7 @@ mod probe_tests {
                     .into(),
                 refusal: None,
                 at: None,
+                harness_startup_failure: None,
             }),
             pids: vec![],
         };

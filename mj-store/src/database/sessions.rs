@@ -843,6 +843,33 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Apply either a live preparation failure or a dead worker's startup failure
+/// only to the running lifecycle revision that the caller observed.
+pub fn fail_unready_session(
+    session_id: &str,
+    cause: &str,
+    observed_updated_at: &str,
+) -> Result<Option<SessionRecord>> {
+    let session_id = session_id.to_owned();
+    let cause = cause.to_owned();
+    let observed_updated_at = observed_updated_at.to_owned();
+    submit_database_write("fail_unready_session", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(mut record) = load_session_with(&tx, &session_id)? else {
+            return Ok(None);
+        };
+        if record.state != SessionState::Running || record.updated_at != observed_updated_at {
+            return Ok(None);
+        }
+        record.state = SessionState::Error;
+        record.updated_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        record.last_error = Some(cause);
+        update_lifecycle_fields(&tx, &record)?;
+        tx.commit()?;
+        Ok(Some(record))
+    })
+}
+
 /// Acceptance of Suspend owns its intent, readiness and Closing publication.
 pub fn save_suspension_intent(
     session: &SessionRecord,

@@ -833,12 +833,14 @@ impl Controller {
         cause: &str,
         observed_updated_at: &str,
     ) -> Result<bool> {
-        self.fail_unready_session_with(
-            session_id,
-            cause,
-            observed_updated_at,
-            crate::database::save_lifecycle_session,
-        )
+        let Some(record) =
+            crate::database::fail_unready_session(session_id, cause, observed_updated_at)
+                .context("persist a session whose harness never became usable")?
+        else {
+            return Ok(false);
+        };
+        self.state.sessions.insert(session_id.to_owned(), record);
+        Ok(true)
     }
 
     /// Persist a worker-reported harness failure from an async lifecycle
@@ -860,33 +862,6 @@ impl Controller {
         .await
         .context("record harness preparation failure task panicked")??;
         Ok(())
-    }
-
-    fn fail_unready_session_with(
-        &mut self,
-        session_id: &str,
-        cause: &str,
-        observed_updated_at: &str,
-        persist: impl Fn(&SessionRecord) -> Result<()>,
-    ) -> Result<bool> {
-        let Some(record) = self.state.sessions.get_mut(session_id) else {
-            return Ok(false);
-        };
-        if record.state != SessionState::Running || record.updated_at != observed_updated_at {
-            return Ok(false);
-        }
-        let previous = record.clone();
-        record.state = SessionState::Error;
-        record.updated_at = now();
-        record.last_error = Some(cause.to_owned());
-        persist_session_record_transition_or_restore(
-            &mut self.state,
-            session_id,
-            &previous,
-            "persist a session whose harness never became usable",
-            &persist,
-        )?;
-        Ok(true)
     }
 
     /// Publish a safe lifecycle failure even if a previous internal error exists.

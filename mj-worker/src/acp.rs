@@ -367,7 +367,7 @@ pub async fn run_with_shutdown(
         emit_runtime_event(
             &events,
             RuntimeEvent::SessionFault {
-                message: format!("ACP runtime failed: {error:#}"),
+                message: format!("ACP runtime failed: {}", worker_exit_reason(error)),
             },
         )
         .await
