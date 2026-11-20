@@ -5,8 +5,9 @@
 // requests, says how the Go code answers one, and Check holds the two answers
 // against each other.
 //
-// Rust's answers are recorded in testdata/oracle/<corpus>.jsonl beside the
-// test, so `go test` needs no Rust toolchain. The environment variable
+// Rust's answers are recorded in testdata/oracle/<corpus>.jsonl.gz beside the
+// test (gzip-compressed JSON lines, one case per line), so `go test` needs no
+// Rust toolchain. The environment variable
 // MJ_ORACLE changes that:
 //
 //	MJ_ORACLE=live     also start the Rust program, generate fresh requests
@@ -19,6 +20,7 @@ package oracle
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,7 +55,7 @@ type Generate func(yield func(request any))
 // the Rust side may reply with a panic.
 func Check(t *testing.T, module, corpus string, generate Generate, answer func(request json.RawMessage) any) {
 	t.Helper()
-	path := filepath.Join("testdata", "oracle", corpus+".jsonl")
+	path := filepath.Join("testdata", "oracle", corpus+".jsonl.gz")
 	mode := os.Getenv("MJ_ORACLE")
 
 	if mode == "record" {
@@ -113,15 +115,37 @@ func decode(text []byte) any {
 	return value
 }
 
+// migrate compresses a corpus that was recorded uncompressed (the form this
+// package wrote at first, <corpus>.jsonl). The uncompressed file is the newer
+// one whenever it exists, so it replaces any compressed one.
+func migrate(t *testing.T, path string) {
+	t.Helper()
+	plain := path[:len(path)-len(".gz")]
+	data, err := os.ReadFile(plain)
+	if err != nil {
+		return
+	}
+	writeCompressed(t, path, data)
+	if err := os.Remove(plain); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readCorpus(t *testing.T, path string) []Case {
 	t.Helper()
+	migrate(t, path)
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("no recorded oracle corpus at %s (%v); record it with MJ_ORACLE=record", path, err)
 	}
 	defer file.Close()
+	unpacked, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	defer unpacked.Close()
 	var cases []Case
-	reader := bufio.NewReader(file)
+	reader := bufio.NewReaderSize(unpacked, 1<<20)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
@@ -142,9 +166,6 @@ func readCorpus(t *testing.T, path string) []Case {
 
 func writeCorpus(t *testing.T, path string, cases []Case) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	var out bytes.Buffer
 	for _, c := range cases {
 		line, err := json.Marshal(c)
@@ -154,7 +175,30 @@ func writeCorpus(t *testing.T, path string, cases []Case) {
 		out.Write(line)
 		out.WriteByte('\n')
 	}
-	if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
+	writeCompressed(t, path, out.Bytes())
+	// A corpus recorded before compression would otherwise shadow this one.
+	_ = os.Remove(path[:len(path)-len(".gz")])
+}
+
+// writeCompressed writes data gzip-compressed, with an empty gzip header so
+// that recording the same cases twice gives the same file.
+func writeCompressed(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var packed bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&packed, gzip.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, packed.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

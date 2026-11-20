@@ -88,12 +88,16 @@ On the Go side:
     }
 
 with `oracle` being `github.com/BrokkAi/mjolnir/go/rs/rstest/oracle`. Record
-the corpus once with `MJ_ORACLE=record go/port/gotest.sh ./go/crates/<name>/`
-and check it in under `testdata/oracle/`; afterwards plain `go/port/gotest.sh`
-replays it and `MJ_ORACLE=live` compares against Rust again. Aim the generated
-inputs at the edges: empty input, Unicode, very long input, the boundaries the
-Rust code branches on. A few hundred to a few thousand cases is right; keep a
-corpus file under about 2 MB.
+the corpus once with `MJ_ORACLE=record go/port/gotest.sh ./go/crates/<name>/`;
+it is written gzip-compressed to `testdata/oracle/<corpus>.jsonl.gz` and is
+committed with the package. Afterwards plain `go/port/gotest.sh` replays it and
+`MJ_ORACLE=live` compares against Rust again. Aim the generated inputs at the
+edges: empty input, Unicode, very long input, the boundaries the Rust code
+branches on. A few hundred to a few thousand cases per corpus is right. The
+corpora are checked out by everyone who clones the repository: keep a
+package's recorded corpora under about 1 MB compressed in total, record a
+deterministic subset if the full set is larger, and run the full set under
+`MJ_ORACLE=live`.
 
 ## Report
 

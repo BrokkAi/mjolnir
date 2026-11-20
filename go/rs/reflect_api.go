@@ -59,8 +59,8 @@ func Max[T any](a, b T) T {
 // collections empty, and a data-free enum is its `#[default]` variant, which
 // the port keeps as the constant with value zero unless the type registers
 // another. A type with a hand-written Default has a `<Type>Default()`
-// function; call that instead.
+// function; call that instead, and register it with RegisterDefault so that
+// a derived Default holding the type finds it (default.go has the rules).
 func Default[T any]() T {
-	var zero T
-	return zero
+	return defaultValue[T]()
 }

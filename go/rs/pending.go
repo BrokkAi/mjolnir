@@ -19,24 +19,6 @@ func formatToString(format string, args []any) string {
 	panic(Todo("core::fmt: Rust format strings (" + format + ")"))
 }
 
-func cloneValue[T any](value T) T {
-	panic(Todo("core::clone: structural clone"))
-}
-
-func equalValues[T any](a, b T) bool {
-	if order, ok := compareOrdered(any(a), any(b)); ok {
-		return order == 0
-	}
-	panic(Todo("core::cmp: structural equality"))
-}
-
-func compareValues[T any](a, b T) int {
-	if order, ok := compareOrdered(any(a), any(b)); ok {
-		return order
-	}
-	panic(Todo("core::cmp: structural ordering"))
-}
-
 // compareOrdered orders the built-in ordered types. It stays when the
 // structural comparison replaces the placeholders above: it is the fast path.
 func compareOrdered(a, b any) (int, bool) {
