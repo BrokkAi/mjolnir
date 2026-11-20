@@ -147,4 +147,7 @@ answering it, rerun the same selection to collect the original turn.
 
 Use `pilot_readout.py --archived` with the judge key, judgments, delivery logs,
 manifest and label snapshot when the original outputs are no longer present.
-The default readout also checks the current outputs for staleness.
+Judge preparation freezes the isolation findings and the attempt set in the
+key. If the engine probe wrote outside the run root, pass `--egress-log` to
+the judge commands so they freeze that file. The default readout also checks
+the current outputs for staleness.

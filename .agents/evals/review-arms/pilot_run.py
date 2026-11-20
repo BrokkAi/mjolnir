@@ -409,10 +409,13 @@ class Pilot:
             except brief_driver.WriterNeedsInput as error:
                 return hold_for_input(sid, error)
             except brief_driver.WriterTurnFailed as error:
-                state = driver.retain_pilot_session(path, sid, str(error))
-                if job["kind"] == "writer":
-                    state = brief_driver.interrupt_on_rql_quota(params, sid) or state
-                return state
+                if job["kind"] != "writer":
+                    return driver.retain_pilot_session(path, sid, str(error))
+                try:
+                    state = brief_driver.retain_pilot_writer_failure(params, sid, error)
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as capture:
+                    return f"interrupted: {sid} could not capture the failed writer ({capture})"
+                return brief_driver.interrupt_on_rql_quota(params, sid) or state
             except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
                 return f"interrupted: {sid} {pending['reason']} ({error})"
             else:

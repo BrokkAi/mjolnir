@@ -203,7 +203,78 @@ def retire_batch(root, key, batch):
     save(root / KEY_PATH, key)
 
 
-def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256=None):
+def isolation_evidence(root, runs):
+    for kind, pattern in (("writer", "**/writer*"), ("reviewer", "**/reviewers/*")):
+        for directory in runs.glob(pattern):
+            yield kind, directory, "launch.json", Path("runs") / directory.relative_to(runs)
+    for pattern in ("*/active", "*/retired/*"):
+        for directory in (root / "engine-cache").glob(pattern):
+            yield "engine", directory, "session.json", directory.relative_to(root)
+    for role, kind in (("terra", "engine"), ("adjudicator", "judge")):
+        for directory in (root / "fidelity").glob(f"**/{role}"):
+            yield kind, directory, "session.json", directory.relative_to(root)
+    retired = root / KEY_PATH.parent / "retired"
+    retired_batches = sorted(retired.iterdir()) if retired.is_dir() else ()
+    for base in (root, *retired_batches):
+        for phase in (INPUT_PATH, HAND_PATH):
+            for directory in (base / phase).glob("sessions/*/*"):
+                yield "judge", directory, "launch.json", directory.relative_to(root)
+
+
+def isolation_report(egress=(), evidence=()):
+    kinds = ("writer", "reviewer", "engine", "judge")
+    void = defaultdict(lambda: defaultdict(dict))
+    screened, attempts = defaultdict(set), []
+
+    def record_void(kind, sid, reasons):
+        recorded = void[kind][sid]
+        for reason in reasons:
+            recorded[json.dumps(reason, sort_keys=True)] = reason
+
+    for kind, directory, launch_name, relative in evidence:
+        launch = directory / launch_name
+        if not launch.is_file() or not (sid := load(launch).get("session_id")):
+            continue
+        attempts.append({"kind": kind, "session_id": sid, "path": relative.as_posix()})
+        marker = directory / "void.json"
+        if marker.is_file():
+            record_void(kind, sid, [load(marker)["reason"]])
+        failed = directory / "failed.json"
+        if failed.is_file() and (reason := load(failed).get("void_reason")):
+            record_void(kind, sid, reason if isinstance(reason, list) else [reason])
+        for path in sorted(directory.glob("*audit.json")):
+            report = load(path)
+            hits = report.get("hits", ())
+            if report["passed"] is False:
+                reasons = [hit for hit in hits if hit["kind"] != "interpreter-screened"]
+                record_void(kind, sid, reasons or ["transcript audit failed"])
+            for hit in hits:
+                if hit["kind"] == "interpreter-screened":
+                    # Turn and retirement audits may cover the same transcript.
+                    screened[kind].add((sid, hit["seq"]))
+    return {
+        "egress_measurements": list(egress),
+        "void_sessions": {kind: len(void[kind]) for kind in kinds},
+        "void_reasons": {kind: {sid: [reasons[key] for key in sorted(reasons)]
+                               for sid, reasons in sorted(void[kind].items())} for kind in kinds},
+        "interpreter_screened": {kind: len(screened[kind]) for kind in kinds},
+        "attempts": sorted(attempts, key=lambda attempt: (attempt["kind"], attempt["path"], attempt["session_id"])),
+        "enforcement_gap": "Podman does not restrict pilot egress to providers. The engine's probes "
+                           "measure reachability of selected non-provider hosts. Stored transcript audits "
+                           "screen observed commands and output and cannot establish unobserved activity.",
+        "scope": "Counts cover stored current and superseded attempts. Engine counts include fidelity "
+                 "enumerators. Judge counts include fidelity adjudicators and blind hand checks.",
+    }
+
+
+def stored_isolation(root, runs, egress_log=None):
+    egress_path = egress_log or root / "egress.jsonl"
+    egress = ([json.loads(line) for line in egress_path.read_bytes().splitlines() if line.strip()]
+              if egress_log is not None or egress_path.is_file() else ())
+    return isolation_report(egress, isolation_evidence(root, runs))
+
+
+def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256=None, egress_log=None):
     key_file = root / KEY_PATH
     key = load(key_file) if key_file.exists() else {"version": 1, "manifest": manifest, "outputs": {}}
     if key["manifest"] != manifest:
@@ -277,7 +348,9 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
             hand_items = texts.copy()
             random.Random(f"{diff}/{kind}/hand-check").shuffle(hand_items)
             write_task(root / HAND_PATH / batch, {**payload, "items": hand_items})
-    if not key_file.exists() or pin_manifest:
+    isolation = stored_isolation(root, root / "runs", egress_log)
+    if not key_file.exists() or pin_manifest or key.get("isolation") != isolation:
+        key["isolation"] = isolation
         save(key_file, key)
     return key
 
@@ -434,6 +507,7 @@ def main():
     parser.add_argument("--bundle", help="bundle with a single empty parentless Git commit")
     parser.add_argument("--repo-commit", help="the empty bundle's pinned commit")
     parser.add_argument("--seal-probe", type=Path, help="trusted host isolation probe; receives the container ID")
+    parser.add_argument("--egress-log", type=Path, help="stored record_egress.py JSONL to freeze in the judge key")
     args = parser.parse_args()
     runs_sessions = args.action in {"run", "hand-check"}
     hand = args.action in {"hand-check", "collect-hand-check"}
@@ -454,7 +528,7 @@ def main():
             if selected and selected - set(group_jobs(manifest)):
                 parser.error(f"unknown diff keys: {sorted(selected - set(group_jobs(manifest)))}")
             key = prepare(root, manifest, snapshot, load_defects(manifest), selected,
-                          manifest_sha256=sha(raw_manifest))
+                          manifest_sha256=sha(raw_manifest), egress_log=args.egress_log)
             print(json.dumps({"queued_outputs": len(key["outputs"])}))
             return
         key = load(key_path)
@@ -464,7 +538,8 @@ def main():
         if not selected:
             return
         defects = load_defects(manifest)
-        key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest))
+        key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest),
+                      egress_log=args.egress_log)
         if runs_sessions:
             tasks = root / (HAND_PATH if hand else INPUT_PATH)
             if not tasks.is_dir():
@@ -479,7 +554,8 @@ def main():
                  "--provider-model", expected_provider_model(manifest)],
                 env={**os.environ, "REVIEW_ARMS_DIR": str(root)},
             )
-            key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest))
+            key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest),
+                          egress_log=args.egress_log)
             collect(root, key, hand=hand, profile=args.profile)
             if result.returncode:
                 raise SystemExit(result.returncode)

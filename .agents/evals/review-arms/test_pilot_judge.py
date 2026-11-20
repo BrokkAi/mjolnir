@@ -240,7 +240,8 @@ class PilotFixture(unittest.TestCase):
         self.assertCountEqual(items, key["outputs"].keys())
 
     def test_readout_uses_only_complete_diffs_and_reports_corrections(self):
-        key = setup(self.root, *fixture(3))
+        manifest, labels, defects = fixture(3)
+        key = setup(self.root, manifest, labels, defects)
         judged = blank_judgments(key)
         caught(key, judged, "repo/d0", "R", rep=2)
         caught(key, judged, "repo/d0", "R-loc", slots=(1,))
@@ -258,17 +259,26 @@ class PilotFixture(unittest.TestCase):
         engine = self.root / "engine-cache" / "commit" / "retired" / "engine"
         judge = self.root / j.KEY_PATH.parent / "retired" / "batch" / j.HAND_PATH / "sessions" / "batch" / "void-judge"
         screened = {"kind": "interpreter-screened", "seq": 5}
+        rejected = {"kind": "github-or-web", "seq": 6}
+        isolation_files = []
         for kind, path, launch in (("writer", writer_path, "launch.json"),
                                    ("reviewer", reviewer_path, "launch.json"),
                                    ("engine", engine, "session.json"), ("judge", judge, "launch.json")):
             j.save(path / launch, {"session_id": kind})
-            j.save(path / "audit.json", {"passed": kind == "reviewer", "hits": [screened]})
-        j.save(engine / "turn-3-audit.json", {"passed": False, "hits": [screened]})
+            hits = [screened] if kind == "reviewer" else [screened, rejected]
+            j.save(path / "audit.json", {"passed": kind == "reviewer", "hits": hits})
+            isolation_files.extend((path / launch, path / "audit.json"))
+        j.save(engine / "turn-3-audit.json", {"passed": False, "hits": [screened, rejected]})
+        isolation_files.append(engine / "turn-3-audit.json")
         egress = {"time": "fixture", "container": "engine", "reachable": {"github.com": True}, "enforced": False}
-        (self.root / "egress.jsonl").write_text(json.dumps(egress) + "\n")
+        egress_log = self.root / "egress.jsonl"
+        egress_log.write_text(json.dumps(egress) + "\n")
+        isolation_files.append(egress_log)
         # The isolated study directory contains only the committed-style snapshot.
         self.assertFalse((self.root / "labels" / "development-primary.jsonl").exists())
         manifest_path = self.root / "pilot/manifest.json"
+        key = j.prepare(self.root, manifest, j.load_snapshot(manifest_path, manifest), defects,
+                        manifest_sha256=key["manifest_sha256"])
         readout_path = self.root / "readout.json"
         args = ["pilot_readout.py", "--root", str(self.root), "--manifest", str(manifest_path),
                 "--output", str(readout_path)]
@@ -282,6 +292,10 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(isolation["egress_measurements"], [egress])
         self.assertEqual(isolation["void_sessions"], {"writer": 1, "reviewer": 0, "engine": 1, "judge": 1})
         self.assertEqual(isolation["interpreter_screened"], {"writer": 1, "reviewer": 1, "engine": 1, "judge": 1})
+        self.assertEqual(isolation["void_reasons"]["engine"], {"engine": [rejected]})
+        self.assertEqual({attempt["session_id"] for attempt in isolation["attempts"]},
+                         {"writer", "reviewer", "engine", "judge"})
+        self.assertEqual(isolation, key["isolation"])
         self.assertIn("does not restrict", isolation["enforcement_gap"])
         self.assertEqual(result["unfinished_diffs"], ["repo/d2"])
         self.assertEqual(result["as_judged"]["arms"]["R"]["catch_rate"], 0.25)
@@ -314,12 +328,23 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(stale["unfinished_diffs"], ["repo/d2"])
         self.assertEqual(stale["paired_contrasts"]["R - G"]["catch"]["hand_checked"]["by_diff"], {})
 
+        late = writer_path.with_name("writer.superseded-2")
+        j.save(late / "launch.json", {"session_id": "later-writer"})
+        j.save(late / "audit.json", {"passed": False, "hits": [screened, rejected]})
+        with egress_log.open("a") as stream:
+            stream.write(json.dumps({**egress, "container": "later"}) + "\n")
+        archive_args = [*args, "--archived"]
+        with patch.object(sys, "argv", archive_args):
+            r.main()
+            self.assertEqual(readout_path.read_bytes(), first)
+
         for entry in key["outputs"].values():
             artifact = self.root / entry["artifact"]
             artifact.unlink()
             (artifact.parent / "done.json").unlink()
             (artifact.parent / "usage.json").unlink()
-        archive_args = [*args, "--archived"]
+        for path in [*isolation_files, late / "launch.json", late / "audit.json"]:
+            path.unlink()
         with patch.object(sys, "argv", archive_args):
             r.main()
             self.assertEqual(readout_path.read_bytes(), first)
