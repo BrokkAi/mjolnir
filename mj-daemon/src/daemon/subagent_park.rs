@@ -335,11 +335,6 @@ impl RuntimeState {
                             &executor,
                         )
                         .await?;
-                    let actor = state
-                        .session_manager
-                        .wait_for_session(&session_id, Duration::from_secs(5))
-                        .await?;
-                    actor.sync_now().await?;
                     let event = MailboxEvent {
                         key,
                         source: "mjolnir".into(),
@@ -357,6 +352,18 @@ impl RuntimeState {
                         )
                     })
                     .await?;
+                    // Keep the lifecycle visible until the actor observes
+                    // the replacement. The outbox already owns the retry.
+                    let observed = async {
+                        state.session_manager
+                            .wait_for_session(&session_id, Duration::from_secs(5))
+                            .await?
+                            .sync_now()
+                            .await
+                    }.await;
+                    if let Err(error) = observed {
+                        tracing::warn!(%session_id, %error, "replacement child actor could not synchronize");
+                    }
                     Ok(DaemonLifecycleResult::Done)
                 },
             )
