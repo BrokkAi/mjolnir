@@ -7550,8 +7550,11 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             harness == HarnessKind::Claude
         );
         let spawn_index = if missing {
-            assert_eq!(children.len(), 3);
-            0
+            // Hard-won: 14b4b00de: replacing an unused thread skipped the replay boundary, so staging from an abandoned load hid later native children.
+            assert_eq!(children.len(), 5);
+            assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
+            assert!(matches!(children[1], NativeAgentEvent::ReplayCommit));
+            2
         } else {
             assert_eq!(children.len(), 5);
             assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));

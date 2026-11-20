@@ -360,6 +360,17 @@ pub(super) async fn serve_session(
             },
         )
         .await?;
+        if native_children_supported {
+            // Publish the empty replay the missing-thread fallback publishes,
+            // so staging left by an abandoned load cannot hide the
+            // replacement's native children.
+            for event in [
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+            ] {
+                emit_runtime_event(events, RuntimeEvent::NativeAgent { event }).await?;
+            }
+        }
         replaced_unused_native_session_id = Some(existing.clone());
         None
     } else if let Some(existing) = &spec.resume_session {
