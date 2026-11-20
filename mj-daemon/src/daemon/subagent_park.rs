@@ -335,6 +335,11 @@ impl RuntimeState {
                             &executor,
                         )
                         .await?;
+                    let actor = state
+                        .session_manager
+                        .wait_for_session(&session_id, Duration::from_secs(5))
+                        .await?;
+                    actor.sync_now().await?;
                     let event = MailboxEvent {
                         key,
                         source: "mjolnir".into(),

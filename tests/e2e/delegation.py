@@ -820,6 +820,15 @@ def main():
                         (child,),
                     ).fetchone()
 
+            def assigned_turn(child):
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
+                    row = db.execute(
+                        "SELECT accepted_ordinal FROM startup_steps WHERE session_id=? "
+                        "AND command_id LIKE 'subagent-spawn-%' AND accepted_ordinal IS NOT NULL",
+                        (child,),
+                    ).fetchone()
+                    return row[0] if row else None
+
             def reports(child):
                 with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
                     rows = db.execute(
@@ -848,6 +857,7 @@ def main():
 
             miss, miss_prompt, _ = spawn_quota_child("with no other profile")
             recovering, recover_prompt, marker = spawn_quota_child("with a replacement")
+            handed_back, handed_back_prompt, _ = spawn_quota_child("after handing back")
             _, profile, native = stored(recovering)
             assert profile == "fake" and native, stored(recovering)
 
@@ -886,6 +896,14 @@ def main():
                 return len(ready) >= 2
 
             wait_for("the replacement profile to offer the child's model", published_replacement)
+            report = "The child handed back its assignment before the quota stop."
+            handback = tool(handed_back, "handback", {"message": report}, raw_message=True)
+            if handback.startswith("Not delivered yet:"):
+                tool(handed_back, "handback", {"message": report})
+            release(handed_back, handed_back_prompt)
+            wait_report(parent, handed_back, report)
+            assert stored(handed_back)[1] == "fake", stored(handed_back)
+
             def loaded_replacement():
                 log = marker.with_name("fixture-open.jsonl")
                 opens = log.read_text().splitlines() if log.exists() else []
@@ -897,9 +915,10 @@ def main():
                 "If a genuine decision, required approval, or external action remains necessary, explain it and stop."
             )
             result = "Continued on the replacement fixture profile."
+            turn = wait_for("the original assignment receipt", lambda: assigned_turn(recovering))
             with subprocess.Popen(
                 [str(args.mj.resolve()), "--instance", args.instance, "wait", "--session",
-                 recovering, "--json", "--timeout", str(WAIT_SECONDS)],
+                 recovering, "--turn", str(turn), "--json", "--timeout", str(WAIT_SECONDS)],
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             ) as wait:
                 try:
@@ -907,6 +926,9 @@ def main():
                     wait_for("the original native conversation to load on the replacement", loaded_replacement)
                     wait_prompt(recovering, continuation)
                     assert wait.poll() is None, wait.communicate()
+                    agents = tool(parent, "list_agents")["agents"]
+                    listed = next(agent for agent in agents if agent["child_session_id"] == recovering)
+                    assert listed["profile_id"] == "replacement", listed
                     handback = tool(recovering, "handback", {"message": result}, raw_message=True)
                     if handback.startswith("Not delivered yet:"):
                         tool(recovering, "handback", {"message": result})
@@ -922,7 +944,7 @@ def main():
             assert all(report["state"] != "failed" for report in reports(recovering)), reports(recovering)
             cli("daemon", "stop")
             print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),
-                              "result": "passed", "quota_children": 2}), flush=True)
+                              "result": "passed", "quota_children": 3}), flush=True)
             return
 
         model_gate.touch()

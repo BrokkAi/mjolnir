@@ -1323,7 +1323,7 @@ impl ApiBackend {
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
                             "name":name,
-                            "profile_id":relation.profile_id,
+                            "profile_id":record.as_ref().map_or(&relation.profile_id, |record| &record.last_profile),
                             "effort":relation.effort,
                             "state":state,
                         });
@@ -1773,7 +1773,7 @@ impl ApiBackend {
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state));
             if let Some(snapshot) = connected {
-                use crate::server::api::{WaitObservation, WaitOutcome};
+                use crate::server::api::WaitObservation;
                 let mut observation = WaitObservation {
                     subagent: true,
                     ..Default::default()
@@ -1787,16 +1787,19 @@ impl ApiBackend {
                             && observation.execution == MaterializedExecutionState::Idle
                     })
                     .and_then(|turn| observation.turn_end(turn));
-                let Some(decision) = decision else {
+                if decision.is_none() {
                     progress.state = ChildState::WaitingForWorker;
                     continue;
-                };
-                if decision.outcome == WaitOutcome::QuotaLimit
-                    && let Some(reason) = decision.message
+                }
+                if let Some(recovery) = observation.quota_recovery
+                    && progress
+                        .answer
+                        .as_ref()
+                        .is_some_and(|turn| turn.command_id == recovery.completed_command_id)
                 {
                     progress.state = ChildState::Failed {
                         state: "failed",
-                        reason,
+                        reason: recovery.notice,
                         provider_failure: true,
                     };
                     continue;

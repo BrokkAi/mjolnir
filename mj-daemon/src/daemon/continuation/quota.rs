@@ -144,7 +144,7 @@ pub(super) async fn prepare(
 ) -> Result<Plan> {
     let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
     let turn = ended_turn(snapshot).context("missing quota completion")?;
-    let (profile_id, profile, child) = {
+    let (profile_id, profile, child, handed_back) = {
         let controller_owner = state.owner();
         let controller = controller_owner.controller();
         let session = controller
@@ -161,6 +161,11 @@ pub(super) async fn prepare(
                 .context("profile was removed")?
                 .clone(),
             controller.state.subagents.contains_key(id),
+            controller_owner
+                .committed()
+                .and_then(|committed| committed.subagent_reports.get(id))
+                .and_then(|report| report.handback.as_ref())
+                .is_some_and(|handback| handback.answers(turn.key)),
         )
     };
     let harness = profile.kind;
@@ -250,6 +255,7 @@ pub(super) async fn prepare(
     let now_ms = mj_core::clock::epoch_millis();
     let reset = mj_controller::quota::retry_deadline(&windows, stated, now_ms / 1000, consumed);
     if reset.is_none()
+        && !handed_back
         && let Some(wait) = wait
     {
         return Ok(Plan::Pending(wait));
@@ -289,7 +295,8 @@ pub(super) async fn prepare(
             ),
         };
     }
-    if (!child || harness != mj_core::config::HarnessKind::OpenCode)
+    if !handed_back
+        && (!child || harness != mj_core::config::HarnessKind::OpenCode)
         && mj_controller::quota::long_window_stop(
             &windows,
             model.as_deref().unwrap_or(""),
@@ -638,8 +645,9 @@ pub(super) async fn schedule(
                 Ok(()) => {
                     let handle = env
                         .control
-                        .wait_for_session(id, Duration::from_secs(5))
-                        .await?;
+                        .find_session(id)
+                        .await?
+                        .context("replacement child actor stopped")?;
                     return Ok(Box::new(handle.view()));
                 }
                 Err(error) => tracing::warn!(session=id, %error, "child quota switch failed"),
