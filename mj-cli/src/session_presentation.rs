@@ -189,6 +189,7 @@ mod tests {
                     local: None,
                     destination: "project".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         );

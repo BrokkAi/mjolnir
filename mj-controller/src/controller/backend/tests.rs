@@ -66,6 +66,7 @@ fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes(
                     local: Some("/removed/checkout".into()),
                     destination: "original-layout".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
             identities: BTreeMap::from([(
@@ -309,6 +310,11 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         BTreeMap::from([("stored".to_owned(), "sk-secret-value".to_owned())]),
     );
     let mut container = container_target("dev:1", Default::default());
+    container.build_cache = Some(mj_core::config::TargetBuildCache {
+        remote: Some("s3://test-build-cache/mbx".into()),
+        remote_region: Some("us-east-1".into()),
+        ..Default::default()
+    });
     container.environment = with_secret_resolver(resolver, || {
         Environment::from_sources(BTreeMap::from([
             (
@@ -343,6 +349,21 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
             history_cutoff: None,
         }],
     };
+    let accepted: ProjectBundle = serde_json::from_value(serde_json::json!({
+        "primary_repo": "app",
+        "repositories": [
+            {"id":"tools", "github":"acme/tools", "destination":"tools", "mbx_namespace":"-Cache/tools"},
+            {"id":"app", "github":"https://github.com/Acme/App.git", "destination":"app"},
+            {"id":"alias", "github":"Acme/App", "destination":"alias"},
+            {"id":"local", "local":"/repo", "destination":"local"}
+        ]
+    })).unwrap();
+    use super::super::provisioning::{NitroBuildCache, nitro_build_cache};
+    let NitroBuildCache::Remote(mbx_remote) =
+        nitro_build_cache(&template, Some(&accepted)).unwrap()
+    else {
+        panic!("the Nitro target and accepted bundle should enable the remote");
+    };
     let mut plan = targets::provision_plan_named(
         &target,
         session_id,
@@ -350,7 +371,10 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         &[],
         None,
         &targets::resource_name(session_id).unwrap(),
-        None,
+        targets::ProvisionOptions {
+            nitro_mbx_remote: Some(&mbx_remote),
+            ..Default::default()
+        },
     )
     .unwrap();
     let secrets = container_environment(&container, ContainerOverrides::default(), true).secrets;
@@ -366,6 +390,18 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     assert!(line.contains("--preserve-env=API_KEY"), "{line}");
     assert!(line.contains("'--env' 'API_KEY'"), "{line}");
     assert!(line.contains("'--env' 'MODE=fast'"), "{line}");
+    assert!(
+        line.contains("'--mbx-remote' 's3://test-build-cache/mbx'"),
+        "{line}"
+    );
+    assert!(line.contains("'--mbx-remote-region=us-east-1'"), "{line}");
+    assert!(
+        line.contains("'--mbx-namespace=Acme/App' '--mbx-namespace=-Cache/tools'"),
+        "{line}"
+    );
+    assert_eq!(line.matches("'--mbx-namespace=").count(), 2, "{line}");
+    assert!(!line.contains("MBX_REMOTE_"), "{line}");
+    assert!(!run.env.keys().any(|name| name.starts_with("MBX_REMOTE_")));
     assert_eq!(run.sensitive_stdin(), Some(&b"sk-secret-value\n"[..]));
 }
 

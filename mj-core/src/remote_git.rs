@@ -692,6 +692,7 @@ mod tests {
             local: None,
             destination: "repo".into(),
             git_ref: None,
+            mbx_namespace: None,
         };
         let source = resolve_repository(&repository, &crate::targets::ProcessExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");

@@ -2887,6 +2887,7 @@ mod tests {
                     local: None,
                     destination: "app".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         );

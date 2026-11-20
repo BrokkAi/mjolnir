@@ -9,9 +9,9 @@
 //! * The engine owns compound operations. `run` creates the named volumes with
 //!   the session's labels and removes everything it created when the launch
 //!   fails, so there is no shell wrapper like `PODMAN_VOLUME_RUN_SCRIPT`.
-//! * A sandbox is a VM. It has no host bind mounts, so additional directories
-//!   and the shared build cache are dropped before this module is reached
-//!   (with a notice), and this module refuses any that arrive.
+//! * A sandbox is a VM. The controller drops requests for host directories
+//!   with a notice, and this module refuses any that arrive. A remote mbx cache
+//!   uses its own engine flags so the host can enforce namespace access.
 
 use super::*;
 use mj_core::targets::SshTrafficClass;
@@ -178,6 +178,14 @@ pub fn nitro_workspace_volume(container: &str) -> String {
     format!("{container}-workspace")
 }
 
+/// Host-side settings for the per-VM proxy.
+pub struct NitroMbxRemote<'a> {
+    pub url: &'a str,
+    pub region: Option<&'a str>,
+    /// The first namespace is the guest's default.
+    pub namespaces: Vec<String>,
+}
+
 /// Run arguments for the engine: the shape `container_run_args` gives Podman,
 /// minus what a VM has no use for (capabilities, security options, a pids
 /// limit, host mounts, user namespaces) and with options spelled the way the
@@ -188,6 +196,7 @@ pub(super) fn nitro_run_args(
     session_id: &str,
     additional_mounts: &[AdditionalMount],
     workspace_root: &str,
+    mbx_remote: Option<&NitroMbxRemote<'_>>,
 ) -> Result<Vec<String>> {
     ensure!(
         additional_mounts.is_empty(),
@@ -238,6 +247,16 @@ pub(super) fn nitro_run_args(
         "--volume".to_owned(),
         format!("{}:{workspace_root}:rw", nitro_workspace_volume(name)),
     ]);
+    if let Some(remote) = mbx_remote {
+        args.extend(["--mbx-remote".to_owned(), remote.url.to_owned()]);
+        if let Some(region) = remote.region {
+            args.push(format!("--mbx-remote-region={region}"));
+        }
+        for namespace in &remote.namespaces {
+            // Namespace segments may start with a hyphen.
+            args.push(format!("--mbx-namespace={namespace}"));
+        }
+    }
     args.push(template.image.clone());
     args.extend([
         "sh".to_owned(),
@@ -256,6 +275,7 @@ pub(super) fn nitro_container_run(
     additional_mounts: &[AdditionalMount],
     ssh: &SshTarget,
     workspace_root: &str,
+    mbx_remote: Option<&NitroMbxRemote<'_>>,
 ) -> Result<Vec<CommandSpec>> {
     let mut arguments = nitro_run_args(
         template,
@@ -263,6 +283,7 @@ pub(super) fn nitro_container_run(
         session_id,
         additional_mounts,
         workspace_root,
+        mbx_remote,
     )?;
     // A valueless `--env NAME` inherits NAME from the engine's environment,
     // which `sudo` would otherwise reset. Preserve exactly those names; the

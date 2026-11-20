@@ -108,6 +108,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                     local: Some("/private/source/hel".into()),
                     destination: "hel".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         )]),
@@ -1574,6 +1575,7 @@ fn web_project_keys_follow_the_complete_repository_set() {
         local: None,
         destination: "secondary".into(),
         git_ref: None,
+        mbx_namespace: None,
     };
     config
         .bundles

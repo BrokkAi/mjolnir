@@ -561,6 +561,7 @@ fn sample_config() -> Config {
                     local: None,
                     destination: PathBuf::from("hel"),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         )]),
@@ -1095,6 +1096,7 @@ fn multi_repository_bundles_include_all_repositories_in_sorted_identity_order() 
         local: None,
         destination: PathBuf::from("docs"),
         git_ref: None,
+        mbx_namespace: None,
     };
     config.bundles.insert(
         "with-docs".into(),
@@ -1143,6 +1145,7 @@ fn multi_repository_bundle_identity_ignores_repository_order_and_primary_selecti
         local: None,
         destination: PathBuf::from("docs"),
         git_ref: None,
+        mbx_namespace: None,
     };
     config.bundles.insert(
         "first-order".into(),
@@ -1352,6 +1355,7 @@ fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
         local: None,
         destination: PathBuf::from("hel-copy"),
         git_ref: None,
+        mbx_namespace: None,
     };
     config.bundles.insert(
         "duplicate".into(),
@@ -1657,7 +1661,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         directory: None,
         tools_directory: None,
         max_total_size: Some("20GB".into()),
-        scheduler: Default::default(),
+        ..Default::default()
     });
     state.validate_setup_update(&before, &after).unwrap();
     // Any other container change is still refused.

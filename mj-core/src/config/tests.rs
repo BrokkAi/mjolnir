@@ -51,7 +51,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
             directory: None,
             tools_directory: None,
             max_total_size: None,
-            scheduler: Default::default(),
+            ..Default::default()
         }),
     };
     let serialized = serde_json::to_value(&every_setting).unwrap();
@@ -866,6 +866,7 @@ fn sample_config() -> Config {
                     local: None,
                     destination: PathBuf::from("app"),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         )]),
@@ -1192,6 +1193,7 @@ fn bundle_rejects_traversal_and_duplicate_destinations() {
         local: None,
         destination: PathBuf::from("app"),
         git_ref: None,
+        mbx_namespace: None,
     });
     assert!(
         config
@@ -2889,7 +2891,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
         directory: None,
         tools_directory: None,
         max_total_size: Some("50GiB".into()),
-        scheduler: Default::default(),
+        ..Default::default()
     };
     assert_eq!(
         config.machines["local"],

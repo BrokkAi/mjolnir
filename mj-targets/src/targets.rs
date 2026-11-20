@@ -72,8 +72,8 @@ pub use container_upgrade::{
 };
 use nitro::*;
 pub use nitro::{
-    NitroEngineInfo, NitroEngineUnavailable, NitroPreflight, nitro_info_command, parse_nitro_info,
-    verify_ssh_nitro,
+    NitroEngineInfo, NitroEngineUnavailable, NitroMbxRemote, NitroPreflight, nitro_info_command,
+    parse_nitro_info, verify_ssh_nitro,
 };
 mod process_limit;
 pub use process_limit::*;

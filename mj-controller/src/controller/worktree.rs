@@ -1061,6 +1061,7 @@ pub(super) fn plan_raw_to_workspace(
                     local: Some(repository),
                     destination,
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
             executor,

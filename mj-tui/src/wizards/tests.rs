@@ -498,6 +498,7 @@ fn two_project_config() -> mj_core::config::Config {
                     local: None,
                     destination: PathBuf::from("bifrost-dev"),
                     git_ref: None,
+                    mbx_namespace: None,
                 },
                 mj_core::config::ProjectRepository {
                     id: "bifrost".into(),
@@ -505,6 +506,7 @@ fn two_project_config() -> mj_core::config::Config {
                     local: Some(PathBuf::from(long_path)),
                     destination: PathBuf::from("bifrost"),
                     git_ref: None,
+                    mbx_namespace: None,
                 },
             ],
         },
@@ -550,6 +552,7 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
                 local: Some(missing.clone()),
                 destination: PathBuf::from("missingpath"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -661,6 +664,7 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
                 local: Some(missing.clone()),
                 destination: PathBuf::from("missingpath"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );

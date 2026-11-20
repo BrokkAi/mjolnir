@@ -131,6 +131,7 @@ fn ssh_docker_registration_config() -> Config {
                 local: None,
                 destination: PathBuf::from("project"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -375,7 +376,10 @@ fn credential_free_container_creation_omits_runtime_token_environment() {
         &[],
         None,
         &targets::resource_name(&session.id).unwrap(),
-        Some("checkout-secret"),
+        targets::ProvisionOptions {
+            github_token: Some("checkout-secret"),
+            ..Default::default()
+        },
     )
     .unwrap();
     let run_args = &plan.commands[0].args;

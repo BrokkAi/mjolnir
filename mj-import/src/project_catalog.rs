@@ -98,6 +98,7 @@ pub fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot
                 local: Some(resolved.checkout_root.clone()),
                 destination: id.clone().into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
         identities: BTreeMap::from([(id.clone(), resolved.identity.clone())]),
@@ -643,6 +644,7 @@ mod tests {
                 local: None,
                 destination: "old-id".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         };
         Config::update(|config| {

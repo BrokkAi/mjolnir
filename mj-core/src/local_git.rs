@@ -1053,6 +1053,7 @@ mod tests {
                 github: None,
                 destination: "repo".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         }
     }

@@ -848,6 +848,7 @@ impl Controller {
                 session.resource_allocation.as_ref(),
                 ContainerOverrides::for_session(&session),
             )?;
+            let nitro_cache = nitro_build_cache(template, session.project_bundle(&self.config))?;
             let mut runtime_mounts = session.additional_mounts.clone();
             // The mounts this container runs with, not the ones the session
             // stores: a forced downgrade belongs to the host the container
@@ -856,21 +857,11 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
-            let build_cache_enabled = {
-                let mut machines = self.config.machines.clone();
-                let stored = mj_core::config::stored_target(
-                    &session.target_template_id,
-                    template,
-                    &mut machines,
-                );
-                machines
-                    .get(stored.machine())
-                    .and_then(|machine| machine.build_cache())
-                    .and_then(|cache| cache.enabled)
-                    != Some(false)
-            };
-            for notice in drop_nitro_host_directories(&target, &mut runtime_mounts, build_cache_enabled) {
+            for notice in drop_nitro_host_directories(&target, &mut runtime_mounts) {
                 executor.notify_notice(&notice);
+            }
+            if matches!(nitro_cache, NitroBuildCache::GuestLocal) {
+                executor.notify_notice("This Nitro sandbox keeps its mbx build cache inside the VM, so its first build starts cold. Set `build_cache.remote` on the host to share CI's cache (see Project environments).");
             }
             let mut bundle = if project_directory.is_some() {
                 None
@@ -974,7 +965,13 @@ impl Controller {
                             &runtime_mounts,
                             session.container_workspace.as_deref(),
                             &resource_name,
-                            session.no_github_credentials.then_some(github_token).flatten(),
+                            targets::ProvisionOptions {
+                                github_token: session.no_github_credentials.then_some(github_token).flatten(),
+                                nitro_mbx_remote: match &nitro_cache {
+                                    NitroBuildCache::Remote(remote) => Some(remote),
+                                    _ => None,
+                                },
+                            },
                         )
                     })
             };
@@ -1765,19 +1762,44 @@ fn provisioned_locator_named(
     })
 }
 
-/// Drop what a Nitro sandbox cannot have and say so.
-///
-/// A sandbox is a virtual machine on the host: Firecracker has no virtio-fs,
-/// so a host directory cannot be attached, and the shared mbx build cache is a
-/// host directory. The session is created without them instead of refused,
-/// and the notice names each thing that is missing so the person is not left
-/// guessing why a build starts cold or an attachment is absent. The session's
-/// stored attachments stay as chosen; this is decided at every creation, like
-/// the overlay downgrade.
+pub(super) enum NitroBuildCache<'a> {
+    Disabled,
+    GuestLocal,
+    Remote(targets::NitroMbxRemote<'a>),
+}
+
+/// Resolve the guest's cache placement from the fused target and accepted bundle.
+pub(super) fn nitro_build_cache<'a>(
+    template: &'a TargetTemplate,
+    bundle: Option<&mj_core::config::ProjectBundle>,
+) -> Result<NitroBuildCache<'a>> {
+    let TargetTemplate::SshNitro { container, .. } = template else {
+        return Ok(NitroBuildCache::Disabled);
+    };
+    let Some(cache) = &container.build_cache else {
+        return Ok(NitroBuildCache::GuestLocal);
+    };
+    if cache.enabled == Some(false) {
+        return Ok(NitroBuildCache::Disabled);
+    }
+    let (Some(url), Some(bundle)) = (cache.remote.as_deref(), bundle) else {
+        return Ok(NitroBuildCache::GuestLocal);
+    };
+    let namespaces = bundle.mbx_namespaces()?;
+    if namespaces.is_empty() {
+        return Ok(NitroBuildCache::GuestLocal);
+    }
+    Ok(NitroBuildCache::Remote(targets::NitroMbxRemote {
+        url,
+        region: cache.remote_region.as_deref(),
+        namespaces,
+    }))
+}
+
+/// Drop host directories from the runtime mounts for a Firecracker guest.
 pub(super) fn drop_nitro_host_directories(
     target: &targets::TargetTemplate,
     mounts: &mut Vec<targets::AdditionalMount>,
-    build_cache_enabled: bool,
 ) -> Vec<String> {
     if !matches!(target, targets::TargetTemplate::SshNitro { .. }) {
         return Vec::new();
@@ -1793,13 +1815,6 @@ pub(super) fn drop_nitro_host_directories(
             "Nitro sandboxes cannot attach host directories, so this session starts without \
              {attached}. Copy what it needs into the workspace, or use a Podman target."
         ));
-    }
-    if build_cache_enabled {
-        notices.push(
-            "Nitro sandboxes cannot share the host's mbx build cache, so builds in this session \
-             start cold."
-                .to_owned(),
-        );
     }
     notices
 }

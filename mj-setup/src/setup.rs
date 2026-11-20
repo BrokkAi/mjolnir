@@ -480,6 +480,7 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
                     local: None,
                     destination: PathBuf::from(repository_id),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         );

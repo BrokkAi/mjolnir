@@ -80,6 +80,7 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
                 github: None,
                 destination: "repo".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );

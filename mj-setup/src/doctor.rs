@@ -27,6 +27,7 @@ use crate::targets::{
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
+    mbx_s3_location,
 };
 use mj_core::credentials::login_command;
 use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
@@ -233,6 +234,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
     checks.extend(ssh_apple_container_checks(config, executor, options.smoke));
     checks.extend(ssh_nitro_checks(config, executor, options.smoke));
+    checks.extend(remote_build_cache_checks(config, executor));
     checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
@@ -382,6 +384,95 @@ fn build_cache_checks(
             }
         })
         .collect()
+}
+
+fn remote_build_cache_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| {
+            let cache = target.container()?.build_cache.as_ref()?;
+            let remote = cache.remote.as_deref()?;
+            let check_id = format!("build-cache.remote.{id}");
+            let title = format!("Remote build cache for target {id}");
+            let TargetTemplate::SshNitro { ssh, .. } = target else {
+                return Some(DoctorCheck::unsupported(
+                    check_id,
+                    title,
+                    "Remote build cache is used only on Nitro targets. This target uses its existing build cache settings.",
+                ));
+            };
+            // Bundles can use any target. Pick the first configured bundle
+            // with a namespace, using its default just as provisioning does.
+            let namespace = config.bundles.values().find_map(|bundle| {
+                bundle.mbx_namespaces().ok()?.into_iter().next()
+            });
+            let Some(namespace) = namespace else {
+                return Some(DoctorCheck::unsupported(check_id, title, "no repository namespace to check"));
+            };
+            let ssh = RuntimeSshTarget::from(ssh);
+            Some(match nitro_remote_cache_probe(&ssh, remote, cache.remote_region.as_deref(), &namespace, executor) {
+                Ok((true, detail)) => DoctorCheck::ready(check_id, title, detail),
+                Ok((false, detail)) => DoctorCheck::warning(
+                    check_id,
+                    title,
+                    detail,
+                    "Verify the Nitro host's instance profile and its S3 read permissions, then rerun `mj doctor`.",
+                ),
+                Err(error) => DoctorCheck::warning(
+                    check_id,
+                    title,
+                    format!("Could not check {remote} on {}: {error:#}", ssh.destination),
+                    "Verify SSH access and use Test in the Targets pane to update the Nitro engine.",
+                ),
+            })
+        })
+        .collect()
+}
+
+fn nitro_remote_cache_probe(
+    ssh: &RuntimeSshTarget,
+    remote: &str,
+    region: Option<&str>,
+    namespace: &str,
+    executor: &impl CommandExecutor,
+) -> Result<(bool, String)> {
+    let (bucket, prefix) = mbx_s3_location(remote)?;
+    let mut args = vec![
+        "mbx-check".to_owned(),
+        format!("--bucket={bucket}"),
+        format!("--namespace={namespace}"),
+    ];
+    if !prefix.is_empty() {
+        args.push(format!("--prefix={prefix}"));
+    }
+    if let Some(region) = region {
+        args.push(format!("--region={region}"));
+    }
+    let command = ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, args)
+        .purpose("check Nitro remote build cache readability");
+    let output = executor.execute(&command)?;
+    let detail = String::from_utf8_lossy(&output.stdout);
+    let detail = detail.trim();
+    if (output.status == 0 && detail == "remote cache readable")
+        || (output.status != 0
+            && (detail == "no instance role attached" || detail.starts_with("role cannot read ")))
+    {
+        return Ok((output.status == 0, detail.to_owned()));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "Nitro mbx-check exited with status {}: {} {}",
+        output.status,
+        detail,
+        stderr.trim()
+    );
 }
 
 /// Report removed workspaces whose mbx build output Mjolnir could not release.

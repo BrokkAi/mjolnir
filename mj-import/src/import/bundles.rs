@@ -122,6 +122,7 @@ pub fn resolve_bundle(
             github: None,
             destination: PathBuf::from(id),
             git_ref: None,
+            mbx_namespace: None,
         });
     }
     Ok(BundleResolution::Synthesized {

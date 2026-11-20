@@ -2120,6 +2120,7 @@ fn move_raw_checkout_uses_the_same_accepted_bundle_transition_plan() {
             local: Some(checkout.path().canonicalize().unwrap()),
             destination: PathBuf::from("accepted/layout"),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     let mut source = raw_session_on("local-bare", &checkout.path().to_string_lossy());
@@ -2747,7 +2748,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
         &[],
         Some(&container_workspace),
         &resource,
-        None,
+        crate::targets::ProvisionOptions::default(),
     )
     .unwrap();
     let cloned = plan

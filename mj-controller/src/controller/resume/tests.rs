@@ -146,6 +146,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
             local: None,
             destination: "custom-layout".into(),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     let project = crate::project_catalog::snapshot(&bundle, &SourceExists, true).unwrap();
@@ -549,6 +550,7 @@ fn repository_preflight_distinguishes_the_original_source_from_a_reused_name() {
         local: Some(origin.clone()),
         destination: "project".into(),
         git_ref: None,
+        mbx_namespace: None,
     };
     assert_eq!(
         checkpoint_source_missing_commit(
@@ -646,6 +648,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             local: Some(PathBuf::from(format!("/origin/{id}"))),
             destination: id.into(),
             git_ref: None,
+            mbx_namespace: None,
         })
         .to_vec();
     let mut session = checkpoint_test_session(session_id);
@@ -797,6 +800,7 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
         local: None,
         destination: "project".into(),
         git_ref: None,
+        mbx_namespace: None,
     };
     let executor = RecordingExecutor {
         commands: Mutex::new(Vec::new()),
@@ -1636,6 +1640,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                 local: Some(data_directory.join("host-clone-that-no-longer-exists")),
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -2054,6 +2059,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             local: Some(repository.path().canonicalize().unwrap()),
             destination: PathBuf::from("accepted/layout"),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     session.bundle_id = "bifrost".into();

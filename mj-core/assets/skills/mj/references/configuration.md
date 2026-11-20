@@ -1029,6 +1029,43 @@ old global override even when a machine explicitly requested caching. The next
 save writes those machine settings and removes the global section. Machines
 added afterward use the normal enabled default.
 
+#### Shared build cache on Nitro
+
+Nitro sandboxes keep a guest-local mbx cache. Set `remote = "s3://bucket/prefix"`
+in `[machines.<id>.build_cache]` to read trusted CI's cache. Optional
+`remote_region` defaults to the Nitro host's region. New hosts can use
+`mj ec2 create --runtime nitro --mbx-remote s3://bucket/prefix` with optional
+`--mbx-remote-region` to create or reuse and attach the instance profile.
+For an existing host, use `aws ec2 associate-iam-instance-profile` and set
+the configuration keys. A manually attached role needs both
+`s3:GetObject` scoped to the cache prefix and unconditional `s3:ListBucket`
+on the cache bucket so missing objects can be distinguished from access
+failures. The proxy serves no bucket listing requests. Use `mj doctor`
+to check the remote.
+
+The namespace defaults to GitHub `owner/repository`, preserving the case
+from `github`. Set `mbx_namespace` on a bundle repository to override it or
+enable a repository without a GitHub source. The primary repository's
+namespace is the guest default, or the first available namespace if the
+primary has none. The guest can read every namespace in its bundle. The
+proxy uses the host instance role and serves only reads on the private
+guest-to-host link. mbx warns that this plain-HTTP hop does not protect
+traffic from reading or modification in transit.
+
+Grant S3 writes only to trusted CI. For GitHub Actions, run the seed build only
+on pushes to the protected default branch and scope the AWS OIDC trust
+policy to the repository, branch ref and `event_name:push` using a customized
+subject. The CI environment uses:
+
+```yaml
+env:
+  MBX_REMOTE_URL: s3://bucket/prefix
+  MBX_REMOTE_NAMESPACE: ${{ github.repository }}
+```
+
+See [Shared build cache on Nitro](/project-environments/#shared-build-cache-on-nitro)
+for the job and IAM trust configuration.
+
 ## Runtimes `[targets.<id>]`
 
 A runtime says how a session runs on a machine: a bare checkout, Podman,

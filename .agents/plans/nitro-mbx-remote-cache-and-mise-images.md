@@ -35,7 +35,9 @@ To see it working:
 - [ ] Milestone 2: controller image alignment (warm effective images at host creation, reconcile images during refresh, `mj image status` without a builder, Doctor, docs).
 - [ ] Milestone 3: mbx in Nitro guests (pinned client, launchers, guest-local store).
 - [ ] Milestone 4: the host proxy (engine verb, per-VM unit, firewall, host cache, trimming, tests).
-- [ ] Milestone 5: configuration, controller wiring and EC2 instance role.
+- [x] (2026-11-20 16:05Z) Milestone 5: implemented configuration, controller wiring, EC2 instance-role provisioning, the Doctor probe caller, and documentation in `nitro-mbx-wiring`.
+- [x] (2026-11-20 16:08Z) Milestone 5: five focused test filters passed one test each, and all 11 touched Rust crates passed Clippy with all targets and warnings denied.
+- [ ] Integrate Milestone 5 with the guest and engine changes, including the Milestone 4 `mbx-check` verb.
 - [ ] Milestone 6: live EC2 validation and measurements, tool-cache decision.
 - [ ] Integrated review, commit, push; update #1495; close it.
 
@@ -60,6 +62,11 @@ To see it working:
 - Observation: each distinct image config becomes a separate flattened ext4 base disk with no layer sharing. The engine's prune keeps every tagged reference, and nothing ever removes a tag. Every `mj image build` of a project therefore adds a disk of several gigabytes to each Nitro host that pulls it. Historically, the 8.3 GiB agent-dev image took 61 s to export and 35 s to convert.
   Evidence: `mj-worker/src/microvm/image.rs:132-178,228-286,397-447`, `mj-worker/src/microvm/cli.rs:98-113`, `.agents/docs/nitro-sandbox-spike.md:65-69`.
 
+- Observation: the current configuration file stores build-cache settings on machines. A runtime's older fused build-cache settings are folded onto its machine during migration, and resolved container targets carry that machine policy.
+  Evidence: `mj-core/src/config/machines.rs`, `resolve_target` and `fold_build_cache`.
+- Observation: mbx's GitHub Actions writer checks for a protected branch push in addition to the CI environment. The seed example checks both protection and default-branch placement.
+  Evidence: mr-boxington `crates/mbx/src/policy.rs`, `trusted_cache_writer`.
+
 ## Decision Log
 
 - Decision: use one proxy process per VM, not one host-wide service. The engine starts it as a transient systemd unit, in `launch` right after the VM's TAP device is up and before the guest agent starts. The unit is bound to the VM's unit (`BindsTo=` plus `After=`), so it stops whenever the VM stops. The process binds one TCP socket to the VM's gateway address and port 7461, with `SO_BINDTODEVICE` set to that VM's TAP. All of its parameters come on its command line, rendered by the engine from the VM's state file.
@@ -77,14 +84,23 @@ To see it working:
 - Decision: the host disk cache is keyed by bucket, prefix, namespace, kind, algorithm, hash and size. Blobs are verified against their digest before they enter the cache. Action results are cached after mbx-cache-core parses and validates them. Manifests are never cached: each request goes to S3. Proxies only add to the cache. The engine trims it, oldest access first, in the new `maintain` verb, which the daemon's hourly image refresh runs. The budget is the build-cache `max_total_size` when set, otherwise the same automatic budget mbx applies to its own store. If a write fails with `ENOSPC`, the proxy serves the object without caching it and logs the failure.
   Rationale: putting the namespace in the key means one namespace's cache never serves another, even for content-addressed blobs. A guest must not learn whether a digest exists in a namespace it cannot read. Trimming has one owner, the engine under its global lock, instead of every proxy racing to evict. The budget reuses the user's existing mbx size setting rather than inventing a new limit.
   Date/Author: 2026-11-20, parent session.
-- Decision: the proxy answers `GET /v1/capabilities` with a valid protocol-1 capabilities document that enables no extensions and no compressors. It serves `GET` on `/v1/action-results/blake3/{hash}/{size}`, `/v1/action-manifests/blake3/{hash}/{size}` and `/v1/blobs/{blake3|sha256}/{hash}/{size}`. Every other method or path gets 405. A namespace outside the allowlist, or a missing or invalid one, gets 403. Confirmed absence in S3 gets 404. S3 authentication or authorization failures and transport errors get 502, with a short text body naming the cause. The mj-managed instance role includes `s3:ListBucket` on the prefix, so absence surfaces as a clean 404.
+- Decision: the proxy answers `GET /v1/capabilities` with a valid protocol-1 capabilities document that enables no extensions and no compressors. It serves `GET` on `/v1/action-results/blake3/{hash}/{size}`, `/v1/action-manifests/blake3/{hash}/{size}` and `/v1/blobs/{blake3|sha256}/{hash}/{size}`. Every other method or path gets 405. A namespace outside the allowlist, or a missing or invalid one, gets 403. Confirmed absence in S3 gets 404. S3 authentication or authorization failures and transport errors get 502, with a short text body naming the cause. The mj-managed instance role includes `s3:ListBucket` on the bucket, so absence surfaces as a clean 404.
   Rationale: a valid capabilities document keeps `mbx doctor` working, where a 404 would fail its strict probe. Read-only clients never use the batch or pack extensions, because they fall back to single-object requests.
   Date/Author: 2026-11-20, parent session.
-- Decision: `mj ec2 create --runtime nitro --mbx-remote s3://<bucket>/<prefix> [--mbx-remote-region <region>]` creates or reuses an IAM role and instance profile, and attaches the profile at launch. The role is named `mjolnir-nitro-mbx-<8 hex chars of SHA-256 of bucket/prefix>`. Its EC2 trust policy allows `s3:GetObject` on `arn:aws:s3:::<bucket>/<prefix>/*` and `s3:ListBucket` on the bucket, conditioned on the prefix. The command also pins `HttpPutResponseHopLimit=1` and records `remote` (and the region, if given) in the new machine's `build_cache`.
+- Decision: `mj ec2 create --runtime nitro --mbx-remote s3://<bucket>/<prefix> [--mbx-remote-region <region>]` creates or reuses an IAM role and instance profile, and attaches the profile at launch. The role is named `mjolnir-nitro-mbx-<8 hex chars of SHA-256 of bucket/prefix>`. The role trusts EC2. Its read policy allows `s3:GetObject` on `arn:aws:s3:::<bucket>/<prefix>/*` and unconditioned `s3:ListBucket` on the bucket. The command also pins `HttpPutResponseHopLimit=1` and records `remote` (and the region, if given) in the new machine's `build_cache`.
   If the caller cannot create or pass the role, the host is still created without the profile. The output then states that the remote cache is off for this host and names the missing IAM permissions.
   On `--runtime podman`, the flag is ignored with a warning. Hosts that already exist are not modified: the docs give the `aws ec2 associate-iam-instance-profile` command and the config key.
   Rationale: Mjolnir already creates the security group, key pair and instance, so it can create the role too, and the user does not have to write IAM policy by hand. Creating the host anyway follows the AGENTS.md rule "never leave the user stuck".
   Date/Author: 2026-11-20, parent session.
+- Decision: supersede the prefix-conditioned `s3:ListBucket` grant in the original role decision. Keep `s3:GetObject` restricted to cache objects and grant `s3:ListBucket` on the bucket without a condition.
+  Rationale: S3 uses bucket-level list permission to choose 404 versus 403 for a missing object in GetObject. GetObject does not carry the ListObjects request's prefix condition. The read-only proxy exposes no bucket listing operation to the guest. Milestone 6 will verify that a miss using the generated role returns 404.
+  Date/Author: 2026-11-20, parent session.
+- Decision: the Doctor probe is a separate read-only engine verb with a single status line and exit status. It can use the default namespace from any configured bundle because bundle placement is unrestricted. Doctor skips the probe with "no repository namespace to check" when no bundle supplies one.
+  Rationale: Doctor does not need to start a sandbox or change the host. The engine can use the same S3 path and instance credentials as the proxy.
+  Date/Author: 2026-11-20, parent session.
+- Decision: hash the normalized bucket and prefix and put the full SHA-256 in the IAM role description. Confirm it when reusing the deterministic role name.
+  Rationale: the public name uses only eight hex characters. The description prevents a short-hash collision from overwriting the policy for another cache.
+  Date/Author: 2026-11-20, Milestone 5.
 - Decision: Nitro guests get Mjolnir's pinned mbx for the guest's platform, staged through the same controller→host→guest path as the session worker binary. They also get the same launchers, shims and environment as Podman sessions, except that the store is guest-local (`/var/lib/hel/mbx`, on the VM's retained root). The guest store uses mbx's automatic budget. Milestone 6 measures host disk use with concurrent sessions before anyone considers a limit.
   Rationale: one mbx installation path for all container sessions. AGENTS.md forbids speculative caps.
   Date/Author: 2026-11-20, parent session.
@@ -110,6 +126,8 @@ To see it working:
 Milestone 1 adds validation of the fetched OCI architecture before publishing image state and validates cached image metadata before reuse. The engine's `maintain --keep-image` command reconciles tags and runs the existing unused-image prune; output lists removed references and reclaimed flattened-disk bytes. Crane digest resolution errors now point operators to host-side crane authorization.
 
 The requested package identifier in the concrete command is outdated for this checkout: Cargo names the package `brokk-mj-worker-runtime`, though its library target is `mj_worker`. Use that package name for test and clippy invocations.
+
+Milestone 5 resolves remote policy against the session's accepted bundle, using the primary namespace first and preserving case. Only engine arguments carry the policy. EC2 registration records the remote after AWS accepts the launch with an instance profile. Doctor can report readiness after the Milestone 4 engine is integrated. The isolated AWS and SSH fixture verifies the IAM policy, profile-propagation retry, launch JSON, and persisted settings. Milestone 6 owns live verification of role access and S3 misses.
 
 ## Context and Orientation
 
@@ -254,7 +272,7 @@ EC2 (`mj-cli/src/ec2.rs`): add `--mbx-remote` and `--mbx-remote-region` to `Crea
 
 A newly created instance profile can take seconds to become usable in `run-instances`. Handle the `InvalidParameterValue` "Invalid IAM Instance Profile" refusal by retrying with backoff until IAM reports the profile, because the other side reports this limit. Do not add a fixed sleep.
 
-Doctor: for a Nitro target with `remote`, run a read check on the host: one `GET` through a short-lived proxy invocation, or an `aws s3api head-object`-equivalent made with core's client from `hel microvm`. It reports "remote cache readable", "role cannot read <bucket>/<prefix>", or "no instance role attached".
+Doctor: for a Nitro target with `remote`, invoke the short-lived `hel microvm mbx-check` read probe using the interface below. Report "remote cache readable", "role cannot read <bucket>/<prefix>: <S3 error>", or "no instance role attached".
 
 Docs: a "Shared build cache on Nitro" section in `docs/src/content/docs/project-environments.md` covering the config keys, the namespace default, the trust model (only trusted CI may write the bucket), the plain-HTTP warning, and a GitHub Actions job snippet:
 
@@ -276,7 +294,8 @@ The parent runs this, because children cannot run the mj CLI against a daemon. U
 4. From the guest:
    - `curl -X PUT http://<gateway>:7461/v1/blobs/blake3/<64 hex>/1` → 405;
    - a GET with `mbx-cache-namespace: other/repo` → 403;
-   - a connection to another running VM's gateway on port 7461 → refused.
+   - a connection to another running VM's gateway on port 7461 → refused;
+   - an absent object in the permitted namespace → 404 using the generated role.
 5. Start a second session on the same host and confirm that the host cache serves it. Check the proxy log, or that the S3 request count falls.
 6. Start a session for the mjolnir bundle on its assigned `mj-dev` image. Record the image's cold pull and conversion time, and the cold-start phases.
 7. Run `mj doctor` and `mj image status` for the Nitro target.
@@ -318,7 +337,7 @@ The automated tests named in each milestone pass. Clippy is clean on every touch
 
 ## Artifacts and Notes
 
-(Filled in as milestones complete.)
+Milestone 5 validation ran in the dev profile through mbx. Each focused filter matched one passing test: `nitro_create_uses_enclave_ami_and_verified_bootstrap_before_registration` in `brokk-mjolnir`, `a_nitro_launch_keeps_referenced_environment_values_off_the_command_line` in `brokk-mj-controller`, `config_toml_round_trip_is_atomic` in `brokk-mj-core`, `nitro` in `brokk-mj-targets`, and `golden_doctor_reports_external_aws_ssh_docker_and_podman_observations` in `brokk-mj-setup`. The EC2 test uses AWS CLI and SSH fixture executables. The GitHub Actions workflow example parses as YAML.
 
 ## Interfaces and Dependencies
 
@@ -328,6 +347,11 @@ Engine CLI, the contract between Milestones 4/1 and 5/2:
     hel microvm maintain --keep-image <ref> [--keep-image <ref> ...] [--mbx-cache-budget <mbx size string>]
     hel microvm mbx-proxy --device <tap> --listen <gateway-ip>:7461 --bucket <b> [--prefix <p>] [--region <r>] --namespace <ns>... --cache-dir <dir>
         (internal; started only by `launch`)
+    hel microvm mbx-check --bucket <b> [--prefix <p>] [--region <r>] --namespace <ns>
+
+Milestone 4 implements `mbx-check`. It prints exactly one line on stdout:
+`remote cache readable` (exit 0), `no instance role attached` (nonzero), or
+`role cannot read <bucket>/<prefix>: <S3 error>` (nonzero).
 
 In `mj-worker/src/microvm/state.rs`:
 
@@ -349,3 +373,5 @@ In `mj-core/src/config/targets.rs`:
 Dependencies: `mbx-cache-core = "0.21"` and `mbx-cache-protocol = "0.5"` (crates.io, MIT), only in `mj-worker`.
 
 Revision note (2026-11-20): initial plan, written after the three reconnaissance maps.
+
+Revision note (2026-11-20, Milestone 5): documented the Doctor engine verb and the bucket-level list permission required for S3 misses.

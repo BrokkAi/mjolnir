@@ -475,6 +475,7 @@ impl InterpretedRepositorySource {
             local,
             destination: PathBuf::from(id),
             git_ref: None,
+            mbx_namespace: None,
         }
     }
 }
