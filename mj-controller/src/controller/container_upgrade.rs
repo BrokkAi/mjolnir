@@ -353,7 +353,7 @@ impl Controller {
         settings: &mj_core::state::ContainerSettingsChange,
         executor: &impl CommandExecutor,
     ) -> Result<Option<targets::RetainedContainer>> {
-        use mj_core::state::{TargetLocator, applied_container_settings};
+        use mj_core::state::TargetLocator;
         let record = self
             .state
             .sessions
@@ -392,9 +392,17 @@ impl Controller {
         if configured.kind != current.kind || configured.connection != current.connection {
             return Ok(None);
         }
-        let applied = applied_container_settings(record);
-        if applied.resource_allocation == settings.resource_allocation.as_ref()
-            && applied.additional_mounts == settings.mounts
+        // Desired settings on old records may already differ from their live
+        // mounts. Only an applied snapshot identifies which binds we may edit.
+        let Some(applied) = current.container_settings.as_ref() else {
+            return Ok(None);
+        };
+        if (applied.resource_allocation == settings.resource_allocation
+            && applied.additional_mounts == settings.mounts)
+            || settings
+                .mounts
+                .iter()
+                .any(|mount| mount.access == targets::MountAccess::Cow)
         {
             return Ok(None);
         }
@@ -466,6 +474,7 @@ impl Controller {
                 mj_core::state::applied_container_settings(session).additional_mounts,
                 settings,
                 Path::new(&workspace),
+                container,
             )?;
         }
         ensure!(

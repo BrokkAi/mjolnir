@@ -1,6 +1,24 @@
 use super::*;
 use mj_core::state::{ContainerSettingsChange, ContainerUpgradePreview, ContainerUpgradeRequest};
 
+fn retained_upgrade_preview(
+    plan: &mj_controller::targets::RetainedContainer,
+    session: SessionRecord,
+) -> ContainerUpgradePreview {
+    if plan.replaces_settings() {
+        plan.settings_preview(
+            &session.id,
+            ContainerSettingsChange {
+                resource_allocation: session.resource_allocation,
+                mounts: session.additional_mounts,
+                mount_history: None,
+            },
+        )
+    } else {
+        plan.preview(&session.id)
+    }
+}
+
 impl RuntimeState {
     /// Save deferred settings or return the confirmation for applying them now.
     pub(crate) async fn set_container_settings(
@@ -46,12 +64,11 @@ impl RuntimeState {
         session_id: String,
     ) -> Result<ContainerUpgradePreview> {
         blocking(move || {
-            if let Some(plan) = mj_controller::database::load_session_restarts()?
-                .into_iter()
-                .find(|intent| intent.session_id == session_id)
-                .and_then(|intent| intent.container_upgrade)
+            if let Some((intent, session)) =
+                mj_controller::database::load_restart_and_session(&session_id)?
+                && let Some(plan) = intent.container_upgrade
             {
-                return Ok(plan.preview(&session_id));
+                return Ok(retained_upgrade_preview(&plan, session));
             }
             Controller::load()?
                 .plan_container_upgrade(&session_id, "preview", &ProcessExecutor)
@@ -74,32 +91,20 @@ impl RuntimeState {
         let request_key = serde_json::to_string(&request.selection)?;
         let existing = blocking({
             let session_id = session_id.clone();
-            move || {
-                Ok(mj_controller::database::load_session_restarts()?
-                    .into_iter()
-                    .find(|intent| intent.session_id == session_id))
-            }
+            move || mj_controller::database::load_restart_and_session(&session_id)
         })
         .await?;
         let settings = request.selection.settings.as_deref().cloned();
-        if let Some(intent) = &existing {
+        let existing = if let Some((intent, session)) = existing {
+            let mut selection = request.selection.clone();
+            if let Some(settings) = &mut selection.settings {
+                settings.mount_history = None;
+            }
             ensure!(
                 intent
                     .container_upgrade
                     .as_ref()
-                    .is_some_and(|plan| match &settings {
-                        Some(settings) if plan.replaces_settings() =>
-                            plan.settings_preview(&session_id, settings.clone())
-                                == request.selection
-                                && self
-                                    .session_record(&session_id)
-                                    .is_some_and(|record| record.resource_allocation
-                                        == settings.resource_allocation
-                                        && record.additional_mounts == settings.mounts),
-                        None if !plan.replaces_settings() =>
-                            plan.preview(&session_id) == request.selection,
-                        _ => false,
-                    }),
+                    .is_some_and(|plan| retained_upgrade_preview(plan, session) == selection),
                 "another Restart or upgrade already owns this environment"
             );
             if self
@@ -112,7 +117,10 @@ impl RuntimeState {
             {
                 return Ok(());
             }
-        }
+            Some(intent)
+        } else {
+            None
+        };
         let phase = if existing.as_ref().is_some_and(|intent| {
             intent.phase == mj_controller::database::SessionRestartPhase::RecreatingContainer
         }) {

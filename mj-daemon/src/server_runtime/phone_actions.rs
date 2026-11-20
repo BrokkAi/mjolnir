@@ -141,6 +141,11 @@ pub(super) fn admit_phone_action(
     action: &ControllerAction,
     active_sessions: &mut std::collections::BTreeSet<String>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
+    if matches!(action, ControllerAction::UpgradeContainer { request } if request.selection.settings.is_some())
+    {
+        // The upgrade owner must be able to join a retry as soon as it has acknowledged it.
+        return Ok(None);
+    }
     let closing = matches!(
         action,
         ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }

@@ -477,8 +477,18 @@ impl RetainedContainer {
         applied: &[AdditionalMount],
         change: &mj_core::state::ContainerSettingsChange,
         workspace: &Path,
+        template: &mj_core::config::ContainerTemplate,
     ) -> Result<()> {
         let overlaps = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
+        let protect = |destination: &Path| -> Result<()> {
+            for path in [workspace, Path::new("/var/lib/hel")] {
+                ensure!(
+                    !overlaps(destination, path),
+                    mount_conflict(destination, &path.to_string_lossy())
+                );
+            }
+            Ok(())
+        };
         for mount in applied
             .iter()
             .filter(|mount| !change.mounts.contains(mount))
@@ -489,19 +499,13 @@ impl RetainedContainer {
                     && retained.source == mj_core::target_path::text(&mount.source)
                     && retained.writable == (mount.access == MountAccess::Rw)
             }) {
-                ensure!(
-                    !overlaps(&mount.destination, workspace)
-                        && !overlaps(&mount.destination, Path::new("/var/lib/hel"))
-                        && self
-                            .control_state
-                            .as_ref()
-                            .is_none_or(|control| !Path::new(&control.staging_directory)
-                                .starts_with(&mount.destination)),
-                    mount_conflict(
-                        &mount.destination,
-                        "the retained workspace or worker control tree"
-                    )
-                );
+                protect(&mount.destination)?;
+                if let Some(control) = &self.control_state {
+                    ensure!(
+                        !Path::new(&control.staging_directory).starts_with(&mount.destination),
+                        mount_conflict(&mount.destination, "the worker staging directory")
+                    );
+                }
                 self.mounts.remove(index);
             } else {
                 bail!(
@@ -515,14 +519,7 @@ impl RetainedContainer {
             .iter()
             .filter(|mount| !applied.contains(mount))
         {
-            ensure!(
-                !overlaps(&mount.destination, workspace)
-                    && !overlaps(&mount.destination, Path::new("/var/lib/hel")),
-                mount_conflict(
-                    &mount.destination,
-                    "the retained workspace or worker control tree"
-                )
-            );
+            protect(&mount.destination)?;
             for retained in &self.mounts {
                 ensure!(
                     !overlaps(&mount.destination, Path::new(&retained.destination)),
@@ -548,8 +545,22 @@ impl RetainedContainer {
                 .checked_mul(1_000_000_000)
                 .context("container CPU limit is too large")?;
         } else {
-            self.memory = 0;
-            self.nano_cpus = 0;
+            self.memory = template
+                .memory
+                .as_deref()
+                .map(mj_core::config::container_memory_limit)
+                .transpose()?
+                .unwrap_or_default();
+            self.nano_cpus = if let Some(cpus) = &template.cpus {
+                let nanos = cpus.parse::<f64>()? * 1e9;
+                ensure!(
+                    (0.0..i64::MAX as f64).contains(&nanos),
+                    "invalid container CPU limit {cpus:?}"
+                );
+                nanos.round() as i64
+            } else {
+                0
+            };
         }
         self.prepared_image = Some(self.current_image_id.clone());
         self.selected_image_id = self.prepared_image.clone();

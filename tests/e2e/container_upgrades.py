@@ -177,8 +177,10 @@ with socket.socket(socket.AF_UNIX) as connection:
             body["resource_allocation"] = allocation
         status, response = self.request("POST", "/api/actions", body)
         assert status == 202, response
-        snapshot = self.wait_snapshot(lambda value: any(row.get("title") == title and row.get("state") == "running" for row in value.get("sessions", [])), title + " ready")
-        session = next(row["id"] for row in snapshot["sessions"] if row.get("title") == title and row["state"] == "running")
+        def ready():
+            return next((row["id"] for row in self.snapshot()["sessions"]
+                         if row.get("title") == title and row.get("state") == "running"), None)
+        session = self.wait(ready, title + " ready")
         self.sessions.append(session)
         return session
 
@@ -253,6 +255,8 @@ def unused_timer_wait():
 
     def run_settings_replacement(self):
         self.prepare_container_fixture("ghcr.io/brokkai/mjolnir/agent-dev:latest")
+        config = self.config / "config.toml"
+        config.write_text(config.read_text().replace("[targets.podman]\n", '[targets.podman]\ncpus = "2.5"\nmemory = "5g"\n'))
         self.cli("workspaces", "create", "Container settings replacement")
         self.authenticate()
         workspace = self.snapshot()["workspaces"][0]["id"]
@@ -280,9 +284,17 @@ def unused_timer_wait():
         assert preview["settings"]["resource_allocation"] == size, preview
         assert "writable layer" in preview["warning"], preview
         assert self.inspect(session)["Id"] == original["Id"]
-        status, body = self.request("POST", f"/api/v1/sessions/{session}/container-upgrade", {
-            "selection": preview, "acknowledge_writable_layer_loss": True}, timeout=WAIT)
-        assert status == 202, body
+        upgrade_path = f"/api/v1/sessions/{session}/container-upgrade"
+        def confirm(selection):
+            status, body = self.request("POST", upgrade_path, {
+                "selection": selection, "acknowledge_writable_layer_loss": True}, timeout=WAIT)
+            assert status == 202, body
+        self.prompt(session, "hold during settings preview retry")
+        confirm(preview)
+        status, retained = self.request("GET", upgrade_path)
+        assert status == 200 and retained == preview, retained
+        confirm(retained)
+        self.release(session, "hold during settings preview retry")
         self.wait(lambda: not self.pending(session) and self.inspect(session)["Id"] != original["Id"],
                   "settings replacement finished")
         replacement = self.inspect(session)
@@ -298,6 +310,18 @@ def unused_timer_wait():
         memory, cpu, marker = limits.splitlines()
         quota, period = map(int, cpu.split())
         assert (int(memory), quota, marker) == (8 << 30, 3 * period, "mounted"), limits
+        status, clear = self.request("POST", "/api/actions", {
+            "action": "set-container-settings", "session_id": session,
+            "resource_allocation": None, "mounts": [fixture, mount]}, timeout=WAIT)
+        assert status == 200 and clear["available"], (status, clear)
+        confirm(clear)
+        self.wait(lambda: not self.pending(session) and self.inspect(session)["Id"] != replacement["Id"],
+                  "template limits restored")
+        limits = self.podman("exec", self.container(session), "cat",
+                             "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/cpu.max")
+        memory, cpu = limits.splitlines()
+        quota, period = map(int, cpu.split())
+        assert int(memory) == 5 << 30 and quota * 2 == 5 * period, limits
         with sqlite3.connect(f"file:{self.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
             assert not database.execute("SELECT 1 FROM session_moves WHERE session_id=?", (session,)).fetchone()
         self.record_action("container-settings-replacement-preserved-storage", session=session)

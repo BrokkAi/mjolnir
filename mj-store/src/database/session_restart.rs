@@ -143,6 +143,19 @@ fn begin_session_restart_with(
     })
 }
 
+pub fn load_restart_and_session(
+    session_id: &str,
+) -> Result<Option<(SessionRestartIntent, SessionRecord)>> {
+    let mut connection = open_reader(&database_path())?;
+    let snapshot = connection.transaction()?;
+    let Some(intent) = load_session_restart_with(&snapshot, session_id)? else {
+        return Ok(None);
+    };
+    let session = state_io::load_session_with(&snapshot, session_id)?
+        .context("Restart session is missing")?;
+    Ok(Some((intent, session)))
+}
+
 pub fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(

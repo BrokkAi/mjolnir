@@ -1436,6 +1436,10 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         return Ok(());
     }
     if let Some(preview) = preparation.container_upgrade.clone() {
+        anyhow::ensure!(
+            args.queue.is_none(),
+            "Container settings replacement waits for accepted work. Omit --queue or clear the queue before confirming."
+        );
         if args.yes {
             eprintln!("{}", preview.warning);
         } else if !prompt_move_confirmation(&preparation, None).await? {
