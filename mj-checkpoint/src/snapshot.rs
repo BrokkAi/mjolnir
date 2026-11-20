@@ -3661,17 +3661,21 @@ pub fn restore_workspace_snapshot(
             "remove the seed's origin push URL: {}",
             String::from_utf8_lossy(&unset.stderr).trim()
         );
-        let stale = git_text(
+        // Git's own listing goes back to Git byte for byte: a ref name may end
+        // in characters that text trimming would remove.
+        let stale = git_bytes(
             runner,
             destination,
             ["for-each-ref", "--format=delete %(refname)", "refs/remotes/origin/"],
+            &[],
+            "list the seed's origin tracking refs",
         )?;
         if !stale.is_empty() {
             git_bytes(
                 runner,
                 destination,
                 ["update-ref", "--no-deref", "--stdin"],
-                format!("{stale}\n").as_bytes(),
+                &stale,
                 "remove the seed's origin tracking refs",
             )?;
         }

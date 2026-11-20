@@ -3749,6 +3749,9 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
 
 #[test]
 fn idle_managed_clone_suspension_requires_publication_confirmation() {
+    // A clone on an SSH target keeps the legacy capture and its publication
+    // confirmation; local clones are origin-delta eligible and suspend
+    // without one.
     let mut session = running_session();
     let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
     session.project_directory = Some(root.clone());
@@ -3758,7 +3761,10 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
         source_repository: "/srv/project".into(),
         worktree_root: root,
         branch: "master".into(),
-        target: mj_core::state::ManagedWorktreeTarget::Local,
+        target: mj_core::state::ManagedWorktreeTarget::Ssh {
+            destination: "build-host".into(),
+            ssh_args: Vec::new(),
+        },
         base_commit: Some("1".repeat(40)),
     }));
     let mut dashboard = dashboard_with_session(session);
