@@ -1627,6 +1627,38 @@ async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
     fixture.assert_no_start().await;
 }
 
+// Hard-won: 2d2476348: a disk-full wake could start a probe with obsolete inputs.
+#[tokio::test(start_paused = true)]
+async fn capacity_co_ready_disk_wake_and_refresh_use_the_latest_paths() {
+    // Let Tokio choose either ready branch. The first probe must use the new
+    // definitions regardless of which branch wins.
+    for _ in 0..32 {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut target = capacity_target("local");
+        fixture.publish_targets(vec![target.clone()]);
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        fixture.updates.recv().await.unwrap();
+
+        target.local_storage_paths = vec!["new-cache-filesystem".into()];
+        fixture.targets.send_replace(CapacityProbeSet {
+            targets: vec![target.clone()],
+            refresh_generation: 1,
+        });
+        fixture.triggers.try_send(()).unwrap();
+        let refreshed = fixture.started.recv().await.unwrap();
+        assert_eq!(refreshed.target, target);
+        refreshed.finish.send(Ok(None)).unwrap();
+        assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publications() {
     let mut fixture = CapacityPollerFixture::new();

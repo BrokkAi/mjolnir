@@ -7,6 +7,12 @@ pub(crate) struct CapacityProbeSet {
     pub(crate) refresh_generation: u64,
 }
 
+impl CapacityProbeSet {
+    pub(crate) fn refreshing(&self, reading: &mj_controller::targets::TargetCapacityState) -> bool {
+        reading.answered_refresh < self.refresh_generation
+    }
+}
+
 pub(crate) fn spawn_daemon_capacity_poller() -> (
     tokio::sync::watch::Sender<CapacityProbeSet>,
     tokio::sync::mpsc::Sender<()>,
@@ -57,32 +63,21 @@ where
         );
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {
+            let schedule_all = tokio::select! {
                 _ = updates_tx.closed() => break,
-                _ = interval.tick() => {
-                    samples.schedule(inputs.targets.iter().cloned(), inputs.refresh_generation, &collect);
-                }
+                _ = interval.tick() => true,
                 changed = targets_rx.changed() => {
                     if changed.is_err() {
                         tracing::debug!("capacity poll target feed closed; stopping capacity poller");
                         break;
                     }
-                    let updated = targets_rx.borrow_and_update().clone();
-                    samples.schedule(
-                        updated.targets.iter().filter(|target| {
-                            updated.refresh_generation != inputs.refresh_generation
-                                || !inputs.targets.contains(target)
-                        }).cloned(),
-                        updated.refresh_generation,
-                        &collect,
-                    );
-                    inputs = updated;
+                    false
                 }
                 trigger = triggers_rx.recv() => {
                     if trigger.is_none() {
                         break;
                     }
-                    samples.schedule(inputs.targets.iter().cloned(), inputs.refresh_generation, &collect);
+                    true
                 }
                 completed = samples.tasks.join_next_with_id(), if !samples.tasks.is_empty() => {
                     let (id, result) = match completed.expect("capacity task exists") {
@@ -120,8 +115,27 @@ where
                     {
                         samples.schedule(std::iter::once(current.clone()), latest.refresh_generation, &collect);
                     }
+                    continue;
                 }
-            }
+            };
+            // A timer or disk-full trigger can win the select while a newer
+            // target publication is ready. Schedule against that publication
+            // and consume it here so changed() cannot schedule it a second time.
+            let latest = targets_rx.borrow_and_update();
+            samples.schedule(
+                latest
+                    .targets
+                    .iter()
+                    .filter(|target| {
+                        schedule_all
+                            || latest.refresh_generation != inputs.refresh_generation
+                            || !inputs.targets.contains(target)
+                    })
+                    .cloned(),
+                latest.refresh_generation,
+                &collect,
+            );
+            inputs = latest.clone();
         }
         samples.tasks.abort_all();
         while let Some(completed) = samples.tasks.join_next().await {

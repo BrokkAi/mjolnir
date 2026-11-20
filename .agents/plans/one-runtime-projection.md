@@ -77,14 +77,14 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 
 - Decision: publish the existing `HostCapacityRow` with daemon-owned refresh status in runtime metadata. Both surfaces read the capacity service and storage board. The service publishes each requested generation together with its newly derived probe definitions.
-  Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request. Each capture uses one storage snapshot for the Targets row and session warnings. Unchanged host rows share their allocation across retained revisions.
+  Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request. Each capture uses one storage snapshot for the Targets row and session warnings. Unchanged host rows share their allocation across retained revisions. The capture reuses the rows while the target, reading and storage publications are unchanged. Both surfaces read the daemon's pending refresh generation, and every wake of the sampler uses its latest inputs.
   Date/Author: 2026-11-20, Milestone 2 implementation.
 
 
 ## Outcomes & Retrospective
 
 
-Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
+Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page showed the pending refresh and then displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
 
 Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
 

@@ -41,51 +41,10 @@ pub(super) struct PhoneSessionViews<'a> {
         &'a std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView>,
 }
 
-/// What the phone server remembers about one probe target: the target itself
-/// and the phone's own nudge of the poller. The readings, their times and
-/// failures belong to the daemon's capacity service and are read from it, so
-/// the page can never disagree with `mj hosts`.
-#[derive(Debug, Clone)]
-pub(super) struct PhoneCapacity {
-    pub(super) target: mj_controller::targets::DeploymentCapacityTarget,
-    pub(super) refresh: PhoneRefresh,
-}
-
-/// The phone's latest request for a new reading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PhoneRefresh {
-    Idle,
-    /// Accepted with this generation; over once the target's
-    /// `answered_refresh` reaches it.
-    Waiting {
-        generation: u64,
-    },
-    /// The poller was gone and refused the request.
-    Rejected,
-}
-
-/// Keep the state map in step with the targets the daemon's capacity service
-/// probes.
-pub(super) fn track_capacity_targets(
-    targets: &[mj_controller::targets::DeploymentCapacityTarget],
-    state: &mut std::collections::BTreeMap<String, PhoneCapacity>,
-) {
-    state.retain(|id, _| targets.iter().any(|target| target.id == *id));
-    for target in targets {
-        state
-            .entry(target.id.clone())
-            .and_modify(|entry| entry.target = target.clone())
-            .or_insert_with(|| PhoneCapacity {
-                target: target.clone(),
-                refresh: PhoneRefresh::Idle,
-            });
-    }
-}
-
-/// Project the capacity readings for the phone.
+/// Project the capacity service's readings and refresh status for the phone.
 pub(super) fn viewer_capacity(
-    state: &std::collections::BTreeMap<String, PhoneCapacity>,
     readings: &std::collections::BTreeMap<String, mj_controller::targets::TargetCapacityState>,
+    inputs: &crate::pollers::CapacityProbeSet,
     container_capacities: &std::collections::BTreeMap<
         String,
         mj_client::runtime_feed::RuntimeContainerCapacity,
@@ -96,31 +55,28 @@ pub(super) fn viewer_capacity(
         .unwrap_or_default()
         .as_secs();
     let storage = mj_controller::target_storage::views_snapshot();
-    state
-        .values()
-        .map(|entry| {
-            let reading = readings.get(&entry.target.id).cloned().unwrap_or_default();
+    let empty = mj_controller::targets::TargetCapacityState::default();
+    inputs
+        .targets
+        .iter()
+        .map(|target| {
+            let reading = readings.get(&target.id).unwrap_or(&empty);
             let usage = reading.usage.as_ref();
-            let rejected = entry.refresh == PhoneRefresh::Rejected;
-            let waiting = matches!(
-                entry.refresh,
-                PhoneRefresh::Waiting { generation } if reading.answered_refresh < generation
-            );
-            let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
+            let hosts = mj_core::targets::storage::capacity_storage_hosts(target, usage);
             let container_capacity = container_capacities
-                .get(&entry.target.id)
+                .get(&target.id)
                 .map(|capacity| capacity.capacity);
             crate::server::ViewerTargetCapacity {
                 storage: crate::server::ViewerTargetStorage::list(
                     &mj_core::targets::storage::views_for(&storage, &hosts),
                     matches!(
-                        entry.target.kind,
+                        target.kind,
                         mj_controller::targets::DeploymentCapacityKind::AwsFleet
                     ),
                 ),
-                id: entry.target.id.clone(),
-                label: entry.target.host.clone(),
-                target_ids: entry.target.target_ids.clone(),
+                id: target.id.clone(),
+                label: target.host.clone(),
+                target_ids: target.target_ids.clone(),
                 cpu_percent: usage.and_then(|usage| usage.cpu_percent),
                 memory_used_bytes: usage.map(|usage| usage.memory_used_bytes),
                 memory_total_bytes: usage.map(|usage| usage.memory_total_bytes),
@@ -129,16 +85,14 @@ pub(super) fn viewer_capacity(
                 disk_total_bytes: usage.and_then(|usage| usage.disk_total_bytes),
                 // The same count `mj hosts` reports: absent for a plain host
                 // and for a fleet whose size is unknown.
-                virtual_machines: reading
-                    .fleet_instances(&entry.target)
-                    .map(|count| count as u64),
+                virtual_machines: reading.fleet_instances(target).map(|count| count as u64),
                 sampled_at_epoch_seconds: reading.sampled_at_epoch_seconds,
                 // A target with no result yet is loading, not idle.
-                refreshing: !rejected && (waiting || !reading.has_answered()),
+                refreshing: inputs.refreshing(reading) || !reading.has_answered(),
                 stale: reading.sampled_at_epoch_seconds.is_some_and(|sampled| {
                     mj_core::targets::capacity_sample_is_stale(sampled, now)
                 }),
-                has_error: rejected || reading.probe_error.is_some(),
+                has_error: reading.probe_error.is_some(),
             }
         })
         .collect()

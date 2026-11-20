@@ -80,14 +80,60 @@ impl Drop for ContainerCapacityLease {
     }
 }
 
+type CapacityReadings = BTreeMap<String, mj_controller::targets::TargetCapacityState>;
+
+/// Host rows are retained in runtime history, so build them at most once per
+/// input publication. These receivers track only what this projection has seen.
+pub(super) struct HostCapacityProjection {
+    targets: tokio::sync::watch::Receiver<CapacityProbeSet>,
+    states: tokio::sync::watch::Receiver<CapacityReadings>,
+    rows: SharedSnapshot<Vec<RuntimeHostCapacity>>,
+    storage: SharedSnapshot<Vec<TargetStorageView>>,
+}
+
+impl HostCapacityProjection {
+    pub(super) fn new(feed: &CapacityFeed) -> Self {
+        let mut targets = feed.targets.clone();
+        let mut states = feed.states.clone();
+        targets.mark_changed();
+        states.mark_changed();
+        Self {
+            targets,
+            states,
+            rows: SharedSnapshot::default(),
+            storage: SharedSnapshot::default(),
+        }
+    }
+
+    pub(super) fn project(
+        &mut self,
+    ) -> (
+        SharedSnapshot<Vec<RuntimeHostCapacity>>,
+        SharedSnapshot<Vec<TargetStorageView>>,
+    ) {
+        let states = self.states.borrow_and_update();
+        let targets = self.targets.borrow_and_update();
+        // Keep the reading lock until the storage snapshot is captured. A
+        // sample updates both under that lock.
+        let storage = mj_controller::target_storage::views_snapshot();
+        if states.has_changed() || targets.has_changed() || !storage.ptr_eq(&self.storage) {
+            let rows = project_host_rows(&targets, &states, &storage);
+            if *self.rows != rows {
+                self.rows = rows.into();
+            }
+            self.storage = storage;
+        }
+        (self.rows.clone(), self.storage.clone())
+    }
+}
+
 /// What the capacity service shares with the surfaces that show capacity.
 pub(crate) struct CapacityFeed {
     pub(crate) targets: tokio::sync::watch::Receiver<CapacityProbeSet>,
     /// The one owner of each target's last good reading, sample time, latest
     /// failure and empty-fleet answer. The poller updates an entry in a single
     /// `send_modify`, so every reader sees a whole entry.
-    pub(crate) states:
-        tokio::sync::watch::Receiver<BTreeMap<String, mj_controller::targets::TargetCapacityState>>,
+    pub(crate) states: tokio::sync::watch::Receiver<CapacityReadings>,
     refresh: tokio::sync::watch::Sender<u64>,
 }
 
@@ -137,48 +183,41 @@ impl CapacityFeed {
 
     /// Every host and fleet with its latest reading and storage verdicts.
     pub(crate) fn host_rows(&self) -> Vec<HostCapacityRow> {
-        let (rows, _) = self.runtime_snapshot();
-        rows.into_iter().map(|row| row.reading).collect()
-    }
-
-    /// Capture the host rows and the session storage verdicts from the same
-    /// board publication. Hold the readings while taking the storage snapshot
-    /// so a sample cannot publish its disks and CPU/RAM independently here.
-    pub(super) fn runtime_snapshot(
-        &self,
-    ) -> (
-        Vec<RuntimeHostCapacity>,
-        SharedSnapshot<Vec<TargetStorageView>>,
-    ) {
         let states = self.states.borrow();
+        let targets = self.targets.borrow();
         let storage = mj_controller::target_storage::views_snapshot();
-        let inputs = self.targets.borrow();
-        let empty = mj_controller::targets::TargetCapacityState::default();
-        let rows = inputs
-            .targets
-            .iter()
-            .map(|target| {
-                let state = states.get(&target.id).unwrap_or(&empty);
-                RuntimeHostCapacity {
-                    reading: HostCapacityRow::new(target, state, &storage),
-                    refreshing: state.answered_refresh < inputs.refresh_generation,
-                }
-            })
-            .collect();
-        (rows, storage)
+        project_host_rows(&targets, &states, &storage)
+            .into_iter()
+            .map(|row| row.reading)
+            .collect()
     }
 
     /// Ask for a new reading of every host. The service coalesces requests
     /// and publishes the latest generation together with freshly derived
     /// definitions. Only probes started with those inputs can answer it.
-    pub(crate) fn request_refresh(&self) -> Option<u64> {
-        let mut generation = 0;
-        self.refresh.send_modify(|requested| {
-            *requested += 1;
-            generation = *requested;
-        });
-        (!self.refresh.is_closed()).then_some(generation)
+    pub(crate) fn request_refresh(&self) -> bool {
+        self.refresh.send_modify(|requested| *requested += 1);
+        !self.refresh.is_closed()
     }
+}
+
+fn project_host_rows(
+    inputs: &CapacityProbeSet,
+    states: &CapacityReadings,
+    storage: &[TargetStorageView],
+) -> Vec<RuntimeHostCapacity> {
+    let empty = mj_controller::targets::TargetCapacityState::default();
+    inputs
+        .targets
+        .iter()
+        .map(|target| {
+            let state = states.get(&target.id).unwrap_or(&empty);
+            RuntimeHostCapacity {
+                reading: HostCapacityRow::new(target, state, storage),
+                refreshing: inputs.refreshing(state),
+            }
+        })
+        .collect()
 }
 
 /// The shortest gap between two recomputations of the probe targets. Every
@@ -1633,6 +1672,13 @@ mod tests {
             before.host_capacities[0].reading.filesystems[0].available_bytes,
             20 << 30
         );
+
+        targets.send_modify(|inputs| inputs.refresh_generation = 1);
+        let pending = state.runtime_publication().unwrap().metadata;
+        assert!(pending.host_capacities[0].refreshing);
+        latest.send_modify(|states| states.get_mut("local").unwrap().answered_refresh = 1);
+        let finished = state.runtime_publication().unwrap().metadata;
+        assert!(!finished.host_capacities[0].refreshing);
 
         let input = ContainerCapacityInput {
             memory_is_pool: false,
