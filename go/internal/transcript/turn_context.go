@@ -5,6 +5,10 @@
 package transcript
 
 import (
+	"math"
+	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -127,7 +131,55 @@ func (c *TurnContext) Reset(commandID *string, prompt string) {
 // resetRequest returns whether this delivery establishes a request in the
 // context.
 func (c *TurnContext) resetRequest(commandID *string, prompt *string) bool {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::reset_request")
+	recovery := commandID != nil && core.IsRestartContinuation(*commandID)
+	var userPromptTail *string
+	if prompt != nil {
+		tail := ""
+		if recovery || core.IsUserAuthoredMessage(commandID, *prompt) {
+			tail = Tail(*prompt, core.UserPromptBytes)
+		}
+		userPromptTail = &tail
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := &c.state
+	generation := state.generation + 1
+	now := time.Now()
+	if recovery {
+		if state.userPromptTail == nil && userPromptTail != nil && prompt != nil {
+			state.userPromptTail = userPromptTail
+			// The carried request precedes the retained replay suffix.
+			// Preserve that suffix and its partially observed answer.
+			state.summary.PushUser(*prompt)
+			entries := state.summary.Entries
+			if len(entries) > 0 {
+				last := entries[len(entries)-1]
+				copy(entries[1:], entries[:len(entries)-1])
+				entries[0] = last
+			}
+		}
+		// Recovery keeps the request, but delivery closes the interrupted
+		// message just as the transcript does. An unlabelled chunk from the
+		// new harness must not inherit the old message ID.
+		completeMessage(state)
+		state.generation = generation
+		state.parentActivity = &now
+		return false
+	}
+	*state = turnContextState{
+		generation:          generation,
+		parentActivity:      &now,
+		decisionLog:         state.decisionLog,
+		authorization:       state.authorization,
+		userPromptTail:      userPromptTail,
+		backgroundCommands:  state.backgroundCommands,
+		queuedCommands:      state.queuedCommands,
+		backgroundInventory: state.backgroundInventory,
+		nativeAgentIDs:      state.nativeAgentIDs,
+		sessionID:           state.sessionID,
+		summary:             state.summary,
+	}
+	return true
 }
 
 // ObservePromptDelivery records a known prompt delivery whose body may no
@@ -154,7 +206,67 @@ func (c *TurnContext) ObserveAutonomousTurnStart() {
 // ObserveRelay records durable transcript observations through the same path
 // during live work and replay.
 func (c *TurnContext) ObserveRelay(observation core.RelayObservation, prompt *string) {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::observe_relay")
+	delivery := false
+	_, commandStarted := observation.(core.RelayObservationCommandStarted)
+	switch o := observation.(type) {
+	case core.RelayObservationCommandStarted:
+		delivery = true
+	case core.RelayObservationCommandCompleted:
+		switch o.Outcome.(type) {
+		case core.RelayCommandOutcomeSteered:
+			delivery = true
+		case core.RelayCommandOutcomeContextCleared:
+			c.ClearHistory()
+			return
+		}
+	case core.RelayObservationMailboxEventsDelivered:
+		delivery = o.Steering != nil
+	// ACP completion may precede native execution's actual end.
+	// Deliveries, autonomous starts and these durable bridge/native
+	// boundaries own the reply stream instead.
+	case core.RelayObservationSessionRestarted:
+		c.completeMessage()
+		return
+	case core.RelayObservationHarnessTurnSettled:
+		if !o.PromptInFlight {
+			c.completeMessage()
+		}
+		return
+	case core.RelayObservationElicitationResolved:
+		if o.Reply != nil && o.Action != core.OperatorAwayAction {
+			c.completeMessage()
+		}
+		return
+	case core.RelayObservationSessionUpdate:
+		c.Observe(&o.Update)
+		return
+	case core.RelayObservationTerminalOutput:
+		c.ObserveTerminal(&core.TerminalOutputRecord{
+			TerminalID: o.TerminalID,
+			Output:     core.NewPackedText(o.Output),
+			Truncated:  o.Truncated,
+			ExitCode:   o.ExitCode,
+			Signal:     o.Signal,
+		})
+		return
+	}
+	// A steering confirmation proves delivery even after its queue body was
+	// collected. Keep the reply boundary without inventing the missing
+	// prompt text.
+	if delivery && (prompt != nil || !commandStarted) {
+		var commandID *string
+		if id, ok := DeliveredPromptCommandID(observation); ok {
+			commandID = &id
+		}
+		c.ObservePromptDelivery(commandID, prompt)
+	}
+}
+
+// completeMessage closes the current message under the lock.
+func (c *TurnContext) completeMessage() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	completeMessage(&c.state)
 }
 
 // Invalidate invalidates a pending verdict at a lifecycle boundary without
@@ -204,7 +316,47 @@ func (c *TurnContext) SessionID() string {
 // user-instruction history to the ACP classifier. A change invalidates any
 // request built from older context. nil is none.
 func (c *TurnContext) SetAuthorizationContext(authorization *core.ContextHistory) {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::set_authorization_context")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !contextHistoryEqual(c.state.authorization, authorization) {
+		c.state.authorization = cloneContextHistory(authorization)
+		c.state.generation++
+	}
+}
+
+// contextHistoryEqual is Rust's PartialEq on Option<ContextHistory>, where
+// an empty message list equals another whether or not Go allocated it.
+func contextHistoryEqual(a, b *core.ContextHistory) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	left, right := *a, *b
+	if len(left.Messages) == 0 {
+		left.Messages = nil
+	}
+	if len(right.Messages) == 0 {
+		right.Messages = nil
+	}
+	return reflect.DeepEqual(left, right)
+}
+
+// cloneContextHistory is a deep copy, so the published history is the
+// context's own as Rust's moved value is; nil stays nil.
+func cloneContextHistory(history *core.ContextHistory) *core.ContextHistory {
+	if history == nil {
+		return nil
+	}
+	copied := *history
+	copied.Messages = slices.Clone(history.Messages)
+	if history.OpenAssistantID != nil {
+		id := *history.OpenAssistantID
+		copied.OpenAssistantID = &id
+	}
+	if history.SetAsideThrough != nil {
+		through := *history.SetAsideThrough
+		copied.SetAsideThrough = &through
+	}
+	return &copied
 }
 
 // RestoreUserPromptTail restores the latest human instructions without
@@ -225,17 +377,61 @@ func (c *TurnContext) RestoreUserPromptTail(history *core.ContextHistory) {
 
 // AuthorizationContext is a copy of the published history, nil when none.
 func (c *TurnContext) AuthorizationContext() *core.ContextHistory {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::authorization_context")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return cloneContextHistory(c.state.authorization)
 }
 
 // SetBackgroundInventory compares identities as well as counts; identical
 // level reports are not activity.
 func (c *TurnContext) SetBackgroundInventory(commands []core.BackgroundCommand, nativeAgentIDs []string) {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::set_background_inventory")
+	commands = slices.Clone(commands)
+	nativeAgentIDs = slices.Clone(nativeAgentIDs)
+	slices.SortStableFunc(commands, func(a, b core.BackgroundCommand) int { return strings.Compare(a.ID, b.ID) })
+	slices.Sort(nativeAgentIDs)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !slices.Equal(c.state.backgroundInventory, commands) || !slices.Equal(c.state.nativeAgentIDs, nativeAgentIDs) {
+		c.state.backgroundInventory = commands
+		c.state.nativeAgentIDs = nativeAgentIDs
+		c.state.generation++
+	}
 }
 
 func (c *TurnContext) Observe(update *schema.SessionUpdate) {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::observe")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := &c.state
+	now := time.Now()
+	state.parentActivity = &now
+	if update.AgentMessageChunk != nil || update.AgentThoughtChunk != nil ||
+		update.ToolCall != nil || update.ToolCallUpdate != nil {
+		state.generation++
+	}
+	state.summary.Observe(update)
+	switch {
+	case update.AgentMessageChunk != nil:
+		chunk := update.AgentMessageChunk
+		// Like authorization history, an omitted ID continues the current
+		// message; explicit IDs establish a new boundary.
+		id := state.messageID
+		if chunk.MessageID != nil {
+			text := string(*chunk.MessageID)
+			id = &text
+		}
+		if !optionalStringEqual(id, state.messageID) {
+			completeMessage(state)
+			state.messageID = id
+		}
+		if chunk.Content.Text != nil {
+			// Trim each chunk before appending, so a huge chunk never grows
+			// retained state.
+			state.assistantTextTail += Tail(chunk.Content.Text.Text, core.AssistantTextBytes)
+			state.assistantTextTail = Tail(state.assistantTextTail, core.AssistantTextBytes)
+		}
+	case update.ToolCall != nil, update.ToolCallUpdate != nil, update.AgentThoughtChunk != nil:
+		completeMessage(state)
+	}
 }
 
 func (c *TurnContext) ObserveTerminal(record *core.TerminalOutputRecord) {
@@ -264,7 +460,30 @@ func (c *TurnContext) GuardianTripped() bool {
 // RecordGuardianReview records one completed guardian review in this
 // request. Returns whether this denial tripped the breaker.
 func (c *TurnContext) RecordGuardianReview(denied bool) bool {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::record_guardian_review")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reviews := &c.state.guardianReviews
+	if denied {
+		if reviews.consecutiveDenials < math.MaxUint32 {
+			reviews.consecutiveDenials++
+		}
+	} else {
+		reviews.consecutiveDenials = 0
+	}
+	reviews.recent = append(reviews.recent, denied)
+	if len(reviews.recent) > guardianDenialWindow {
+		reviews.recent = slices.Delete(reviews.recent, 0, 1)
+	}
+	recentDenials := 0
+	for _, review := range reviews.recent {
+		if review {
+			recentDenials++
+		}
+	}
+	trips := denied && !reviews.tripped &&
+		(reviews.consecutiveDenials >= maxConsecutiveGuardianDenials || recentDenials >= maxRecentGuardianDenials)
+	reviews.tripped = reviews.tripped || trips
+	return trips
 }
 
 func (c *TurnContext) MarkEarlierHistoryOmitted() {
@@ -286,7 +505,83 @@ func (c *TurnContext) ClearHistory() {
 }
 
 func (c *TurnContext) Evidence(harness core.HarnessKind, phase core.TurnPhase, facts *core.ActivityFacts, nowMs int64) core.TurnEvidence {
-	panic("unported: mj-transcript/src/turn_context.rs TurnContext::evidence")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := &c.state
+	summary := state.summary.LatestUserMessages()
+	entries := state.summary.Entries
+	lastAssistant := state.summary.latestIndex(SummaryRoleAssistant)
+	var finalToolCalls []core.ToolOutcome
+	for _, entry := range entries[lastAssistant+1:] {
+		if len(finalToolCalls) == core.InFlightTools {
+			break
+		}
+		if entry.Role != SummaryRoleTool {
+			continue
+		}
+		name, ok := transcriptGetString(entry.Tool, "name")
+		if !ok {
+			name = entry.Text
+		}
+		status, ok := transcriptGetString(entry.Tool, "status")
+		if !ok {
+			status = "unknown"
+		}
+		finalToolCalls = append(finalToolCalls, core.ToolOutcome{Name: core.ToolTitle(name), Status: status})
+	}
+	var silentForS uint64
+	if facts.LastAcpActivityAtMs != nil {
+		silentForS = uint64(max(saturatingSubI64(nowMs, *facts.LastAcpActivityAtMs), 0)) / 1000
+	}
+	toolsInFlight := []core.ToolEvidence{}
+	for _, tool := range facts.ToolsInFlight[:min(len(facts.ToolsInFlight), core.InFlightTools)] {
+		title := "unknown tool"
+		for i := range entries {
+			if entries[i].ID == tool.ToolCallID {
+				title = entries[i].Text
+				break
+			}
+		}
+		toolsInFlight = append(toolsInFlight, core.ToolEvidence{
+			Title:    core.ToolTitle(title),
+			RunningS: uint64(max(saturatingSubI64(nowMs, tool.StartedAtMs), 0)) / 1000,
+		})
+	}
+	userPromptTail := ""
+	if state.userPromptTail != nil {
+		userPromptTail = *state.userPromptTail
+	}
+	assistantTextTail := state.assistantTextTail
+	if assistantTextTail == "" {
+		assistantTextTail = state.lastCompletedMessage
+	}
+	return core.TurnEvidence{
+		Authorization:      nil,
+		FinalToolCalls:     finalToolCalls,
+		Background:         nil,
+		Harness:            harness,
+		Phase:              phase,
+		SilentForS:         silentForS,
+		ToolsInFlight:      toolsInFlight,
+		TranscriptSummary:  summary.Render(48 * 1024),
+		BackgroundCommands: facts.BackgroundCommands,
+		QueuedCommands:     facts.QueuedCommands,
+		UserPromptTail:     userPromptTail,
+		AssistantTextTail:  assistantTextTail,
+		Completion:         nil,
+	}
+}
+
+// saturatingSubI64 is Rust's i64::saturating_sub.
+func saturatingSubI64(a, b int64) int64 {
+	difference := a - b
+	if (b < 0 && difference < a) || (b > 0 && difference > a) {
+		if b < 0 {
+			return math.MaxInt64
+		}
+		return math.MinInt64
+	}
+	return difference
 }
 
 func completeMessage(state *turnContextState) {

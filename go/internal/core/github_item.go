@@ -6,6 +6,7 @@ package core
 
 import (
 	"bytes"
+	"container/heap"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -15,8 +16,12 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sugarme/tokenizer"
+	"github.com/sugarme/tokenizer/model"
+	"github.com/sugarme/tokenizer/model/bpe"
+	"github.com/sugarme/tokenizer/pretokenizer"
 	"github.com/sugarme/tokenizer/pretrained"
 	"golang.org/x/text/unicode/norm"
 )
@@ -448,13 +453,16 @@ type GithubHistoryTokenizer interface {
 var githubHistoryTokenizerJSON []byte
 
 // githubHistoryTokenizer is the embedded HuggingFace tokenizer definition.
-// github.com/sugarme/tokenizer runs its normalizer, byte-level
-// pre-tokenizer and BPE model. Its added vocabulary does not match tokens
-// that are also in the model vocabulary (the space runs and the redaction
-// markers here), so the added tokens are split out first as HuggingFace's
-// AddedVocabulary does, and the template's special tokens are added here.
+// github.com/sugarme/tokenizer loads it; its BPE vocabulary and merges are
+// used here. Its added vocabulary does not match tokens that are also in
+// the model vocabulary (the space runs and the redaction markers here), so
+// the added tokens are split out first as HuggingFace's AddedVocabulary
+// does, and the template's special tokens are added here. Its ByteLevel
+// pre-tokenizer and its BPE merge order differ from HuggingFace's, so
+// historyByteLevelWords and historyMergeWord do those steps.
 type githubHistoryTokenizer struct {
 	tokenizer *tokenizer.Tokenizer
+	model     *bpe.BPE
 	// rawTokens match the input as written, normalizedTokens the NFC text.
 	rawTokens, normalizedTokens []historyAddedToken
 	single, pair                []historyTemplatePiece
@@ -523,16 +531,182 @@ func (t *githubHistoryTokenizer) encodeSequence(sequence string) ([]uint32, erro
 				ids = append(ids, piece.token.ID)
 				continue
 			}
-			encoding, err := t.tokenizer.Encode(tokenizer.NewSingleEncodeInput(tokenizer.NewInputSequence(piece.text)), false)
-			if err != nil {
-				return nil, err
-			}
-			for _, id := range encoding.Ids {
-				ids = append(ids, uint32(id))
+			// sugarme's ByteLevel pre-tokenizer drops the regex's
+			// whitespace alternatives and reads `\s` as ASCII, so each word
+			// is split here and merged as HuggingFace's BPE merges it.
+			for _, word := range historyByteLevelWords(piece.text) {
+				var mapped strings.Builder
+				for i := 0; i < len(word); i++ {
+					mapped.WriteString(pretokenizer.BytesChar[word[i]])
+				}
+				ids = append(ids, historyMergeWord(mapped.String(), *t.model.Vocab, *t.model.Merges)...)
 			}
 		}
 	}
 	return ids, nil
+}
+
+// historySymbol is one symbol of a word being merged, linked to its
+// neighbours (HuggingFace's bpe::word::Symbol).
+type historySymbol struct {
+	id         int
+	prev, next int
+	len        int
+}
+
+// historyMerge is a pending merge of the symbol at pos with its next one.
+type historyMerge struct {
+	pos, rank, newID int
+}
+
+// historyMergeQueue is a min-heap by rank, then by position, as
+// HuggingFace's BinaryHeap of merges orders them. sugarme orders equal
+// ranks by an unset timestamp, which merges repeated characters, such as a
+// line of box-drawing characters, differently.
+type historyMergeQueue []historyMerge
+
+func (q historyMergeQueue) Len() int { return len(q) }
+func (q historyMergeQueue) Less(i, j int) bool {
+	if q[i].rank != q[j].rank {
+		return q[i].rank < q[j].rank
+	}
+	return q[i].pos < q[j].pos
+}
+func (q historyMergeQueue) Swap(i, j int) { q[i], q[j] = q[j], q[i] }
+func (q *historyMergeQueue) Push(x any)   { *q = append(*q, x.(historyMerge)) }
+func (q *historyMergeQueue) Pop() any {
+	old := *q
+	last := old[len(old)-1]
+	*q = old[:len(old)-1]
+	return last
+}
+
+// historyMergeWord is HuggingFace's BPE::merge_word followed by
+// Word::merge_all without dropout: the word's characters as vocabulary ids
+// (a character the vocabulary lacks is dropped, as with no unknown token),
+// merged lowest rank first and leftmost first among equal ranks.
+func historyMergeWord(word string, vocab model.Vocab, merges bpe.Merges) []uint32 {
+	var symbols []historySymbol
+	for _, c := range word {
+		id, ok := vocab[string(c)]
+		if !ok {
+			continue
+		}
+		symbol := historySymbol{id: id, prev: -1, next: -1, len: utf8.RuneLen(c)}
+		if count := len(symbols); count > 0 {
+			symbols[count-1].next = count
+			symbol.prev = count - 1
+		}
+		symbols = append(symbols, symbol)
+	}
+	queue := &historyMergeQueue{}
+	for index := 0; index+1 < len(symbols); index++ {
+		if merge, ok := merges[bpe.Pair{C1: symbols[index].id, C2: symbols[index+1].id}]; ok {
+			*queue = append(*queue, historyMerge{pos: index, rank: merge.Rank, newID: merge.NewId})
+		}
+	}
+	heap.Init(queue)
+	for queue.Len() > 0 {
+		top := heap.Pop(queue).(historyMerge)
+		if symbols[top.pos].len == 0 || symbols[top.pos].next == -1 {
+			continue
+		}
+		nextPos := symbols[top.pos].next
+		right := symbols[nextPos]
+		// Skip an expired queue entry.
+		merge, ok := merges[bpe.Pair{C1: symbols[top.pos].id, C2: right.id}]
+		if !ok || merge.NewId != top.newID {
+			continue
+		}
+		symbols[top.pos].id = top.newID
+		symbols[top.pos].len += right.len
+		symbols[top.pos].next = right.next
+		symbols[nextPos].len = 0
+		if right.next > -1 && right.next < len(symbols) {
+			symbols[right.next].prev = top.pos
+		}
+		current := symbols[top.pos]
+		if current.prev >= 0 {
+			if merge, ok := merges[bpe.Pair{C1: symbols[current.prev].id, C2: current.id}]; ok {
+				heap.Push(queue, historyMerge{pos: current.prev, rank: merge.Rank, newID: merge.NewId})
+			}
+		}
+		if next := current.next; next > -1 && next < len(symbols) {
+			if merge, ok := merges[bpe.Pair{C1: current.id, C2: symbols[next].id}]; ok {
+				heap.Push(queue, historyMerge{pos: top.pos, rank: merge.Rank, newID: merge.NewId})
+			}
+		}
+	}
+	var ids []uint32
+	for _, symbol := range symbols {
+		if symbol.len != 0 {
+			ids = append(ids, uint32(symbol.id))
+		}
+	}
+	return ids
+}
+
+// historyByteLevelWords splits text as HuggingFace's ByteLevel
+// pre-tokenizer does with use_regex, by the GPT-2 expression
+// `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
+// with Unicode `\s`. Go's regexp has no lookahead, so the alternatives are
+// tried here in order at each position, as the leftmost-first regex does.
+func historyByteLevelWords(text string) []string {
+	isSpace := unicode.IsSpace
+	isLetter := func(c rune) bool { return unicode.IsLetter(c) }
+	isNumber := func(c rune) bool { return unicode.IsNumber(c) }
+	isOther := func(c rune) bool { return !isSpace(c) && !isLetter(c) && !isNumber(c) }
+	// run is the end of the longest run of characters in class from i.
+	run := func(i int, class func(rune) bool) int {
+		for i < len(text) {
+			c, size := utf8.DecodeRuneInString(text[i:])
+			if !class(c) {
+				break
+			}
+			i += size
+		}
+		return i
+	}
+	var words []string
+	for i := 0; i < len(text); {
+		end := i
+		rest := text[i:]
+		for _, contraction := range []string{"'s", "'t", "'re", "'ve", "'m", "'ll", "'d"} {
+			if strings.HasPrefix(rest, contraction) {
+				end = i + len(contraction)
+				break
+			}
+		}
+		if end == i {
+			for _, class := range []func(rune) bool{isLetter, isNumber, isOther} {
+				start := i
+				if text[start] == ' ' {
+					if c, _ := utf8.DecodeRuneInString(text[start+1:]); start+1 < len(text) && class(c) {
+						start++
+					}
+				}
+				if c, _ := utf8.DecodeRuneInString(text[start:]); class(c) {
+					end = run(start, class)
+					break
+				}
+			}
+		}
+		if end == i {
+			// Whitespace: the run, less its last character when a
+			// non-space follows, or that one character alone.
+			stop := run(i, isSpace)
+			if stop < len(text) {
+				_, last := utf8.DecodeLastRuneInString(text[i:stop])
+				if stop-last > i {
+					stop -= last
+				}
+			}
+			end = stop
+		}
+		words = append(words, text[i:end])
+		i = end
+	}
+	return words
 }
 
 type historyPiece struct {
@@ -602,6 +776,14 @@ var historyTokenizer = sync.OnceValues(func() (GithubHistoryTokenizer, error) {
 		return nil, err
 	}
 	history := &githubHistoryTokenizer{tokenizer: loaded}
+	switch model := loaded.GetModel().(type) {
+	case *bpe.BPE:
+		history.model = model
+	case bpe.BPE:
+		history.model = &model
+	default:
+		return nil, fmt.Errorf("history tokenizer model is %T, not BPE", model)
+	}
 	for _, token := range definition.AddedTokens {
 		if token.Normalized {
 			history.normalizedTokens = append(history.normalizedTokens, token)

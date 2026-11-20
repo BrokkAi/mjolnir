@@ -6,9 +6,12 @@ package transcript
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
@@ -173,7 +176,38 @@ func (s *HandoffState) AttachToText(text string) (string, error) {
 }
 
 func HandoffStateFromHandoffText(text string) (HandoffState, bool) {
-	panic("unported: mj-transcript/src/handoff.rs HandoffState::from_handoff_text")
+	index := strings.LastIndex(text, markerOpen)
+	if index < 0 {
+		return HandoffState{}, false
+	}
+	bodyText, encoded := text[:index], text[index+len(markerOpen):]
+	encoded, ok := strings.CutSuffix(encoded, markerClose)
+	if !ok {
+		return HandoffState{}, false
+	}
+	var decoded marker
+	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
+		return HandoffState{}, false
+	}
+	if decoded.Version != version || len(decoded.PrefixSHA256) != 64 {
+		return HandoffState{}, false
+	}
+	for i := 0; i < len(decoded.PrefixSHA256); i++ {
+		b := decoded.PrefixSHA256[i]
+		if !(b >= '0' && b <= '9' || b >= 'a' && b <= 'f') {
+			return HandoffState{}, false
+		}
+	}
+	summary, ok := modelBody(bodyText)
+	if !ok {
+		return HandoffState{}, false
+	}
+	return HandoffState{
+		Version:         decoded.Version,
+		ThroughPosition: decoded.ThroughPosition,
+		PrefixSHA256:    decoded.PrefixSHA256,
+		Summary:         summary,
+	}, true
 }
 
 func EncodeHandoff(snapshot *core.CanonicalSessionSnapshot, text string) (string, error) {
@@ -193,7 +227,25 @@ func ParseHandoff(text string) (HandoffState, bool) {
 }
 
 func ReusableHandoff(snapshot *core.CanonicalSessionSnapshot) (HandoffState, bool) {
-	panic("unported: mj-transcript/src/handoff.rs reusable_handoff")
+	value, ok := snapshot.Session.Configuration.Values[HandoffStateKey]
+	if !ok {
+		return HandoffState{}, false
+	}
+	var state HandoffState
+	encoded, err := jsonvalue.Marshal(value)
+	if err == nil {
+		err = json.Unmarshal(encoded, &state)
+	}
+	if err != nil {
+		slog.Warn("stored handoff state is malformed", "error", err)
+		return HandoffState{}, false
+	}
+	valid, err := state.Validate(snapshot)
+	if err != nil {
+		slog.Warn("could not validate stored handoff state", "error", err)
+		return HandoffState{}, false
+	}
+	return state, valid
 }
 
 func modelBody(text string) (string, bool) {
@@ -213,5 +265,39 @@ func modelBody(text string) (string, bool) {
 }
 
 func prefixDigest(snapshot *core.CanonicalSessionSnapshot, throughPosition uint64) (string, error) {
-	panic("unported: mj-transcript/src/handoff.rs prefix_digest")
+	start := snapshot.CurrentContextStart()
+	hash := sha256.New()
+	hash.Write([]byte("mj-handoff-prefix-v1\x00"))
+	hash.Write(binary.LittleEndian.AppendUint64(nil, start))
+	for i := range snapshot.Transcript {
+		item := &snapshot.Transcript[i]
+		if item.Position <= start || item.Position > throughPosition {
+			continue
+		}
+		hash.Write(binary.LittleEndian.AppendUint64(nil, item.Position))
+		hash.Write(binary.LittleEndian.AppendUint64(nil, uint64(len(item.StableID))))
+		hash.Write([]byte(item.StableID))
+		body := item.Body
+		switch b := body.(type) {
+		case core.CanonicalTranscriptBodyAgent:
+			b.Streaming = false
+			body = b
+		case core.CanonicalTranscriptBodyThought:
+			b.Streaming = false
+			body = b
+		}
+		marshaler, ok := body.(json.Marshaler)
+		if !ok {
+			return "", fmt.Errorf("transcript body %T is not serializable", body)
+		}
+		// The body's own encoder writes it as serde_json::to_vec does;
+		// json.Marshal would escape HTML characters inside its strings.
+		encoded, err := marshaler.MarshalJSON()
+		if err != nil {
+			return "", err
+		}
+		hash.Write(binary.LittleEndian.AppendUint64(nil, uint64(len(encoded))))
+		hash.Write(encoded)
+	}
+	return core.LowerHex(hash.Sum(nil)), nil
 }

@@ -10,6 +10,8 @@ require (
 	github.com/spf13/pflag v1.0.9
 	github.com/sugarme/tokenizer v0.3.0
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
+	github.com/tree-sitter/go-tree-sitter v0.25.0
+	github.com/tree-sitter/tree-sitter-bash v0.25.1
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
@@ -19,10 +21,10 @@ require (
 require (
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
