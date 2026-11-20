@@ -160,6 +160,7 @@ async fn a_worker_quota_assessment_schedules_recovery_whatever_the_spent_allowan
         project_memory: None,
     }]);
     let environment = Environment {
+        child_switch_runtime: None,
         session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
         schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
@@ -264,6 +265,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             "moving" | "timed-moving" | "timed-moving-future" | "timed-moved"
         );
         let environment = Environment {
+            child_switch_runtime: None,
             session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
             schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
@@ -373,6 +375,7 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
     }]);
     let log_dir = tempfile::tempdir().unwrap();
     let environment = Environment {
+        child_switch_runtime: None,
         session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
         schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
@@ -478,6 +481,7 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
         let log_dir = tempfile::tempdir().unwrap();
         let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
         let environment = Environment {
+            child_switch_runtime: None,
             session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
             schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
@@ -575,6 +579,7 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             project_memory: None,
         }]);
         let environment = Environment {
+            child_switch_runtime: None,
             session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
             schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
@@ -680,6 +685,7 @@ async fn handoff_defers_a_quota_assessment_without_consuming_its_trigger() {
     }]);
     let (calls, mut requests) = mpsc::unbounded_channel();
     let environment = Environment {
+        child_switch_runtime: None,
         session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
         schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
@@ -746,6 +752,7 @@ fn idle_feed(
     cancellation: CancellationToken,
 ) -> UpdateFeed {
     let environment = Environment {
+        child_switch_runtime: None,
         session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
         schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
@@ -1008,6 +1015,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
         let session_gate = Arc::new(mj_controller::recovery_gate::RecoveryGate::default());
         let fallback_blocker = Arc::new(std::sync::Mutex::new(None));
         let environment = Environment {
+            child_switch_runtime: None,
             session_gate: session_gate.clone(),
             schedules: Default::default(),
             log: None,
@@ -1713,6 +1721,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         let (prepared, mut preparations) = mpsc::unbounded_channel();
         let permitted = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut environment = Environment {
+            child_switch_runtime: None,
             session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
             schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
@@ -2082,6 +2091,7 @@ async fn refused_quota_scheduling_waits_for_backoff_or_a_new_assessment() {
         .unwrap();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let environment = Environment {
+        child_switch_runtime: None,
         session_gate: gate,
         schedules: Default::default(),
         log: None,
@@ -2259,6 +2269,7 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
     let blocked = handle.view();
     let session_gate = Arc::new(mj_controller::recovery_gate::RecoveryGate::default());
     let environment = Environment {
+        child_switch_runtime: None,
         session_gate: session_gate.clone(),
         schedules: Default::default(),
         log: None,
@@ -2371,6 +2382,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             project_memory: None,
         }]);
         let environment = Environment {
+            child_switch_runtime: None,
             session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
             schedules: Default::default(),
             log: None,
@@ -2621,6 +2633,7 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
         let moves = Arc::new(std::sync::Mutex::new(Vec::new()));
         let launched = Arc::new(tokio::sync::Notify::new());
         let environment = Environment {
+            child_switch_runtime: None,
             session_gate: session_gate.clone(),
             schedules: Default::default(),
             log: None,

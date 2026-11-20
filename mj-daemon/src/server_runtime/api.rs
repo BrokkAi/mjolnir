@@ -203,6 +203,13 @@ pub trait ExportRuntime: Send + Sync {
         false
     }
 
+    fn child_park_snapshot(
+        &self,
+        session_id: &str,
+    ) -> (Option<mj_core::state::SessionRecord>, bool) {
+        (self.session_record(session_id), false)
+    }
+
     /// Stop an idle child's worker and keep everything else, once its parent
     /// has been told its turn ended (#1161).
     fn park_subagent(
@@ -457,6 +464,13 @@ impl ExportRuntime for RuntimeState {
 
     fn subagent_park_running(&self, session_id: &str) -> bool {
         RuntimeState::subagent_park_running(self, session_id)
+    }
+
+    fn child_park_snapshot(
+        &self,
+        session_id: &str,
+    ) -> (Option<mj_core::state::SessionRecord>, bool) {
+        RuntimeState::child_park_snapshot(self, session_id)
     }
 
     fn park_subagent(
@@ -1729,7 +1743,15 @@ impl ApiBackend {
         )],
     ) -> Result<()> {
         for (id, _, progress) in children {
-            let record = self.exports.session_record(id);
+            let (record, parking) = self.exports.child_park_snapshot(id);
+            if parking
+                && record
+                    .as_ref()
+                    .is_some_and(|record| record.state == SessionState::Parked)
+            {
+                progress.state = ChildState::WaitingForWorker;
+                continue;
+            }
             let view = if record
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state))
@@ -1750,23 +1772,35 @@ impl ApiBackend {
             let active = record
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state));
-            if active
-                && connected.is_some_and(|snapshot| {
-                    snapshot
-                        .materialized
-                        .last_turn_outcome
-                        .as_ref()
-                        .map(|turn| turn.completed_ordinal)
-                        != progress.last_completed_ordinal
-                        || !matches!(
-                            snapshot.materialized.execution,
-                            MaterializedExecutionState::Idle
-                        )
-                        || crate::server::api::WaitObservation::worker_turn_pending(snapshot)
-                })
-            {
-                progress.state = ChildState::WaitingForWorker;
-                continue;
+            if let Some(snapshot) = connected {
+                use crate::server::api::{WaitObservation, WaitOutcome};
+                let mut observation = WaitObservation {
+                    subagent: true,
+                    ..Default::default()
+                };
+                observation.observe_worker_turn(snapshot);
+                let decision = observation
+                    .last_turn_outcome
+                    .as_ref()
+                    .filter(|turn| {
+                        Some(turn.completed_ordinal) == progress.last_completed_ordinal
+                            && observation.execution == MaterializedExecutionState::Idle
+                    })
+                    .and_then(|turn| observation.turn_end(turn));
+                let Some(decision) = decision else {
+                    progress.state = ChildState::WaitingForWorker;
+                    continue;
+                };
+                if decision.outcome == WaitOutcome::QuotaLimit
+                    && let Some(reason) = decision.message
+                {
+                    progress.state = ChildState::Failed {
+                        state: "failed",
+                        reason,
+                        provider_failure: true,
+                    };
+                    continue;
+                }
             }
             let state = self
                 .child_state(

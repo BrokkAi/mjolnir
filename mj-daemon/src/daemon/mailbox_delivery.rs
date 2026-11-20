@@ -266,7 +266,8 @@ pub(crate) async fn deliver_session_events(
                 continue;
             }
         };
-        let command_id = mailbox_command_id(&entry.event_key);
+        let command_id = quota_prompt_id(&session_id, &entry.event_key)
+            .unwrap_or_else(|| mailbox_command_id(&entry.event_key));
         let created_at_ms = event.created_at_ms;
         match deliver_mailbox_event(state.clone(), &sessions, &session_id, event, entry.unpark)
             .await
@@ -341,6 +342,14 @@ pub(crate) async fn deliver_session_events(
     }
 }
 
+fn quota_prompt_id(session: &str, key: &str) -> Option<String> {
+    let ordinal = key
+        .strip_prefix(&format!("quota-retry-{session}-"))?
+        .parse::<u64>()
+        .ok()?;
+    Some(mj_core::continuation::GeneratedPrompt::QuotaRetry.command_id(ordinal))
+}
+
 /// Submit one durable event through the existing session actor. Callers may
 /// opt into unpark for deliberate parent-to-child messages; GitHub and the
 /// public events API always pass `false`.
@@ -390,6 +399,32 @@ pub(crate) async fn deliver_mailbox_event(
     }
     if !view.connected {
         return Ok(pending("the worker is not connected"));
+    }
+    if let Some(command_id) = quota_prompt_id(session_id, &event.key) {
+        let result = tokio::time::timeout(
+            DELIVERY_TIMEOUT,
+            handle.submit(
+                command_id,
+                mj_core::relay::RelayCommand::Prompt {
+                    prompt: mj_core::continuation::prompt_blocks(),
+                },
+            ),
+        )
+        .await
+        .context("quota continuation acknowledgement timed out")?;
+        return match result {
+            Ok(ordinal) => Ok(MailboxEventDelivery::Accepted(ordinal)),
+            Err(error)
+                if error
+                    .downcast_ref::<mj_controller::session_manager::SubmitRefusalCode>()
+                    .is_some_and(|code| {
+                        code.0 == mj_core::relay::RelayErrorCode::InvalidRequest
+                    }) =>
+            {
+                Ok(MailboxEventDelivery::Discarded)
+            }
+            Err(error) => Err(error),
+        };
     }
     match protocol {
         None => return Ok(pending("the worker has not published its relay protocol")),

@@ -178,6 +178,12 @@ async fn wait_for_turn(
                         let now = mj_core::clock::epoch_millis();
                         observation.work_liveness = child_liveness.clone();
                         observation.apply_subagent_report(*handback_tool, report, now);
+                        // A child can briefly lose its actor while a park
+                        // lifecycle switches its profile.
+                        observation.resuming |=
+                            session.operation.as_ref().is_some_and(|operation| {
+                                operation.kind == crate::server::ViewerOperationKind::Stop
+                            });
                         report_deadline = [
                             reminder_grace_end(&observation, report, now),
                             hold_give_up_end(&observation, now),
@@ -254,7 +260,7 @@ async fn wait_for_turn(
         // A stopped actor stops publishing; re-acquire so a session that was
         // replaced or resumed under us is followed rather than waited on
         // forever.
-        if handle.as_ref().is_some_and(SessionHandle::is_stopped) {
+        if handle.as_ref().is_none_or(SessionHandle::is_stopped) {
             handle = backend.session_handle(session_id.clone()).await?;
             wake = Wake::Session;
         }

@@ -115,8 +115,11 @@ impl WaitObservation {
             .filter(|recovery| !recovery.submitted);
     }
 
-    pub fn worker_turn_pending(snapshot: &mj_core::state::ManagedSessionSnapshot) -> bool {
-        let mut observation = Self::default();
+    pub fn child_turn_pending(snapshot: &mj_core::state::ManagedSessionSnapshot) -> bool {
+        let mut observation = Self {
+            subagent: true,
+            ..Default::default()
+        };
         observation.observe_worker_turn(snapshot);
         observation
             .last_turn_outcome
@@ -140,7 +143,7 @@ impl WaitObservation {
     /// the user, or as a quota stop. A quota recovery recorded for the turn
     /// answers `quota_limit` with its notice, whether or not a resume is
     /// scheduled: the resume is a new command.
-    fn turn_end(&self, outcome: &MaterializedTurnOutcome) -> Option<WaitDecision> {
+    pub fn turn_end(&self, outcome: &MaterializedTurnOutcome) -> Option<WaitDecision> {
         use mj_core::assessment::{Action, Status};
         if self.resubmits(outcome)
             || self.report_pending_for.as_deref() == Some(outcome.command_id.as_str())
@@ -164,6 +167,16 @@ impl WaitObservation {
             .quota_recovery
             .as_ref()
             .filter(|recovery| recovery.completed_command_id == outcome.command_id);
+        // Managed workers record quota directly without a classifier result.
+        // The recovery decision still owns this turn until it records a
+        // no-retry notice or the continuation runs.
+        if self.subagent
+            && recovery.is_none()
+            && action == Some(Action::RecoverQuota)
+            && verdict.is_some_and(|a| a.status == Status::Deferred)
+        {
+            return None;
+        }
         if recovery.is_some() || action == Some(Action::RecoverQuota) {
             result.outcome = WaitOutcome::QuotaLimit;
             if let Some(recovery) = recovery {

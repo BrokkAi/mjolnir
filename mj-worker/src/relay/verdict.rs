@@ -123,8 +123,34 @@ impl DurableRelay {
                 .cloned()
                 .filter(|a| a.current())
             {
-                assessment.status = mj_core::assessment::Status::Superseded;
-                assessment.reason = "managed_subagent".into();
+                use mj_core::assessment::{Action, Status};
+                let continuation = &self.snapshot.continuation;
+                let owns_quota_frontier = !continuation.quota_suppressed
+                    && continuation.user_command_id.is_some()
+                    && continuation.completed_command_id.as_deref() == Some(&assessment.turn_id);
+                if assessment.action == Some(Action::RecoverQuota) {
+                    // SetQuotaRecovery advances this verdict for the same turn.
+                    return Ok(());
+                }
+                if self.recovers_child_quota
+                    && owns_quota_frontier
+                    && assessment.status == Status::Pending
+                    && (assessment
+                        .completion
+                        .diagnostic
+                        .as_ref()
+                        .is_some_and(|d| d.is_usage_limit())
+                        || mj_core::state::classify_prompt_completion(
+                            &assessment.completion.stop_reason,
+                        ) == mj_core::state::PromptCompletion::QuotaLimit)
+                {
+                    assessment.action = Some(Action::RecoverQuota);
+                    assessment.status = Status::Deferred;
+                    assessment.reason = "quota_resolution_required".into();
+                } else {
+                    assessment.status = Status::Superseded;
+                    assessment.reason = "managed_subagent".into();
+                }
                 assessment.retry_at_ms = None;
                 self.store_assessment(assessment)?;
             }

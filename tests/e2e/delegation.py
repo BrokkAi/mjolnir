@@ -2,6 +2,7 @@
 """Delegation without web access, then durable accounting, in a named instance."""
 
 import argparse
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -30,6 +31,8 @@ WAIT_SECONDS = 120
 # turn too early on a slow host, or leaves too little time for what follows.
 HELD_PROMPTS = (
     "Return a short fixture report.",
+    "Exhaust fixture quota ",
+    "Continue the unfinished work already requested",
     "Hold the parent turn for queued settings.",
     "Run after the pending settings.",
     "second turn",
@@ -49,6 +52,7 @@ def main():
     parser.add_argument("--mailbox-regression-only", action="store_true")
     parser.add_argument("--restart-regression-only", action="store_true")
     parser.add_argument("--create-restart-only", action="store_true")
+    parser.add_argument("--child-quota-only", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
@@ -184,6 +188,31 @@ def main():
             '                    raise RuntimeError("startup model response was not released")\n'
             '                time.sleep(0.05)\n',
         )
+        if args.child_quota_only:
+            reset = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=1)
+            script = script.replace(
+                '            marker.write(text + "\\n")',
+                '            marker.write(text + "\\n")\n'
+                '        if "Exhaust fixture quota " in text or (\n'
+                '            "Continue the unfinished work already requested" in text\n'
+                '            and not os.environ.get("MJ_FIXTURE_ACCOUNT")\n'
+                '        ):\n'
+                '            if "Exhaust fixture quota " in text:\n'
+                '                hold_until_released()\n'
+                '            report_execution("idle")\n'
+                '            send({"jsonrpc": "2.0", "id": ident, "error": {"code": -32603,\n'
+                '                  "message": "Internal error", "data": {"message": "Fixture quota exhausted",\n'
+                '                  "codexErrorInfo": "usageLimitExceeded",\n'
+                f'                  "resetAt": {int(reset.timestamp())!r}}}' + '}})\n'
+                '            continue',
+                1,
+            )
+            script = script.replace(
+                '        session_id = message.get("params", {}).get("sessionId", session_id)',
+                '        session_id = message.get("params", {}).get("sessionId", session_id)\n'
+                '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-open.jsonl"), "a") as marker:\n'
+                '            marker.write(json.dumps([method, session_id, os.environ.get("MJ_FIXTURE_ACCOUNT", "original")]) + "\\n")',
+            )
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
         if args.create_restart_only:
@@ -309,7 +338,7 @@ def main():
                 time.sleep(0.05)
             raise RuntimeError(f"no worker tool socket for {session}")
 
-        def tool(session, action, params=None):
+        def tool(session, action, params=None, *, raw_message=False):
             request = {
                 "request_id": uuid.uuid4().hex,
                 "created_at_ms": int(time.time() * 1000),
@@ -345,7 +374,7 @@ def main():
             result = reply.get("result")
             assert result is not None, reply
             assert not result["is_error"], result
-            return json.loads(result["message"])
+            return result["message"] if raw_message else json.loads(result["message"])
 
         def worker_status(session):
             # Ask the worker that owns the turn, independently of projection lag.
@@ -454,13 +483,14 @@ def main():
             raise RuntimeError(f"parent did not finish provisioning: {sessions}")
         wait_worker_ready(parent)
         config = config_path
-        config.write_text(
-            config.read_text().replace(
-                "[phone]\nenabled = true", "[phone]\nenabled = false"
+        if not args.child_quota_only:
+            config.write_text(
+                config.read_text().replace(
+                    "[phone]\nenabled = true", "[phone]\nenabled = false"
+                )
             )
-        )
-        cli("daemon", "restart")
-        assert "disabled" in cli("daemon", "status").lower()
+            cli("daemon", "restart")
+            assert "disabled" in cli("daemon", "status").lower()
         tool(parent, "list_agents")
 
         def listed_session_ids(*options):
@@ -772,6 +802,127 @@ def main():
                 "result": "passed",
                 "child": child,
             }), flush=True)
+            return
+
+        if args.child_quota_only:
+            def wait_for(description, observe):
+                deadline = time.monotonic() + WAIT_SECONDS
+                while time.monotonic() < deadline:
+                    if result := observe():
+                        return result
+                    time.sleep(0.1)
+                raise RuntimeError(f"timed out waiting for {description}")
+
+            def stored(child):
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
+                    return db.execute(
+                        "SELECT state, last_profile, native_session_id FROM sessions WHERE session_id=?",
+                        (child,),
+                    ).fetchone()
+
+            def reports(child):
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
+                    rows = db.execute(
+                        "SELECT event_json FROM mailbox_outbox WHERE target_session_id=? "
+                        "AND event_key LIKE 'subagent-finished-%'",
+                        (parent,),
+                    ).fetchall()
+                return [
+                    body["report"] for (event,) in rows
+                    if (body := json.loads(event)["body"])["type"] == "subagent_finished"
+                    and body["report"]["child_session_id"] == child
+                ]
+
+            def spawn_quota_child(title):
+                prompt = f"Exhaust fixture quota {title}."
+                child = tool(parent, "spawn", {
+                    "task_name": title,
+                    "task_type": "straightforward",
+                    "instructions": prompt,
+                })["child_session_id"]
+                marker = wait_prompt(child, prompt)
+                wait_for(f"{title} to publish its native session", lambda: (
+                    (record := stored(child))[0] == "running" and record[2]
+                ))
+                return child, prompt, marker
+
+            miss, miss_prompt, _ = spawn_quota_child("with no other profile")
+            recovering, recover_prompt, marker = spawn_quota_child("with a replacement")
+            _, profile, native = stored(recovering)
+            assert profile == "fake" and native, stored(recovering)
+
+            release(miss, miss_prompt)
+            refusal = wait_for("the quota miss report", lambda: next(
+                (report for report in reports(miss) if report.get("finished")), None
+            ))
+            assert refusal["state"] == "failed", refusal
+            assert reset.astimezone().strftime("%Y-%m-%d %H:%M:%S") in refusal["output"], refusal
+            assert "Start a new sub-agent" in refusal["output"], refusal
+            wait_report(parent, miss, refusal["output"])
+
+            replacement_home = lab.runtime_root / "profile-replacement"
+            replacement_home.mkdir()
+            for source_file in lab.profile.iterdir():
+                if source_file.is_file():
+                    (replacement_home / source_file.name).write_bytes(source_file.read_bytes())
+            config_text = config.read_text()
+            profile = config_text.split("[profiles.fake]\n", 1)[1].split("\n[", 1)[0]
+            replacement = profile.replace(
+                json.dumps(str(lab.profile)), json.dumps(str(replacement_home))
+            ).replace("environment = {", 'environment = { MJ_FIXTURE_ACCOUNT = "replacement",')
+            config.write_text(config_text + "\n[profiles.replacement]\n" + replacement)
+
+            def published_replacement():
+                reply = reliability_lab.daemon_request(lab.data, {
+                    "action": "runtime_changes",
+                    "arguments": {"cursor": None, "wait": False, "subagent_parents": []},
+                })
+                metadata = reply["value"]["Snapshot"]["projection"]["metadata"]
+                ready = [
+                    profile for profile in metadata["profile_capabilities"]["profiles"].values()
+                    if profile["choices"]["status"] == "ready"
+                    and profile["choices"]["value"].get("model") == "tiny"
+                ]
+                return len(ready) >= 2
+
+            wait_for("the replacement profile to offer the child's model", published_replacement)
+            def loaded_replacement():
+                log = marker.with_name("fixture-open.jsonl")
+                opens = log.read_text().splitlines() if log.exists() else []
+                return ["session/load", native, "replacement"] in [json.loads(line) for line in opens]
+
+            continuation = (
+                "Continue the unfinished work already requested by the user, following their latest instructions. "
+                "This message supplies no new approval or missing information. "
+                "If a genuine decision, required approval, or external action remains necessary, explain it and stop."
+            )
+            result = "Continued on the replacement fixture profile."
+            with subprocess.Popen(
+                [str(args.mj.resolve()), "--instance", args.instance, "wait", "--session",
+                 recovering, "--json", "--timeout", str(WAIT_SECONDS)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ) as wait:
+                try:
+                    release(recovering, recover_prompt)
+                    wait_for("the original native conversation to load on the replacement", loaded_replacement)
+                    wait_prompt(recovering, continuation)
+                    assert wait.poll() is None, wait.communicate()
+                    handback = tool(recovering, "handback", {"message": result}, raw_message=True)
+                    if handback.startswith("Not delivered yet:"):
+                        tool(recovering, "handback", {"message": result})
+                    release(recovering, continuation)
+                    stdout, stderr = wait.communicate(timeout=WAIT_SECONDS)
+                    assert wait.returncode == 0, (stdout, stderr)
+                    assert json.loads(stdout)["outcome"] == "finished", stdout
+                finally:
+                    if wait.poll() is None:
+                        wait.terminate()
+            wait_report(parent, recovering, result)
+            assert stored(recovering)[1:] == ("replacement", native), stored(recovering)
+            assert all(report["state"] != "failed" for report in reports(recovering)), reports(recovering)
+            cli("daemon", "stop")
+            print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),
+                              "result": "passed", "quota_children": 2}), flush=True)
             return
 
         model_gate.touch()

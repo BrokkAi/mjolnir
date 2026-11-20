@@ -315,6 +315,7 @@ pub struct DurableRelay {
     #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
     pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
+    pub(crate) recovers_child_quota: bool,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
     /// Work facts the coordinator observed for the runtime event it is about to
@@ -1028,6 +1029,7 @@ impl DurableRelay {
             authentication_login_path: None,
             login_identity: Default::default(),
             replied_verdict: Default::default(),
+            recovers_child_quota: false,
             air_tasks: BTreeMap::new(),
             pending_settle_facts: None,
             claude_pending_stops: BTreeMap::new(),

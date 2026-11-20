@@ -9,6 +9,10 @@ use mj_core::state::{MoveSessionRequest, QuotaMoveContinuation};
 pub(super) enum Plan {
     Pending(QuotaWait),
     Wait(QuotaRecovery),
+    ChildSwitch {
+        destination: String,
+        fallback: QuotaRecovery,
+    },
     Move {
         request: Box<MoveSessionRequest>,
         destination: String,
@@ -140,7 +144,7 @@ pub(super) async fn prepare(
 ) -> Result<Plan> {
     let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
     let turn = ended_turn(snapshot).context("missing quota completion")?;
-    let (profile_id, profile) = {
+    let (profile_id, profile, child) = {
         let controller_owner = state.owner();
         let controller = controller_owner.controller();
         let session = controller
@@ -156,6 +160,7 @@ pub(super) async fn prepare(
                 .get(&session.last_profile)
                 .context("profile was removed")?
                 .clone(),
+            controller.state.subagents.contains_key(id),
         )
     };
     let harness = profile.kind;
@@ -267,13 +272,32 @@ pub(super) async fn prepare(
         notice,
         submitted: false,
     };
-    if mj_controller::quota::long_window_stop(
-        &windows,
-        model.as_deref().unwrap_or(""),
-        stated.map(|stated| stated.at),
-        reset,
-        now_ms / 1000,
-    ) {
+    if child {
+        fallback.reset_at_ms = None;
+        fallback.retry_at_ms = None;
+        fallback.notice = match reset
+            .and_then(|time| time.checked_mul(1000))
+            .and_then(local_reset)
+        {
+            Some(time) => format!(
+                "Profile {} is out of quota until {time}.",
+                fallback.profile_id
+            ),
+            None => format!(
+                "Profile {} is out of quota. The reset time is unknown.",
+                fallback.profile_id
+            ),
+        };
+    }
+    if (!child || harness != mj_core::config::HarnessKind::OpenCode)
+        && mj_controller::quota::long_window_stop(
+            &windows,
+            model.as_deref().unwrap_or(""),
+            stated.map(|stated| stated.at),
+            reset,
+            now_ms / 1000,
+        )
+    {
         let candidates = match (&model, state.quota_report_backend()) {
             (Some(_), Some(backend)) => match backend.session_profile_candidates().await {
                 Ok(candidates) => Some(candidates.offered),
@@ -301,6 +325,12 @@ pub(super) async fn prepare(
             for candidate in
                 destinations(&config, &source, harness, &model, candidates, now_ms / 1000)?
             {
+                if child {
+                    return Ok(Plan::ChildSwitch {
+                        destination: candidate.profile_id,
+                        fallback,
+                    });
+                }
                 match state.prepare_quota_move(id, &candidate.profile_id).await {
                     Ok(request) => {
                         // The record keeps the fallback's times, so a Move that
@@ -337,6 +367,12 @@ pub(super) async fn prepare(
                 );
             }
         }
+    }
+    if child {
+        append_bounded(
+            &mut fallback.notice,
+            " Start a new sub-agent or send again after quota resets.",
+        );
     }
     Ok(Plan::Wait(fallback))
 }
@@ -576,6 +612,46 @@ pub(super) async fn schedule(
     view: ManagedSessionView,
     plan: Plan,
 ) -> Result<Box<ManagedSessionView>> {
+    let plan = match plan {
+        Plan::ChildSwitch {
+            destination,
+            mut fallback,
+        } => {
+            let turn = view
+                .snapshot
+                .as_ref()
+                .and_then(ended_turn)
+                .context("missing quota completion")?;
+            let runtime = env
+                .child_switch_runtime
+                .as_ref()
+                .context("missing child quota runtime")?;
+            match runtime
+                .switch_child_quota_profile(
+                    id.to_owned(),
+                    fallback.profile_id.clone(),
+                    destination,
+                    turn.completed_ordinal,
+                )
+                .await
+            {
+                Ok(()) => {
+                    let handle = env
+                        .control
+                        .wait_for_session(id, Duration::from_secs(5))
+                        .await?;
+                    return Ok(Box::new(handle.view()));
+                }
+                Err(error) => tracing::warn!(session=id, %error, "child quota switch failed"),
+            }
+            append_bounded(
+                &mut fallback.notice,
+                " The sub-agent could not switch profiles. Start a new sub-agent or send again after quota resets.",
+            );
+            Plan::Wait(fallback)
+        }
+        plan => plan,
+    };
     let plan = Arc::new(plan);
     let admission = admit(env, id)?;
     let handle = env
@@ -602,6 +678,9 @@ pub(super) async fn schedule(
     } else {
         let recovery = match plan.as_ref() {
             Plan::Pending(_) => bail!("quota report has not been published yet"),
+            Plan::ChildSwitch { .. } => {
+                unreachable!("child switches are handled before scheduling")
+            }
             Plan::Wait(r) => r,
             Plan::Move { abstention, .. } => abstention,
         };
@@ -749,7 +828,9 @@ pub(super) async fn schedule(
         return Ok(Box::new(current));
     }
     match schedule.plan.as_ref() {
-        Plan::Pending(_) => unreachable!("quota scheduling never retains a publication wait"),
+        Plan::Pending(_) | Plan::ChildSwitch { .. } => {
+            unreachable!("quota scheduling only records waits and Moves")
+        }
         Plan::Wait(_) => {
             if let Some(recovery) = stale_move_fallback {
                 let pending = PendingFallback {

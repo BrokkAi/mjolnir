@@ -336,6 +336,8 @@ impl MaterializedTurnOutcome {
     pub fn is_resubmitted_by(&self, command_id: &str) -> bool {
         let carried = crate::continuation::carried_command(command_id);
         crate::relay::retried_turn(carried) == Some(self.completed_ordinal)
+            || crate::continuation::GeneratedPrompt::QuotaRetry.retry_ordinal(carried)
+                == Some(self.completed_ordinal)
             || (carried != command_id
                 && carried == crate::continuation::carried_command(&self.command_id))
     }
