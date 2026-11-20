@@ -1898,7 +1898,7 @@ pub(crate) fn listed_capacity_targets<'a>(
 ) -> impl Iterator<Item = &'a String> + 'a {
     target_ids
         .iter()
-        .filter(|id| dashboard.target_missing(id) != Some(crate::availability::Missing::Silent))
+        .filter(|id| !dashboard.default_engine_missing(id))
 }
 
 pub(crate) fn capacity_target_labels(
@@ -1911,7 +1911,7 @@ pub(crate) fn capacity_target_labels(
         if index > 0 {
             spans.push(Span::raw(", "));
         }
-        if dashboard.target_missing(target_id).is_some() {
+        if dashboard.target_missing_line(target_id).is_some() {
             spans.push(Span::styled(
                 format!("{target_id} (unavailable)"),
                 Style::default().fg(theme::palette().muted),

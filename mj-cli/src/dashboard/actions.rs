@@ -425,12 +425,8 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::CheckAvailability { generation } => {
-            super::io::spawn_availability_check(
-                generation,
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            );
+        DashboardAction::CheckAvailability => {
+            super::io::spawn_availability_check(context.dashboard_io_tx.clone());
         }
         DashboardAction::ResolveContainerPath { session_id, source } => {
             let input_context = context.dashboard.path_input_context();

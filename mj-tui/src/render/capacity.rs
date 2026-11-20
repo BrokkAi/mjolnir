@@ -95,7 +95,7 @@ pub(crate) fn all_listed_targets_unavailable(
     dashboard: &DashboardState,
 ) -> bool {
     let mut listed = super::sessions::listed_capacity_targets(target_ids, dashboard).peekable();
-    listed.peek().is_some() && listed.all(|id| dashboard.target_missing(id).is_some())
+    listed.peek().is_some() && listed.all(|id| dashboard.target_missing_line(id).is_some())
 }
 
 /// The CPU and RAM cells of one row. A host reports how much of each is in

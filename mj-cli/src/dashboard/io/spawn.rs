@@ -480,27 +480,24 @@ pub(crate) fn spawn_first_run_setup(
     )
 }
 
-/// Check what is there and add what is new, off the event loop: this
-/// computer's agents and engines, and every machine at once, each with one
-/// SSH call. Quitting cancels the check.
-pub(crate) fn spawn_availability_check(
-    generation: u64,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) -> JoinHandle<()> {
-    spawn_cancellable_io(
-        tracker,
-        "checking what is available",
+/// Ask the daemon to check launch availability. Results arrive on the feed.
+pub(crate) fn spawn_availability_check(updates: UnboundedSender<DashboardIoUpdate>) {
+    spawn_background_async(
+        "asking the daemon to check availability",
         updates,
-        move |cancelled| match machine_request(
-            mj_client::daemon::DaemonAction::CheckAvailability,
-            cancelled,
-        )? {
-            mj_client::daemon::DaemonReply::Availability(report) => Ok(report),
-            _ => anyhow::bail!("daemon returned an unexpected availability reply"),
+        SAVE_ACK_TIMEOUT,
+        async {
+            match daemon::connect_existing()
+                .await?
+                .request(daemon::DaemonAction::CheckAvailability)
+                .await?
+            {
+                daemon::DaemonReply::Done => Ok(()),
+                _ => anyhow::bail!("daemon returned an unexpected availability acknowledgement"),
+            }
         },
-        move |result| DashboardIoUpdate::AvailabilityChecked { generation, result },
-    )
+        DashboardIoUpdate::AvailabilityCheckRequested,
+    );
 }
 
 /// Read saved-profile sign-in status off the dashboard's loop.

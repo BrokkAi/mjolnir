@@ -119,9 +119,7 @@ mod docs_screenshots;
 mod test_support;
 
 pub use crate::actions::CommandId;
-pub use crate::availability::{
-    AvailabilityChecked, LocalEngine, MachineFinding, MachineRuntimeProbe,
-};
+pub use crate::availability::{MachineFinding, MachineRuntimeProbe};
 pub use crate::combined::{
     render_combined, render_combined_with_chat_access, render_combined_with_theme,
 };
@@ -572,12 +570,8 @@ pub enum DashboardAction {
         target_id: String,
     },
     CancelTargetTest,
-    /// Find out, off the render loop, which profiles and runtimes are there,
-    /// adding what is new; the answer returns through
-    /// `DashboardState::apply_availability_check`.
-    CheckAvailability {
-        generation: u64,
-    },
+    /// Ask the daemon to check launch availability and publish it on the feed.
+    CheckAvailability,
     /// Find out, off the render loop, which of these configured project
     /// directories exist; answers return through
     /// `DashboardState::apply_project_directory_check`.

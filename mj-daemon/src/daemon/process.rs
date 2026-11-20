@@ -420,6 +420,11 @@ pub(super) async fn run_daemon_runtime(
     // Before the web viewer starts: it shows this service's readings.
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
+    let mut availability = mj_core::runtime::spawn(super::availability::run(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut availability_outcome = None;
     let notification_pruning = mj_core::runtime::spawn(super::attention::prune_read_notifications(
         state.clone(),
         cancellation.clone(),
@@ -713,6 +718,10 @@ pub(super) async fn run_daemon_runtime(
                     break;
                 }
                 result = supervise_service(&mut alert_task, &mut alert_outcome, &cancellation, "notification service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut availability, &mut availability_outcome, &cancellation, "availability service") => {
                     result?;
                     break;
                 }
@@ -1023,6 +1032,17 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join capacity service",
         capacity_service.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join availability service",
+        match availability_outcome {
+            Some(result) => result,
+            None => availability
+                .await
+                .context("availability service failed")
+                .and_then(std::convert::identity),
+        },
     );
     epilogue.record(
         &mut outcome,

@@ -1151,6 +1151,16 @@ pub(crate) async fn run_server(
                             });
                             continue;
                         }
+                        ControllerAction::CheckAvailability => {
+                            let outcome = match daemon_runtime.request_availability_check() {
+                                Ok(()) => ActionOutcome::accepted(),
+                                Err(error) => ActionOutcome::Refused(Refusal::unusable(format!("{error:#}"))),
+                            };
+                            if request.reply.send(outcome).is_err() {
+                                tracing::debug!("availability check reply dropped after client disconnect");
+                            }
+                            continue;
+                        }
                         ControllerAction::RefreshCapacity { target_id } => {
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not

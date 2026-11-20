@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine};
+use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine, TargetTemplate};
 
 use super::machines::{MachineProbe, add_machine_runtimes, probe_machines};
 use super::{RuntimeProbe, add_detected_profiles, discover_runtimes, harness_cli_installed};
@@ -24,6 +24,8 @@ pub struct AvailabilityReport {
     /// Every configured profile, as it was checked, and why it is missing,
     /// or `None` when it is there.
     pub profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
+    /// Target templates that stood while probing, including exact additions.
+    pub targets: BTreeMap<String, TargetTemplate>,
     /// This computer's container engines, usable or not.
     pub local: Vec<RuntimeProbe>,
     /// What each SSH and EC2 machine can run.
@@ -76,7 +78,9 @@ pub fn check_availability(
     executor: &(impl CommandExecutor + Sync),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<AvailabilityReport> {
-    let machines: Vec<(String, Machine)> = Config::load_from(config_path)?
+    let config = Config::load_from(config_path)?.with_local_targets();
+    let mut targets = config.targets;
+    let machines: Vec<(String, Machine)> = config
         .machines
         .into_iter()
         .filter(|(_, machine)| !matches!(machine, Machine::Local { .. }))
@@ -91,7 +95,14 @@ pub fn check_availability(
     });
     let added_profiles = added_profiles?;
     ensure!(!cancelled(), "availability check cancelled");
-    let added_runtimes = add_machine_runtimes(config_path, &machines, cancelled)?;
+    let added_runtimes = add_machine_runtimes(config_path, &machines, cancelled)?
+        .into_iter()
+        .map(|(machine, runtimes)| {
+            let ids = runtimes.keys().cloned().collect();
+            targets.extend(runtimes);
+            (machine, ids)
+        })
+        .collect();
     let profiles = Config::load_from(config_path)?
         .profiles
         .into_iter()
@@ -102,6 +113,7 @@ pub fn check_availability(
         .collect();
     Ok(AvailabilityReport {
         profiles,
+        targets,
         local,
         machines,
         added_profiles,

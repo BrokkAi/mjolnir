@@ -2009,38 +2009,13 @@ fn api_app_with_preferences(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
-    // Every local engine answers, so a test's availability does not depend on
-    // the engines the machine running it has.
-    api_app_with_engines(
-        backend,
-        adjust,
-        preferences_path,
-        Arc::new(|kind| {
-            matches!(kind, "local-podman" | "local-docker" | "apple-container")
-                .then_some(mj_controller::controller::LocalEngineReadiness::Ready)
-        }),
-    )
-}
-
-fn api_app_with_engines(
-    backend: Arc<FakeBackend>,
-    adjust: impl FnOnce(&mut ViewerSnapshot),
-    preferences_path: PathBuf,
-    engine_probe: super::EngineProbe,
-) -> (
-    axum::Router,
-    mpsc::Receiver<ControllerRequest>,
-    watch::Sender<ViewerSnapshot>,
-    mpsc::Receiver<super::super::BundleRequest>,
-) {
-    api_app_with_worker_check(backend, adjust, preferences_path, engine_probe, None)
+    api_app_with_worker_check(backend, adjust, preferences_path, None)
 }
 
 fn api_app_with_worker_check(
     backend: Arc<FakeBackend>,
     adjust: impl FnOnce(&mut ViewerSnapshot),
     preferences_path: PathBuf,
-    engine_probe: super::EngineProbe,
     worker_check: Option<crate::server::WorkerSourceCheck>,
 ) -> (
     axum::Router,
@@ -2084,7 +2059,6 @@ fn api_app_with_worker_check(
     options.set_upgrade_gate(backend.upgrade_gate.clone());
     options.set_subagent_backend(backend);
     options.set_preferences_path(preferences_path);
-    options.set_engine_probe(engine_probe);
     if let Some(check) = worker_check {
         options.set_worker_source_check(check);
     }
@@ -2767,6 +2741,7 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
         backend.clone(),
         |snapshot| {
             snapshot.profiles.push(ViewerProfile {
+                availability: Default::default(),
                 id: "grok-main".into(),
 
                 capabilities_key: String::new(),
@@ -3034,6 +3009,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
         backend.clone(),
         |snapshot| {
             snapshot.profiles.push(crate::server::ViewerProfile {
+                availability: Default::default(),
                 id: "quota-winner".into(),
                 harness_kind: "codex".into(),
 
@@ -3043,6 +3019,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
                 quota: None,
             });
             snapshot.profiles.push(crate::server::ViewerProfile {
+                availability: Default::default(),
                 id: "claude4".into(),
                 harness_kind: "claude".into(),
 
@@ -3158,6 +3135,7 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
         backend,
         |snapshot| {
             snapshot.profiles.push(crate::server::ViewerProfile {
+                availability: Default::default(),
                 id: "claude4".into(),
                 harness_kind: "codex".into(),
                 capabilities_key: String::new(),
@@ -3243,6 +3221,7 @@ async fn model_first_sonnet_alias_uses_the_selected_profiles_launch_value() {
             let (app, mut actions, _, _) = api_app(backend.clone(), |snapshot| {
                 for (id, kind) in [("claude", "claude"), ("gemini", "antigravity")] {
                     snapshot.profiles.push(crate::server::ViewerProfile {
+                        availability: Default::default(),
                         id: id.into(),
                         harness_kind: kind.into(),
                         capabilities_key: String::new(),
@@ -3304,6 +3283,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
     let (app, mut actions, _, _) = api_app(backend, |snapshot| {
         for id in ["alpha", "zeta"] {
             snapshot.profiles.push(crate::server::ViewerProfile {
+                availability: Default::default(),
                 id: id.into(),
                 harness_kind: "codex".into(),
 
@@ -6410,65 +6390,51 @@ async fn options_list_what_a_caller_may_launch_without_leaking_configuration() {
     assert!(body["default"].is_null());
 }
 
-/// F-7: on a host with no Docker engine, `mj doctor` and the dashboard's
-/// Targets pane said the built-in `docker` target was unavailable while this
-/// route said `ready`, because the local host's capacity reading answered.
-/// The route now asks the same engine check, and says the engine is missing.
 // Hard-won: ba563efa: options said Docker was ready while doctor and the dashboard found no engine.
 #[tokio::test]
-async fn options_mark_a_local_target_without_its_engine_unavailable() {
-    use mj_controller::controller::LocalEngineReadiness;
+async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity() {
+    use mj_client::availability::AvailabilityVerdict;
 
-    let (app, _, _, _) = api_app_with_engines(
-        Arc::new(FakeBackend::default()),
-        |snapshot| {
-            snapshot.targets.push(crate::server::ViewerTarget {
-                id: "docker".into(),
-                kind: "local-docker".into(),
-                permission_mode: None,
-                yolo: true,
-                subagents_configured: false,
-                oracle_configured: false,
-                resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
-                requires_project_directory: false,
-                remembered_container_size: None,
-                container_host_limits: None,
-                container_capacity: None,
-                container_memory_hard_limit: false,
-                default_resource_allocation: None,
-                runtime_missing: false,
-                default_candidate: false,
-                availability: crate::server::api::LaunchAvailability::Unknown,
-                unavailable_reason: None,
-                recent_project_directories: Vec::new(),
-            });
-            snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
-                id: "local".into(),
-                label: "local".into(),
-                target_ids: vec!["docker".into(), "podman".into(), "raw".into()],
-                cpu_percent: Some(20),
-                memory_used_bytes: None,
-                memory_total_bytes: None,
-                logical_cores: None,
-                container_capacity: None,
-                disk_total_bytes: None,
-                virtual_machines: None,
-                sampled_at_epoch_seconds: Some(1),
-                refreshing: false,
-                stale: false,
-                has_error: false,
-                storage: Vec::new(),
-            }];
-        },
-        absent_preferences_path(),
-        Arc::new(|kind| match kind {
-            "local-docker" => Some(LocalEngineReadiness::NotInstalled),
-            "local-podman" => Some(LocalEngineReadiness::Ready),
-            _ => None,
-        }),
-    );
-
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        snapshot.profiles[0].availability = AvailabilityVerdict::Missing {
+            reason: "Codex is not installed here.".into(),
+        };
+        let podman = snapshot
+            .targets
+            .iter_mut()
+            .find(|target| target.id == "podman")
+            .unwrap();
+        podman.availability = AvailabilityVerdict::Missing {
+            reason: "Start Podman and try again.".into(),
+        };
+        let mut docker = podman.clone();
+        docker.id = "docker".into();
+        docker.kind = "local-docker".into();
+        docker.runtime_missing = true;
+        docker.availability = AvailabilityVerdict::Missing {
+            reason: "Docker is not installed on this host".into(),
+        };
+        snapshot.targets.push(docker);
+        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
+            id: "local".into(),
+            label: "local".into(),
+            target_ids: vec!["docker".into(), "podman".into(), "raw".into()],
+            cpu_percent: Some(20),
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            logical_cores: None,
+            container_capacity: None,
+            disk_total_bytes: None,
+            virtual_machines: None,
+            sampled_at_epoch_seconds: Some(1),
+            refreshing: false,
+            stale: false,
+            has_error: false,
+            storage: Vec::new(),
+        }];
+    });
     let response = app
+        .clone()
         .oneshot(
             bearer(Request::get("/api/v1/options"))
                 .body(Body::empty())
@@ -6485,70 +6451,33 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
         target("docker")["unavailable_reason"],
         "Docker is not installed on this host"
     );
-    assert_eq!(target("podman")["availability"], "ready");
-    assert_eq!(target("raw")["availability"], "ready");
-}
-
-/// A runtime missing on the daemon's host is permanent, so the options say so
-/// with `runtime_missing`; a host that did not answer is unavailable but not
-/// missing, so callers keep it listed.
-#[tokio::test]
-async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
-    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
-        snapshot.targets.push(crate::server::ViewerTarget {
-            id: "docker".into(),
-            kind: "local-docker".into(),
-            permission_mode: None,
-            yolo: true,
-            subagents_configured: false,
-            oracle_configured: false,
-            resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
-            requires_project_directory: false,
-            remembered_container_size: None,
-            container_host_limits: None,
-            container_capacity: None,
-            container_memory_hard_limit: false,
-            default_resource_allocation: None,
-            runtime_missing: true,
-            default_candidate: false,
-            availability: crate::server::api::LaunchAvailability::Unknown,
-            unavailable_reason: None,
-            recent_project_directories: Vec::new(),
-        });
-        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
-            id: "builder".into(),
-            label: "builder".into(),
-            target_ids: vec!["podman".into()],
-            cpu_percent: None,
-            memory_used_bytes: None,
-            memory_total_bytes: None,
-            logical_cores: None,
-            container_capacity: None,
-            disk_total_bytes: None,
-            virtual_machines: None,
-            sampled_at_epoch_seconds: None,
-            refreshing: false,
-            stale: false,
-            has_error: true,
-            storage: Vec::new(),
-        }];
-    });
-    let response = app
-        .oneshot(
-            bearer(Request::get("/api/v1/options"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = json_body(response).await;
-    let targets = body["targets"].as_array().unwrap();
-    let target = |id: &str| targets.iter().find(|target| target["id"] == id).unwrap();
-
-    assert_eq!(target("docker")["availability"], "unavailable");
     assert_eq!(target("docker")["runtime_missing"], true);
     assert_eq!(target("podman")["availability"], "unavailable");
+    assert_eq!(
+        target("podman")["unavailable_reason"],
+        "Start Podman and try again."
+    );
     assert!(target("podman").get("runtime_missing").is_none());
+    assert_eq!(target("raw")["availability"], "unknown");
+    assert_eq!(body["profiles"][0]["availability"], "unavailable");
+    assert_eq!(
+        body["profiles"][0]["unavailable_reason"],
+        "Codex is not installed here."
+    );
+
+    let response = app
+        .oneshot(start_request(
+            r#"{"profile_id":"codex-1","target_id":"docker","bundle_id":"hel"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        json_body(response)
+            .await
+            .to_string()
+            .contains("Docker is not installed on this host")
+    );
 }
 
 /// A target the daemon has no worker binary for is refused at admission with
@@ -6567,7 +6496,6 @@ async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
         Arc::new(FakeBackend::default()),
         |_| {},
         absent_preferences_path(),
-        Arc::new(|_| Some(mj_controller::controller::LocalEngineReadiness::Ready)),
         Some(check),
     );
     let response = app

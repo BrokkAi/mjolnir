@@ -34,6 +34,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use mj_controller::database::DetachedSessionDraft;
+#[cfg(test)]
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord};
 use mj_core::subagent::SubagentMetadata;
@@ -480,7 +481,7 @@ pub(crate) struct DashboardContext {
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
     runtime_review_views: BTreeMap<String, mj_daemon::review_host::RuntimeReviewView>,
-    runtime_config: Feed<watch::Receiver<Config>>,
+    runtime_config: Feed<watch::Receiver<mj_daemon::pollers::RuntimeLaunchConfig>>,
     pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
     remote_lifecycle_operations: BTreeMap<String, drains::RemoteLifecycleObservation>,
     /// A workspace the user just created, opened once the feed carries it.
@@ -1963,6 +1964,13 @@ impl DashboardContext {
         dashboard.set_profile_capabilities(capabilities_rx.borrow().clone());
         dashboard.set_quota_snapshot(quota_rx.borrow().clone());
         let runtime_config_rx = remote_worker.config;
+        {
+            let runtime_launch = runtime_config_rx.borrow();
+            dashboard.set_runtime_config(
+                runtime_launch.config.clone(),
+                runtime_launch.availability.clone(),
+            );
+        }
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardLifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();

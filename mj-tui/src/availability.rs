@@ -1,43 +1,17 @@
-//! What is there: the one answer to which profiles and runtimes the session
-//! pickers offer.
-//!
-//! A check runs in the background when the dashboard starts and whenever a
-//! new-session or resume picker opens, never more than one at a time. It
-//! adds what is new to the configuration and answers, for everything
-//! configured, whether it is there. The pickers list only what is offered:
-//! enabled, and not found missing. Nothing is ever shown as being checked:
-//! until an answer arrives the configuration stands, and the screen changes
-//! only when an answer does. What is missing is named once under the list,
-//! with why and how to fix it.
-
-use std::collections::{BTreeMap, BTreeSet};
-
-use mj_core::config::{HarnessProfile, TargetTemplate, runtime_kind_name, target_machine_id};
+//! Request launch checks and render the verdicts published by the daemon.
+use mj_client::availability::{AvailabilityNote, RuntimeAvailability};
+use mj_core::config::{Config, HarnessProfile, TargetTemplate};
+use mj_core::snapshot_map::SharedSnapshot;
 
 use crate::{DashboardAction, DashboardState, Mode};
 
-pub use mj_client::availability::{
-    AvailabilityChecked, LocalEngine, MachineFinding, MachineRuntimeProbe,
-};
+pub use mj_client::availability::{MachineFinding, MachineRuntimeProbe};
 
-/// The dashboard's latest answers. Each answer applies only while what it
-/// describes is configured unchanged; an edited profile or machine has no
-/// answer until the next check.
 #[derive(Debug, Clone)]
 pub(crate) struct Availability {
-    /// A check should start: at startup, and whenever a picker opens.
     wanted: bool,
-    /// No check may start: first-run setup has not finished deciding
-    /// whether the configuration is new.
     held: bool,
-    in_flight: Option<u64>,
-    generation: u64,
-    profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
-    local: BTreeMap<String, LocalEngine>,
-    machines: BTreeMap<String, MachineRuntimeProbe>,
-    /// The last failure reported, so a check that keeps failing the same
-    /// way says so once.
-    failure: Option<String>,
+    pub(crate) snapshot: SharedSnapshot<RuntimeAvailability>,
 }
 
 impl Default for Availability {
@@ -45,61 +19,17 @@ impl Default for Availability {
         Self {
             wanted: true,
             held: false,
-            in_flight: None,
-            generation: 0,
-            profiles: BTreeMap::new(),
-            local: BTreeMap::new(),
-            machines: BTreeMap::new(),
-            failure: None,
+            snapshot: Default::default(),
         }
     }
-}
-
-/// An entry the pickers leave out, and the line that says why.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Missing {
-    /// A runtime that is there but cannot run sessions, named with its
-    /// reason and fix everywhere: it needs the user's action.
-    Named(String),
-    /// Its SSH check failed. The list names the machine once, however many
-    /// runtimes it hides; only a host that answered nothing is routine.
-    Unreachable {
-        machine: String,
-        detail: String,
-        remediation: String,
-        answered_nothing: bool,
-    },
-    /// A standard runtime whose engine was never installed here.
-    Silent,
-}
-
-impl Missing {
-    fn ssh_failure(machine: Option<&str>, answered_nothing: bool) -> String {
-        match (machine, answered_nothing) {
-            (Some(machine), true) => format!("{machine} did not answer"),
-            (Some(machine), false) => format!("SSH to {machine} failed"),
-            (None, true) => "it did not answer".into(),
-            (None, false) => "its SSH check failed".into(),
-        }
-    }
-}
-
-/// One line under the target list. A `routine` line (a machine that did not
-/// answer) is muted; the others are warnings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MissingTargetLine {
-    pub(crate) text: String,
-    pub(crate) full: String,
-    pub(crate) routine: bool,
 }
 
 impl DashboardState {
-    /// Ask for a check the next time the dashboard can start one.
     pub(crate) fn want_availability_check(&mut self) {
         self.availability.wanted = true;
     }
 
-    /// Keep checks from starting until [`Self::release_availability_check`].
+    /// Wait for first-run setup to decide whether the configuration is new.
     pub fn hold_availability_check(&mut self) {
         self.availability.held = true;
     }
@@ -108,74 +38,84 @@ impl DashboardState {
         self.availability.held = false;
     }
 
-    /// Start a check if one is wanted and none is running. Settings holds
-    /// its own draft of profiles and machines, so a check waits for it to
-    /// close rather than write under it.
     pub fn take_availability_check(&mut self) -> Option<DashboardAction> {
-        let availability = &mut self.availability;
-        if !availability.wanted
-            || availability.held
-            || availability.in_flight.is_some()
+        if !self.availability.wanted
+            || self.availability.held
             || matches!(self.mode, Mode::Setup(_))
         {
             return None;
         }
-        availability.wanted = false;
-        availability.generation = availability.generation.wrapping_add(1);
-        availability.in_flight = Some(availability.generation);
-        Some(DashboardAction::CheckAvailability {
-            generation: availability.generation,
+        self.availability.wanted = false;
+        Some(DashboardAction::CheckAvailability)
+    }
+
+    /// Install configuration and its verdicts from the same feed frame.
+    pub fn set_runtime_config(
+        &mut self,
+        config: Config,
+        availability: SharedSnapshot<RuntimeAvailability>,
+    ) {
+        if *self.config == config && self.availability.snapshot == availability {
+            return;
+        }
+        let selected = self.wizard_selection();
+        self.availability.snapshot = availability;
+        self.set_config(config);
+        self.reselect_wizard(selected);
+    }
+
+    pub(crate) fn profile_missing(&self, id: &str) -> Option<&str> {
+        self.availability
+            .snapshot
+            .profiles
+            .get(id)?
+            .missing_reason()
+    }
+
+    pub(crate) fn missing_target_lines(&self) -> &[AvailabilityNote] {
+        &self.availability.snapshot.target_notes
+    }
+
+    pub(crate) fn target_unavailable(&self, id: &str) -> Option<String> {
+        if let Some(notice) = self
+            .config
+            .targets
+            .get(id)
+            .and_then(TargetTemplate::launch_refusal)
+        {
+            return Some(notice.into());
+        }
+        (!self.target_offered(id)).then(|| {
+            self.target_missing_line(id)
+                .unwrap_or_else(|| format!("{id} is not available."))
         })
     }
 
-    /// Record a check's answers. What it added is said; what is missing is
-    /// shown where it matters, under the picker lists, so a check that
-    /// finds what the last one found changes nothing on screen.
-    pub fn apply_availability_check(
-        &mut self,
-        generation: u64,
-        result: Result<AvailabilityChecked, String>,
-    ) {
-        if self.availability.in_flight != Some(generation) {
-            return;
-        }
-        self.availability.in_flight = None;
-        let checked = match result {
-            Ok(checked) => checked,
-            Err(error) => {
-                if self.availability.failure.as_deref() != Some(error.as_str()) {
-                    self.set_failure_notice(format!("Could not check what is available: {error}"));
-                    self.availability.failure = Some(error);
-                }
-                return;
-            }
-        };
-        self.availability.failure = None;
-        let selected = self.wizard_selection();
-        self.availability.profiles = checked.profiles;
-        self.availability.local = checked.local;
-        self.availability.machines = checked
-            .machines
-            .into_iter()
-            .map(|probe| (probe.machine_id.clone(), probe))
-            .collect();
-        let mut sentences = Vec::new();
-        if !checked.added_profiles.is_empty() {
-            sentences.push(format!(
-                "Added agent profiles: {}.",
-                checked.added_profiles.join(", ")
-            ));
-        }
-        for (machine, added) in &checked.added_runtimes {
-            sentences.push(format!(
-                "Added runtimes for {machine}: {}.",
-                added.join(", ")
-            ));
-        }
-        if !sentences.is_empty() {
-            self.set_notice(sentences.join(" "));
-        }
-        self.reselect_wizard(selected);
+    pub(crate) fn target_offered(&self, id: &str) -> bool {
+        self.config.enabled_target(id).is_some() && self.target_missing_line(id).is_none()
+    }
+
+    pub(crate) fn target_missing_line(&self, id: &str) -> Option<String> {
+        self.config.enabled_target(id)?;
+        self.availability
+            .snapshot
+            .targets
+            .get(id)?
+            .missing_reason()
+            .map(str::to_owned)
+    }
+
+    pub(crate) fn default_engine_missing(&self, id: &str) -> bool {
+        self.config.is_default_target(id)
+            && self.availability.snapshot.uninstalled_engines.contains(id)
+    }
+
+    pub(crate) fn machine_runtime_reason(&self, id: &str) -> Option<String> {
+        self.availability
+            .snapshot
+            .machines_without_runtime
+            .get(id)
+            .cloned()
     }
 
     /// Whether profile `id` is offered for new work.
@@ -195,20 +135,6 @@ impl DashboardState {
         self.offered_profiles()
             .nth(index)
             .map(|(id, _)| id.to_owned())
-    }
-
-    /// Why enabled profile `id` is missing, from the latest answer about it
-    /// as it is configured now.
-    pub(crate) fn profile_missing(&self, id: &str) -> Option<&str> {
-        let current = self.config.profiles.get(id)?;
-        let (checked, missing) = self.availability.profiles.get(id)?;
-        // Readiness came from the daemon. Its projection retains sources only,
-        // while the installed profile may also hold locally resolved values.
-        let checked_sources = serde_json::to_value(checked).expect("profile serializes");
-        let current_sources = serde_json::to_value(current).expect("profile serializes");
-        (checked_sources == current_sources)
-            .then_some(missing.as_deref())
-            .flatten()
     }
 
     /// The index in `config.targets` of `wanted` when it is offered, or of
@@ -234,184 +160,6 @@ impl DashboardState {
             .enabled_profiles()
             .filter_map(|(id, _)| Some(format!("{id}: {}", self.profile_missing(id)?)))
             .collect()
-    }
-
-    /// The lines under a target list: one for each enabled runtime it leaves
-    /// out, except that a machine that did not answer is named once with every
-    /// runtime it hides; then one for each machine that runs nothing yet.
-    pub(crate) fn missing_target_lines(&self) -> Vec<MissingTargetLine> {
-        let mut lines = Vec::new();
-        let mut unreachable_machines: Vec<(Missing, Vec<&str>)> = Vec::new();
-        for id in self.config.targets.keys() {
-            if self.config.enabled_target(id).is_none() {
-                continue;
-            }
-            match self.target_missing(id) {
-                Some(Missing::Named(reason)) => lines.push(MissingTargetLine {
-                    text: format!("{id}: {reason}"),
-                    full: format!("{id}: {reason}"),
-                    routine: false,
-                }),
-                Some(missing @ Missing::Unreachable { .. }) => {
-                    match unreachable_machines
-                        .iter_mut()
-                        .find(|(found, _)| *found == missing)
-                    {
-                        Some((_, ids)) => ids.push(id),
-                        None => unreachable_machines.push((missing, vec![id])),
-                    }
-                }
-                Some(Missing::Silent) | None => {}
-            }
-        }
-        lines.extend(unreachable_machines.into_iter().map(|(missing, ids)| {
-            let Missing::Unreachable {
-                machine,
-                detail,
-                remediation,
-                answered_nothing,
-            } = missing
-            else {
-                unreachable!("only SSH failures are grouped");
-            };
-            let brief = format!(
-                "{}; not listing {}.",
-                Missing::ssh_failure(Some(&machine), answered_nothing),
-                ids.join(", ")
-            );
-            let full = sentence(&format!("{brief} {}", detail.trim()), &remediation);
-            MissingTargetLine {
-                text: if answered_nothing {
-                    brief
-                } else {
-                    full.clone()
-                },
-                full,
-                routine: answered_nothing,
-            }
-        }));
-        lines.extend(self.machines_without_runtime_lines());
-        lines
-    }
-
-    /// Why runtime `id` cannot be chosen for new work, or `None` when it can.
-    /// Every picker's target step asks this.
-    pub(crate) fn target_unavailable(&self, id: &str) -> Option<String> {
-        if let Some(notice) = self
-            .config
-            .targets
-            .get(id)
-            .and_then(TargetTemplate::launch_refusal)
-        {
-            return Some(notice.into());
-        }
-        if self.target_offered(id) {
-            return None;
-        }
-        Some(
-            self.target_missing_line(id)
-                .unwrap_or_else(|| format!("{id} is not available.")),
-        )
-    }
-
-    /// Whether runtime `id` is offered for new work.
-    pub(crate) fn target_offered(&self, id: &str) -> bool {
-        self.config.enabled_target(id).is_some() && self.target_missing(id).is_none()
-    }
-
-    /// Why runtime `id` is missing, from the latest answer about its engine
-    /// or its machine as configured now; `None` while it is there or no
-    /// answer applies.
-    pub(crate) fn target_missing(&self, id: &str) -> Option<Missing> {
-        let target = self.config.targets.get(id)?;
-        let kind = runtime_kind_name(target);
-        match target {
-            TargetTemplate::LocalBare => None,
-            TargetTemplate::LocalPodman { .. }
-            | TargetTemplate::LocalDocker { .. }
-            | TargetTemplate::AppleContainer { .. } => {
-                let engine = self.availability.local.get(kind)?;
-                let reason = engine.missing.as_ref()?;
-                Some(if !engine.installed && self.config.is_default_target(id) {
-                    Missing::Silent
-                } else {
-                    Missing::Named(reason.clone())
-                })
-            }
-            TargetTemplate::SshBare { .. }
-            | TargetTemplate::SshPodman { .. }
-            | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. }
-            | TargetTemplate::SshNitro { .. }
-            | TargetTemplate::AwsEc2 { .. } => {
-                let machine_id = target_machine_id(target, &self.config.machines)?;
-                let probe =
-                    self.availability.machines.get(machine_id).filter(|probe| {
-                        self.config.machines.get(machine_id) == Some(&probe.machine)
-                    })?;
-                match &probe.finding {
-                    MachineFinding::Unreachable {
-                        detail,
-                        remediation,
-                        answered_nothing,
-                    } => Some(Missing::Unreachable {
-                        machine: machine_id.to_owned(),
-                        detail: detail.clone(),
-                        remediation: remediation.clone(),
-                        answered_nothing: *answered_nothing,
-                    }),
-                    MachineFinding::Answered { runtimes, rejected } => {
-                        if runtimes
-                            .iter()
-                            .any(|(_, found)| runtime_kind_name(found) == kind)
-                        {
-                            return None;
-                        }
-                        let rejected = rejected.iter().find(|runtime| runtime.kind == kind)?;
-                        Some(Missing::Named(sentence(
-                            &rejected.detail,
-                            rejected.remediation.as_deref().unwrap_or_default(),
-                        )))
-                    }
-                }
-            }
-        }
-    }
-
-    /// The reason a configured, enabled runtime is not listed, for the line
-    /// under the target list. A standard runtime whose engine was never
-    /// installed has none.
-    pub(crate) fn target_missing_line(&self, id: &str) -> Option<String> {
-        self.config.enabled_target(id)?;
-        match self.target_missing(id)? {
-            Missing::Named(reason) => Some(reason),
-            Missing::Unreachable {
-                machine,
-                detail,
-                remediation,
-                answered_nothing,
-            } => Some(sentence(
-                &format!(
-                    "{}. {}",
-                    Missing::ssh_failure(Some(&machine), answered_nothing),
-                    detail.trim()
-                ),
-                &remediation,
-            )),
-            Missing::Silent => None,
-        }
-    }
-
-    /// Why machine `id`, which no runtime runs on, still has none, or `None`
-    /// before a check of its current definition has answered.
-    pub(crate) fn machine_runtime_reason(&self, id: &str) -> Option<String> {
-        let machine = self.config.machines.get(id)?;
-        let probe = self
-            .availability
-            .machines
-            .get(id)
-            .filter(|probe| probe.machine == *machine)?;
-        Some(finding_reason(&probe.finding))
     }
 
     /// The ids an open wizard has chosen, so an answer that removes one can
@@ -522,40 +270,6 @@ impl DashboardState {
             });
         }
     }
-
-    /// The machines no runtime runs on, for the line under the target list.
-    pub(crate) fn machines_without_runtime_lines(&self) -> Vec<MissingTargetLine> {
-        let ids: BTreeSet<&str> = self
-            .config
-            .machines_without_runtimes()
-            .map(|(id, _)| id)
-            .collect();
-        ids.into_iter()
-            .filter_map(|id| {
-                let machine = self.config.machines.get(id)?;
-                let probe = self
-                    .availability
-                    .machines
-                    .get(id)
-                    .filter(|probe| probe.machine == *machine)?;
-                Some(match &probe.finding {
-                    MachineFinding::Unreachable {
-                        answered_nothing: true,
-                        ..
-                    } => MissingTargetLine {
-                        text: format!("{id} did not answer."),
-                        full: format!("{id}: {}", finding_reason(&probe.finding)),
-                        routine: true,
-                    },
-                    finding => MissingTargetLine {
-                        text: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
-                        full: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
-                        routine: false,
-                    },
-                })
-            })
-            .collect()
-    }
 }
 
 /// Send a wizard past the step of a choice that just disappeared back to
@@ -579,102 +293,4 @@ fn return_to_changed_step(
         return Some(WizardStep::Target);
     }
     None
-}
-
-/// Why a machine has no runtime, from what probing it found: the reason it
-/// did not answer, or each runtime it cannot run. A finding with usable
-/// runtimes only arises when they could not be added.
-pub(crate) fn finding_reason(finding: &MachineFinding) -> String {
-    match finding {
-        MachineFinding::Unreachable {
-            detail,
-            remediation,
-            answered_nothing,
-        } => sentence(
-            &format!(
-                "{}. {}",
-                Missing::ssh_failure(None, *answered_nothing),
-                detail.trim()
-            ),
-            remediation,
-        ),
-        MachineFinding::Answered { runtimes, rejected } if runtimes.is_empty() => {
-            let mut reason = "it can run none.".to_owned();
-            for runtime in rejected {
-                reason.push(' ');
-                reason.push_str(&sentence(
-                    &format!("{}: {}", runtime.label, runtime.detail.trim()),
-                    runtime.remediation.as_deref().unwrap_or_default(),
-                ));
-            }
-            reason
-        }
-        MachineFinding::Answered { runtimes, .. } => format!(
-            "it can run {}; choose Detect runtimes in Settings › Runtimes to add them.",
-            runtimes
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
-/// `text` as a sentence, followed by `then` as another.
-fn sentence(text: &str, then: &str) -> String {
-    let mut sentence = text.trim().to_owned();
-    if !sentence.ends_with('.') {
-        sentence.push('.');
-    }
-    let then = then.trim();
-    if !then.is_empty() {
-        sentence.push(' ');
-        sentence.push_str(then);
-        if !sentence.ends_with('.') {
-            sentence.push('.');
-        }
-    }
-    sentence
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::{answer_availability, availability_answer};
-
-    // Hard-won: 471c11891: source-only daemon replies lost readiness when installed environments held resolved values.
-    #[test]
-    fn source_only_profile_readiness_survives_wire_transport_until_sources_change() {
-        let mut config = crate::test_support::config();
-        let id = config.profiles.keys().next().unwrap().clone();
-        config.profiles.get_mut(&id).unwrap().environment =
-            [("CONFIGURED_KEY".to_owned(), "value".to_owned())]
-                .into_iter()
-                .collect();
-        let mut dashboard = DashboardState::new(config, Default::default(), BTreeMap::new());
-        answer_availability(&mut dashboard, |dashboard| {
-            let mut answer = availability_answer(dashboard, &[], &[]);
-            answer.profiles.get_mut(&id).unwrap().1 = Some("daemon credential missing".into());
-            let wire =
-                serde_json::to_value(mj_client::daemon::DaemonReply::Availability(answer)).unwrap();
-            let mj_client::daemon::DaemonReply::Availability(answer) =
-                serde_json::from_value(wire).unwrap()
-            else {
-                panic!("availability reply")
-            };
-            assert_ne!(answer.profiles[&id].0, dashboard.config.profiles[&id]);
-            answer
-        });
-        assert_eq!(
-            dashboard.profile_missing(&id),
-            Some("daemon credential missing")
-        );
-        assert!(!dashboard.profile_offered(&id));
-        dashboard.config.profiles.get_mut(&id).unwrap().environment =
-            [("CONFIGURED_KEY".to_owned(), "changed".to_owned())]
-                .into_iter()
-                .collect();
-        assert_eq!(dashboard.profile_missing(&id), None);
-        assert!(dashboard.profile_offered(&id));
-    }
 }

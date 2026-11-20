@@ -331,10 +331,7 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<BTreeMap<String, mj_core::credentials::LoginStatus>, String>,
     },
-    AvailabilityChecked {
-        generation: u64,
-        result: std::result::Result<mj_tui::AvailabilityChecked, String>,
-    },
+    AvailabilityCheckRequested(Result<(), String>),
     BuildCachePreviewed {
         generation: u64,
         key: serde_json::Value,
@@ -1411,9 +1408,11 @@ impl DashboardContext {
                     tracing::warn!(%error, "could not read profile sign-in status");
                 }
             },
-            DashboardIoUpdate::AvailabilityChecked { generation, result } => self
-                .dashboard
-                .apply_availability_check(generation, result),
+            DashboardIoUpdate::AvailabilityCheckRequested(result) => {
+                if let Err(error) = result {
+                    self.dashboard.set_failure_notice(format!("Could not request an availability check: {error}"));
+                }
+            }
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
                 let no_agents = report.agents.is_empty();

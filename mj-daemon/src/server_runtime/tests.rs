@@ -1711,13 +1711,10 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
     }
 }
 
-/// The web pickers read a target's status from the snapshot, so it carries
-/// the same availability and reason `/api/v1/options` gives: a host that did
-/// not answer is unavailable with a sentence, a host that did is ready, and a
-/// target no reading covers is unknown.
 // Hard-won: 97bf5586: A silent target must carry its unavailable status into the web picker snapshot.
 #[test]
-fn snapshot_targets_carry_the_availability_the_options_report() {
+fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
+    use mj_client::availability::{AvailabilityVerdict, RuntimeAvailability};
     let mut controller = controller_with_profiles(&["codex"]);
     for id in ["answering", "silent", "unread"] {
         controller
@@ -1742,9 +1739,25 @@ fn snapshot_targets_carry_the_availability_the_options_report() {
         has_error,
         storage: Vec::new(),
     };
-    let capacity = [reading("answering", false), reading("silent", true)];
+    let capacity = [reading("answering", true), reading("silent", false)];
     let sources = PhoneProjectSources::default();
-    let snapshot = viewer_snapshot(
+    let mut publication = super::publication::ViewerPublication::default();
+    let missing = AvailabilityVerdict::Missing {
+        reason: "SSH to silent failed.".into(),
+    };
+    let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+    runtime.metadata.availability = RuntimeAvailability {
+        targets: [
+            ("answering".into(), AvailabilityVerdict::Available),
+            ("silent".into(), missing.clone()),
+            ("unread".into(), AvailabilityVerdict::Unknown),
+        ]
+        .into(),
+        ..Default::default()
+    }
+    .into();
+    publication.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+    let snapshot = publication.snapshot(
         &controller,
         &[],
         &Default::default(),
@@ -1766,18 +1779,18 @@ fn snapshot_targets_carry_the_availability_the_options_report() {
         },
         1,
     );
-    use crate::server::api::LaunchAvailability::{Ready, Unavailable, Unknown};
     let target = |id: &str| snapshot.targets.iter().find(|t| t.id == id).unwrap();
-    assert_eq!(target("answering").availability, Ready);
-    assert_eq!(target("answering").unavailable_reason, None);
-    assert_eq!(target("silent").availability, Unavailable);
     assert_eq!(
-        target("silent").unavailable_reason.as_deref(),
-        Some("the host \"silent\" did not answer its last check")
+        target("answering").availability,
+        AvailabilityVerdict::Available
     );
-    assert_eq!(target("unread").availability, Unknown);
+    assert_eq!(target("silent").availability, missing);
+    assert_eq!(target("unread").availability, AvailabilityVerdict::Unknown);
     let json = serde_json::to_value(target("silent")).unwrap();
-    assert_eq!(json["availability"], "unavailable");
+    assert_eq!(
+        json["availability"],
+        serde_json::json!({"status": "missing", "reason": "SSH to silent failed."})
+    );
 }
 
 fn snapshot_with_project_sources(

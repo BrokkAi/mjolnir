@@ -106,13 +106,13 @@ fn target_step_choices<W: WizardDraft>(
         .collect();
     // What is not there has no row, so it is named here with the reason,
     // rather than missing from the list without a word.
-    help.extend(dashboard.missing_target_lines().into_iter().map(|line| {
+    help.extend(dashboard.missing_target_lines().iter().map(|line| {
         let style = if line.routine {
             theme::muted()
         } else {
             warning
         };
-        Line::styled(line.text, style)
+        Line::styled(line.text.clone(), style)
     }));
     (target_table(rows), help, selected_row)
 }

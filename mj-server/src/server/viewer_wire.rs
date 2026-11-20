@@ -15,7 +15,7 @@ const INTERNED_FIELDS: [&str; 5] = [
     "incompatible_resume_targets",
 ];
 
-pub(super) const METADATA_FIELDS: [&str; 19] = [
+pub(super) const METADATA_FIELDS: [&str; 20] = [
     "profile_capabilities",
     "last_subagent_policies",
     "last_oracle_choices",
@@ -30,6 +30,7 @@ pub(super) const METADATA_FIELDS: [&str; 19] = [
     "workspaces",
     "profiles",
     "targets",
+    "target_availability_notes",
     "bundles",
     "review_config",
     "capacity",
@@ -127,6 +128,8 @@ struct SnapshotMetadata<'a> {
     workspaces: &'a [super::ViewerWorkspace],
     profiles: &'a [super::ViewerProfile],
     targets: &'a [super::ViewerTarget],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    target_availability_notes: &'a [mj_client::availability::AvailabilityNote],
     bundles: &'a [super::ViewerBundle],
     review_config: &'a super::ViewerReviewConfig,
     #[serde(skip_serializing_if = "slice_is_empty")]
@@ -179,6 +182,7 @@ pub(super) fn metadata(
         workspaces: &snapshot.workspaces,
         profiles: &snapshot.profiles,
         targets: &snapshot.targets,
+        target_availability_notes: &snapshot.target_availability_notes,
         bundles: &snapshot.bundles,
         review_config: &snapshot.review_config,
         capacity: &snapshot.capacity,

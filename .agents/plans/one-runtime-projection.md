@@ -19,7 +19,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 
 - [x] (2026-11-20 16:40Z) Reconnaissance: compared both pipelines and listed every fact computed twice. Findings are folded into Context and Orientation and the Decision Log. The full report, with file and line references at commit 818e11d0e, is in the parent session's report directory `.mj/agents/08c56cb5893e5e88dd4ff2d329501203/report.md` (not checked in; everything needed is restated here).
-- [ ] Milestone 1: one availability owner (#1372).
+- [x] (2026-11-20 17:09Z) Milestone 1: the daemon publishes launch availability for the terminal, web viewer and options API (#1372). Targeted tests, all 34 terminal goldens and Clippy passed. Live validation used an isolated Docker command fixture for a stopped service, and a second daemon with Docker absent from PATH.
 - [ ] Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
 - [ ] Milestone 3: web rows built only from the runtime capture.
 - [ ] Milestone 4: one verdict per action and per session state.
@@ -37,6 +37,13 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: the web viewer rebuilds only rows it marks dirty, and some facts a row shows depend on things that never mark it. A parent's Interrupt All offer depends on its children's activity, but a child-only update does not dirty the parent; the "change workspace" offer depends on how many workspaces exist, but creating a workspace dirties no row; a storage-only refresh rebuilds capacity metadata but not the per-row storage problem.
   Evidence: `mj-daemon/src/server_runtime/publication.rs` lines 141–224 and 277–287, `run.rs` lines 499–509 and 579–623, `snapshot.rs` lines 278–284 at 818e11d0e.
+
+- Observation: Milestone 1 also touches an existing HTTP admission rule. `InstalledEngines::runtime_missing` currently supplies the engine-installation fact that lets HTTP validation refuse explicitly named targets before enqueueing create, resume, and Move requests. The web Targets view also uses it to omit default candidates for engines that have never been installed. Replacing that fact with a demand-driven verdict changes admission before the first picker check, and using a general missing verdict in its place changes which requests get refused. The Decision Log records how those consumers retain the installation fact.
+  Evidence: `mj-daemon/src/server_runtime/snapshot.rs` lines 483–508 and 564, `mj-server/src/server/validation.rs` lines 183, 607, 694 and 1064–1075, `mj-server/src/server/api/sessions.rs` lines 102 and 367, and `mj-server/src/web/viewer.js` lines 5863–5868 at acd73e9d9.
+
+
+- Observation: the probe must retain the same target definitions that the daemon installs, including built-in runtime candidates. Automatic machine-runtime additions return their inserted definitions from the configuration transaction, so a later edit of a new target cannot inherit its probe result.
+  Evidence: `mj-setup/src/setup/availability.rs` and `mj-setup/src/setup/machines.rs`.
 
 
 ## Decision Log
@@ -62,6 +69,10 @@ This plan does not add a new public API. A later plan will publish this projecti
   Rationale: running discovery at daemon start would edit configuration on headless daemons that no user is looking at. The check already runs inside the daemon (`DaemonAction::CheckAvailability`), so only its owner and its readers change.
   Date/Author: 2026-11-20, parent session.
 
+- Decision: the presence of a local engine command and the result of probing a runtime are different facts. The existing `InstalledEngines` classifier moves to runtime capture and remains the owner of the first fact. HTTP create, resume and Move still refuse an absent engine before enqueueing, and the web Targets view still omits implicit runtimes whose engine is absent. The availability projection also uses that classifier to mark a target missing before any check if its command is absent. The pickers and launch options get their launch verdicts from the projection, and HTTP admission lets execution preflight judge probe-dependent failures.
+  Rationale: an absent command is definitive. A probe may be stale or unknown and does not justify broadening admission refusals.
+  Date/Author: 2026-11-20, parent session.
+
 - Decision: project-source resolution and quota surfacing are out of scope. Both surfaces call the same resolver and the same quota functions; only cache timing differs.
   Rationale: they are not two answers to one question, and including them would grow Milestone 3 without fixing a visible defect. Recorded under Outcomes as follow-ups.
   Date/Author: 2026-11-20, parent session.
@@ -74,7 +85,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 ## Outcomes & Retrospective
 
 
-Nothing has landed yet. Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
+Milestone 1 is implemented and validated in its detached worktree. Both pickers showed unchecked profiles and targets, then hid the same missing entries reported by the options API. A configuration edit restored the unchecked choice in both pickers. The running check accepted demand from both surfaces and repeated once. Without the Docker command, both pickers hid the target immediately and the API returned HTTP 400 on explicit create. The host has no installed Docker command, so the stopped-service case used a command fixture with the actual Docker preflight and daemon. Both isolated daemons were stopped. Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
 
 
 ## Context and Orientation
@@ -157,7 +168,7 @@ When a milestone changes dashboard layout or a shared terminal renderer, run eve
 ## Validation and Acceptance
 
 
-Milestone 1 is accepted when, in a named instance with Docker installed but its service stopped, one SSH machine configured with an unreachable address, and one native-login profile whose agent home and command were removed, the terminal's new-session picker and the web viewer's new-session picker leave out the same three entries and name each with the same reason, and `curl` of `/api/v1/options` with the instance's API token reports the same three as missing. Before the first check completes, both pickers list all three (unknown is offered). Editing the profile so it differs from what was checked makes it unknown until the next check.
+Milestone 1 is accepted when, in a named instance with Docker installed but its service stopped, one SSH machine configured with an unreachable address, and one native-login profile whose agent home and command were removed, the terminal's new-session picker and the web viewer's new-session picker leave out the same three entries and name each with the same reason, and `curl` of `/api/v1/options` with the instance's API token reports the same three as missing. Before the first check completes, both pickers list all three (unknown is offered). Editing the profile so it differs from what was checked makes it unknown until the next check. With no Docker command on PATH, both pickers hide its target before the first check and an explicit create through `/api/v1` returns the existing HTTP 400.
 
 Milestone 2 is accepted when, after editing the mbx `cache_dir` and pressing Refresh in the terminal, the Disks view shows the new filesystem without waiting for the daemon's next cycle, and the web viewer shows the same reading; and when no capacity sampler runs in the terminal process.
 

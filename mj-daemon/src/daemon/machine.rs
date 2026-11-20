@@ -20,7 +20,6 @@ pub(super) async fn execute(
             DaemonAction::PreviewBuildCache { .. } => executor.with_deadline(Duration::from_secs(60)),
             DaemonAction::TestTarget { .. } => executor.with_deadline(Duration::from_secs(15)),
             DaemonAction::DiscoverSetup { .. } => executor.with_deadline(Duration::from_secs(30)),
-            DaemonAction::CheckAvailability => executor.with_deadline(Duration::from_secs(60)),
             DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
             DaemonAction::DiscoverProjects { .. } => {
                 executor.with_deadline(Duration::from_secs(15))
@@ -156,50 +155,6 @@ pub(super) async fn execute(
                         machines: machine_probes,
                     },
                 )))
-            }
-            DaemonAction::CheckAvailability => {
-                use mj_setup::setup::{self, DEFAULT_IMAGE};
-                // Only quitting stops the check. A host that runs out the
-                // deadline fails its own probe; every other answer still lands.
-
-                let report =
-                    setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
-                        quit.load(std::sync::atomic::Ordering::Acquire)
-                    })?;
-                let path = std::env::var_os("PATH");
-                let local = report
-                    .local
-                    .into_iter()
-                    .map(|runtime| {
-                        let (_, template) =
-                            setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                        let installed = mj_controller::targets::local_engine_command(&template)
-                            .is_some_and(|engine| {
-                                mj_controller::targets::program_on_path(engine, path.as_deref())
-                            });
-                        let missing = (!runtime.usable()).then(|| match runtime.remediation {
-                            Some(fix) => format!("{} {fix}", runtime.detail.trim()),
-                            None => runtime.detail,
-                        });
-                        (
-                            runtime.kind.name().to_owned(),
-                            mj_client::availability::LocalEngine { missing, installed },
-                        )
-                    })
-                    .collect();
-                Ok(DaemonReply::Availability(
-                    mj_client::availability::AvailabilityChecked {
-                        profiles: report.profiles,
-                        local,
-                        machines: report
-                            .machines
-                            .into_iter()
-                            .map(machine_runtime_probe)
-                            .collect(),
-                        added_profiles: report.added_profiles,
-                        added_runtimes: report.added_runtimes,
-                    },
-                ))
             }
             DaemonAction::ProfileLoginStatuses => Ok(DaemonReply::ProfileLoginStatuses(
                 mj_controller::profile_login::statuses(&controller.config, quit.clone()),

@@ -583,7 +583,7 @@ pub fn add_machine_runtimes(
     config_path: &Path,
     probes: &[MachineProbe],
     cancelled: &dyn Fn() -> bool,
-) -> Result<BTreeMap<String, Vec<String>>> {
+) -> Result<BTreeMap<String, BTreeMap<String, TargetTemplate>>> {
     let additions = |config: &Config| {
         probes
             .iter()
@@ -609,8 +609,8 @@ pub fn add_machine_runtimes(
         // doubled.
         let mut added = BTreeMap::new();
         for (machine_id, runtimes) in additions(latest) {
-            added.insert(machine_id, runtimes.keys().cloned().collect());
-            latest.targets.extend(runtimes);
+            latest.targets.extend(runtimes.clone());
+            added.insert(machine_id, runtimes);
         }
         Ok(added)
     })?;

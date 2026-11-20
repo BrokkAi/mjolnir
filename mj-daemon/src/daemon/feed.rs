@@ -14,6 +14,7 @@ type NativeOwners = SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
     capacity: super::capacity::ContainerCapacityProjection,
+    installed_engines: super::availability::InstalledEngines,
     incarnation: String,
     sequence: u64,
     snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
@@ -249,6 +250,13 @@ impl RuntimeState {
                 owner.committed_snapshot(),
             )
         };
+        let availability_report = self.availability().report.clone();
+        full.metadata.availability = super::availability::project(
+            availability_report.as_deref(),
+            &full.metadata.config,
+            &mut history.installed_engines,
+        )
+        .into();
         full.metadata.container_upgrade_sessions =
             history.full.metadata.container_upgrade_sessions.clone();
         for (id, record) in history.full.records.changes(&full.records) {

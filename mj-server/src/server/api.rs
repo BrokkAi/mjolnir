@@ -111,10 +111,7 @@ pub use routes::*;
 mod config;
 pub use config::*;
 mod options;
-#[cfg(test)]
-pub(crate) use options::EngineProbe;
-use options::*;
-pub use options::{LocalEngineChecks, TargetStatus, target_availability};
+use options::{options, saved_default};
 mod sessions;
 use sessions::*;
 mod ui;

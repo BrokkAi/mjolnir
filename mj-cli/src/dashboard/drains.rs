@@ -587,9 +587,15 @@ impl DashboardContext {
         while let Some(config) = self.runtime_config.next_ready() {
             latest = Some(config);
         }
-        let Some(config) = latest else {
+        let Some(mj_daemon::pollers::RuntimeLaunchConfig {
+            config,
+            availability,
+        }) = latest
+        else {
             return;
         };
+        self.dashboard
+            .set_runtime_config(config.clone(), availability);
         self.auto_afk
             .set_enabled(config.advanced.auto_afk_minutes > 0);
         // The chat's copy of `[review]` follows the daemon's, so `/review
@@ -605,7 +611,6 @@ impl DashboardContext {
         // where a changed `[daemon]` setting is carried out.
         let daemon_changed = config.daemon != self.controller.config.daemon;
         self.controller.config = config.clone();
-        self.dashboard.set_config(config);
         self.refresh_chat_context();
         if daemon_changed {
             super::actions::spawn_daemon_placement(self);

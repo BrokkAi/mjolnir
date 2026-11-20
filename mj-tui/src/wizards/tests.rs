@@ -1611,11 +1611,11 @@ fn a_missing_profile_is_left_out_of_the_profile_step_and_named() {
     ready_open_new_wizard(&mut dashboard);
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
         let mut answer = crate::test_support::availability_answer(dashboard, &[], &[]);
-        answer.profiles.get_mut("kimi-1").unwrap().1 = Some(
+        *answer.profiles.get_mut("kimi-1").unwrap() = mj_client::availability::AvailabilityVerdict::Missing { reason:
             "Kimi Code is not installed here: /profiles/kimi does not exist and `kimi` is not \
              on PATH. Install Kimi Code, or turn the profile off in Settings › Profiles."
                 .into(),
-        );
+        };
         answer
     });
     let text = captured_drawn(&mut dashboard, 120, 30).join("\n");
@@ -3743,33 +3743,29 @@ fn ready_key(dashboard: &mut DashboardState, event: crossterm::event::KeyEvent) 
 }
 
 /// An answer that a runtime is gone removes it from the open picker, and an
-/// answer that it is back returns it, with nothing shown in between. A
-/// check is never repeated while one runs, and an answer that arrives after
-/// a newer check started is dropped.
+/// answer that it is back returns it, with no transient checking UI.
 #[test]
 fn availability_answers_change_the_open_picker_only_when_they_differ() {
     let mut config = standard_local_targets_config();
     config.default_targets.clear();
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let Some(DashboardAction::CheckAvailability {
-        generation: startup,
-    }) = dashboard.take_availability_check()
-    else {
-        panic!("startup checks what is there");
-    };
+    assert_eq!(
+        dashboard.take_availability_check(),
+        Some(DashboardAction::CheckAvailability)
+    );
     open_new_session_wizard(&mut dashboard);
     assert_eq!(
         dashboard.take_availability_check(),
-        None,
-        "a check in flight is not repeated"
+        Some(DashboardAction::CheckAvailability)
     );
     dashboard.handle_key(key(KeyCode::Enter));
     let before = crate::test_support::drawn(&mut dashboard, 160, 40).join("\n");
     assert!(before.contains("docker"), "{before}");
     assert!(!before.contains("checking"), "{before}");
 
-    let answer = crate::test_support::availability_answer(&dashboard, &["docker"], &[]);
-    dashboard.apply_availability_check(startup, Ok(answer));
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["docker"], &[])
+    });
     let gone = crate::test_support::drawn(&mut dashboard, 160, 40).join("\n");
     assert!(
         gone.contains("docker: docker is not installed here."),
@@ -3777,24 +3773,12 @@ fn availability_answers_change_the_open_picker_only_when_they_differ() {
     );
     assert!(!gone.contains("unavailable"), "{gone}");
 
-    // The picker opened while the startup check ran, so another is due.
-    let Some(DashboardAction::CheckAvailability { generation: stale }) =
-        dashboard.take_availability_check()
-    else {
-        panic!("opening the picker asked for a check");
-    };
-    dashboard.handle_key(key(KeyCode::Esc));
-    open_new_session_wizard(&mut dashboard);
-    let answer = crate::test_support::availability_answer(&dashboard, &[], &[]);
-    dashboard.apply_availability_check(stale, Ok(answer));
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &[], &[])
+    });
     let back = crate::test_support::drawn(&mut dashboard, 160, 40).join("\n");
     assert!(!back.contains("not installed"), "{back}");
-    let answer = crate::test_support::availability_answer(&dashboard, &["docker"], &[]);
-    dashboard.apply_availability_check(stale, Ok(answer));
-    assert!(
-        dashboard.target_offered("docker"),
-        "an answer to a finished check changes nothing"
-    );
+    assert!(dashboard.target_offered("docker"));
 }
 
 // Hard-won: #1370: an availability answer left a stale profile index, closed a mid-launch wizard, and raced first-run setup.
@@ -3808,11 +3792,11 @@ fn availability_answers_update_a_wizard_and_spare_a_launch() {
         "nothing is checked while first-run setup decides"
     );
     dashboard.release_availability_check();
-    let Some(DashboardAction::CheckAvailability { generation }) =
-        dashboard.take_availability_check()
-    else {
-        panic!("the startup check starts once setup is done");
-    };
+    assert_eq!(
+        dashboard.take_availability_check(),
+        Some(DashboardAction::CheckAvailability),
+        "the startup check starts once setup is done"
+    );
     open_new_session_wizard(&mut dashboard);
     let last = dashboard.offered_profiles().count() - 1;
     let chosen = dashboard.nth_offered_profile(last).unwrap();
@@ -3821,9 +3805,16 @@ fn availability_answers_update_a_wizard_and_spare_a_launch() {
         _ => panic!("expected the new-session wizard"),
     }
     let first = dashboard.nth_offered_profile(0).unwrap();
-    let mut answer = crate::test_support::availability_answer(&dashboard, &[], &[]);
-    answer.profiles.get_mut(&first).unwrap().1 = Some("gone".into());
-    dashboard.apply_availability_check(generation, Ok(answer));
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        let mut answer = crate::test_support::availability_answer(dashboard, &[], &[]);
+        answer.profiles.insert(
+            first,
+            mj_client::availability::AvailabilityVerdict::Missing {
+                reason: "gone".into(),
+            },
+        );
+        answer
+    });
     let wizard = new_wizard(&dashboard);
     assert_eq!(
         dashboard.nth_offered_profile(wizard.profile).as_deref(),
@@ -3838,8 +3829,10 @@ fn availability_answers_update_a_wizard_and_spare_a_launch() {
     }
     crate::test_support::answer_availability(&mut dashboard, |dashboard| {
         let mut answer = crate::test_support::availability_answer(dashboard, &[], &[]);
-        for (_, missing) in answer.profiles.values_mut() {
-            *missing = Some("gone".into());
+        for verdict in answer.profiles.values_mut() {
+            *verdict = mj_client::availability::AvailabilityVerdict::Missing {
+                reason: "gone".into(),
+            };
         }
         answer
     });
@@ -3859,11 +3852,7 @@ fn a_chosen_runtime_that_disappears_returns_the_wizard_to_its_step() {
     let mut config = standard_local_targets_config();
     config.default_targets.clear();
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let Some(DashboardAction::CheckAvailability { generation }) =
-        dashboard.take_availability_check()
-    else {
-        panic!("startup checks what is there");
-    };
+
     open_new_session_wizard(&mut dashboard);
     let docker = dashboard
         .config
@@ -3878,8 +3867,9 @@ fn a_chosen_runtime_that_disappears_returns_the_wizard_to_its_step() {
         }
         _ => panic!("expected the new-session wizard"),
     }
-    let answer = crate::test_support::availability_answer(&dashboard, &["docker"], &[]);
-    dashboard.apply_availability_check(generation, Ok(answer));
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["docker"], &[])
+    });
     let wizard = new_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Target);
     assert_ne!(nth_key(&dashboard.config.targets, wizard.target), "docker");
@@ -4424,16 +4414,15 @@ fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
 
         dashboard.want_availability_check();
         crate::test_support::answer_availability(&mut dashboard, |dashboard| {
-            let mut answer =
-                crate::test_support::availability_answer(dashboard, &["docker"], &["machine"]);
-            // Older daemons omit the flag: default false must keep the fix visible.
-            answer.machines[0].finding = serde_json::from_value(serde_json::json!({
-                "Unreachable": {
-                    "detail": "Permission denied (publickey).",
-                    "remediation": "Install your public key with `ssh-copy-id dev@machine`."
-                }
-            }))
-            .unwrap();
+            let mut answer = crate::test_support::availability_answer(dashboard, &["docker"], &[]);
+            crate::test_support::publish_unreachable_machine(
+                dashboard,
+                &mut answer,
+                "machine",
+                "Permission denied (publickey).",
+                "Install your public key with `ssh-copy-id dev@machine`.",
+                false,
+            );
             answer
         });
         let lines = dashboard.missing_target_lines();

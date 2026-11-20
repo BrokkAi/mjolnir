@@ -835,83 +835,116 @@ pub(crate) fn operation(
         resume_destination: None,
     }
 }
-
-/// The availability answer for every profile and runtime `dashboard`
-/// configures: everything is there except the local engines of the targets
-/// in `uninstalled`, which were never installed, and the machines in
-/// `unreachable`, which did not answer.
+/// The launch verdicts this rendering fixture receives from the feed.
 pub(crate) fn availability_answer(
     dashboard: &DashboardState,
     uninstalled: &[&str],
     unreachable: &[&str],
-) -> crate::AvailabilityChecked {
+) -> mj_client::availability::RuntimeAvailability {
+    use mj_client::availability::{AvailabilityNote, AvailabilityVerdict, RuntimeAvailability};
     let config = &dashboard.config;
-    let missing_kinds: Vec<&str> = uninstalled
+    let mut answer = RuntimeAvailability {
+        profiles: config
+            .enabled_profiles()
+            .map(|(id, _)| (id.to_owned(), AvailabilityVerdict::Available))
+            .collect(),
+        ..Default::default()
+    };
+    let missing_kinds: Vec<_> = uninstalled
         .iter()
         .map(|id| mj_core::config::runtime_kind_name(&config.targets[*id]))
         .collect();
-    let local = ["podman", "docker", "apple-container"]
-        .into_iter()
-        .map(|kind| {
-            let gone = missing_kinds.contains(&kind);
-            (
-                kind.to_owned(),
-                crate::LocalEngine {
-                    missing: gone.then(|| format!("{kind} is not installed here.")),
-                    installed: !gone,
-                },
-            )
-        })
-        .collect();
-    let machines = config
-        .machines
-        .iter()
-        .filter(|(_, machine)| !matches!(machine, mj_core::config::Machine::Local { .. }))
-        .map(|(id, machine)| crate::MachineRuntimeProbe {
-            machine_id: id.clone(),
-            machine: machine.clone(),
-            finding: if unreachable.contains(&id.as_str()) {
-                crate::MachineFinding::Unreachable {
-                    answered_nothing: true,
-                    detail: format!("`ssh {id} true` failed: Connection timed out"),
-                    remediation: format!("Check that {id} is up."),
-                }
-            } else {
-                crate::MachineFinding::Answered {
-                    runtimes: config
-                        .machine_runtimes(id)
-                        .map(|(id, target)| (id.to_owned(), target.clone()))
-                        .collect(),
-                    rejected: Vec::new(),
-                }
-            },
-        })
-        .collect();
-    crate::AvailabilityChecked {
-        profiles: config
-            .profiles
-            .iter()
-            .map(|(id, profile)| (id.clone(), (profile.clone(), None)))
-            .collect(),
-        local,
-        machines,
-        added_profiles: Vec::new(),
-        added_runtimes: BTreeMap::new(),
+    for (id, target) in config.enabled_targets() {
+        let kind = mj_core::config::runtime_kind_name(target);
+        let local_engine = matches!(
+            target,
+            mj_core::config::TargetTemplate::LocalDocker { .. }
+                | mj_core::config::TargetTemplate::LocalPodman { .. }
+                | mj_core::config::TargetTemplate::AppleContainer { .. }
+        );
+        let verdict = if local_engine && missing_kinds.contains(&kind) {
+            answer.uninstalled_engines.insert(id.to_owned());
+            let reason = format!("{kind} is not installed here.");
+            if !config.is_default_target(id) {
+                let text = format!("{id}: {reason}");
+                answer.target_notes.push(AvailabilityNote {
+                    full: text.clone(),
+                    text,
+                    routine: false,
+                });
+            }
+            AvailabilityVerdict::Missing { reason }
+        } else {
+            AvailabilityVerdict::Available
+        };
+        answer.targets.insert(id.to_owned(), verdict);
     }
+    for machine in unreachable
+        .iter()
+        .filter(|id| config.machines.contains_key(**id))
+    {
+        publish_unreachable_machine(
+            dashboard,
+            &mut answer,
+            machine,
+            &format!("`ssh {machine} true` failed: Connection timed out."),
+            &format!("Check that {machine} is up."),
+            true,
+        );
+    }
+    answer
 }
 
-/// Answers the availability check the dashboard asks for, as its loop would.
+pub(crate) fn publish_unreachable_machine(
+    dashboard: &DashboardState,
+    answer: &mut mj_client::availability::RuntimeAvailability,
+    machine: &str,
+    detail: &str,
+    remediation: &str,
+    routine: bool,
+) {
+    use mj_client::availability::{AvailabilityNote, AvailabilityVerdict};
+    let ids: Vec<_> = dashboard
+        .config
+        .machine_runtimes(machine)
+        .map(|(id, _)| id)
+        .collect();
+    let summary = if routine {
+        format!("{machine} did not answer")
+    } else {
+        format!("SSH to {machine} failed")
+    };
+    let suffix = format!("{detail} {remediation}");
+    for id in &ids {
+        answer.targets.insert(
+            (*id).to_owned(),
+            AvailabilityVerdict::Missing {
+                reason: format!("{summary}. {suffix}"),
+            },
+        );
+    }
+    let text = if ids.is_empty() {
+        answer
+            .machines_without_runtime
+            .insert(machine.to_owned(), format!("it did not answer. {suffix}"));
+        format!("{summary}.")
+    } else {
+        format!("{summary}; not listing {}.", ids.join(", "))
+    };
+    let full = format!("{text} {suffix}");
+    answer.target_notes.push(AvailabilityNote {
+        text: if routine { text } else { full.clone() },
+        full,
+        routine,
+    });
+}
+
 pub(crate) fn answer_availability(
     dashboard: &mut DashboardState,
-    answer: impl FnOnce(&DashboardState) -> crate::AvailabilityChecked,
+    answer: impl FnOnce(&DashboardState) -> mj_client::availability::RuntimeAvailability,
 ) {
-    let Some(DashboardAction::CheckAvailability { generation }) =
-        dashboard.take_availability_check()
-    else {
-        panic!("a check of what is there is due");
-    };
     let answer = answer(dashboard);
-    dashboard.apply_availability_check(generation, Ok(answer));
+    dashboard.set_runtime_config((*dashboard.config).clone(), answer.into());
 }
 
 /// Publish authoritative form provenance, as the daemon runtime feed does.

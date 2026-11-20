@@ -642,7 +642,9 @@ pub(super) async fn apply_phone_action(
         }
         // Refreshes are handled by the phone control loop, which owns the
         // pollers they nudge.
-        ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => {
+        ControllerAction::CheckAvailability
+        | ControllerAction::RefreshQuota { .. }
+        | ControllerAction::RefreshCapacity { .. } => {
             bail!("refresh actions must be handled by the phone control loop")
         }
     }

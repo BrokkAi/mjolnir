@@ -506,6 +506,8 @@ pub struct RuntimeMetadata {
     pub profile_capabilities:
         SharedSnapshot<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
     pub config: SharedSnapshot<Config>,
+    #[serde(default)]
+    pub availability: SharedSnapshot<crate::availability::RuntimeAvailability>,
     /// The ids in `config.targets` that the daemon supplied as default
     /// candidates rather than the user's file naming them. `Config` never
     /// serializes this set (it is not file content), so the feed carries it

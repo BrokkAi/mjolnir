@@ -16,7 +16,6 @@ pub(super) async fn handle_action(
         | DaemonAction::CheckpointArchiveSizes { .. }
         | DaemonAction::TestTarget { .. }
         | DaemonAction::DiscoverSetup { .. }
-        | DaemonAction::CheckAvailability
         | DaemonAction::ProfileLoginStatuses
         | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
@@ -28,6 +27,10 @@ pub(super) async fn handle_action(
         | DaemonAction::ValidateMountSource { .. }
         | DaemonAction::ValidateSessionMounts { .. }) => {
             super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
+        }
+        DaemonAction::CheckAvailability => {
+            state.request_availability_check()?;
+            Ok(DaemonReply::Done)
         }
         DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
         DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
@@ -1351,6 +1354,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
+            | DaemonAction::CheckAvailability
             | DaemonAction::RuntimeChanges { .. }
             | DaemonAction::SessionTail { .. }
             | DaemonAction::SubagentOptions { .. }

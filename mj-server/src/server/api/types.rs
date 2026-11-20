@@ -902,6 +902,10 @@ pub struct LaunchProfile {
     /// The harness kind, such as `codex` or `claude`. Which account it is, and
     /// where its credentials live, stay on the controller.
     pub harness: String,
+    #[serde(default)]
+    pub availability: LaunchAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 /// One runtime template a session can run on.
@@ -915,9 +919,7 @@ pub struct LaunchTarget {
     /// instead of provisioning repositories into a workspace.
     pub requires_project_directory: bool,
     pub availability: LaunchAvailability,
-    /// What to tell a person when the host did not answer. This repository
-    /// composes the sentence: a probe's own message names hosts and commands
-    /// and stays on the controller.
+    /// The daemon's launch-availability reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
     /// Whether the target's runtime (Docker, Podman) is not installed on the
@@ -937,22 +939,18 @@ pub struct LaunchTarget {
     pub host: Option<String>,
 }
 
-/// How much this daemon knows about a target's host.
-///
-/// A reading arrives from a background poll, so it can be absent, old, or
-/// failed. Only `Unavailable` is a statement that the target cannot be used;
-/// `Unknown` means nobody has checked yet, which is the ordinary state
-/// immediately after startup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The launch verdict for a configured profile or target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchAvailability {
-    /// A reading covers this target and its last check succeeded.
+    /// A check found the entry usable.
     Ready,
-    /// A reading covers this target but is marked stale.
+    /// Historical host-capacity status accepted when reading older replies.
     Stale,
-    /// A reading covers this target and its last check failed.
+    /// A check found the entry missing or its engine is absent.
     Unavailable,
-    /// No reading covers this target yet.
+    /// The current configuration has no completed check. Offer the entry.
+    #[default]
     Unknown,
 }
 

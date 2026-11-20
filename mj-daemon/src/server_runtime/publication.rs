@@ -17,7 +17,6 @@ pub(super) struct ViewerPublication {
     pub(super) dirty: BTreeSet<String>,
     project_dirty: BTreeSet<String>,
     pub(super) inputs_changed: bool,
-    engines: InstalledEngines,
     capabilities: mj_core::snapshot_map::SharedSnapshot<
         mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     >,
@@ -220,7 +219,7 @@ impl ViewerPublication {
                 children: &self.children,
                 failed_launch_retries: &self.runtime.metadata.failed_launch_retries,
             }),
-            &mut self.engines,
+            &self.runtime.metadata.availability,
         );
         for id in snapshot.sessions.0.keys().cloned().collect::<Vec<_>>() {
             let row = snapshot.sessions.0.get_mut(&id).expect("selected row");

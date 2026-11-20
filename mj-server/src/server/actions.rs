@@ -185,6 +185,7 @@ pub enum ControllerAction {
     RefreshQuota {
         profile_id: String,
     },
+    CheckAvailability,
     RefreshCapacity {
         target_id: String,
     },

@@ -389,6 +389,8 @@ function selectedWorkspaceId() {
   undefined)?.id;
 }
 
+let availabilityPicker = null;
+
 function applyRoute() {
   cancelSessionPress();
   const previousRoute = route;
@@ -476,6 +478,13 @@ function applyRoute() {
   }
   if (name !== 'move') moveDraft = null;
   if (name === 'settings') syncSettingsRoute();
+  const picker = name === 'new' || (name === 'resume' && (route.sessionId || route.wikiId))
+    ? routeHash(route)
+    : null;
+  if (picker !== availabilityPicker) {
+    availabilityPicker = picker;
+    if (picker) void requestAvailabilityCheck();
+  }
   renderRoute();
   // A screen reader should land at the top of the page it just moved to
   // rather than wherever it happened to be.
@@ -2888,44 +2897,56 @@ function abortPendingNewPreflight() {
   pendingNewPreflight = null;
 }
 
-// The id of the only profile there is to choose, or '' when the Account
-// choice is real. The terminal wizard skips that step the same way.
+async function requestAvailabilityCheck() {
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'check-availability' }),
+    });
+  } catch (error) {
+    announce(`Could not request an availability check: ${error.message}`);
+  }
+}
+
+function availabilityMissing(item) {
+  return item?.availability?.status === 'missing';
+}
+
+function offeredProfiles() {
+  return (snapshot?.profiles || []).filter(profile => !availabilityMissing(profile));
+}
+
+function launchableTargets(targets) {
+  return (targets || []).filter(target => !availabilityMissing(target));
+}
+
+function targetLaunchable(id) {
+  return !availabilityMissing((snapshot?.targets || []).find(target => target.id === id));
+}
+
+function missingProfileNotes() {
+  return (snapshot?.profiles || []).filter(availabilityMissing).map(profile => ({
+    full: `${profile.id}: ${profile.availability.reason}`,
+  }));
+}
+
+function appendAvailabilityNotes(body, notes) {
+  for (const note of notes) {
+    const line = el('p', note.routine ? 'dim' : 'move-warning', note.text || note.full);
+    if (note.text && note.text !== note.full) line.title = note.full;
+    body.append(line);
+  }
+}
+
+// Single choices are filled in when the wizard can skip their step.
 function soleProfileId() {
-  const profiles = snapshot?.profiles || [];
+  const profiles = offeredProfiles();
   return profiles.length === 1 ? profiles[0].id : '';
 }
 
-// The id of the only target the Where-to-run step could offer, or '' when it
-// has a decision to make. This is the terminal wizard's rule (`lone_target`):
-// a target counts unless its runtime is missing or its last check failed; the
-// one left must be a raw host, because a container or EC2 target is sized on
-// that step. A check that has not answered yet still counts.
 function loneNewTargetId() {
-  const offered = launchableTargets(snapshot?.targets).filter(target => target.availability !== 'unavailable');
-  return offered.length === 1 && offered[0].requires_project_directory === true ? offered[0].id : '';
-}
-
-// A target whose runtime (Docker, Podman) is not installed on the daemon's
-// host will never run a session there, so no picker lists it. A host that
-// merely did not answer its last check is a different fact and stays listed.
-function launchableTargets(targets) {
-  return (targets || []).filter(target => !target.runtime_missing);
-}
-
-// What to say beside a target whose host did not answer its last check. The
-// target stays selectable: the check may be out of date, and only the daemon
-// knows whether a launch would work. A missing runtime is filtered out before
-// this is asked, and `unknown` (nobody has checked yet) says nothing.
-function targetStatus(target) {
-  return target?.availability === 'unavailable' && !target.runtime_missing
-    ? 'did not answer its last check'
-    : '';
-}
-
-// Whether a target id may be offered: unknown ids pass, because the server
-// answers for those.
-function targetLaunchable(id) {
-  return !(snapshot?.targets || []).find(target => target.id === id)?.runtime_missing;
+  const targets = launchableTargets(snapshot?.targets);
+  return targets.length === 1 && targets[0].requires_project_directory === true ? targets[0].id : '';
 }
 
 // The daemon's saved default pair, read from `/api/v1/options` (the snapshot
@@ -3156,7 +3177,7 @@ function freshDraft() {
   const draft = {
     workspaceId: selectedWorkspaceId(),
     step: 0,
-    profileId: preferredId(snapshot?.profiles || [], launchDefault?.profile_id),
+    profileId: preferredId(offeredProfiles(), launchDefault?.profile_id),
     targetId: preferredId(launchableTargets(snapshot?.targets), launchDefault?.target_id),
     bundleId: '',
     projectDirectory: '',
@@ -3384,6 +3405,23 @@ function derivedTitle() {
   return `${project} via ${newDraft.profileId}`;
 }
 
+function selectNewTarget(draft, value) {
+  const previousTargetId = draft.targetId;
+  cancelProjectRequests();
+  draft.projectPicker = freshProjectPicker();
+  draft.projectPickers = {};
+  draft.projectDirectories[previousTargetId] = draft.projectDirectory;
+  draft.targetId = value;
+  draft.projectDirectory = draft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
+  setNewTargetSizing(draft, value);
+  // Changing the target changes which project question is asked, and
+  // invalidates anything the previous project answer was checked for.
+  draft.preflighted = false;
+  draft.remoteRepositories = [];
+  draft.localChangesExcluded = false;
+  draft.preflightError = '';
+}
+
 function renderNewForm() {
   if (!newDraft || newDraft.workspaceId !== selectedWorkspaceId()) {
     if (newDraft && newDraft.workspaceId !== selectedWorkspaceId()) {
@@ -3393,8 +3431,27 @@ function renderNewForm() {
     newDraft = freshDraft();
     newError.textContent = '';
   }
-  settleSkippedNewSteps(newDraft);
+  let changedChoice = null;
+  const profile = snapshot.profiles.find(profile => profile.id === newDraft.profileId);
+  const target = snapshot.targets.find(target => target.id === newDraft.targetId);
+  if (!newDraft.committing) {
+    if (availabilityMissing(profile)) {
+      abortPendingNewPreflight();
+      selectNewProfile(newDraft, preferredId(offeredProfiles(), launchDefault?.profile_id));
+      changedChoice = 'profile';
+    }
+    if (availabilityMissing(target)) {
+      abortPendingNewPreflight();
+      selectNewTarget(newDraft, preferredId(launchableTargets(snapshot.targets), launchDefault?.target_id));
+      changedChoice ??= 'target';
+    }
+    settleSkippedNewSteps(newDraft);
+  }
   const steps = visibleSteps();
+  if (changedChoice) {
+    const choiceStep = steps.findIndex(step => step.key === changedChoice);
+    newDraft.step = Math.min(newDraft.step, Math.max(0, choiceStep));
+  }
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
   if (step.key === 'project' && !newDraft.catalogStep) {
@@ -3405,9 +3462,11 @@ function renderNewForm() {
   // mounted so it cannot interrupt a touch gesture or dismiss a native picker.
   const signature = JSON.stringify({
     step: step.key,
-    profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
+    profiles: step.key === 'profile' ? offeredProfiles().map(p => [p.id, p.harness_kind]) : null,
+    profileNotes: missingProfileNotes(),
+    targetNotes: snapshot.target_availability_notes,
     targets: step.key === 'target' ? [
-      launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t), t.resource_allocation_kind,
+      launchableTargets(snapshot.targets).map(t => [t.id, t.kind, t.resource_allocation_kind,
         t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
       newDraft.rememberContainerSize,
@@ -3443,7 +3502,7 @@ function renderNewForm() {
       field.append(el('span', '', 'Account'));
       const select = el('select');
       select.id = 'new-profile';
-      for (const profile of snapshot.profiles) {
+      for (const profile of offeredProfiles()) {
         const option = el('option', '', profile.label ?? profile.id);
         option.value = profile.id;
         select.append(option);
@@ -3461,25 +3520,12 @@ function renderNewForm() {
       };
       field.append(select, description);
       body.append(field);
-      if (!snapshot.profiles.length) body.append(el('p', 'dim', 'No accounts configured.'));
+      if (!offeredProfiles().length) body.append(el('p', 'dim', 'No account is available here.'));
       break;
     }
     case 'target': {
       body.append(pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), newDraft.targetId, value => {
-          const previousTargetId = newDraft.targetId;
-          cancelProjectRequests();
-          newDraft.projectPicker = freshProjectPicker();
-          newDraft.projectPickers = {};
-          newDraft.projectDirectories[previousTargetId] = newDraft.projectDirectory;
-          newDraft.targetId = value;
-          newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
-          setNewTargetSizing(newDraft, value);
-          // Changing the target changes which project question is asked, and
-          // invalidates anything the previous project answer was checked for.
-          newDraft.preflighted = false;
-          newDraft.remoteRepositories = [];
-          newDraft.localChangesExcluded = false;
-          newDraft.preflightError = '';
+          selectNewTarget(newDraft, value);
           renderNewTargetSizingControls(newDraft, sizing);
           syncNewSizingState(newDraft);
         }));
@@ -3619,6 +3665,8 @@ function renderNewForm() {
 
     }
   }
+  appendAvailabilityNotes(body, missingProfileNotes());
+  appendAvailabilityNotes(body, snapshot.target_availability_notes || []);
   newStep.replaceChildren(body);
   const checking = pendingNewPreflight === newDraft;
   if (checking) {
@@ -3642,7 +3690,7 @@ function renderNewForm() {
 function pickerField(label, id, items, value, onChange) {
   const field = choiceControl({
     label,
-    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: [item.kind || item.harness_kind, targetStatus(item)].filter(Boolean).join(' · ') })),
+    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: item.kind || item.harness_kind || '' })),
     values: [value],
     onChange: () => onChange(field.querySelector('input:checked')?.value || ''),
   });
@@ -4331,7 +4379,7 @@ async function advanceNew() {
   const steps = visibleSteps();
   const step = steps[newDraft.step];
   newError.textContent = '';
-  if (step.key === 'profile' && !snapshot.profiles.some(p => p.id === newDraft.profileId)) {
+  if (step.key === 'profile' && !offeredProfiles().some(p => p.id === newDraft.profileId)) {
     newError.textContent = 'Choose an available account before continuing.';
     return;
   }
@@ -4942,9 +4990,9 @@ function wikiDraft(wikiId) {
     const row = wikiState.rows.find(item => item.id === wikiId);
     const held = (list, id) => (list || []).some(item => item.id === id);
     draft = {
-      profileId: held(snapshot?.profiles, row?.profile)
+      profileId: held(offeredProfiles(), row?.profile)
         ? row.profile
-        : (snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : ''),
+        : soleProfileId(),
       targetId: held(launchableTargets(snapshot?.targets), row?.target)
         ? row.target
         : (launchableTargets(snapshot?.targets).length === 1 ? launchableTargets(snapshot.targets)[0].id : ''),
@@ -5002,11 +5050,10 @@ function renderWikiDetail(wikiId) {
   else if (brief.status === 'error') briefBox.append(el('p', 'resume-status error', brief.error));
   else briefBox.append(renderMarkdown(brief.markdown));
   card.append(briefBox);
-  const profileItems = (snapshot?.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
+  const profileItems = offeredProfiles().map(profile => ({ id: profile.id, label: profile.id }));
   const targetItems = launchableTargets(snapshot?.targets).map(target => ({
     id: target.id,
     label: target.label || target.name || target.id,
-    status: targetStatus(target),
   }));
   if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
   if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
@@ -5021,6 +5068,8 @@ function renderWikiDetail(wikiId) {
   });
   targetField.dataset.role = 'wiki-target';
   card.append(profileField, targetField);
+  appendAvailabilityNotes(card, missingProfileNotes());
+  appendAvailabilityNotes(card, snapshot.target_availability_notes || []);
   const submit = action('Restore', '', { action: 'wiki-restore', id: wikiId });
   submit.disabled = submit.disabled || !draft.profileId || !draft.targetId;
   const row2 = el('div', 'row');
@@ -5121,7 +5170,7 @@ function conversionApplies(session, targetId) {
 function ensureResumeConversionPreflight(session) {
   const draft = resumeDraft(session);
   const targetId = draft.targetId;
-  if (!conversionApplies(session, targetId)) {
+  if (!targetLaunchable(targetId) || !conversionApplies(session, targetId)) {
     if (draft.conversion) draft.conversion = null;
     return;
   }
@@ -5169,8 +5218,9 @@ function resumeCardSignature(session) {
     draft.conversion?.status || '',
     draft.conversion?.detail || '',
     draft.conversion?.preview || null,
-    (snapshot.profiles || []).map(profile => [profile.id, profile.harness_kind]),
-    resumeTargetItems(session).map(item => item.status),
+    offeredProfiles().map(profile => [profile.id, profile.harness_kind]),
+    missingProfileNotes(),
+    snapshot.target_availability_notes,
     session.move_recovery,
     session.profile_id,
     session.target_id,
@@ -5193,7 +5243,7 @@ function resumeCardSignature(session) {
 function resumeTargetItems(session) {
   return (session.compatible_resume_targets || []).filter(targetLaunchable).map(id => {
     const target = (snapshot.targets || []).find(item => item.id === id);
-    return { id, label: target?.label || target?.name || id, status: targetStatus(target) };
+    return { id, label: target?.label || target?.name || id };
   });
 }
 
@@ -5233,7 +5283,7 @@ function updateResumeCard(card, session, rebuild = false) {
   const recovery = session.move_recovery;
   const draft = resumeDraft(session);
   const targetItems = resumeTargetItems(session);
-  const profileItems = (snapshot.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
+  const profileItems = offeredProfiles().map(profile => ({ id: profile.id, label: profile.id }));
   if (!draft.initialized) {
     if (!profileItems.some(item => item.id === draft.profileId)) {
       draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
@@ -5346,6 +5396,10 @@ function updateResumeCard(card, session, rebuild = false) {
     row.append(submit);
     body.append(row);
     card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
+  }
+  if (canResume && !stale && !session.failed_launch_retry) {
+    appendAvailabilityNotes(body, missingProfileNotes());
+    appendAvailabilityNotes(body, snapshot.target_availability_notes || []);
   }
   const pendingNode = el('p', 'dim', pendingActions.has(`destroy:${session.id}`) ? 'Destroying…' : pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '');
   pendingNode.setAttribute('role', 'status');

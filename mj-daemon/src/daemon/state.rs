@@ -130,6 +130,8 @@ impl RuntimeState {
             recent_launch: tokio::sync::watch::channel(None).0,
             recent_launch_update: Mutex::new(()),
             feed: Mutex::new(feed::RuntimeHistory::default()),
+            availability: Mutex::default(),
+            availability_requested: tokio::sync::Notify::new(),
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),

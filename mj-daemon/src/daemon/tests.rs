@@ -14567,22 +14567,6 @@ async fn daemon_api_exchange() {
             mj_core::config::SecretResolver::beside(&client_config_path),
             || serde_json::from_value(wire).unwrap(),
         );
-        if let Ok(DaemonReply::Availability(report)) = &response.result {
-            assert!(report.profiles["ready"].1.is_none());
-            assert!(report.profiles["agent"].1.is_some());
-            assert_eq!(
-                report.profiles["ready"]
-                    .0
-                    .environment
-                    .get("DAEMON_TEST_KEY"),
-                None
-            );
-            assert!(
-                !serde_json::to_string(report)
-                    .unwrap()
-                    .contains("daemon-secret-value")
-            );
-        }
         // Embedded NUL is invalid on every host; only OS diagnostic wording varies.
         if let Ok(DaemonReply::CheckpointArchiveSizes(sizes)) = &mut response.result {
             let error = sizes.get_mut("unreadable").unwrap().as_mut().unwrap_err();
@@ -14640,14 +14624,10 @@ async fn daemon_api_exchange() {
     }
 }
 
-/// Drop every answer that depends on the host's Docker: its availability
-/// entry, its rejected-runtime row, and a local Docker target it allowed.
+/// Drop Docker discovery results that depend on this test host.
 fn remove_host_docker(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
-            if let Some(serde_json::Value::Object(local)) = object.get_mut("local") {
-                local.remove("docker");
-            }
             if let Some(serde_json::Value::Array(rejected)) = object.get_mut("rejected_runtimes") {
                 rejected.retain(|runtime| runtime["kind"] != "docker");
             }

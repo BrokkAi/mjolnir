@@ -1,6 +1,7 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
 mod auto_afk;
+mod availability;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
@@ -271,6 +272,8 @@ pub struct RuntimeState {
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
+    availability: Mutex<availability::Availability>,
+    availability_requested: tokio::sync::Notify,
     recent_launch: tokio::sync::watch::Sender<Option<mj_core::go::RecentLaunch>>,
     recent_launch_update: Mutex<()>,
     committed: Option<

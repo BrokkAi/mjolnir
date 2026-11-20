@@ -870,6 +870,7 @@ fn validate_action_against(
         }
         ControllerAction::PushUnsubscribe { .. }
         | ControllerAction::PushTest { .. }
+        | ControllerAction::CheckAvailability
         | ControllerAction::RecordOperatorActivity
         | ControllerAction::SetOperatorAway { .. } => {}
         ControllerAction::RefreshQuota { profile_id } => {

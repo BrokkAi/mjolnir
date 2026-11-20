@@ -245,7 +245,11 @@ pub fn run_setup_command(config_path: &Path) -> Result<()> {
         .collect();
     let found = probe_machines(&machines, &probes);
     for (machine, runtimes) in add_machine_runtimes(config_path, &found, &|| false)? {
-        writeln!(output, "Runtimes for {machine}: {}.", runtimes.join(", "))?;
+        writeln!(
+            output,
+            "Runtimes for {machine}: {}.",
+            runtimes.into_keys().collect::<Vec<_>>().join(", ")
+        )?;
     }
     let checks = run_with_config_path(
         config_path,

@@ -1422,10 +1422,6 @@ pub enum DaemonReply {
         std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
     ),
     SetupDiscovery(Box<crate::discovery::SetupDetection>),
-    Availability(
-        #[serde(deserialize_with = "deserialize_availability")]
-        crate::availability::AvailabilityChecked,
-    ),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
@@ -3860,7 +3856,9 @@ pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 pub const SUSPEND_ONLY_CHECKPOINT_PROTOCOL: u32 = 110;
 /// Adoption streams cancellable quiescence waits before its atomic install.
 pub const QUIESCENT_ADOPTION_PROTOCOL: u32 = SUSPEND_ONLY_CHECKPOINT_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = QUIESCENT_ADOPTION_PROTOCOL;
+/// Availability checks are requested independently of their runtime feed results.
+pub const RUNTIME_AVAILABILITY_PROTOCOL: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = RUNTIME_AVAILABILITY_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
@@ -3962,7 +3960,6 @@ impl DaemonAction {
                 | Self::CheckpointArchiveSizes { .. }
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses
-                | Self::CheckAvailability
                 | Self::DiscoverSetup { .. }
                 | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
@@ -4046,12 +4043,6 @@ async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-}
-
-fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
-    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
 }
 
 #[cfg(test)]
