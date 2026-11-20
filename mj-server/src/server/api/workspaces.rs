@@ -54,11 +54,9 @@ const RESERVED_WORKSPACE_NAME: &str = "the workspace name \"default\" is reserve
 
 /// The workspace a new session belongs to.
 ///
-/// An empty answer means "let the controller choose", which it does only when
-/// the instance holds exactly one workspace. Every session lives in a
-/// workspace the dashboard and the viewer list, so an instance with none is
-/// refused with the way to make one, rather than given a workspace nobody
-/// sees (launch finding H-3).
+/// When the caller omits the workspace, select the instance's sole workspace.
+/// If there are none, tell the caller how to create one. If there are several,
+/// ask the caller to name one.
 pub(super) async fn workspace_for_new_session(
     backend: &Arc<dyn SubagentBackend>,
     requested: Option<String>,

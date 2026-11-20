@@ -2987,7 +2987,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             no_later_history: false,
             subagents: None,
             create_managed_worktree: None,
-            workspace_id: String::new(),
+            workspace_id: FakeWorkspaces::record("existing").id,
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             target_id: "podman".into(),
