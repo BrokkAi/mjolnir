@@ -840,10 +840,11 @@
   "eligible_pool_sha256": "d0fd469a4d0d5a22e7ac8833c0607ed4901e7432e81c0586187a2a457dbafc0d",
   "inputs": {
     "catalogue_sha256": "0ceb62a3c5b5e465fe7df216d191b2133b081ac2cc01ff54544df238d84a8551",
-    "labels_sha256": "3ef33b1029f3ed9b500da49960993b5d2fdf215f88f7d3c7973c4b1472181ff7",
+    "eligible_labels_sha256": "17a6a495c4bab449296c2037c8be4f2bff391aade1ba6d6f017270bed4624072",
     "labels_snapshot_sha256": "c1c143eeb5b8e107f9785300b839bbf3f8f9d7ca99c9a563eb6fb2e6c868ea02",
     "menu_sha256": "2059cb17f85cc02e6362bc205ca850f21c26064abde21bdb0449cf24cef828d3",
-    "steps_sha256": "033deac2faeebdc5dc28e8eb69aa4a6d56bc14d2ca26acaa5f70c80ce9b68105"
+    "plan_sha256": "d91cdbc4c008a3dbe53bbb65bfb5922c206e9d8425e34c927190c6cd8f89d20b",
+    "steps_sha256": "55733330171fa5ee7ba9956ea8679992758f867dd221879b5ef4cca909fdd377"
   },
   "jobs": [
     {
@@ -4417,7 +4418,7 @@
     "writer": "gpt-6.1-sol/high"
   },
   "page_rows": 50,
-  "plan_commit": "c37716a98cb4785c659b4862f43665474893bd72",
+  "plan_commit": "e183d4a876a481c44909c9265ae28ee97cc33bb3",
   "seed": 20261120,
   "version": 1
 }
