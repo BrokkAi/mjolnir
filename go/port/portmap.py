@@ -17,6 +17,7 @@ Usage (from the repository root):
   python3 go/port/portmap.py schedule [crate-dir]
   python3 go/port/portmap.py file <path.rs>       # one file's needs and names
   python3 go/port/portmap.py names <crate-dir>    # Rust path -> Go identifier
+  python3 go/port/portmap.py files <crate-dir> [--tests]   # the crate's Rust files, in port order
   python3 go/port/portmap.py tests <crate-dir>    # every Rust test and its Go name
   python3 go/port/portmap.py declarations <path.rs>...   # the Go declarations for Rust files
   python3 go/port/portmap.py declarations --write <path.rs>...   # write them where no Go file exists yet
@@ -600,6 +601,20 @@ def cmd_tests(ws: Workspace, directory: str) -> None:
             print(f"{file['path']}:{item['start']}\t{item['name']}\t{ws.test_go_name(crate, file, item)}\t{' '.join(flags)}")
 
 
+def cmd_files(ws: Workspace, directory: str, tests: bool) -> None:
+    """The Rust files of a crate, production code first in schedule order."""
+    crate = ws.crates[directory]
+    seen = set()
+    for group in crate_schedule(ws, crate):
+        for path in group["files"]:
+            seen.add(path)
+            print(path)
+    if tests:
+        for file in crate.files:
+            if file["path"] not in seen and file["target"] not in ("build",) and not file["target"].startswith("example"):
+                print(file["path"])
+
+
 def cmd_json(ws: Workspace) -> None:
     out = {}
     for directory in crate_order(ws):
@@ -669,6 +684,8 @@ def main(argv: list[str]) -> int:
                     out.write(text)
                 print(f"{path}: written", file=sys.stderr)
             print(f"{target}: {notes} places marked PORT:", file=sys.stderr)
+    elif command == "files":
+        cmd_files(ws, argv[2].rstrip("/"), "--tests" in argv)
     elif command == "json":
         cmd_json(ws)
     else:
