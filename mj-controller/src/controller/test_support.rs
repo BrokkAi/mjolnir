@@ -224,6 +224,7 @@ pub fn checkpoint_archive_input(
             },
             transcript: Vec::new(),
             queued_prompts: Vec::new(),
+            mailbox: None,
         },
         native_artifacts,
         repositories,

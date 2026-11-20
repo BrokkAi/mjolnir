@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 142;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 143;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2733,8 +2733,11 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
-    // Breaking: saved permission forms can name their tool call. Older
-    // readers reject the new field and cannot replay these forms.
+    // Breaking: checkpoint archives now carry the worker's accepted,
+    // undelivered mail in their canonical session (archive schema 13). Older
+    // daemons reject that field, so they could not resume a session this
+    // daemon suspended, and the mail the daemon already marked accepted would
+    // be lost with it. Refuse their reads and writes. No table changes.
     if version < 142 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -2742,6 +2745,18 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (142, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 142;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: saved permission forms can name their tool call. Older
+    // readers reject the new field and cannot replay these forms.
+    if version < 143 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 143 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (143, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 143;
              COMMIT;",
         )?;
     }
@@ -5579,19 +5594,22 @@ mod reader_tests {
         materialized.pending_elicitations = vec![request.clone()];
         save_materialized_session_to(&path, &materialized).unwrap();
 
-        stamp_schema_version(&path, 141);
+        stamp_schema_version(&path, 142);
+        let previous = read_schema_state(&Connection::open(&path).unwrap()).unwrap();
+        assert_eq!(previous.minimum_compatible, Some(142));
+        previous.ensure_supported_by(142).unwrap();
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
         assert!(matches!(
             schema
-                .ensure_supported_by(141)
+                .ensure_supported_by(142)
                 .unwrap_err()
                 .downcast_ref::<StoreSchemaMismatch>()
                 .unwrap()
                 .reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 142
+                minimum_compatible: 143
             }
         ));
         drop(upgraded);

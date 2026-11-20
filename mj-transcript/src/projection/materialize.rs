@@ -351,6 +351,8 @@ pub fn canonical_session_from_materialized_owned(
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
+        // Worker-owned: the checkpoint reads it from the relay at the cut.
+        mailbox: None,
         event_frontier: applied_event_ordinal,
         event_frontier_digest: applied_event_digest,
         session: CanonicalSessionState {

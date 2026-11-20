@@ -2350,6 +2350,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
             },
             transcript,
             queued_prompts: queued,
+            mailbox: None,
         }
     };
     let assignment_item = CanonicalTranscriptItem {

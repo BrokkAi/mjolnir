@@ -5552,6 +5552,7 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
         },
         transcript: Vec::new(),
         queued_prompts: Vec::new(),
+        mailbox: None,
     }
 }
 

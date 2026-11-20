@@ -198,6 +198,7 @@ for line in sys.stdin:
                     }],
                     accepted_config: Default::default(),
                     native_session_unused: !used,
+                    mailbox: None,
                 })
                 .unwrap(),
             )
