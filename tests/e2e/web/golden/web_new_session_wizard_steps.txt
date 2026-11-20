@@ -346,13 +346,13 @@ Your repositories and search
 Browse folders
 On your Mjolnir computer
 Paste URL
-GitHub URL or owner/repository
+Git URL or GitHub owner/repository
 Saved projects
 existing
 Select multiple repositories
 Back
 Cancel
-controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repositories and search","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Browse folders\nOn your Mjolnir computer","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"Paste URL\nGitHub URL or owner/repository","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-saved-project-existing","label":"existing","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repositories and search","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Browse folders\nOn your Mjolnir computer","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"Paste URL\nGit URL or GitHub owner/repository","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-saved-project-existing","label":"existing","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === single sized target keeps Where to run: Step 4 of 4 · Review (390x844) ===
