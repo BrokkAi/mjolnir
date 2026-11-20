@@ -27,9 +27,10 @@ MJOLNIR_REVISION = "fb0a4c0ac5cfe0396e1bce2740b6a1148c47fdb9"
 # Missing-step kinds from label-SPEC.md; the menu ranks these.
 MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
                  "keyed_matching", "contract", "other")
-# Default profile, model and quota scope per labeller. --profile overrides the profile, for
-# example to run replication on a Claude profile the coordinator allots (claude7's week ran out).
-ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
+# Default profile, model and quota scope per labeller. --profile pins a profile. Replication has
+# no default: each batch runs on the --profiles entry (the coordinator's Claude allotment) with
+# the most Opus week left.
+ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": (None, "opus", "opus")}
 
 
 # The plan reserves codex4 for other sessions (PLAN-rql-census.md, Cost and quota).
@@ -689,16 +690,41 @@ def collect(output, expected, role, repo, allowed):
 def quota(args, role):
     _, _, scope = ROLES[role]
     profile = role_profile(args, role)
+    if role == "replication" and profile is None:
+        previous = None
+        while True:
+            readings = {}
+            for candidate in args.profiles:
+                report = driver.mj("quota", "--profile", candidate).get("profiles") or []
+                report = (report[0].get("report") or {}) if report else {}
+                windows = [window for window in report.get("windows", [])
+                           if (not window.get("model_scope") or scope in window["model_scope"].split(","))
+                           and window.get("duration_seconds") == 7 * 24 * 60 * 60]
+                values = [w.get("remaining_percent") for w in windows]
+                readings[candidate] = (min(values) if values and None not in values
+                                       and not report.get("error") else None)
+            eligible = [(value, candidate) for candidate, value in readings.items()
+                        if value is not None and value > 25]
+            if eligible:
+                value, candidate = max(eligible)
+                log(args.labels_dir, "quota-cleared", role=role, profile=candidate, remaining_percent=value)
+                return candidate
+            if readings != previous:
+                log(args.labels_dir, "quota-held", role=role, readings=readings)
+                previous = readings
+            if args.check_quota:
+                return None
+            time.sleep(60)
     previous = None
     while hold := driver.quota_hold(scope, floor=f"{profile}=25", weekly=True, strict=True):
         if hold != previous:
             log(args.labels_dir, "quota-held", role=role, profile=profile, reason=hold)
             previous = hold
         if args.check_quota:
-            return False
+            return None
         time.sleep(60)
     log(args.labels_dir, "quota-cleared", role=role, profile=profile)
-    return True
+    return profile
 
 
 def checkout_revision(repo, pins):
@@ -833,7 +859,6 @@ def suspend_session(sid, report=lambda **fields: None):
 
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     _, model, _ = ROLES[role]
-    profile = role_profile(args, role)
     ids = [item["id"] for item in batch]
     if not args.work_dir.is_absolute():
         raise ValueError("--work-dir must be absolute")
@@ -858,7 +883,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         save(inputs / "batch.json", {"labeller": role, "output": "labels.jsonl", "items": batch})
         prompt = unit / "prompt.txt"
         prompt.write_text(LABEL_PROMPT.format(role=role), encoding="utf-8")
-        quota(args, role)
+        profile = quota(args, role)
         tag = hashlib.sha256(unit.name.encode()).hexdigest()[:8]
         title = f"RQL census {role} {repo} {tag}"
         log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
@@ -968,7 +993,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=("test", "development"))
     parser.add_argument("--labeller", choices=ROLES, required=False)
-    parser.add_argument("--profile", help="run this labeller on another profile of the same model family")
+    parser.add_argument("--profile", help="pin this labeller to a profile of the same model family")
+    parser.add_argument("--profiles", default="claude3,claude5,claude6",
+                        help="replication profiles eligible for quota-based selection")
     parser.add_argument("--repo", help="run only this repo, e.g. 1jehuang/jcode")
     parser.add_argument("--limit", type=int, help="take only the first N selected items, before applying resume")
     parser.add_argument("--batch-size", type=int, default=5)
@@ -987,6 +1014,14 @@ def main():
             setattr(args, name, getattr(args, name).resolve())
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
+    if args.labeller == "replication":
+        profiles = [profile.strip() for profile in args.profiles.split(",")]
+        if not profiles or any(not profile for profile in profiles):
+            parser.error("--profiles must be a comma-separated list of profile names")
+        excluded = EXCLUDED_PROFILES.intersection(profiles)
+        if excluded:
+            parser.error(f"profiles excluded from the census: {', '.join(sorted(excluded))}")
+        args.profiles = profiles
     if not args.inspect and (not args.labeller or (not args.split and not args.check_quota)):
         parser.error("choose --labeller and --split, or use --inspect")
     items, pins, unconfirmed_dev = item_sets()
