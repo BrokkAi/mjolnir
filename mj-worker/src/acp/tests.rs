@@ -7789,7 +7789,14 @@ for line in sys.stdin:
         .unwrap();
     if fail_replacement {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message , ..} if request_id == "clear-request" && message.contains("replacement refused"))).await;
-        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+        if harness == HarnessKind::Codex {
+            // Codex keeps a never-prompted thread only in the app-server that
+            // created it, and the rollback runs in a new bridge, so the
+            // unused original is replaced rather than reloaded.
+            wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: false, replaced_unused_native_session_id: Some(previous), .. } if native_session_id == "replacement" && previous == "original")).await;
+        } else {
+            wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+        }
     } else {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
     }
@@ -7843,14 +7850,18 @@ for line in sys.stdin:
             .iter()
             .filter(|method| method.as_str() == "session/new")
             .count(),
-        2
+        if fail_replacement && harness == HarnessKind::Codex {
+            3
+        } else {
+            2
+        }
     );
     assert_eq!(
         methods
             .iter()
             .filter(|method| method.as_str() == "session/load")
             .count(),
-        usize::from(fail_replacement)
+        usize::from(fail_replacement && harness != HarnessKind::Codex)
     );
 }
 
