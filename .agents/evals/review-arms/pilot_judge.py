@@ -208,6 +208,12 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
     key = load(key_file) if key_file.exists() else {"version": 1, "manifest": manifest, "outputs": {}}
     if key["manifest"] != manifest:
         raise ValueError("manifest differs from the private judge key")
+    pinned = key.get("manifest_sha256")
+    if pinned is not None and manifest_sha256 is not None and pinned != manifest_sha256:
+        raise ValueError("manifest SHA-256 differs from the private judge key")
+    pin_manifest = pinned is None and manifest_sha256 is not None
+    if pin_manifest:
+        key["manifest_sha256"] = manifest_sha256
     outputs = key["outputs"]
     retired = root / KEY_PATH.parent / "retired"
     for batch in {entry["batch"] for entry in outputs.values()}:
@@ -271,7 +277,7 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
             hand_items = texts.copy()
             random.Random(f"{diff}/{kind}/hand-check").shuffle(hand_items)
             write_task(root / HAND_PATH / batch, {**payload, "items": hand_items})
-    if not key_file.exists():
+    if not key_file.exists() or pin_manifest:
         save(key_file, key)
     return key
 

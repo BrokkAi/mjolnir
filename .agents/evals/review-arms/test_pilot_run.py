@@ -339,6 +339,56 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(failure["pending_elicitations"], [question])
         self.assertFalse((path / "done.json").exists())
 
+    # Hard-won: 2ac06cf: input-required writer replaced
+    def test_pending_writer_resume_waits_and_collects_the_original_turn(self):
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root)
+        runner.writer_model, runner.gate, runner.attested = ("sol", "high"), None, set()
+        job = {"job": "mjolnir/first/R/r1/writer", "diff": "mjolnir/first",
+               "arm": "R", "replicate": 1, "kind": "writer"}
+        path = pilot.job_path(self.root, job)
+        runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {"rql_tools": ["rql_query"]}}
+        question = {"id": "permission-1", "message": "May I read the source file?", "fields": []}
+        status = {"lifecycle": "live", "is_idle": False, "pending_elicitations": [question]}
+        launches, submissions = [], []
+
+        def write(bug_id, gate, *, pilot):
+            if not (path / "launch.json").exists():
+                launches.append("original")
+                brief_driver.save(path / "launch.json", {"session_id": "original"})
+                brief_driver.save(path / "tool-assignment.json", {"session_id": "original", "arm": "R"})
+            brief_driver.send(path, "original", "prompt", "writer-command", "Write the brief.", limit=None)
+            completion = json.loads((path / "prompt-completion.json").read_text())
+            self.assertEqual(completion["command_id"], "writer-command")
+            brief_driver.save(path / "done.json", {"session_id": "original"})
+            return "done"
+
+        def message(operation, *args):
+            self.assertEqual(operation, "message")
+            submissions.append(args[args.index("--command-id") + 1])
+            return {"session_id": "original", "via": "turn", "turn_id": 1}
+
+        with (unittest.mock.patch.object(brief_driver, "run", write),
+              unittest.mock.patch.object(brief_driver, "mj", message),
+              unittest.mock.patch.object(brief_driver, "session", lambda sid: status),
+              unittest.mock.patch.object(pilot.subprocess, "run", side_effect=AssertionError("assignment revoked"))):
+            self.assertIn("original writer needs input. May I read the source file?", runner.execute(job))
+            # Simulate the receipt written before command IDs were added to failures.
+            failure = pilot.read_json(path / "failed.json")
+            del failure["command_id"]
+            pilot.driver.save(path / "failed.json", failure)
+            self.assertIn("original writer needs input. May I read the source file?", runner.execute(job))
+            self.assertFalse((path / "done.json").exists())
+            status.update(is_idle=True, pending_elicitations=[], last_turn_outcome={
+                "command_id": "writer-command", "outcome": {"kind": "completed"},
+            })
+            self.assertEqual(runner.execute(job), "done")
+        self.assertEqual(launches, ["original"])
+        self.assertEqual(submissions, ["writer-command"])
+        self.assertEqual(pilot.read_json(path / "done.json")["session_id"], "original")
+        self.assertFalse((path / "failed.json").exists())
+        self.assertFalse(list(path.parent.glob(f"{path.name}.superseded-*")))
+
     # Hard-won: 49e16b8: startup refusal retained a session and charged a replacement.
     def test_config_startup_refusal_retries_same_session(self):
         calls, waits = [], []

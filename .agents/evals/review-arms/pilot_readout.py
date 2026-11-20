@@ -406,11 +406,24 @@ def main():
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="root containing stored judgments")
     parser.add_argument("--runs", type=Path, help="writer delivery logs under this runs directory")
     parser.add_argument("--egress-log", type=Path, help="stored record_egress.py JSONL (default: egress.jsonl in the run root)")
+    parser.add_argument("--archived", action="store_true",
+                        help="reproduce frozen judgments and deliveries without checking live run artifacts")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    manifest = load(args.manifest)
-    snapshot = load_snapshot(args.manifest, manifest)
+    raw_manifest = args.manifest.read_bytes()
+    manifest = json.loads(raw_manifest)
     key = load(args.root / KEY_PATH)
+    if "manifest_sha256" in key:
+        if sha(raw_manifest) != key["manifest_sha256"]:
+            raise ValueError("manifest SHA-256 differs from the stored judgment key")
+    else:
+        # Older archives embed the full manifest without its original byte digest.
+        def manifest_digest(value):
+            return sha(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+        if manifest_digest(manifest) != manifest_digest(key["manifest"]):
+            raise ValueError("manifest differs from the stored judgment key")
+    snapshot = load_snapshot(args.manifest, manifest)
     judgments = {"key": key, "judge": records(args.root, key, "judge"),
                  "hand_check": records(args.root, key, "hand-check")}
     runs = args.runs or args.root / "runs"
@@ -418,7 +431,7 @@ def main():
     egress = ([json.loads(line) for line in egress_path.read_bytes().splitlines() if line.strip()]
               if args.egress_log is not None or egress_path.is_file() else ())
     isolation = isolation_report(egress, isolation_evidence(args.root, runs))
-    stale = stale_judged_diffs(runs, key)
+    stale = set() if args.archived else stale_judged_diffs(runs, key)
     result = readout(manifest, judgments, load_deliveries(runs, key, stale_diffs=stale), snapshot,
                      isolation=isolation, stale_diffs=stale)
     if args.output:

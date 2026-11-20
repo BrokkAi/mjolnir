@@ -75,7 +75,7 @@ def setup(root, manifest, snapshot_bytes, defects):
                 {"sites": [{"path": "out.rs", "start_line": 3, "end_line": 3}]},
             ]}}
             (path.parent / f"queries-{session_id}.jsonl").write_text(json.dumps(event) + "\n")
-    return j.prepare(root, manifest, snapshot, defects)
+    return j.prepare(root, manifest, snapshot, defects, manifest_sha256=j.sha(manifest_path.read_bytes()))
 
 
 def blank_judgments(key):
@@ -313,6 +313,34 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(stale["complete_diffs"], [])
         self.assertEqual(stale["unfinished_diffs"], ["repo/d2"])
         self.assertEqual(stale["paired_contrasts"]["R - G"]["catch"]["hand_checked"]["by_diff"], {})
+
+        for entry in key["outputs"].values():
+            artifact = self.root / entry["artifact"]
+            artifact.unlink()
+            (artifact.parent / "done.json").unlink()
+            (artifact.parent / "usage.json").unlink()
+        archive_args = [*args, "--archived"]
+        with patch.object(sys, "argv", archive_args):
+            r.main()
+            self.assertEqual(readout_path.read_bytes(), first)
+
+            rql = next(e for e in key["outputs"].values() if e.get("query_sha256"))
+            delivery = (self.root / rql["artifact"]).parent / f"queries-{rql['session_id']}.jsonl"
+            original_delivery = delivery.read_bytes()
+            delivery.write_bytes(original_delivery + b"\n")
+            with self.assertRaisesRegex(ValueError, "delivery log differs"):
+                r.main()
+            delivery.write_bytes(original_delivery)
+
+            snapshot_path = manifest_path.with_name("labels-snapshot.jsonl")
+            original_snapshot = snapshot_path.read_bytes()
+            snapshot_path.write_bytes(original_snapshot + b"\n")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                r.main()
+            snapshot_path.write_bytes(original_snapshot)
+            manifest_path.write_bytes(manifest_path.read_bytes() + b"\n")
+            with self.assertRaisesRegex(ValueError, "manifest SHA-256 differs"):
+                r.main()
 
     def test_missing_hand_check_keeps_a_diff_out_of_both_contrasts(self):
         key = setup(self.root, *fixture(2))

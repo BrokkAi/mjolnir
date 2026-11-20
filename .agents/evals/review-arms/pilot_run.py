@@ -395,6 +395,29 @@ class Pilot:
                 subprocess.run([str(self.args.rql_hook), "--revoke", str(assignment)],
                                check=True, stdout=subprocess.PIPE)
 
+        def hold_for_input(sid, error):
+            driver.retain_pilot_session(path, sid, str(error), status="input_required",
+                                        pending_elicitations=error.questions, command_id=error.command)
+            return f"interrupted: {sid} {error}"
+
+        if failure.exists() and (pending := read_json(failure)).get("status") == "input_required":
+            if not launch.exists():
+                return f"needs-recovery: missing launch for {pending['retained_session']} ({pending['reason']})"
+            sid = read_json(launch)["session_id"]
+            try:
+                brief_driver.resume_input_required(path, sid, pending)
+            except brief_driver.WriterNeedsInput as error:
+                return hold_for_input(sid, error)
+            except brief_driver.WriterTurnFailed as error:
+                state = driver.retain_pilot_session(path, sid, str(error))
+                if job["kind"] == "writer":
+                    state = brief_driver.interrupt_on_rql_quota(params, sid) or state
+                return state
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+                return f"interrupted: {sid} {pending['reason']} ({error})"
+            else:
+                failure.unlink()
+
         if failure.exists() and job["kind"] == "writer" and launch.exists():
             # A retained attempt made by an earlier build may lack the status.
             if read_json(failure).get("status") != "quota_hold":
@@ -429,7 +452,6 @@ class Pilot:
         params["publish_tool_assignment"] = lambda sid: publish_tool_assignment(
             path, self.args, job, self.diffs[job["diff"]], sid, engine_identity=self.engine_identity)
         params["revoke_tool_assignment"] = revoke_assignment
-        needs_input = False
         try:
             if job["kind"] == "writer":
                 params["model"] = self.writer_model
@@ -438,17 +460,14 @@ class Pilot:
                 params["model"] = self.reviewer_model
                 state = pilot_review.run(params)
         except brief_driver.WriterNeedsInput as error:
-            driver.retain_pilot_session(path, read_json(launch)["session_id"], str(error),
-                                        status="input_required", pending_elicitations=error.questions)
-            state = f"interrupted: {error}"
-            needs_input = True
+            return hold_for_input(read_json(launch)["session_id"], error)
         except (brief_driver.PromptUncertain, TimeoutError, subprocess.TimeoutExpired) as error:
             return f"interrupted: {error}"
         except (OSError, KeyError, TypeError, ValueError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
             if not launch.exists():
                 return f"needs-recovery: launch has no recorded session ID ({error})"
             state = driver.retain_pilot_session(path, read_json(launch)["session_id"], str(error) or type(error).__name__)
-        if job["kind"] == "writer" and launch.exists() and (state == "retained-failure" or needs_input):
+        if job["kind"] == "writer" and launch.exists() and state == "retained-failure":
             if interruption := brief_driver.interrupt_on_rql_quota(params, read_json(launch)["session_id"]):
                 state = interruption
         if params["attest_cache"] and (path / "cache-attestation.json").exists():
