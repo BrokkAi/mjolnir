@@ -842,10 +842,12 @@ def suspend_session(sid):
         deadline, delay = time.monotonic() + 900, 1
         while True:
             session = driver.session(sid)
-            if session["lifecycle"] == "suspended":
-                return None
+            # mj can report a session suspended while its deferred target cleanup failed, so the
+            # error is read first: a suspension counts only when it is also error-free.
             if session.get("error") is not None:
                 return session["error"]
+            if session["lifecycle"] == "suspended":
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return f"suspension did not complete in 15 minutes: lifecycle is {session['lifecycle']}"
