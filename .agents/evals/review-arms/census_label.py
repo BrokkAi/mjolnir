@@ -723,9 +723,10 @@ def quota(args, role):
                     readings[candidate], unavailable[candidate] = None, f"harness {harness}, not claude"
                     continue
                 # A usage-billed profile (for example through Bedrock) has no weekly window, so it
-                # can never clear the weekly floor.
+                # can never clear the weekly floor. mj reports "unknown" billing while it has no
+                # reading yet; that profile stays a candidate and is read again.
                 billing = report[0].get("billing")
-                if billing != "subscription":
+                if billing == "usage":
                     readings[candidate], unavailable[candidate] = None, f"billing {billing} has no weekly quota"
                     continue
                 report = (report[0].get("report") or {}) if report else {}
