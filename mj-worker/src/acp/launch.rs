@@ -176,9 +176,10 @@ pub struct LaunchSpec {
     /// idle session reloads once they change. Set when the bridge starts.
     pub imported_logins: Option<super::ImportedLogins>,
     pub execution_policy: ExecutionPolicy,
-    /// The Claude profile's permission mode under configured approvals, from
-    /// the launch config. Read only through `session_enforcement`.
-    pub claude_permission_mode: mj_core::config::ClaudePermissionMode,
+    /// The profile's approval choices from the launch config: the Claude
+    /// permission mode, read only through `session_enforcement`, and whether
+    /// the Mjolnir guardian reviews, read only through `Guardian::for_launch`.
+    pub approval_choices: mj_core::config::ApprovalChoices,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.

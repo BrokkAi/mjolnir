@@ -336,6 +336,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &mut additional_directories,
     );
     let instruction_role = crate::acp::InstructionRole::from_launch(&config);
+    let approval_choices = config.approval_choices();
     let acp_spec = LaunchSpec {
         operator_away,
         imported_logins: None,
@@ -389,7 +390,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         initial_model: config.initial_model,
         harness: config.harness,
         execution_policy: config.execution_policy,
-        claude_permission_mode: config.claude_permission_mode,
+        approval_choices,
         acp_activity,
         step_clock,
         tools_in_flight,

@@ -2234,6 +2234,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         }),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     }
     .write(&spec.relay_root.join("launch.json"))
