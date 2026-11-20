@@ -701,17 +701,26 @@ def collect(output, expected, role, repo, allowed):
 def quota(args, role):
     _, _, scope = ROLES[role]
     profile = role_profile(args, role)
-    if role == "replication" and profile is None:
+    if role == "replication":
+        # A pinned profile goes through the same checks as the allotment; pinning only narrows
+        # which profiles are considered.
+        candidates = [profile] if profile else args.profiles
         previous = None
         while True:
             readings, unavailable, exhausted = {}, {}, {}
-            for candidate in args.profiles:
+            for candidate in candidates:
                 # A disabled or missing profile makes mj quota fail; it can't clear the floor,
                 # but the other allotted profiles still can.
                 try:
                     report = driver.mj("quota", "--profile", candidate).get("profiles") or []
                 except RuntimeError as error:
                     readings[candidate], unavailable[candidate] = None, str(error)[-300:]
+                    continue
+                # Only a Claude profile can run the Sonnet labeller; another harness's quota
+                # would otherwise rank like any other.
+                harness = report[0].get("harness") if report else None
+                if harness != "claude":
+                    readings[candidate], unavailable[candidate] = None, f"harness {harness}, not claude"
                     continue
                 report = (report[0].get("report") or {}) if report else {}
                 scoped = [window for window in report.get("windows", [])
@@ -728,7 +737,7 @@ def quota(args, role):
                     exhausted[candidate] = min(w.get("resets") or "unknown" for w in spent)
             # Every allotted profile refused by mj quota is a configuration error (a misspelled
             # or disabled profile), not quota that will recover, so report it instead of holding.
-            if len(unavailable) == len(args.profiles):
+            if len(unavailable) == len(candidates):
                 raise RuntimeError(f"no allotted replication profile is usable: {json.dumps(unavailable)}")
             eligible = [(value, candidate) for candidate, value in readings.items()
                         if value is not None and value > 25 and candidate not in exhausted]
@@ -773,8 +782,8 @@ def replication_sample(rows):
         ranked = sorted(members, key=lambda row: hashlib.sha256(
             f"{REPLICATION_SALT}\0{repo}\0{row['id']}".encode()).hexdigest())
         count = max(1, int(len(members) * REPLICATION_SHARE + 0.5))
-        chosen.update(row["id"] for row in ranked[:count])
-    return [row for row in rows if row["id"] in chosen]
+        chosen.update((repo, row["id"]) for row in ranked[:count])
+    return [row for row in rows if (row["repo"], row["id"]) in chosen]
 
 
 def source_clone(args, repo):
