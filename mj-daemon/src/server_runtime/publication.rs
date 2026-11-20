@@ -16,7 +16,7 @@ pub(super) struct ViewerPublication {
     runtime: RuntimeProjection,
     pub(super) dirty: BTreeSet<String>,
     project_dirty: BTreeSet<String>,
-    pub(super) inputs_changed: bool,
+    workspace_count: usize,
     capabilities: mj_core::snapshot_map::SharedSnapshot<
         mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     >,
@@ -35,13 +35,22 @@ impl ViewerPublication {
         native: &mut BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
         moves: &mut ViewerMoveRecoveries,
     ) {
-        self.inputs_changed |= self.runtime.records != next.records
-            || self.runtime.subagents != next.subagents
-            || self.runtime.metadata.config != next.metadata.config;
         self.capabilities_dirty |= self.runtime.metadata.profile_capabilities
             != next.metadata.profile_capabilities
             || self.runtime.metadata.config != next.metadata.config;
-        self.inputs_changed |= self.capabilities_dirty;
+        if self.runtime.metadata.storage != next.metadata.storage {
+            self.dirty.extend(next.records.keys().cloned());
+        }
+        self.dirty.extend(
+            self.runtime
+                .metadata
+                .failed_launch_retries
+                .symmetric_difference(&next.metadata.failed_launch_retries)
+                .cloned(),
+        );
+        for (id, _) in self.runtime.sessions.changes(&next.sessions) {
+            self.dirty.insert(id.clone());
+        }
         for (id, summary) in self.runtime.native_agents.changes(&next.native_agents) {
             if self.runtime.native_agents.get(id).map(|old| &old.agent)
                 == summary.map(|next| &next.agent)
@@ -145,22 +154,14 @@ impl ViewerPublication {
         views: &PhoneSessionViews<'_>,
         revision: u64,
     ) -> ViewerSnapshot {
-        if self.config.as_ref() != Some(&controller.config) {
+        if self.config.as_ref() != Some(&controller.config)
+            || self.workspace_count != workspaces.len()
+        {
             self.dirty.extend(controller.state.sessions.keys().cloned());
         }
-        for (id, next) in self.records.changes(&controller.state.sessions) {
+        for (id, _) in self.records.changes(&controller.state.sessions) {
             self.dirty.insert(id.clone());
-            let previous_key = self.records.get(id).map(|record| {
-                let checkout = record.checkout();
-                ProjectSourceKey::of(record, &checkout, &controller.config)
-            });
-            let next_key = next.and_then(|record| {
-                let checkout = controller.state.checkout(id).ok()?;
-                Some(ProjectSourceKey::of(record, &checkout, &controller.config))
-            });
-            if previous_key != next_key {
-                self.project_dirty.insert(id.clone());
-            }
+            self.project_dirty.insert(id.clone());
         }
         for (id, relation) in self.subagents.changes(&controller.state.subagents) {
             self.dirty.insert(id.clone());
@@ -192,6 +193,19 @@ impl ViewerPublication {
                 self.dirty.insert(id.clone());
             }
         }
+        // Each row also reads its children's captured facts. Use both
+        // relationship versions so a reparent invalidates both parents.
+        let parents = self
+            .dirty
+            .iter()
+            .flat_map(|id| {
+                [self.subagents.get(id), controller.state.subagents.get(id)]
+                    .into_iter()
+                    .flatten()
+                    .map(|relation| relation.parent_session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        self.dirty.extend(parents);
         // Descendants inherit project identity from their parent. Only that
         // dependency subtree is invalidated when the parent changes.
         let mut pending: Vec<_> = std::mem::take(&mut self.project_dirty)
@@ -214,65 +228,13 @@ impl ViewerPublication {
             quotas,
             views,
             revision,
-            Some(ViewerRecordSelection {
+            ViewerRecordSelection {
                 ids: &self.dirty,
                 children: &self.children,
-                failed_launch_retries: &self.runtime.metadata.failed_launch_retries,
-            }),
-            &self.runtime.metadata.availability,
+                failed_launch_retries: Some(&self.runtime.metadata.failed_launch_retries),
+            },
+            &self.runtime.metadata,
         );
-        for id in snapshot.sessions.0.keys().cloned().collect::<Vec<_>>() {
-            let row = snapshot.sessions.0.get_mut(&id).expect("selected row");
-            row.attention = self
-                .runtime
-                .metadata
-                .session_attention
-                .get(&id)
-                .copied()
-                .unwrap_or_default();
-            row.unread_frontier = self.runtime.metadata.unread_frontiers.get(&id).copied();
-            row.notification_dismissal = self
-                .runtime
-                .metadata
-                .notification_dismissals
-                .get(&id)
-                .cloned();
-            row.notification_card = self
-                .runtime
-                .metadata
-                .notification_cards
-                .as_ref()
-                .and_then(|cards| cards.get(&id))
-                .cloned();
-            if let Some(entry) = row
-                .notification_card
-                .as_ref()
-                .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
-            {
-                row.question_message = match &entry.message {
-                    mj_core::attention::EntryMessage::Found(id) => Some(id.clone()),
-                    mj_core::attention::EntryMessage::Locating
-                    | mj_core::attention::EntryMessage::None => None,
-                };
-            }
-            row.form_holder = self.runtime.metadata.form_holders.get(&id).cloned();
-            row.capabilities.dismiss_notification = row.notification_dismissal.is_some();
-            row.native_subagent_attention = row
-                .native_subagents
-                .iter()
-                .map(|native| {
-                    (
-                        native.session_id.clone(),
-                        self.runtime
-                            .metadata
-                            .session_attention
-                            .get(&native.view_id())
-                            .copied()
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect();
-        }
         for id in &self.dirty {
             match snapshot.sessions.0.get(id) {
                 Some(row) => {
@@ -294,6 +256,7 @@ impl ViewerPublication {
             self.capabilities_dirty = false;
         }
         snapshot.profile_capabilities = self.capabilities.clone();
+        self.workspace_count = workspaces.len();
         self.records = controller.state.sessions.clone();
         self.subagents = controller.state.subagents.clone();
         if self.config.as_ref() != Some(&controller.config) {

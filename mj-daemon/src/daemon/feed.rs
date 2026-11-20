@@ -235,6 +235,7 @@ impl RuntimeState {
                         operator_presence: controller.state.operator_presence,
                         config: owner.config_snapshot.clone(),
                         default_targets: controller.config.default_targets.clone(),
+                        container_sizes: controller.state.container_sizes.clone(),
                         last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
                         container_capacities: history
@@ -316,9 +317,10 @@ impl RuntimeState {
                 }
             }
         }
-        full.metadata.workspace_names = self
-            .workspaces()
-            .borrow()
+        full.metadata.workspaces = self.workspaces().borrow().clone();
+        full.metadata.workspace_names = full
+            .metadata
+            .workspaces
             .iter()
             .map(|w| (w.id.clone(), w.name.clone()))
             .collect();

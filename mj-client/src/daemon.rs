@@ -450,6 +450,12 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
+    /// Materialized queue and activity survive retirement of a relay actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized: Option<mj_core::snapshot_map::SharedSnapshot<RuntimeMaterializedSession>>,
+    /// A retained projection for a session with no relay view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub materialized_only: bool,
     pub attention: mj_core::attention::SessionAttention,
     /// Config selectors owned by the target permission policy.
     #[serde(default)]
@@ -461,6 +467,15 @@ pub struct RuntimeSessionView {
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub connected: bool,
     pub error: Option<ViewError>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeMaterializedSession {
+    pub execution: mj_core::state::MaterializedExecutionState,
+    pub last_activity_at_ms: Option<i64>,
+    pub queued_prompts: Vec<mj_core::relay::QueuedPrompt>,
+    pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
 }
 
 impl RuntimeSessionView {
@@ -476,6 +491,8 @@ impl RuntimeSessionView {
                     )
                 });
         Self {
+            materialized: None,
+            materialized_only: false,
             session_id,
             attention: view.attention,
             policy_config_keys: Vec::new(),
@@ -3889,7 +3906,8 @@ pub const TOOL_PERMISSION_CALL_PROTOCOL: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
 pub const RUNTIME_HOST_CAPACITY_PROTOCOL: u32 = TOOL_PERMISSION_CALL_PROTOCOL + 1;
 /// Availability checks are requested independently of their runtime feed results.
 pub const RUNTIME_AVAILABILITY_PROTOCOL: u32 = RUNTIME_HOST_CAPACITY_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = RUNTIME_AVAILABILITY_PROTOCOL;
+pub const RUNTIME_SESSION_MATERIALIZED_PROTOCOL: u32 = RUNTIME_AVAILABILITY_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = RUNTIME_SESSION_MATERIALIZED_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";

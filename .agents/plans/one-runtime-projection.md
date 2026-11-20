@@ -26,7 +26,8 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20 18:06Z) Verified that a terminal Move starts a fresh preparation if a feed update removes its selected account, whether the old preparation is pending or complete.
 - [x] (2026-11-20) Implement Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
 - [x] (2026-11-20) Verify Milestone 2 in `feeds-m2` with an isolated mbx config.
-- [ ] Milestone 3: web rows built only from the runtime capture.
+- [x] (2026-11-20) Milestone 3: built viewer rows from the runtime capture and verified a real parent/child session pair on the browser stream in `feeds-m3`.
+- [ ] Milestone 3: finish integrated validation and review.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
 
@@ -53,6 +54,13 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: before Milestone 2, both capacity samplers used `Controller::deployment_capacity_targets`. Its host list comes from configured targets, and its session-dependent paths and EC2 instance probes use active records. The daemon already supplies those records. The existing daemon refresh triggered sampling of the old target definitions.
   Evidence: `mj-controller/src/controller/backend.rs`, `mj-daemon/src/daemon/views.rs`, and the pre-change `CapacityFeed::request_refresh` at acd73e9d9.
+
+
+- Observation: the phone's mirrored session manager supplied both raw views and a request bridge. Removing its view stream also removes the registrations that made bridge handles usable. The phone now sends commands to the daemon's existing manager. The web action and background-task admission scopes still hold until the operation returns.
+  Evidence: `mj-session-runtime/src/session_manager/remote.rs` and `mj-daemon/src/server_runtime/run.rs`. A live browser stream in `feeds-m3` saw the parent's Interrupt All offer go from false to true and back to false after a child started and completed its assignment. The isolated daemon and workers were stopped.
+
+- Observation: retired relay actors still need to leave queue and activity behind for the web viewer. Bootstrap loads the last durable facts, and the runtime owner keeps those facts when a relay actor retires. Family-scoped terminal feeds continue to omit the retired actor's view.
+  Evidence: `mj-daemon/src/daemon/owner.rs`, `mj-client/src/runtime_feed.rs`, and the existing regression for retiring a relay actor.
 
 
 ## Decision Log
@@ -102,6 +110,15 @@ This plan does not add a new public API. A later plan will publish this projecti
 - Decision: publish the existing `HostCapacityRow` with daemon-owned refresh status in runtime metadata. Both surfaces read the capacity service and storage board. The service publishes each requested generation together with its newly derived probe definitions.
   Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request. Each capture uses one storage snapshot for the Targets row and session warnings. Unchanged host rows share their allocation across retained revisions. The capture reuses the rows while the target, reading and storage publications are unchanged. Both surfaces read the daemon's pending refresh generation, and every wake of the sampler uses its latest inputs.
   Date/Author: 2026-11-20, Milestone 2 implementation.
+
+
+- Decision: rebuild rows by dependency. Compare captured per-session entries and invalidate their parents when child entries change. Invalidate descendants for changes to an ancestor record or relationship they use for checkout and project identity. Rebuild every row when config, workspace count or storage changes.
+  Rationale: a synthetic store of 1,200 records (200 active views, 1,000 stopped sessions, two profiles and one configured target) took 12.78 ms median and 13.19 ms p95 to rebuild all rows, versus 0.20 ms median and 0.22 ms p95 to publish one changed active view. This was 30 warm dev-profile samples on hel timed around row publication, excluding capture and HTTP serialization. Keep dependency-based selection because worker revisions can arrive many times a second and the existing test covers 100,000 retained sessions.
+  Date/Author: 2026-11-20, Milestone 3 implementation.
+
+- Decision: workspaces, capacity and storage are capture inputs. Only the runtime revision watch wakes the viewer for them. Retain the separate quota watch as a wake trigger leading to a fresh capture, keeping quota surfacing out of scope.
+  Rationale: the daemon already publishes revisions from workspace and capacity changes, including storage-only publications. Session storage problems and host capacity rows now use the same storage snapshot.
+  Date/Author: 2026-11-20, Milestone 3 implementation.
 
 
 ## Outcomes & Retrospective

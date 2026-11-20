@@ -42,12 +42,22 @@ fn quota_reports_for_viewer(
         .collect()
 }
 
+fn install_captured_records(
+    controller: &mut Controller,
+    runtime: &mj_client::runtime_feed::RuntimeProjection,
+) {
+    controller.state.sessions = runtime.records.clone();
+    controller.state.subagents = runtime.subagents.clone();
+    controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies.clone();
+    controller.state.operator_presence = runtime.metadata.operator_presence;
+    controller.state.container_sizes = runtime.metadata.container_sizes.clone();
+}
+
 pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
-    worker: SessionManagerChannels,
+    worker_commands_tx: SessionManagerControl,
     daemon_runtime: Arc<RuntimeState>,
-    mut workspace_updates: tokio::sync::watch::Receiver<Vec<WorkspaceRecord>>,
     services: crate::daemon::delegation::Services,
 ) -> Result<()> {
     // Each step is logged with its duration: the viewer and API stay
@@ -56,75 +66,52 @@ pub(crate) async fn run_server(
     let resolved = resolve_server_args(args, termination.clone()).await?;
     startup.finished("resolve server arguments and TLS");
     let bind = resolved.bind;
-    let mut controller = Controller::load()?;
-    startup.finished("load controller state");
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
-    workspace_updates.borrow_and_update();
     let mut quota_updates = services.quotas.clone();
     let mut quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
     let api_backend = services.backend.clone();
     let mut revision = daemon_runtime.allocate_revision();
     let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
-    let mut queued_prompts = projected_queued_prompts(&controller)?;
-    startup.finished("project queued prompts");
-    let mut active_user_shells = std::collections::BTreeMap::new();
-    let mut pending_elicitations = std::collections::BTreeMap::new();
-    let mut prompt_images = std::collections::BTreeSet::new();
-    let mut operational = std::collections::BTreeMap::new();
-    let mut native_agents = std::collections::BTreeMap::new();
-    let mut materialized_activity = load_materialized_activity(&controller).await?;
-    startup.finished("load materialized activity");
     let mut project_sources = PhoneProjectSources::default();
-    let mut move_recoveries = ViewerMoveRecoveries::new();
     let mut publication = publication::ViewerPublication::default();
+    let mut native_agents = std::collections::BTreeMap::new();
+    let mut move_recoveries = ViewerMoveRecoveries::new();
     let initial = daemon_runtime.runtime_publication()?;
     startup.finished("capture runtime publication");
     publication.observe_runtime(&initial, &mut native_agents, &mut move_recoveries);
-    controller.state.sessions = initial.records;
-    controller.state.subagents = initial.subagents;
-    controller.config = initial.metadata.installed_config();
+    let mut controller = Controller {
+        config: initial.metadata.installed_config(),
+        state: State::default(),
+    };
+    install_captured_records(&mut controller, &initial);
     let mut installed_runtime_config = initial.metadata.config.clone();
-    controller.state.last_subagent_policies = initial.metadata.last_subagent_policies;
-    controller.state.operator_presence = initial.metadata.operator_presence;
-    let mut operations = initial
-        .metadata
-        .lifecycles
-        .iter()
-        .map(|view| (view.session_id.clone(), viewer_operation(view)))
-        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut workspaces = initial.metadata.workspaces.clone();
     let mut launch_failures = Vec::new();
-    // The daemon's capacity service probes each host once per interval; the
-    // page shows its readings rather than probing again.
-    let capacity_feed = daemon_runtime
-        .capacity_feed()
-        .context("the daemon capacity service is not running")?;
-    let mut capacity_targets_rx = capacity_feed.targets.clone();
-    let mut capacity_states_rx = capacity_feed.states.clone();
-    let container_capacities = initial.metadata.container_capacities.clone();
     let mut first_snapshot = publication.snapshot(
         &controller,
-        &workspace_updates.borrow().clone(),
+        &workspaces,
         &quotas,
         &PhoneSessionViews {
             native_agents: &native_agents,
             conversations: &conversations,
-            queued_prompts: &queued_prompts,
-            active_user_shells: &active_user_shells,
-            pending_elicitations: &pending_elicitations,
-            prompt_images: &prompt_images,
-            operational: &operational,
-            materialized_activity: &materialized_activity,
+            sessions: &initial.sessions,
             project_sources: &project_sources,
-            operations: &operations,
+            operations: &initial
+                .metadata
+                .lifecycles
+                .iter()
+                .map(|view| (view.session_id.clone(), viewer_operation(view)))
+                .collect(),
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(
-                &capacity_states_rx.borrow(),
-                &capacity_targets_rx.borrow(),
-                &container_capacities,
-            ),
+            capacity: &viewer_capacity(&initial.metadata),
             launch_failures: &launch_failures,
-            reviews: &review_views(&daemon_runtime),
+            reviews: &initial
+                .metadata
+                .reviews
+                .iter()
+                .map(|review| (review.session_id.clone(), review.clone()))
+                .collect(),
         },
         revision,
     );
@@ -140,13 +127,6 @@ pub(crate) async fn run_server(
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
     let (background_task_stop_tx, mut background_task_stop_rx) =
         tokio::sync::mpsc::channel::<BackgroundTaskStopRequest>(32);
-    let SessionManagerChannels {
-        session_cpu: _,
-        targets: _,
-        control: worker_commands_tx,
-        updates: mut worker_updates_rx,
-        shutdown: worker_shutdown,
-    } = worker;
     // Captured before `options` is moved into the server.
     let options_session_ttl = crate::server::default_session_ttl();
     let activity_snapshots = snapshot_rx.clone();
@@ -277,8 +257,6 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<PhoneActionStarted>();
         let (receipt_done_tx, mut receipt_done_rx) =
             tokio::sync::mpsc::unbounded_channel::<ReadReceiptPersisted>();
-        let (controller_reload_tx, mut controller_reload_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ControllerReloaded>();
         let (bundle_done_tx, mut bundle_done_rx) =
             tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
         let (move_prepared_tx, mut move_prepared_rx) =
@@ -290,9 +268,6 @@ pub(crate) async fn run_server(
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
         let mut background_task_stop_jobs = tokio::task::JoinSet::new();
         let mut background_task_stop_open = true;
-        let mut controller_reload_in_flight = false;
-        let mut controller_reload_requested = false;
-        let mut controller_reload_invalidated = false;
         let mut pending_action_errors = std::collections::BTreeMap::<String, String>::new();
         let mut active_actions = std::collections::BTreeSet::new();
         let mut closing_actions = std::collections::BTreeMap::<String, u64>::new();
@@ -327,14 +302,6 @@ pub(crate) async fn run_server(
                 };
                 let mut conversations_changed = false;
                 for (id, record) in cache_records.changes(&runtime.records) {
-                    if record.is_none() {
-                        queued_prompts.remove(id);
-                        pending_elicitations.remove(id);
-                        prompt_images.remove(id);
-                        active_user_shells.remove(id);
-                        operational.remove(id);
-                        materialized_activity.remove(id);
-                    }
                     if record.is_none_or(|record| !record.state.is_active()) {
                         conversations_changed |= conversations.remove_shared(id).is_some();
                         conversation_projections.forget(id);
@@ -351,14 +318,12 @@ pub(crate) async fn run_server(
                 cache_transcripts = runtime.transcripts.clone();
                 if conversations_changed { conversation_tx.send_replace(conversations.clone()); }
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
-                controller.state.sessions = runtime.records;
-                controller.state.subagents = runtime.subagents;
+                install_captured_records(&mut controller, &runtime);
                 if installed_runtime_config != runtime.metadata.config {
                     controller.config = runtime.metadata.installed_config();
                     installed_runtime_config = runtime.metadata.config.clone();
                 }
-                controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies;
-                controller.state.operator_presence = runtime.metadata.operator_presence;
+                workspaces.clone_from(&runtime.metadata.workspaces);
                 for (session_id, error) in &pending_action_errors {
                     if let Some(session) = controller.state.sessions.get_mut(session_id)
                         && session.last_error.is_none()
@@ -366,33 +331,24 @@ pub(crate) async fn run_server(
                         session.last_error = Some(error.clone());
                     }
                 }
-                operations = runtime.metadata.lifecycles.iter()
-                    .map(|view| (view.session_id.clone(), viewer_operation(view)))
-                    .collect();
-                let container_capacities = runtime.metadata.container_capacities;
                 let mut snapshot = publication.snapshot(
                     &controller,
-                    &workspace_updates.borrow().clone(),
+                    &workspaces,
                     &quotas,
                     &PhoneSessionViews {
                         native_agents: &native_agents,
                         conversations: &conversations,
-                        queued_prompts: &queued_prompts,
-                        active_user_shells: &active_user_shells,
-                        pending_elicitations: &pending_elicitations,
-                        prompt_images: &prompt_images,
-                        operational: &operational,
-                        materialized_activity: &materialized_activity,
+                        sessions: &runtime.sessions,
                         project_sources: &project_sources,
-                        operations: &operations,
+                        operations: &runtime.metadata.lifecycles.iter()
+                            .map(|view| (view.session_id.clone(), viewer_operation(view)))
+                            .collect(),
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(
-                            &capacity_states_rx.borrow(),
-                            &capacity_targets_rx.borrow(),
-                            &container_capacities,
-                        ),
+                        capacity: &viewer_capacity(&runtime.metadata),
                         launch_failures: &launch_failures,
-                        reviews: &review_views(&daemon_runtime),
+                        reviews: &runtime.metadata.reviews.iter()
+                            .map(|review| (review.session_id.clone(), review.clone()))
+                            .collect(),
                     },
                     $revision,
                 );
@@ -403,13 +359,6 @@ pub(crate) async fn run_server(
             };
         }
         'control: loop {
-            if std::mem::take(&mut publication.inputs_changed) {
-                request_controller_reload(
-                    &mut controller_reload_in_flight,
-                    &mut controller_reload_requested,
-                    &controller_reload_tx,
-                );
-            }
             project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
@@ -486,35 +435,7 @@ pub(crate) async fn run_server(
                     daemon_revisions.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
-                }
-                changed = workspace_updates.changed() => {
-                    if changed.is_err() {
-                        failure = feed_stopped(
-                            termination.is_cancelled(),
-                            "the daemon stopped publishing workspaces to the phone server",
-                        );
-                        break;
-                    }
-                    workspace_updates.borrow_and_update();
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
-                }
-                changed = capacity_targets_rx.changed() => {
-                    if changed.is_err() {
-                        failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
-                        break;
-                    }
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
-                }
-                changed = capacity_states_rx.changed() => {
-                    if changed.is_err() {
-                        failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
-                        break;
-                    }
-                    capacity_states_rx.borrow_and_update();
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
+                    tokio::task::yield_now().await;
                 }
                 changed = quota_updates.changed() => {
                     if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
@@ -564,58 +485,6 @@ pub(crate) async fn run_server(
                     // SessionManagerUpdates has a synchronous pending fast
                     // path. Yield after each completion so a hot stream of
                     // updates cannot monopolize this runtime worker.
-                    tokio::task::yield_now().await;
-                }
-                update = worker_updates_rx.recv() => {
-                    let Some(update) = update else {
-                        failure = feed_stopped(termination.is_cancelled(), "the session manager stopped; the phone server can no longer follow sessions");
-                        break;
-                    };
-                    publication.dirty.insert(update.session_id.clone());
-                    apply_worker_record_update(&mut controller, &update);
-                    if let Some(snapshot) = update.view.snapshot {
-                        let materialized = snapshot.materialized;
-                        let operational_state = snapshot.operational;
-                        materialized_activity.insert(
-                            update.session_id.clone(),
-                            crate::server_runtime::snapshot::MaterializedActivity {
-                                last_activity_at_ms: materialized.last_activity_at_ms,
-                                execution: materialized.execution,
-                            },
-                        );
-                        let queued = queued_prompt_projection(&materialized);
-                        let pending = materialized.pending_elicitations.clone();
-                        let active_shells = operational_state.active_user_shells.clone();
-                        let prompt_images_supported =
-                            operational_state.accepts_prompt_images();
-                        active_user_shells.insert(
-                            update.session_id.clone(),
-                            active_shells,
-                        );
-                        queued_prompts.insert(
-                            update.session_id.clone(),
-                            queued,
-                        );
-                        pending_elicitations.insert(
-                            update.session_id.clone(),
-                            pending,
-                        );
-                        if prompt_images_supported {
-                            prompt_images.insert(update.session_id.clone());
-                        } else {
-                            prompt_images.remove(&update.session_id);
-                        }
-                        operational.insert(
-                            update.session_id.clone(),
-                            operational_state,
-                        );
-                        revision = daemon_runtime.allocate_revision();
-                        publish_snapshot!('control, revision);
-                    }
-                    // The session update receiver can return pending entries
-                    // without touching Tokio's budgeted receive operation.
-                    // Give HTTP/TLS tasks a scheduling opportunity after each
-                    // update even when the worker is publishing continuously.
                     tokio::task::yield_now().await;
                 }
                 _ = prune_tick.tick() => {
@@ -867,32 +736,8 @@ pub(crate) async fn run_server(
                     match result {
                         Ok(created) => {
                             let bundle_id = created.bundle_id;
-                            // Other config sections may have changed while
-                            // this request was in flight. Publish only the
-                            // bundle this transaction created; a full fresh
-                            // config is requested below and must not make a
-                            // later completion hide another completed bundle.
-                            let Some(bundle) = created.config.bundles.get(&bundle_id) else {
-                                tracing::error!(%bundle_id, "bundle creation returned a config without its bundle");
-                                if reply.send(Err(crate::server::BundleFailure::Controller)).is_err() {
-                                    tracing::debug!("bundle creation failure reply dropped after client disconnect");
-                                }
-                                continue;
-                            };
-                            controller
-                                .config
-                                .bundles
-                                .insert(bundle_id.clone(), bundle.clone());
-                            // A reload started before this save may still be
-                            // queued. It must not hide a bundle after we have
-                            // acknowledged it as available to the browser.
-                            controller_reload_invalidated |= controller_reload_in_flight;
                             revision = daemon_runtime.allocate_revision();
                             publish_snapshot!('control, revision);
-                            request_daemon_controller_reload(
-                                daemon_runtime.clone(),
-                                "new bundle publication",
-                            );
                             if reply.send(Ok(bundle_id)).is_err() {
                                 tracing::debug!("bundle creation reply dropped after client disconnect");
                             }
@@ -1169,8 +1014,8 @@ pub(crate) async fn run_server(
                             continue;
                         }
                         ControllerAction::RefreshCapacity { target_id } => {
-                            let known = capacity_targets_rx.borrow().targets.iter().any(|target| &target.id == target_id);
-                            let accepted = known && capacity_feed.request_refresh();
+                            let known = snapshot_tx.borrow().capacity.iter().any(|target| &target.id == target_id);
+                            let accepted = known && daemon_runtime.capacity_feed().is_some_and(|feed| feed.request_refresh());
                             if known && !accepted {
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
                             }
@@ -1272,7 +1117,6 @@ pub(crate) async fn run_server(
                     let action_id = next_action_id;
                     if let ControllerAction::Suspend { session_id, .. } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
-                        let workspaces = workspace_updates.borrow().clone();
                         let workspace_id = if workspace_id.is_empty() && workspaces.len() == 1 {
                             workspaces[0].id.clone()
                         } else {
@@ -1410,7 +1254,7 @@ pub(crate) async fn run_server(
                         tokio::task::yield_now().await;
                         continue;
                     };
-                    let started_session_id = started.session.id.clone();
+                    let started_session_id = started.session_id;
                     // Registration turned review off for a session it cannot
                     // review; tell whoever asked for it.
                     let started_notice = [
@@ -1422,11 +1266,10 @@ pub(crate) async fn run_server(
                         Err("phone action completed before its provisional session was published".into())
                     } else {
                         track_started_phone_session(
-                            &mut controller.state,
                             &mut active_actions,
                             &mut action_sessions,
                             started.action_id,
-                            started.session,
+                            &started_session_id,
                         )
                     };
                     if publication.is_ok() {
@@ -1492,7 +1335,7 @@ pub(crate) async fn run_server(
                     );
                     if let Some(workspace_id) = launch_workspaces.remove(&action_id)
                         && result.is_err()
-                        && !session_id.as_ref().is_some_and(|id| closing_actions.contains_key(id))
+                        && session_id.is_none()
                     {
                         record_launch_failure(
                             &mut launch_failures,
@@ -1501,8 +1344,6 @@ pub(crate) async fn run_server(
                             session_id.clone(),
                             result.as_ref().err().map(|failure| failure.detail.clone()),
                         );
-                        revision = daemon_runtime.allocate_revision();
-                        publish_snapshot!('control, revision);
                     }
                     if let Err(failure) = &result {
                         tracing::warn!(
@@ -1518,63 +1359,12 @@ pub(crate) async fn run_server(
                         session_id.as_deref(),
                         &result,
                     );
-                    request_controller_reload(
-                        &mut controller_reload_in_flight,
-                        &mut controller_reload_requested,
-                        &controller_reload_tx,
-                    );
+                    revision = daemon_runtime.allocate_revision();
+                    publish_snapshot!('control, revision);
                     request_daemon_controller_reload(
                         daemon_runtime.clone(),
                         "phone action completion",
                     );
-                }
-                reloaded = controller_reload_rx.recv() => {
-                    let Some(ControllerReloaded { result }) = reloaded else {
-                        failure = feed_stopped(
-                            termination.is_cancelled(),
-                            "the controller reload pipeline stopped while the phone server was running",
-                        );
-                        break;
-                    };
-                    controller_reload_in_flight = false;
-                    if std::mem::take(&mut controller_reload_invalidated) {
-                        if let Err(error) = &result {
-                            tracing::warn!(%error, "superseded controller reload failed");
-                        }
-                        controller_reload_requested = false;
-                        request_controller_reload(
-                            &mut controller_reload_in_flight,
-                            &mut controller_reload_requested,
-                            &controller_reload_tx,
-                        );
-                        continue;
-                    }
-                    match result {
-                        Ok(_) => {
-                            let mut reloaded = daemon_runtime.controller_projection();
-                            for (session_id, error) in &pending_action_errors {
-                                if let Some(session) = reloaded.state.sessions.get_mut(session_id)
-                                    && session.last_error.is_none()
-                                {
-                                    session.last_error = Some(error.clone());
-                                }
-                            }
-                            controller = reloaded;
-                            quotas.retain(|id, _| controller.config.enabled_profile(id).is_some());
-                            // The capacity service follows the reload itself;
-                            // its new targets arrive on `capacity_targets_rx`.
-                            revision = daemon_runtime.allocate_revision();
-                            publish_snapshot!('control, revision);
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "completed phone operation could not reload controller state");
-                        }
-                    }
-                    if controller_reload_requested {
-                        controller_reload_requested = false;
-                        controller_reload_in_flight = true;
-                        spawn_controller_reload(controller_reload_tx.clone());
-                    }
                 }
             }
         }
@@ -1629,10 +1419,6 @@ pub(crate) async fn run_server(
     {
         tracing::warn!(%error, "Tailscale certificate renewal task failed");
     }
-    worker_shutdown
-        .shutdown()
-        .await
-        .context("shut down phone server session manager")?;
     result?;
     Ok(())
 }

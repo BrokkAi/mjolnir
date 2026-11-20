@@ -8,25 +8,8 @@ pub(super) struct PhoneSessionViews<'a> {
         &'a std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
     pub(super) conversations:
         &'a mj_core::snapshot_map::SnapshotMap<String, crate::server::BrowserTranscript>,
-    pub(super) queued_prompts:
-        &'a std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
-    pub(super) active_user_shells:
-        &'a std::collections::BTreeMap<String, Vec<mj_core::relay::ActiveUserShell>>,
-    pub(super) pending_elicitations:
-        &'a std::collections::BTreeMap<String, Vec<mj_core::elicitation::ElicitationRequest>>,
-    /// Sessions whose agent advertised image support in prompts.
-    pub(super) prompt_images: &'a std::collections::BTreeSet<String>,
-    /// What each managed session's relay last reported. This is where the
-    /// projection learns what the agent can do, rather than guessing from the
-    /// durable record, which knows only what was configured.
-    pub(super) operational: &'a std::collections::BTreeMap<
-        String,
-        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
-    >,
-    /// Durable activity watermarks delivered with the materialized worker
-    /// snapshots. Keeping this in the control-loop cache avoids a database
-    /// read while rendering each viewer snapshot.
-    pub(super) materialized_activity: &'a std::collections::BTreeMap<String, MaterializedActivity>,
+    pub(super) sessions:
+        &'a mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
     pub(super) project_sources: &'a PhoneProjectSources,
     /// Lifecycle operations running now, keyed by session.
     pub(super) operations: &'a std::collections::BTreeMap<String, crate::server::ViewerOperation>,
@@ -43,52 +26,52 @@ pub(super) struct PhoneSessionViews<'a> {
 
 /// Project the capacity service's readings and refresh status for the phone.
 pub(super) fn viewer_capacity(
-    readings: &std::collections::BTreeMap<String, mj_controller::targets::TargetCapacityState>,
-    inputs: &crate::pollers::CapacityProbeSet,
-    container_capacities: &std::collections::BTreeMap<
-        String,
-        mj_client::runtime_feed::RuntimeContainerCapacity,
-    >,
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
 ) -> Vec<crate::server::ViewerTargetCapacity> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let storage = mj_controller::target_storage::views_snapshot();
-    let empty = mj_controller::targets::TargetCapacityState::default();
-    inputs
-        .targets
+    metadata
+        .host_capacities
         .iter()
-        .map(|target| {
-            let reading = readings.get(&target.id).unwrap_or(&empty);
-            let usage = reading.usage.as_ref();
-            let hosts = mj_core::targets::storage::capacity_storage_hosts(target, usage);
-            let container_capacity = container_capacities
-                .get(&target.id)
-                .map(|capacity| capacity.capacity);
+        .map(|capacity| {
+            let reading = &capacity.reading;
+            let hosts = reading
+                .filesystems
+                .iter()
+                .map(|filesystem| filesystem.host.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let storage = metadata
+                .storage
+                .iter()
+                .filter(|view| hosts.contains(view.host.as_str()))
+                .collect::<Vec<_>>();
             crate::server::ViewerTargetCapacity {
                 storage: crate::server::ViewerTargetStorage::list(
-                    &mj_core::targets::storage::views_for(&storage, &hosts),
+                    &storage,
                     matches!(
-                        target.kind,
+                        reading.kind,
                         mj_controller::targets::DeploymentCapacityKind::AwsFleet
                     ),
                 ),
-                id: target.id.clone(),
-                label: target.host.clone(),
-                target_ids: target.target_ids.clone(),
-                cpu_percent: usage.and_then(|usage| usage.cpu_percent),
-                memory_used_bytes: usage.map(|usage| usage.memory_used_bytes),
-                memory_total_bytes: usage.map(|usage| usage.memory_total_bytes),
-                logical_cores: usage.map(|usage| usage.logical_cores),
-                container_capacity,
-                disk_total_bytes: usage.and_then(|usage| usage.disk_total_bytes),
-                // The same count `mj hosts` reports: absent for a plain host
-                // and for a fleet whose size is unknown.
-                virtual_machines: reading.fleet_instances(target).map(|count| count as u64),
+                id: reading.id.clone(),
+                label: reading.host.clone(),
+                target_ids: reading.target_ids.clone(),
+                cpu_percent: reading.cpu_percent,
+                memory_used_bytes: reading.has_reading.then_some(reading.memory_used_bytes),
+                memory_total_bytes: reading.has_reading.then_some(reading.memory_total_bytes),
+                logical_cores: reading.has_reading.then_some(reading.logical_cores),
+                container_capacity: metadata
+                    .container_capacities
+                    .get(&reading.id)
+                    .map(|host| host.capacity),
+                disk_total_bytes: capacity.disk_total_bytes,
+                virtual_machines: reading.fleet_instances.map(|count| count as u64),
                 sampled_at_epoch_seconds: reading.sampled_at_epoch_seconds,
-                // A target with no result yet is loading, not idle.
-                refreshing: inputs.refreshing(reading) || !reading.has_answered(),
+                refreshing: capacity.refreshing
+                    || (reading.sampled_at_epoch_seconds.is_none()
+                        && reading.probe_error.is_none()),
                 stale: reading.sampled_at_epoch_seconds.is_some_and(|sampled| {
                     mj_core::targets::capacity_sample_is_stale(sampled, now)
                 }),
@@ -395,17 +378,6 @@ pub(super) fn phone_commands(
 }
 
 /// The open reviews, keyed by session, for one snapshot.
-pub(super) fn review_views(
-    daemon_runtime: &Arc<RuntimeState>,
-) -> std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView> {
-    daemon_runtime
-        .review_host()
-        .views()
-        .into_iter()
-        .map(|review| (review.session_id.clone(), review))
-        .collect()
-}
-
 pub(super) type ViewerMoveRecoveries =
     std::collections::BTreeMap<String, crate::server::ViewerMoveRecovery>;
 
@@ -417,21 +389,33 @@ pub(super) fn viewer_snapshot(
     views: &PhoneSessionViews<'_>,
     revision: u64,
 ) -> ViewerSnapshot {
+    let mut children = crate::server::ViewerChildren::default();
+    for relation in controller.state.subagents.values() {
+        children
+            .entry(relation.parent_session_id.clone())
+            .or_insert_with(Default::default)
+            .insert(relation.child_session_id.clone(), relation.kind);
+    }
     viewer_snapshot_selected(
         controller,
         workspaces,
         quotas,
         views,
         revision,
-        None,
+        ViewerRecordSelection {
+            ids: &controller.state.sessions.keys().cloned().collect(),
+            children: &children,
+            failed_launch_retries: None,
+        },
         &Default::default(),
     )
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct ViewerRecordSelection<'a> {
     pub(super) ids: &'a std::collections::BTreeSet<String>,
     pub(super) children: &'a crate::server::ViewerChildren,
-    pub(super) failed_launch_retries: &'a std::collections::BTreeSet<String>,
+    pub(super) failed_launch_retries: Option<&'a std::collections::BTreeSet<String>>,
 }
 
 pub(super) fn viewer_snapshot_selected(
@@ -440,39 +424,32 @@ pub(super) fn viewer_snapshot_selected(
     quotas: &std::collections::BTreeMap<String, ProfileQuota>,
     views: &PhoneSessionViews<'_>,
     revision: u64,
-    selection: Option<ViewerRecordSelection<'_>>,
-    availability: &mj_client::availability::RuntimeAvailability,
+    selection: ViewerRecordSelection<'_>,
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
 ) -> ViewerSnapshot {
     let PhoneSessionViews {
         native_agents,
         conversations,
         reviews,
-        queued_prompts,
-        active_user_shells,
-        pending_elicitations,
-        prompt_images,
-        operational,
-        materialized_activity,
+        sessions,
         project_sources,
         operations,
         move_recoveries,
         capacity,
         launch_failures,
     } = views;
-    let mut snapshot = match selection {
-        Some(selection) => ViewerSnapshot::from_config_records(
-            &controller.config,
-            &controller.state,
-            revision,
-            selection
-                .ids
-                .iter()
-                .filter_map(|id| controller.state.sessions.get(id)),
-            selection.children,
-            Some(selection.failed_launch_retries),
-        ),
-        None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
-    };
+    let mut snapshot = ViewerSnapshot::from_config_records(
+        &controller.config,
+        &controller.state,
+        revision,
+        selection
+            .ids
+            .iter()
+            .filter_map(|id| controller.state.sessions.get(id)),
+        selection.children,
+        selection.failed_launch_retries,
+    );
+    let availability = &metadata.availability;
     snapshot.target_availability_notes = availability.browser.target_notes.clone();
     for profile in &mut snapshot.profiles {
         profile.availability = browser_availability(
@@ -618,15 +595,13 @@ pub(super) fn viewer_snapshot_selected(
         {
             session.set_project_source(source);
         }
-        let durable_activity = materialized_activity
-            .get(&session.id)
-            .copied()
-            .unwrap_or_default();
-        session.last_activity_at_ms = durable_activity.last_activity_at_ms;
-        session.queued_prompts = queued_prompts
-            .get(&session.id)
+        let view = sessions.get(&session.id);
+        let live = view.and_then(|view| view.operational.as_deref());
+        let materialized = view.and_then(|view| view.materialized.as_deref());
+        session.last_activity_at_ms = materialized.and_then(|view| view.last_activity_at_ms);
+        session.queued_prompts = materialized
             .into_iter()
-            .flatten()
+            .flat_map(|view| &view.queued_prompts)
             .map(|prompt| ViewerQueuedPrompt {
                 id: prompt.id.clone(),
                 kind: prompt.kind.clone(),
@@ -634,34 +609,27 @@ pub(super) fn viewer_snapshot_selected(
                 created_at: prompt.created_at_ms.to_string(),
             })
             .collect();
-        session.active_user_shells = active_user_shells
-            .get(&session.id)
+        session.active_user_shells = live
             .into_iter()
-            .flatten()
+            .flat_map(|state| &state.active_user_shells)
             .map(|shell| ViewerUserShell {
                 id: shell.command_id.clone(),
                 command: shell.command.clone(),
                 started_at_ms: shell.started_at_ms,
             })
             .collect();
-        session.background_tasks = operational
-            .get(&session.id)
-            .map(|state| {
-                state
-                    .background_commands
-                    .iter()
-                    .map(|task| ViewerBackgroundTask {
-                        id: task.id.clone(),
-                        command: task.command.clone(),
-                        started_at_ms: task.started_at_ms,
-                        can_stop: task.can_stop,
-                    })
-                    .collect()
+        session.background_tasks = live
+            .into_iter()
+            .flat_map(|state| &state.background_commands)
+            .map(|task| ViewerBackgroundTask {
+                id: task.id.clone(),
+                command: task.command.clone(),
+                started_at_ms: task.started_at_ms,
+                can_stop: task.can_stop,
             })
-            .unwrap_or_default();
-        session.pending_elicitations = pending_elicitations
-            .get(&session.id)
-            .cloned()
+            .collect();
+        session.pending_elicitations = materialized
+            .map(|view| view.pending_elicitations.clone())
             .unwrap_or_default();
         // A reviewing harness's form is this session's question too: the
         // person answers it here, and its id routes the answer to that role.
@@ -673,7 +641,8 @@ pub(super) fn viewer_snapshot_selected(
                     .map(crate::review_host::ReviewerQuestion::session_request),
             );
         }
-        session.prompt_images_supported = prompt_images.contains(&session.id);
+        session.prompt_images_supported =
+            live.is_some_and(mj_core::relay::RelayOperationalState::accepts_prompt_images);
         session.operation = operations.get(&session.id).cloned().map(Box::new);
         // Runtime ownership takes precedence over the durable record. Move
         // can still look Running while its old conversation is no longer a
@@ -695,12 +664,13 @@ pub(super) fn viewer_snapshot_selected(
         {
             session.state = crate::server::LAUNCHING_STATE.to_owned();
         }
-        let live = operational.get(&session.id).map(|state| &**state);
         session.storage_problem = controller
             .state
             .sessions
             .get(&session.id)
-            .and_then(mj_controller::target_storage::session_problem);
+            .and_then(|record| {
+                mj_controller::target_storage::session_problem_in(&metadata.storage, record)
+            });
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =
             live.is_some_and(|state| state.supports_targeted_turn_control());
@@ -717,8 +687,8 @@ pub(super) fn viewer_snapshot_selected(
         let activity_state = match live {
             Some(state) => state.activity_state(),
             None => mj_core::activity::while_disconnected(
-                durable_activity.execution,
-                durable_activity.last_activity_at_ms,
+                materialized.map_or(Default::default(), |view| view.execution),
+                session.last_activity_at_ms,
             ),
         };
         // A session the daemon can see reports the phase its own flag names,
@@ -749,7 +719,45 @@ pub(super) fn viewer_snapshot_selected(
                     )
                 })
             && session.operation.is_none();
-        session.question_message = question_message(live, session.attention);
+        session.attention = metadata
+            .session_attention
+            .get(&session.id)
+            .copied()
+            .unwrap_or_default();
+        session.unread_frontier = metadata.unread_frontiers.get(&session.id).copied();
+        session.notification_dismissal = metadata.notification_dismissals.get(&session.id).cloned();
+        session.notification_card = metadata
+            .notification_cards
+            .as_ref()
+            .and_then(|cards| cards.get(&session.id))
+            .cloned();
+        session.question_message = match session
+            .notification_card
+            .as_ref()
+            .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
+        {
+            Some(entry) => match &entry.message {
+                mj_core::attention::EntryMessage::Found(id) => Some(id.clone()),
+                mj_core::attention::EntryMessage::Locating
+                | mj_core::attention::EntryMessage::None => None,
+            },
+            None => question_message(live, session.attention),
+        };
+        session.form_holder = metadata.form_holders.get(&session.id).cloned();
+        session.native_subagent_attention = session
+            .native_subagents
+            .iter()
+            .map(|native| {
+                (
+                    native.session_id.clone(),
+                    metadata
+                        .session_attention
+                        .get(&native.view_id())
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
         session.supports_open_request = live.is_some_and(|state| state.supports_open_request());
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {
@@ -833,17 +841,19 @@ pub(super) fn viewer_snapshot_selected(
             .is_some_and(mj_core::config::is_container_target);
         let tree_turn_running = std::iter::once(session.id.as_str())
             .chain(
-                controller
-                    .state
-                    .subagents
-                    .values()
-                    .filter(|child| child.parent_session_id == session.id)
-                    .map(|child| child.child_session_id.as_str()),
+                selection
+                    .children
+                    .get(&session.id)
+                    .into_iter()
+                    .flat_map(|children| children.keys().map(String::as_str)),
             )
             .any(|id| {
-                operational.get(id).is_some_and(|state| {
-                    state.active_prompt.is_some() || state.harness_turn.is_some()
-                })
+                sessions
+                    .get(id)
+                    .and_then(|view| view.operational.as_ref())
+                    .is_some_and(|state| {
+                        state.active_prompt.is_some() || state.harness_turn.is_some()
+                    })
             });
         session.capabilities = session_capabilities(
             session,
@@ -1001,49 +1011,4 @@ pub(super) fn viewer_activity_details(
         last_activity_at_ms: details.last_activity_at_ms,
         label: details.label.clone(),
     }
-}
-
-/// What the durable projection last recorded about a session's turn.
-///
-/// The daemon keeps this for every session, including ones it currently has
-/// no live connection to, because that is the only honest thing it can report
-/// about a worker it cannot see. Reporting the default value of an enum
-/// instead is what made a running turn look finished after a daemon restart
-/// (#1025).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct MaterializedActivity {
-    pub(super) last_activity_at_ms: Option<i64>,
-    pub(super) execution: mj_core::state::MaterializedExecutionState,
-}
-
-/// Seed the viewer's in-memory activity cache from the durable projection
-/// before publishing its first snapshot. Later worker snapshots update this
-/// cache without adding a database read to the render path.
-pub(super) async fn load_materialized_activity(
-    controller: &Controller,
-) -> Result<std::collections::BTreeMap<String, MaterializedActivity>> {
-    let session_ids = controller
-        .state
-        .sessions
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    mj_core::runtime::spawn_blocking(move || {
-        let activity_by_session = mj_controller::database::load_materialized_activity()?;
-        Ok(session_ids
-            .into_iter()
-            .map(|session_id| {
-                let activity = activity_by_session
-                    .get(&session_id)
-                    .map(|(last_activity_at_ms, execution)| MaterializedActivity {
-                        last_activity_at_ms: *last_activity_at_ms,
-                        execution: *execution,
-                    })
-                    .unwrap_or_default();
-                (session_id, activity)
-            })
-            .collect::<std::collections::BTreeMap<_, _>>())
-    })
-    .await
-    .context("materialized activity startup task failed")?
 }

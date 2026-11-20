@@ -1457,7 +1457,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
 pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
-    pub(super) publisher: RemoteSessionPublisher,
+    pub(super) publisher: mj_controller::session_manager::RemoteSessionPublisher,
     /// Background tasks the daemon asked a worker to stop, in order.
     pub(super) stopped_tasks: Vec<String>,
     _shutdown: SessionManagerShutdown,
@@ -1632,35 +1632,6 @@ pub(super) fn test_metadata(address: SocketAddr) -> DaemonMetadata {
         instance_id: String::new(),
         placement: DaemonPlacement::Host,
     }
-}
-
-#[tokio::test]
-async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
-    let mut manager = TestRemoteManager::new().await;
-    let (reply, response) = tokio::sync::oneshot::channel();
-    let forwarding = mj_core::runtime::spawn(forward_in_process_session_request(
-        RemoteSessionRequest::Reviewer {
-            session_id: "session-1".into(),
-            role: None,
-            action: mj_controller::session_manager::ReviewerAction::CaptureDelta {
-                repositories: None,
-            },
-            reply,
-        },
-        manager.control.clone(),
-    ));
-    let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
-        .await
-        .expect("reviewer forwarding did not reach the manager")
-        .expect("manager request stream ended");
-    let RemoteSessionRequest::Reviewer { mut reply, .. } = request else {
-        panic!("expected the forwarded reviewer request")
-    };
-    drop(response);
-    tokio::time::timeout(Duration::from_secs(5), reply.closed())
-        .await
-        .expect("in-process forwarding kept the actor reply alive");
-    forwarding.await.expect("forwarding task panicked");
 }
 
 #[tokio::test]
@@ -11579,7 +11550,13 @@ async fn a_session_without_a_relay_actor_has_no_runtime_view() {
         .publish_session("session-1".into(), ready_startup_view())
         .await
         .unwrap();
-    assert!(!state.owner().sessions.contains_key("session-1"));
+    assert!(
+        state
+            .owner()
+            .sessions
+            .get("session-1")
+            .is_none_or(|view| view.materialized_only)
+    );
 }
 
 #[tokio::test]

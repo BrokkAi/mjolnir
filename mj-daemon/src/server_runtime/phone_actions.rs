@@ -66,7 +66,7 @@ pub(super) fn action_reference(action_id: u64) -> String {
 
 pub(super) struct PhoneActionStarted {
     pub(super) action_id: u64,
-    pub(super) session: SessionRecord,
+    pub(super) session_id: String,
     /// Registration turned review off because the folder has no Git commits.
     pub(super) review_notice: Option<&'static str>,
     pub(super) capacity_warning: Option<String>,
@@ -166,10 +166,6 @@ pub(super) struct ReadReceiptPersisted {
     pub(super) reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
 }
 
-pub(super) struct ControllerReloaded {
-    pub(super) result: std::result::Result<Controller, String>,
-}
-
 pub(super) struct BundleCreated {
     pub(super) result: std::result::Result<
         mj_controller::controller::QuickBundleCreation,
@@ -185,43 +181,6 @@ pub(super) struct MovePrepared {
     pub(super) reply: tokio::sync::oneshot::Sender<
         std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
     >,
-}
-
-/// Loads durable controller state without occupying the phone control loop.
-/// The outer task observes blocking-task panics and reports a closed result
-/// channel instead of silently abandoning the refresh.
-pub(super) fn spawn_controller_reload(
-    completed: tokio::sync::mpsc::UnboundedSender<ControllerReloaded>,
-) {
-    spawn_controller_reload_with(completed, Controller::load);
-}
-
-pub(super) fn spawn_controller_reload_with(
-    completed: tokio::sync::mpsc::UnboundedSender<ControllerReloaded>,
-    load: impl FnOnce() -> Result<Controller> + Send + 'static,
-) {
-    mj_core::runtime::spawn(async move {
-        let result = match mj_core::runtime::spawn_blocking(load).await {
-            Ok(result) => result.map_err(|error| format!("{error:#}")),
-            Err(error) => Err(format!("controller reload task failed: {error}")),
-        };
-        if completed.send(ControllerReloaded { result }).is_err() {
-            tracing::debug!("controller reload completed after the phone control loop stopped");
-        }
-    });
-}
-
-pub(super) fn request_controller_reload(
-    in_flight: &mut bool,
-    requested: &mut bool,
-    completed: &tokio::sync::mpsc::UnboundedSender<ControllerReloaded>,
-) {
-    if *in_flight {
-        *requested = true;
-    } else {
-        *in_flight = true;
-        spawn_controller_reload(completed.clone());
-    }
 }
 
 /// How often the housekeeping tick runs: hourly, unless the test-only

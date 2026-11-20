@@ -180,7 +180,7 @@ impl ScopedProjection {
             .retain(|id, _| keeps_relation(full, id, kept.contains_key(id)));
         result.sessions = full
             .sessions
-            .filtered(|id, _| result.records.contains_key(id));
+            .filtered(|id, view| result.records.contains_key(id) && !view.materialized_only);
         result.moves = full.moves.filtered(|id, _| result.records.contains_key(id));
         result.session_cpu = full
             .session_cpu
@@ -240,13 +240,19 @@ impl ScopedProjection {
         }
 
         let records = &result.records;
-        follow_records(
-            &mut result.sessions,
-            &before.sessions,
-            &after.sessions,
-            records,
-            &moved,
-        );
+        for id in before
+            .sessions
+            .changes(&after.sessions)
+            .map(|(id, _)| id)
+            .chain(&moved)
+        {
+            let keep = records.contains_key(id)
+                && after
+                    .sessions
+                    .get(id)
+                    .is_some_and(|view| !view.materialized_only);
+            result.sessions.copy_entry(&after.sessions, id, keep);
+        }
         follow_records(
             &mut result.moves,
             &before.moves,
@@ -329,6 +335,8 @@ pub struct RuntimeContainerCapacity {
 pub struct RuntimeHostCapacity {
     pub reading: mj_core::targets::HostCapacityRow,
     pub refreshing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,6 +539,10 @@ pub struct RuntimeMetadata {
     )]
     pub last_subagent_policies: BTreeMap<String, SubagentPolicy>,
     pub workspace_names: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,
@@ -1157,6 +1169,8 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            materialized: None,
+            materialized_only: false,
             attention: Default::default(),
             policy_config_keys: Vec::new(),
             session_id: id.into(),

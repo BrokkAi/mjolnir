@@ -49,6 +49,8 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        materialized: None,
+        materialized_only: false,
         attention: Default::default(),
         policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
