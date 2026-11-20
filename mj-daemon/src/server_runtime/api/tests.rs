@@ -8089,7 +8089,7 @@ async fn the_first_question_starts_one_oracle_like_a_spawn_and_a_later_one_asks_
         }),
     };
     let replay = backend
-        .execute_subagent_tool_prepared("parent-1".into(), first.clone(), Some(&prepared))
+        .execute_subagent_tool_prepared("parent-1".into(), first.clone(), Some(&prepared), None)
         .await;
     assert!(!replay.is_error, "{}", replay.message);
     assert_eq!(exports.requests().len(), 1);

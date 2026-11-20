@@ -907,16 +907,13 @@ impl ApiBackend {
             .await?
         };
         // A child's handback is final only once the review host can say
-        // whether the child's review is open. While it restores reviews or the
-        // daemon stops, the request stays unanswered: this error is a task
-        // failure, which the dispatcher retries with backoff, and no refusal
-        // is stored for a child that may never read it.
-        if matches!(
-            prepared.request.action,
-            mj_core::subagent::SubagentToolAction::Handback { .. }
-        ) && self.exports.child_review(parent.clone()).await
-            == crate::daemon::ChildReview::Unknown
-        {
+        // whether the child's review is open. The state is read once, here,
+        // and the handback is decided from that one answer. While the host
+        // restores reviews or the daemon stops, the request stays unanswered:
+        // this error is a task failure, which the dispatcher retries with
+        // backoff, and no refusal is stored for a child that may never read it.
+        let handback_review = self.handback_review(&parent, &prepared.request).await?;
+        if handback_review == Some(crate::daemon::ChildReview::Unknown) {
             bail!("the review host cannot yet say whether this child's review is open; the handback will be retried");
         }
         blocking("mark delegation delivering", {
@@ -930,6 +927,7 @@ impl ApiBackend {
                 parent.clone(),
                 prepared.request.clone(),
                 Some(&prepared),
+                handback_review,
             )
             .await;
         let stored_result = mj_controller::database::StoredDelegationResult {
@@ -1002,8 +1000,40 @@ impl ApiBackend {
         parent_session_id: String,
         request: mj_core::subagent::SubagentToolRequest,
     ) -> mj_core::subagent::SubagentToolResult {
-        self.execute_subagent_tool_prepared(parent_session_id, request, None)
+        let handback_review = self
+            .handback_review(&parent_session_id, &request)
             .await
+            .ok()
+            .flatten();
+        self.execute_subagent_tool_prepared(parent_session_id, request, None, handback_review)
+            .await
+    }
+
+    /// For an ordinary worker child's handback, whether its review is open,
+    /// asked once so the decision rests on one answer. `None` for any other
+    /// action and for reviewers and oracles, which have no review of their
+    /// own and so never wait for the review host.
+    async fn handback_review(
+        &self,
+        requester: &str,
+        request: &mj_core::subagent::SubagentToolRequest,
+    ) -> Result<Option<crate::daemon::ChildReview>> {
+        if !matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::Handback { .. }
+        ) {
+            return Ok(None);
+        }
+        let worker = blocking("load sub-agent kind", {
+            let requester = requester.to_owned();
+            move || mj_controller::database::load_subagent(&requester)
+        })
+        .await?
+        .is_some_and(|record| record.kind == mj_core::subagent::SubagentKind::Worker);
+        if !worker {
+            return Ok(None);
+        }
+        Ok(Some(self.exports.child_review(requester.to_owned()).await))
     }
 
     async fn execute_subagent_tool_prepared(
@@ -1011,9 +1041,10 @@ impl ApiBackend {
         parent_session_id: String,
         request: mj_core::subagent::SubagentToolRequest,
         prepared: Option<&mj_controller::database::PreparedDelegation>,
+        handback_review: Option<crate::daemon::ChildReview>,
     ) -> mj_core::subagent::SubagentToolResult {
         let outcome = self
-            .execute_subagent_tool_inner(&parent_session_id, &request, prepared)
+            .execute_subagent_tool_inner(&parent_session_id, &request, prepared, handback_review)
             .await;
         let child_id = match &request.action {
             mj_core::subagent::SubagentToolAction::SendInput {
@@ -1082,6 +1113,7 @@ impl ApiBackend {
         parent_session_id: &str,
         request: &mj_core::subagent::SubagentToolRequest,
         prepared: Option<&mj_controller::database::PreparedDelegation>,
+        handback_review: Option<crate::daemon::ChildReview>,
     ) -> Result<serde_json::Value> {
         use mj_core::subagent::SubagentToolAction;
         let request_created_at_ms = request.created_at_ms;
@@ -1504,7 +1536,7 @@ impl ApiBackend {
                 // Refusing here means no report exists to release before the
                 // child has read and addressed its verdict.
                 if record.kind == mj_core::subagent::SubagentKind::Worker {
-                    match self.exports.child_review(child_id.clone()).await {
+                    match handback_review.context("a handback is executed with its review state")? {
                         crate::daemon::ChildReview::Open => bail!(
                             "your review has no verdict yet; wait for it, address it, then hand back"
                         ),
