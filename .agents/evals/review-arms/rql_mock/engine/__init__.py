@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -10,13 +11,12 @@ import subprocess
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
 from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, PROMPT, REPAIR, semantics_only
-from .runner import EFFORT, MODEL, RUN_ERRORS, SESSION_ID, IsolationFailure, SealedRunner, TurnFailure
+from .runner import EFFORT, MODEL, RUN_ERRORS, SESSION_ID, IsolationFailure, LaunchHeld, SealedRunner, TurnFailure
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
 from .validation import canonical, ordered_rows, validate
 
 
-ROOT = Path("/mnt/optane/review-arms-pilot")
-CACHE_ROOT = ROOT / "engine-cache"
+ROOT = Path(os.environ.get("REVIEW_ARMS_ENGINE_ROOT", "/mnt/optane/review-arms-pilot"))
 CONFIG = ROOT / "engine.json"
 DOCUMENT_KEYS = ("catalogue", "steps", "menu", "eligible_labels")
 
@@ -146,8 +146,13 @@ class Engine:
             # An interrupted launch can leave a live engine even if mj never
             # returned its ID. Refuse duplicate engines until it is reconciled.
             save(record_path, identity)
-            record = {**identity, "session_id": runner.start(snapshot, commit),
-                      "instance": runner.instance, "model_version": self.model_version()}
+            try:
+                sid = runner.start(snapshot, commit)
+            except LaunchHeld:
+                record_path.unlink()
+                raise
+            record = {**identity, "session_id": sid, "instance": runner.instance,
+                      "model_version": self.model_version()}
             save(record_path, record)
         if not record.get("prepared"):
             runner.prepare(record["session_id"], snapshot, record_path.parent)
@@ -258,7 +263,7 @@ def answer(commit, query_text, *, fresh=False):
         repo = manifest_sources(manifest, config["repos"])[revision]
         return blob_reader(repo, revision), prepared_snapshot(repo, config["snapshot_repo"], revision)
 
-    return Engine(CACHE_ROOT, documents, source,
+    return Engine(CONFIG.parent / "engine-cache", documents, source,
                   lambda: SealedRunner({**config, "model_version": version}, manifest), lambda: version,
                   served_steps=manifest["served_steps"], menu_sha256=manifest["inputs"]["menu_sha256"]
                   ).answer(commit, query_text, fresh=fresh)

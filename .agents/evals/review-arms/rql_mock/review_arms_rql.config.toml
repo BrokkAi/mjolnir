@@ -7,4 +7,12 @@ env_vars = [
     "RQL_SSH_TARGET", "MJ_SESSION_ID",
 ]
 startup_timeout_sec = 60
+# Codex abandons a tool call after tool_timeout_sec (upstream documents 60 s when
+# unset; not checked against this pin). An uncached
+# answer is a whole engine turn, so the client must outwait the engine's own limits
+# for one call: at most 2 sessions x 2 attempts, each a /clear (runner.py
+# CONTEXT_TIMEOUT, 1200 s) and an answer wait (1830 s), plus per-session launch
+# (900 s) and idle wait (1200 s), about 4.5 h before file commands. The engine then
+# decides every failure and returns it as an engine_error the writer sees.
+tool_timeout_sec = 21600
 default_tools_approval_mode = "approve"

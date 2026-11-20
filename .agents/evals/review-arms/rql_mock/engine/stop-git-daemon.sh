@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-config=${1:-/mnt/optane/review-arms-pilot/engine.json}
+config=${1:-${REVIEW_ARMS_ENGINE_ROOT:-/mnt/optane/review-arms-pilot}/engine.json}
 repo=$(python3 -c '
 import json, pathlib, sys
 with open(sys.argv[1]) as f:
@@ -22,6 +22,12 @@ if [[ -r /proc/$pid/cmdline ]]; then
         printf 'PID %s no longer belongs to the engine Git daemon\n' "$pid" >&2
         exit 1
     fi
-    kill -TERM -- "-$pid"
+    # Git may fork helpers beneath the group leader created by setsid.
+    read -r pgid sid < <(ps -o pgid=,sid= -p "$pid")
+    if [[ ! $pgid =~ ^[1-9][0-9]*$ || $pgid != "$sid" ]]; then
+        printf 'PID %s is outside the engine Git daemon session\n' "$pid" >&2
+        exit 1
+    fi
+    kill -TERM -- "-$pgid"
 fi
 rm -- "$pidfile"

@@ -346,6 +346,25 @@ def step_result(random_rows, decisive, seed):
             "decisive_n": len(decisive), "prescience": metrics["prescience"]["status"], "metrics": metrics}
 
 
+def validate_decisions(query, candidates, decisions):
+    if not isinstance(decisions, dict):
+        raise ValueError(f"{query.key}: adjudicator output is not an object")
+    if set(decisions) != set(candidates):
+        raise ValueError(f"{query.key}: adjudicator must classify every candidate")
+
+    validity = {}
+    for decision in decisions.values():
+        if (not isinstance(decision, dict) or set(decision) != {"key", "in_scope", "reason"}
+                or not isinstance(decision["key"], str) or not decision["key"].strip()
+                or type(decision["in_scope"]) is not bool
+                or not isinstance(decision["reason"], str) or not decision["reason"].strip()):
+            raise ValueError(f"{query.key}: invalid adjudication {decision!r}")
+        key, valid = decision["key"], decision["in_scope"]
+        if validity.setdefault(key, valid) != valid:
+            raise ValueError(f"{query.key}: conflicting decisions for semantic row {key!r}")
+    return validity
+
+
 def measure(query, fresh, engine, enumerate_rows, adjudicate):
     """Pool anonymous candidates and count typed semantic row identities."""
     def answer(again):
@@ -363,19 +382,7 @@ def measure(query, fresh, engine, enumerate_rows, adjudicate):
     ids = {row: str(index) for index, row in enumerate(unique)}
     candidates = {ids[row]: json.loads(row) for row in unique}
     decisions = adjudicate(query, candidates) if candidates else {}
-    if set(decisions) != set(candidates):
-        raise ValueError(f"{query.key}: adjudicator must classify every candidate")
-
-    validity = {}
-    for decision in decisions.values():
-        if (not isinstance(decision, dict) or set(decision) != {"key", "in_scope", "reason"}
-                or not isinstance(decision["key"], str) or not decision["key"].strip()
-                or type(decision["in_scope"]) is not bool
-                or not isinstance(decision["reason"], str) or not decision["reason"].strip()):
-            raise ValueError(f"{query.key}: invalid adjudication {decision!r}")
-        key, valid = decision["key"], decision["in_scope"]
-        if validity.setdefault(key, valid) != valid:
-            raise ValueError(f"{query.key}: conflicting decisions for semantic row {key!r}")
+    validity = validate_decisions(query, candidates, decisions)
 
     def keys(source):
         return {decisions[ids[canonical(row)]]["key"] for row in sources[source]}

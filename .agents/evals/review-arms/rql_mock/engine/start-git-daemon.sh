@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run only for the pilot. Does not start any Mjolnir session.
 set -euo pipefail
-config=${1:-/mnt/optane/review-arms-pilot/engine.json}
+config=${1:-${REVIEW_ARMS_ENGINE_ROOT:-/mnt/optane/review-arms-pilot}/engine.json}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 export PYTHONPATH="$script_dir/../..${PYTHONPATH:+:$PYTHONPATH}"
 readarray -t settings < <(python3 -c '

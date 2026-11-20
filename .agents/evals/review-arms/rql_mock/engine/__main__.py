@@ -3,7 +3,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from . import CACHE_ROOT, CONFIG, frozen_inputs, load, save, teardown
+from . import CONFIG, frozen_inputs, load, save, teardown
 from .runner import SealedRunner
 from .snapshot import git_output, manifest_sources, orphan_ref, parentless_snapshot, prepared_snapshot
 
@@ -36,7 +36,8 @@ def main():
         # Old active records may predate the per-session provider pin.
         manifest = load(Path(config["manifest"]))
         version = manifest["model_versions"]["fable_provider_id"]
-        accepted, failures = teardown(CACHE_ROOT, SealedRunner({**config, "model_version": version}))
+        accepted, failures = teardown(args.config.parent / "engine-cache",
+                                      SealedRunner({**config, "model_version": version}))
         print(f"Engine session destroy requests accepted: {accepted}")
         for message in failures:
             print(message, file=sys.stderr)

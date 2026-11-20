@@ -388,7 +388,7 @@ def run_sealed_judge(batch_path):
             if launch_intent.exists():
                 raise RuntimeError(f"{attempt}: launch has no recorded session ID; reconcile before retrying")
             profile = pick_profile()
-            if hold := pilot_driver.quota_hold("fable", floor=f"{profile}=25", weekly=True, strict=True):
+            if hold := pilot_driver.pilot_weekly_hold(profile, scope=a.model):
                 raise RuntimeError("held before judge launch: " + hold)
             title = f"Assessment {tag}"
             scope = {"profile": profile, "instance": a.instance, "bundle": a.bundle, "commit": a.repo_commit}

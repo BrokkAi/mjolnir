@@ -316,7 +316,8 @@ def load_deliveries(runs, key):
         data = path.read_bytes()
         if sha(data) != entry["query_sha256"]:
             raise ValueError(f"{path}: delivery log differs from the judge input's frozen run")
-        deliveries[entry["job"]] = [json.loads(line) for line in data.splitlines() if line.strip()]
+        records = [json.loads(line) for line in data.splitlines() if line.strip()]
+        deliveries[entry["job"]] = [record for record in records if record.get("delivered") is True]
     return deliveries
 
 

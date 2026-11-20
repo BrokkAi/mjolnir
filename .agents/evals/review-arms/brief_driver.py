@@ -101,8 +101,9 @@ class WriterBriefMissing(RuntimeError):
 
 
 def wait_command(sid, command, limit=1800):
-    end = time.monotonic() + limit
-    while time.monotonic() < end:
+    """limit=None waits for the session's own outcome, with no observer deadline."""
+    end = None if limit is None else time.monotonic() + limit
+    while end is None or time.monotonic() < end:
         s = session(sid)
         outcome = s.get("last_turn_outcome") or {}
         if outcome.get("command_id") == command and s.get("is_idle"):
@@ -129,13 +130,13 @@ def fetch_brief(sid):
     return r.stdout.decode()
 
 
-def send(d, sid, name, command, text):
+def send(d, sid, name, command, text, limit=1800):
     (d / f"{name}.txt").write_text(text)
     if not (d / f"{name}-request.json").exists():
         save(d / f"{name}-request.json", mj("message", "--session", sid, "--command-id", command,
                                             "--prompt-file", d / f"{name}.txt"))
     if not (d / f"{name}-completion.json").exists():
-        save(d / f"{name}-completion.json", wait_command(sid, command))
+        save(d / f"{name}-completion.json", wait_command(sid, command, limit))
 
 
 def sealed_launch(bundle, commit, profile, title, *, base=None, effort=None):
@@ -291,7 +292,9 @@ def run(bug_id, gate, *, pilot=None):
     prompt = pilot["prompt"] if pilot else ((SCRIPTS / "brief/WRITER.md").read_text()
               .replace("{base}", bug["base_commit"]).replace("{message}", driver.commit_message(bug)))
     try:
-        text, problems, rounds = write_brief(d, sid, tag, prompt, bug)
+        # A pilot writer's turn contains its RQL engine calls, each a whole Fable turn, so the
+        # session's own outcome ends the wait; 1800 s was sized for writers without RQL.
+        text, problems, rounds = write_brief(d, sid, tag, prompt, bug, limit=None if pilot else 1800)
     except (WriterTurnFailed, WriterBriefMissing) as error:
         if not pilot:
             raise
@@ -350,8 +353,8 @@ def pilot_audit(d, sid, allow_rql):
     return verdict
 
 
-def write_brief(d, sid, tag, prompt, bug):
-    send(d, sid, "prompt", "brief-" + tag[:32], prompt)
+def write_brief(d, sid, tag, prompt, bug, limit=1800):
+    send(d, sid, "prompt", "brief-" + tag[:32], prompt, limit)
     for rounds in range(FIX_ROUNDS + 1):
         text = fetch_brief(sid)
         problems = lint(text, bug)
@@ -362,7 +365,7 @@ def write_brief(d, sid, tag, prompt, bug):
                + "\n".join(f"- {p}" for p in problems)
                + "\n\nFix brief.md so that it follows every rule, then reply `brief written`.\n")
         repair = rounds + 1
-        send(d, sid, f"fix-{repair}", f"brief-fix{repair}-" + tag[:28], fix)
+        send(d, sid, f"fix-{repair}", f"brief-fix{repair}-" + tag[:28], fix, limit)
 
 
 def finish_pilot_writer(pilot, sid, bug_id, profile):

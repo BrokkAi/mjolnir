@@ -94,7 +94,7 @@ def validate(output, read_blob):
                 evidence(part, f"{label}[{index}]", sites)
         elif isinstance(value, str):
             if coverage["complete"] and re.search(
-                r"\b(?:open frontier|unresolved (?:dispatch|transition)|unsupported transformation|depth[ _-]boundary)\b",
+                r"\b(?:open frontier|unresolved (?:dispatch|transition)|unsupported transformation)\b",
                 value, re.I,
             ):
                 errors.append(f"{label}: an open frontier contradicts coverage.complete")
@@ -137,7 +137,7 @@ def validate(output, read_blob):
             for key, part in value.items():
                 if (coverage["complete"] and
                         ((key in {"proof", "status", "coverage", "frontier", "kind"} and part == "open")
-                         or (key in {"open", "frontier", "depth_boundary"} and part))):
+                         or (key in {"open", "frontier"} and part))):
                     errors.append(f"{label}.{key}: an open frontier contradicts coverage.complete")
                 if key == "site" and part is not None:
                     cited = site(part, f"{label}.site")

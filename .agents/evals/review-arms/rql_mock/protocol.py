@@ -52,9 +52,20 @@ def invalid_constant(token):
 
 
 def reply(request_id, result=None, *, error=None):
+    callback = None
+    if isinstance(result, dict):
+        callback = result.pop("_after_write", None)
     response = {"jsonrpc": "2.0", "id": request_id}
     if error is None:
         response["result"] = result
     else:
         response["error"] = error
-    print(encode(response), flush=True)
+    try:
+        sys.stdout.write(encode(response) + "\n")
+        sys.stdout.flush()
+    except (OSError, BrokenPipeError):
+        if callback:
+            callback(False)
+        raise
+    if callback:
+        callback(True)

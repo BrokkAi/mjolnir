@@ -133,17 +133,21 @@ class Server:
             "latency_ms": round((time.monotonic() - started) * 1000, 3),
             "payload": payload,
             "provenance": provenance,
+            "delivered": False,
         }
-        # Reconnects can run in parallel. Keep a large audit record together.
-        fcntl.flock(self.log, fcntl.LOCK_EX)
-        try:
-            self.log.write(encode(record) + "\n")
-            self.log.flush()
-        finally:
-            fcntl.flock(self.log, fcntl.LOCK_UN)
+        def log_delivery(delivered):
+            record["delivered"] = delivered
+            # Reconnects can run in parallel. Keep a large audit record together.
+            fcntl.flock(self.log, fcntl.LOCK_EX)
+            try:
+                self.log.write(encode(record) + "\n")
+                self.log.flush()
+            finally:
+                fcntl.flock(self.log, fcntl.LOCK_UN)
         return {
             "content": [{"type": "text", "text": delivered}],
             "isError": payload["status"] != "ok",
+            "_after_write": log_delivery,
         }
 
 

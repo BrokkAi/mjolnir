@@ -29,15 +29,17 @@ Use zero-based, end-exclusive UTF-8 byte offsets within each source line, with o
 slice per line of the span. Put every written slice and its site in this format.
 Keep derived values and names or resolved identities in distinct typed fields.
 Use projected_row for projections and retain the original row's evidence sites.
-Coverage is answer-level. For each open frontier that can affect the answer,
-including unresolved dispatch, unsupported transformations and depth boundaries,
-include {"reason": "...", "site": {...}} in coverage.open. Set coverage.complete
-to false whenever a frontier exists, including when rows is empty. Label any
-open row proof or depth boundary explicitly. Use complete=true with an empty
-open list only when the query's scope is closed.
+At the query's depth bound, return the call or value port if it qualifies and
+mark the row or endpoint with "depth_boundary": true. This bound does not open
+coverage. For each unresolved frontier that can change rows within the query's
+scope, such as unresolved dispatch, unsupported transformations, missing
+identities or unknown control effects, include {"reason": "...", "site": {...}}
+in coverage.open. Set coverage.complete to false whenever such a frontier exists,
+including when rows is empty. Label any open row proof explicitly. Use
+complete=true with an empty open list when the query's scope is closed.
 The catalogue sometimes describes Bifrost implementation outcomes such as over
 budget, exhaustion or cancellation. Do not return those outcomes. Enumerate
-the complete semantic relation and put only semantic boundaries in coverage.open.
+the complete bounded relation and put only unresolved in-scope frontiers in coverage.open.
 Do not include prose outside the structured output.
 
 Read the catalogue and menu semantics files. Evaluate the whole query at once

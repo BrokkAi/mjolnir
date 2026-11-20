@@ -16,7 +16,7 @@ from .engine.prompt import assert_blind, semantics_only, turn_prompt
 from .engine.runner import SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
 from .engine.validation import canonical, decode, validate
-from .fidelity import CENSUS, ROOT, gate_report, load_inputs, measure, sample, sha
+from .fidelity import CENSUS, ROOT, gate_report, load_inputs, measure, sample, sha, validate_decisions
 from .fidelity_symbols import touched_symbols
 
 
@@ -86,8 +86,9 @@ class LiveModels:
         self.fable_version = fable_version
         self.sources = manifest_sources(manifest, config["repos"])
 
-    def sealed_task(self, commit, directory, model, profile, files, prompt):
-        role_config = {**self.config, "profile": profile, "model_version": self.fable_version}
+    def sealed_task(self, commit, directory, model, profile, files, prompt, check_output):
+        version = TERRA if model == TERRA else self.fable_version
+        role_config = {**self.config, "profile": profile, "model_version": version}
         runner = SealedRunner(role_config, self.manifest)
         read = blob_reader(self.sources[commit], commit)
         snapshot = prepared_snapshot(self.sources[commit], self.config["snapshot_repo"], commit)
@@ -98,65 +99,87 @@ class LiveModels:
         output_path = directory / "output.json"
         identity = {"model": model, "effort": EFFORT, "profile": profile, **snapshot,
                     "inputs_sha256": sha(canonical([files, prompt(".scratch")]).encode())}
-        if intent.exists() and json.loads(intent.read_bytes()) != identity:
-            raise ValueError(f"fidelity session inputs changed at {directory}")
-        if completed.exists():
-            sid = json.loads(state.read_bytes())["session_id"]
-            driver.suspend_pilot_session(directory, sid)
-            return output_path.read_bytes(), json.loads(completed.read_bytes()), read
-        if intent.exists():
-            raise RuntimeError(f"an incomplete fidelity launch needs reconciliation at {directory}")
-        if model == TERRA:
-            hold = driver.quota_hold(profile, floor=f"{profile}=25.2", weekly=True, strict=True)
-            if hold:
-                raise RuntimeError(hold)
-        driver.save(intent, identity)
-        orphan = snapshot["orphan"]
-        sid = brief_driver.sealed_launch(self.config["bundle"], orphan, profile,
-                                        f"RQL fidelity {model}", base=orphan, effort=EFFORT)
-        driver.save(state, {"session_id": sid})
+        sid = None
         try:
-            session = runner.attest(sid, snapshot, directory)
-            if session["profile_id"] != profile:
-                raise ValueError("sealed fidelity session uses the wrong profile")
-            while True:
+            if state.exists():
+                sid = json.loads(state.read_bytes())["session_id"]
+            if intent.exists() and json.loads(intent.read_bytes()) != identity:
+                raise ValueError(f"fidelity session inputs changed at {directory}")
+            if completed.exists():
+                record = json.loads(completed.read_bytes())
+                if sid is None or (record["session"], record["model"], record["version"], record["effort"]) != (
+                        sid, model, version, EFFORT):
+                    raise ValueError("fidelity completion does not match the recorded session or model")
+                checked = check_output(output_path.read_bytes(), read)
+            else:
+                if sid is not None or intent.exists():
+                    raise RuntimeError(f"an incomplete fidelity launch needs reconciliation at {directory}")
+                if model == TERRA:
+                    hold = driver.pilot_weekly_hold(profile, cost=driver.PILOT_TERRA_QUOTA_COST)
+                else:
+                    hold = driver.pilot_weekly_hold(profile, scope=model)
+                if hold:
+                    raise RuntimeError(hold)
+                driver.save(intent, identity)
+                orphan = snapshot["orphan"]
+                sid = brief_driver.sealed_launch(self.config["bundle"], orphan, profile,
+                                                f"RQL fidelity {model}", base=orphan, effort=EFFORT)
+                driver.save(state, {"session_id": sid})
+                output, record = self.run_turn(runner, sid, snapshot, directory, model, profile, files, prompt)
+                output_path.write_bytes(output)
+                checked = check_output(output, read)
+                runner.clean_checkout(sid)
+                driver.save(completed, record)
+            runner.retire(directory, {"session_id": sid, "orphan": snapshot["orphan"],
+                                      "commit": commit, "model_version": record["version"],
+                                      "instance": runner.instance}, require_clean_audit=True)
+            return checked, record
+        except (Exception, KeyboardInterrupt) as error:
+            failed = directory / "failed.json"
+            if sid is not None and not failed.exists():
                 try:
-                    brief_driver.configure_pilot_model(sid, model, EFFORT)
-                    break
-                except RuntimeError as error:
-                    if "initialization is still running" not in str(error):
-                        raise
-                    driver.wait_idle(sid)
-                    time.sleep(5)
-            configured = driver.wait_idle(sid)
-            advertised = verify_session_selection(configured, model, profile,
-                                                  self.manifest["model_versions"]["fable"])
-            driver.save(directory / "settings.json", {"options": configured["config_options"],
-                                                      "advertised_version": advertised})
-            scratch = runner.clean_checkout(sid)
-            for name, data in files.items():
-                runner.command("put-file", "--session", sid, "--path", f"{scratch}/{name}",
-                               "-", data=data.encode("utf-8"))
-            before = driver.mj("usage", "--session", sid)
-            command = f"fidelity-{uuid4().hex}"
-            turn = runner.message(sid, prompt(scratch), command)
-            waited = driver.mj("wait", "--session", sid, "--turn", turn,
-                               "--return-on-input", "--timeout", 1800, timeout=1830)
-            if not runner.audit_turn(sid, turn, directory):
-                raise RuntimeError("fidelity session failed the pilot audit")
-            if waited.get("turn_id") != turn or waited["outcome"] != "finished":
-                raise RuntimeError(f"fidelity turn {turn} ended with {waited['outcome']}")
-            usage = driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
-            driver.save(directory / "usage.json", usage)
-            resolved = model_usage(usage, command, turn, model, self.fable_version)
-            output = runner.command("fetch", "--session", sid, "--path", f"{scratch}/output.json", "--stdout")
-            runner.clean_checkout(sid)
-            record = {"session": sid, "turn": turn, "model": model, "version": resolved, "effort": EFFORT}
-            output_path.write_bytes(output)
-            driver.save(completed, record)
-            return output, record, read
-        finally:
-            driver.suspend_pilot_session(directory, sid)
+                    driver.save(failed, {"session_id": sid, "reason": str(error)})
+                except OSError as save_error:
+                    error.add_note(f"Could not record fidelity session {sid} failure: {save_error}")
+            raise
+
+    def run_turn(self, runner, sid, snapshot, directory, model, profile, files, prompt):
+        session = runner.attest(sid, snapshot, directory)
+        if session["profile_id"] != profile:
+            raise ValueError("sealed fidelity session uses the wrong profile")
+        while True:
+            try:
+                brief_driver.configure_pilot_model(sid, model, EFFORT)
+                break
+            except RuntimeError as error:
+                if "initialization is still running" not in str(error):
+                    raise
+                driver.wait_idle(sid)
+                time.sleep(5)
+        configured = driver.wait_idle(sid)
+        advertised = verify_session_selection(configured, model, profile,
+                                              self.manifest["model_versions"]["fable"])
+        driver.save(directory / "settings.json", {"options": configured["config_options"],
+                                                  "advertised_version": advertised})
+        scratch = runner.clean_checkout(sid)
+        for name, data in files.items():
+            runner.command("put-file", "--session", sid, "--path", f"{scratch}/{name}",
+                           "-", data=data.encode("utf-8"))
+        before = driver.mj("usage", "--session", sid)
+        command = f"fidelity-{uuid4().hex}"
+        turn = runner.message(sid, prompt(scratch), command)
+        waited = driver.mj("wait", "--session", sid, "--turn", turn,
+                           "--return-on-input", "--timeout", 1800, timeout=1830)
+        if waited.get("turn_id") != turn or waited["outcome"] != "finished":
+            raise RuntimeError(f"fidelity turn {turn} ended with {waited['outcome']}")
+        if not runner.audit_turn(sid, turn, directory):
+            raise RuntimeError("fidelity session failed the pilot audit")
+        usage = driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
+        driver.save(directory / "turn-usage.json", usage)
+        resolved = model_usage(usage, command, turn, model, self.fable_version)
+        output = runner.command("fetch", "--session", sid, "--path", f"{scratch}/output.json", "--stdout")
+        record = {"session": sid, "turn": turn, "model": model, "version": resolved, "effort": EFFORT}
+        return output, record
 
     def enumerate_rows(self, repo, commit, text):
         key = text.split()[0][1:]
@@ -169,11 +192,15 @@ class LiveModels:
             return turn_prompt(text, f"{scratch}/output.json", f"{scratch}/catalogue.md",
                                f"{scratch}/menu.md", ())
 
+        def check_output(output, read):
+            rows, coverage, errors = validate(output, read)
+            if errors:
+                raise ValueError(f"{directory}: invalid Terra evidence: {'; '.join(errors)}")
+            return rows, coverage
+
         assert_blind((*files.values(), prompt(".scratch")), self.manifest)
-        output, record, read = self.sealed_task(commit, directory, TERRA, self.terra_profile, files, prompt)
-        rows, coverage, errors = validate(output, read)
-        if errors:
-            raise ValueError(f"{directory}: invalid Terra evidence: {'; '.join(errors)}")
+        (rows, coverage), record = self.sealed_task(
+            commit, directory, TERRA, self.terra_profile, files, prompt, check_output)
         return {"rows": rows, "coverage": coverage, "provenance": record}
 
     def adjudicate(self, query, candidates):
@@ -189,10 +216,13 @@ class LiveModels:
                     f"Write the JSON object to {scratch}/output.json.\n")
 
         directory = self.directory / query.key / "adjudicator"
-        output, _, _ = self.sealed_task(query.commit, directory, FABLE, self.config["profile"], files, prompt)
-        decisions = decode(output)
-        if not isinstance(decisions, dict):
-            raise ValueError(f"{directory}: adjudicator output is not an object")
+        def check_output(output, _read):
+            decisions = decode(output)
+            validate_decisions(query, candidates, decisions)
+            return decisions
+
+        decisions, _ = self.sealed_task(
+            query.commit, directory, FABLE, self.config["profile"], files, prompt, check_output)
         return decisions
 
 

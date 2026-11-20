@@ -247,25 +247,34 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
     2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
     daemon's stored report; a missing or unreadable report holds the job, since unknown is
     not "enough". A caller can supply its own floor, restrict it to weekly windows, and
-    require the remaining percentage to strictly exceed the floor."""
+    require the remaining percentage to strictly exceed the floor. A weekly Fable
+    check requires both the general and the Fable-specific weekly windows."""
     if floor is None:
         floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
     if not floor:
         return None
     for spec in floor.split(","):
         profile, _, percent = spec.partition("=")
-        rows = mj("quota", "--profile", profile).get("profiles") or []
-        report = (rows[0].get("report") or {}) if rows else {}
-        windows = report.get("windows") or []
+        try:
+            rows = mj("quota", "--profile", profile).get("profiles") or []
+            report = (rows[0].get("report") or {}) if rows else {}
+            windows = report.get("windows") or []
+            pools = [(window, (window.get("model_scope") or "").split(","))
+                     for window in windows]
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+                RuntimeError, OSError, subprocess.SubprocessError) as error:
+            return f"{profile}: no usable quota report ({error})"
         # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
         # windows apply to every model; an absent matching pool stays unknown.
         if scope:
-            windows = [w for w in windows if not w.get("model_scope")
-                       or scope in w["model_scope"].split(",")]
+            windows = [w for w, models in pools if models == [""] or scope in models]
         if weekly:
             windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
         left = [w.get("remaining_percent") for w in windows]
-        if not left or None in left or report.get("error"):
+        if (not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left)
+                or report.get("error")
+                or (weekly and scope == "fable"
+                    and {bool(w.get("model_scope")) for w in windows} != {False, True})):
             return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
         least = min(windows, key=lambda w: w["remaining_percent"])
         remaining = least["remaining_percent"]
@@ -277,6 +286,21 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
                         f"epoch {least.get('resets_at_epoch_seconds')})")
             return f"{profile}: {remaining}% left, below the floor of {percent}%"
     return None
+
+
+PILOT_TERRA_QUOTA_COST = 20
+
+
+def pilot_weekly_hold(profile, *, scope=None, cost=0, quota=None):
+    """Check the study's weekly floor plus the estimated cost in hundredths of a point."""
+    # PLAN-rql-census.md sets the floor at 25%. There is no measured Fable
+    # per-session weekly cost in the pilot, so its launches use the floor itself.
+    threshold = 2500 + cost
+    floor = f"{profile}={threshold // 100}.{threshold % 100:02}"
+    quota = quota_hold if quota is None else quota
+    if scope is None:
+        return quota(floor=floor, weekly=True, strict=True)
+    return quota(scope, floor=floor, weekly=True, strict=True)
 
 
 def wait_idle(sid, limit=1200):

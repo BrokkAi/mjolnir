@@ -11,15 +11,21 @@ checks locations and copied byte slices against the pinned host Git tree.
 ## Private study instance
 
 The host entry point reads `/mnt/optane/review-arms-pilot/engine.json`. Fill in
-the study's actual named instance, profile, source clones and manifest. Keep
-the manifest's relative paths intact. The engine verifies the catalogue, menu
+the study's named instance, profile, source clones and manifest. The engine
+keeps its cache beside this file. For an isolated smoke, set
+`REVIEW_ARMS_ENGINE_ROOT=/mnt/optane/review-arms-pilot-smoke` for the host
+answer function and lifecycle commands and put the smoke's `engine.json`
+there. An explicit `--config` also selects the cache beside that file for
+teardown. Keep smoke data out of the pilot run root.
+
+Keep the manifest's relative paths intact. The engine verifies the catalogue, menu
 semantics, menu and eligible-label sidecar against the manifest's SHA-256 pins
 before serving any answer. Only the menu steps in `served_steps` are available.
 The sample port is shared with the bundle configuration.
 
 ```json
 {
-  "instance": "rql-pilot",
+  "instance": "rql-census-pilot",
   "profile": "<allotted Claude profile>",
   "manifest": "/absolute/path/to/review-arms/brief/rql-census/pilot/manifest.json",
   "repos": {
@@ -30,12 +36,21 @@ The sample port is shared with the bundle configuration.
   "git_port": 9438,
   "bundle": "rql-pilot-engine",
   "destination": "engine-trees",
-  "seal_probe": ["/absolute/path/to/operator-provisioned-engine-isolation-check"]
+  "seal_probe": ["python3", "-B", "/absolute/path/to/rql_mock/engine/record_egress.py", "--out", "/mnt/optane/review-arms-pilot/egress.jsonl"]
 }
 ```
 
-Use the same named instance and local Podman target as the pilot writers. Add
-this bundle to the private instance's configuration.
+Use the same named instance and local Podman target as the pilot writers.
+Create a controller-side Git source descriptor and configure its remote:
+
+```sh
+engine_source="$HOME/.config/mjolnir/instances/rql-census-pilot/engine-source"
+git init --template= "$engine_source"
+git -C "$engine_source" remote add origin git://127.0.0.1:9438/engine-trees.git
+```
+
+Set the bundle's `local` to that descriptor's absolute path. The descriptor
+only supplies the network remote for the isolated checkout.
 
 ```toml
 [bundles.rql-pilot-engine]
@@ -44,20 +59,20 @@ primary_repo = "engine-trees"
 [[bundles.rql-pilot-engine.repositories]]
 id = "engine-trees"
 destination = "engine-trees"
-github = "git://127.0.0.1:9438/engine-trees.git"
+local = "/absolute/path/to/engine-source"
 ```
 
-Engine egress policy must allow only the Claude provider transport. Writer
-sessions' RQL SSH exception must be unavailable to the engine. Provision the
-target's policy and supply a trusted host command in `seal_probe`. The command
-receives the actual Podman container ID and must check its effective egress and
-mount policy, including that it cannot reach the host Git listener or access
-other workspaces, real history, source mounts or census material. Its exit
-status controls whether the engine may send its first prompt. The built-in
-checks also verify a clean singleton checkout and the exact tree hash. They
+The engine measures egress with `record_egress.py` before the first prompt.
+The probe receives the actual Podman container ID and records which
+non-provider hosts it can reach. The engine checks a clean singleton checkout
+and the exact tree hash. Its built-in checks
 unpack and enumerate the mounted cutoff bundle and test the Git daemon's port
 from inside the session. Mjolnir must prepare this cutoff bundle on the host,
 where loopback Git is reachable.
+
+Mjolnir build `2.73.0+8d8e2db1` only prepares host Git cache snapshots for
+recognized GitHub sources. The loopback repository needs host-side cutoff
+bundle support for non-GitHub sources before this launch can succeed.
 
 ## Snapshots and run lifecycle
 

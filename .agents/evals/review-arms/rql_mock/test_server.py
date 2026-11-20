@@ -254,6 +254,21 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(payload(after)["rows"], answer(COMMIT, request)["rows"])
         self.assertEqual(ping, {"jsonrpc": "2.0", "id": 3, "result": {}})
 
+    # Hard-won: a19cfbf: a response logged before a failed write counted as exposure.
+    def test_closed_writer_does_not_log_large_response_as_delivered(self):
+        process = subprocess.Popen([HERE / "serve-rql.sh", self.config, SESSION_R],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True,
+                                   env={**os.environ, "SSH_ORIGINAL_COMMAND": SESSION_R})
+        process.stdout.close()
+        process.stdin.write(call(1, query="large") + "\n")
+        process.stdin.flush()
+        process.stdin.close()
+        process.wait(timeout=15)
+        records = [json.loads(line) for line in self.logs[SESSION_R].read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertIs(records[0]["delivered"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

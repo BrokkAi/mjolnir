@@ -26,7 +26,8 @@ be enabled. Configure the Podman target with
 a pinned image ID and `pull_policy = "never"`. The writer/reviewer bundles
 are `mjolnir` and `bifrost-history`. Set the primary repository's destination
 in each bundle. For the engine, configure the local Git daemon and bundle
-as described in the engine setup. The bundle in this instance is:
+as described in the engine setup. Use its controller-side source descriptor
+as the bundle's `local` source:
 
 ```toml
 [bundles.rql-pilot-engine]
@@ -35,7 +36,7 @@ primary_repo = "engine-trees"
 [[bundles.rql-pilot-engine.repositories]]
 id = "engine-trees"
 destination = "engine-trees"
-github = "git://127.0.0.1:<engine-git-port>/engine-trees.git"
+local = "/absolute/path/to/engine-source"
 ```
 
 The source clone paths default to `~/Projects/mjolnir` and

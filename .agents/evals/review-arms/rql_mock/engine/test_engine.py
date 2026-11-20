@@ -8,15 +8,18 @@ import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import MethodType
 import unittest
 
+import driver
 from census_label import CENSUS
+from rql_mock import fidelity_live
 
 from . import Engine, frozen_inputs, teardown
 from .__main__ import audit
 from .grammar import parse
 from .prompt import CONTEXT_RECALL, assert_blind, semantics_only, turn_prompt
-from .runner import CHECKOUT_CLEAN, CONTEXT_BOUNDARY, IsolationFailure, SealedRunner, usage_delta
+from .runner import CHECKOUT_CLEAN, CONTEXT_BOUNDARY, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
 from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot
 from .validation import validate
 
@@ -215,6 +218,15 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(validate(payload([], {"complete": True, "open": open_cover["open"]}),
                                  SOURCE.get)[2])
 
+    # Hard-won: a19cfbf: a query depth boundary invalidated a complete answer.
+    def test_complete_coverage_allows_depth_boundary_but_rejects_unresolved_dispatch(self):
+        rows = deepcopy(ROWS)
+        rows[0]["fields"].update(depth_boundary=True, endpoint={"boundary": "depth-boundary"})
+        self.assertEqual(validate(payload(rows), SOURCE.get), (rows, closed(), []))
+        rows[0]["fields"]["endpoint"]["boundary"] = "unresolved dispatch"
+        self.assertIn("an open frontier contradicts coverage.complete",
+                      "\n".join(validate(payload(rows), SOURCE.get)[2]))
+
     def test_coverage_rejects_bifrost_execution_limit_outcomes(self):
         for reason in ("traversal budget", "over_budget", "request cancelled", "exhaustion"):
             with self.subTest(reason=reason):
@@ -278,6 +290,42 @@ class EngineTests(unittest.TestCase):
             return SOURCE.get, {"tree": "frozen-tree", "orphan": "root"}
 
         return Engine(self.cache, (catalogue, menu), source, lambda: runner, lambda: model)
+
+    # Hard-won: a19cfbf: an engine launch could ignore either Fable weekly quota window.
+    def test_fable_launch_checks_both_weekly_windows_and_can_retry(self):
+        runner = FakeRunner([])
+        runner.driver = driver
+        runner.config = {"profile": "claude-fixture", "bundle": "test-bundle"}
+        runner.start = MethodType(SealedRunner.start, runner)
+
+        def launch(*args, **kwargs):
+            runner.launches.append((args, kwargs))
+            return SESSION
+
+        runner.launch = launch
+        windows = []
+
+        def quota(operation, flag, profile):
+            self.assertEqual((operation, flag, profile), ("quota", "--profile", "claude-fixture"))
+            return {"profiles": [{"report": {"windows": windows}}]}
+
+        self.addCleanup(setattr, driver, "mj", driver.mj)
+        driver.mj = quota
+        engine = self.engine(runner)
+        record = self.cache / "session.json"
+        for general, fable in ((24, 80), (25, 80), (80, 24), (80, 25), (None, 80), (80, None), (80, 80)):
+            with self.subTest(general=general, fable=fable):
+                windows[:] = [{"remaining_percent": percent, "duration_seconds": 604800, "model_scope": scope}
+                              for percent, scope in ((general, None), (fable, "fable")) if percent is not None]
+                windows.append({"remaining_percent": 0, "duration_seconds": 604800, "model_scope": "sonnet"})
+                if (general, fable) == (80, 80):
+                    self.assertEqual(engine.session(COMMIT, {"orphan": COMMIT}, record), (runner, SESSION))
+                else:
+                    with self.assertRaises(LaunchHeld):
+                        engine.session(COMMIT, {"orphan": COMMIT}, record)
+                    self.assertFalse(record.exists())
+                    self.assertFalse(runner.launches)
+        self.assertEqual(len(runner.launches), 1)
 
     def test_cache_normalization_and_changed_input(self):
         runner = FakeRunner([payload()] * 4)
@@ -354,7 +402,7 @@ class EngineTests(unittest.TestCase):
 
     def test_retry_then_success_sorts_and_retains_open_coverage(self):
         first = {"kind": "structural_match", "sites": [span(line=1)], "fields": {}}
-        coverage = {"complete": False, "open": [{"reason": "depth boundary", "site": span(line=1)}]}
+        coverage = {"complete": False, "open": [{"reason": "unresolved dispatch", "site": span(line=1)}]}
         runner = FakeRunner(["{}", payload(ROWS + [first], coverage)])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "ok", result)
@@ -564,9 +612,11 @@ def answer(commit, query, *, fresh=False):
 
 
 class CaptureDriver:
-    def __init__(self, directory, fail=None):
+    def __init__(self, directory, fail=None, *, clean=False, models=(VERSION,)):
         self.directory = directory
         self.fail = fail
+        self.clean = clean
+        self.models = models
         self.argv = []
         self.usage_cursors = []
 
@@ -579,9 +629,9 @@ class CaptureDriver:
         assert sid == SESSION
         if self.fail == "transcript":
             raise RuntimeError("transcript unavailable")
-        return [{"session_id": sid, "next_after_seq": 20, "latest_seq": 20,
-                 "items": [{"seq": 20, "role": "tool",
-                            "body": {"call": {"rawInput": "curl https://example.invalid"}}}]}]
+        command = "rg evaluate source.rs" if self.clean else "curl https://example.invalid"
+        items = [{"seq": 20, "role": "tool", "body": {"call": {"rawInput": command}}}]
+        return [{"session_id": sid, "next_after_seq": 20, "latest_seq": 20, "items": items}]
 
     def mj(self, operation, *args):
         assert operation == "usage" and args[:3] == ("--session", SESSION, "--after-seq")
@@ -591,13 +641,13 @@ class CaptureDriver:
         self.usage_cursors.append(cursor)
         next_seq = 11 if cursor == 0 else 20
         return {"session_id": SESSION, "next_after_seq": next_seq, "latest_seq": 20,
-                "turns": [{"usage": {"provider_details": {"model_usage": {VERSION: {}}}}}]}
+                "turns": [{"usage": {"provider_details": {"model_usage": dict.fromkeys(self.models, {})}}}]}
 
     def mj_invocation(self, *args):
         if args[0] == "destroy":
             # Capture and the actual transcript audit must already be durable.
             index = json.loads((self.directory / "capture.json").read_text())
-            assert index["session"] == SESSION and index["audit_passed"] is False
+            assert index["session"] == SESSION and index["audit_passed"] is self.clean
             assert (self.directory / "destroy-request.json").is_file()
         argv = ("--instance", INSTANCE, *args)
         self.argv.append(argv)
@@ -616,6 +666,29 @@ class CaptureDriver:
 
 
 class RetirementTests(unittest.TestCase):
+    def test_teardown_cli_uses_the_cache_beside_its_explicit_config(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            default, selected = root / "default", root / "selected"
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"model_versions": {"fable_provider_id": VERSION}}))
+            for instance_root, commit in ((default, NONPILOT), (selected, COMMIT)):
+                active = instance_root / "engine-cache" / commit / "active"
+                active.mkdir(parents=True)
+                # An unconfirmed launch elicits a diagnostic without calling mj.
+                (active / "session.json").write_text(json.dumps({"commit": commit}))
+                (instance_root / "engine.json").write_text(json.dumps(
+                    {"instance": INSTANCE, "manifest": str(manifest)}))
+            result = subprocess.run(
+                [sys.executable, "-B", "-m", "rql_mock.engine", "teardown",
+                 "--config", str(selected / "engine.json")],
+                env={**os.environ, "REVIEW_ARMS_ENGINE_ROOT": str(default)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f"{COMMIT}: cannot retire an unconfirmed engine launch", result.stderr)
+            self.assertNotIn(NONPILOT, result.stderr)
+
     def fixture(self, cache, fail=None, *, pending=False):
         active = cache / COMMIT / "active"
         answers = active / "answers" / "context-test"
@@ -667,6 +740,86 @@ class RetirementTests(unittest.TestCase):
                 self.assertFalse(any("destroy" in argv for argv in runner.driver.argv))
                 self.assertTrue((retired / "answers/context-test/pending.json").exists())
                 self.assertEqual((retired / "answers/context-test/answer.raw").exists(), failure != "fetch")
+
+    # Hard-won: a19cfbf: fidelity cleanup masked turn failures and never retired completed sessions.
+    def test_fidelity_retains_failed_turn_and_retires_success_only_once(self):
+        def replace(target, name, replacement):
+            self.addCleanup(setattr, target, name, getattr(target, name))
+            setattr(target, name, replacement)
+
+        snapshot = {"orphan": COMMIT, "tree": "frozen-tree"}
+        replace(fidelity_live, "prepared_snapshot", lambda *args: snapshot)
+        replace(fidelity_live, "blob_reader", lambda *args: SOURCE.get)
+        replace(driver, "pilot_weekly_hold", lambda *args, **kwargs: None)
+        launches = []
+
+        def launch(*args, **kwargs):
+            launches.append((args, kwargs))
+            return SESSION
+
+        replace(fidelity_live.brief_driver, "sealed_launch", launch)
+
+        def make_runner(config, manifest):
+            runner = SealedRunner.__new__(SealedRunner)
+            runner.config = config
+            runner.instance = config["instance"]
+            runner.driver = capture
+            runner.clean_checkout = lambda sid: None
+            return runner
+
+        replace(fidelity_live, "SealedRunner", make_runner)
+        adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+        adapter.config = {"instance": INSTANCE, "snapshot_repo": "snapshot", "bundle": "fixture"}
+        adapter.manifest = {}
+        adapter.sources = {COMMIT: "source"}
+        adapter.fable_version = VERSION
+        failure = RuntimeError("original fidelity turn error")
+        model = fidelity_live.TERRA
+        result = {"session": SESSION, "turn": 1, "model": model, "version": model, "effort": "high"}
+
+        def run_turn(*args):
+            if capture.fail == "turn":
+                raise failure
+            return payload().encode(), result
+
+        def checked(output, read):
+            rows, _, errors = validate(output, read)
+            self.assertFalse(errors)
+            return rows
+
+        adapter.run_turn = run_turn
+        for scenario in ("turn", "transcript", "success"):
+            with self.subTest(scenario=scenario), TemporaryDirectory() as root:
+                directory = Path(root)
+                capture = CaptureDriver(directory, scenario, clean=True, models=())
+                launches.clear()
+
+                def sealed():
+                    return adapter.sealed_task(COMMIT, directory, model, "terra", {}, lambda _: QUERY, checked)
+
+                if scenario == "turn":
+                    with self.assertRaises(RuntimeError) as error:
+                        sealed()
+                    self.assertIs(error.exception, failure)
+                    self.assertEqual(json.loads((directory / "failed.json").read_text()),
+                                     {"session_id": SESSION, "reason": str(failure)})
+                    self.assertFalse((directory / "completed.json").exists())
+                    self.assertEqual(capture.argv, [])
+                else:
+                    if scenario == "transcript":
+                        with self.assertRaisesRegex(RuntimeError, "transcript unavailable"):
+                            sealed()
+                        self.assertTrue((directory / "completed.json").exists())
+                        self.assertFalse((directory / "destroy-request.json").exists())
+                        self.assertEqual(capture.argv, [])
+                        capture.fail = None
+                    self.assertEqual(sealed(), (ROWS, result))
+                    self.assertEqual(sealed(), (ROWS, result))
+                    self.assertEqual(len(launches), 1)
+                    self.assertEqual(capture.argv, [("--instance", INSTANCE, "destroy", "--session", SESSION, "--json")])
+                    self.assertTrue((directory / "destroy-receipt.json").is_file())
+                    usage = json.loads((directory / "usage.json").read_text())
+                    self.assertEqual(usage["expected_provider_model"], model)
 
 
 class SnapshotTests(unittest.TestCase):

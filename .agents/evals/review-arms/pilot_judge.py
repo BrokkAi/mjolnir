@@ -215,8 +215,14 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
         jobs = by_diff[diff]
         current = run_artifacts(root, jobs, manifest_sha256)
         defect_ids = [d["id"] for d in defects[diff]]
+        scoring_inputs = sha(json.dumps({
+            "defects": defects[diff],
+            "pilot_sha256": sha((HERE / "judge/PILOT.md").read_bytes()),
+            "spec_sha256": sha((HERE / "judge/SPEC.md").read_bytes()),
+        }, sort_keys=True, separators=(",", ":")).encode())
         for entry, _ in current.values():
             entry["defect_ids"] = defect_ids
+            entry["scoring_inputs"] = scoring_inputs
         for batch in {entry["batch"] for entry in outputs.values()
                       if entry["diff"] == diff and (entry["job"] not in current
                           or entry != {**current[entry["job"]][0], "batch": entry["batch"]})}:

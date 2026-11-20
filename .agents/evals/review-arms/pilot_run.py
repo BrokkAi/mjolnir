@@ -21,9 +21,8 @@ BUNDLES = {"mjolnir": "mjolnir", "bifrost-dev": "bifrost-history"}
 WRITER_ARMS = ("G", "R", "R-loc")
 ARMS = ("N", *WRITER_ARMS)
 TOOL_ARMS = ("R", "R-loc")
-FLOOR = 2500
 # Hundredths of a percentage point. Registered lean-pilot Sol/Terra rates.
-COST = {"writer": 43, "reviewer": 20}
+COST = {"writer": 43, "reviewer": driver.PILOT_TERRA_QUOTA_COST}
 
 
 def digest(data):
@@ -77,9 +76,7 @@ def load_manifest(raw):
 
 
 def admission(profile, jobs, quota=driver.quota_hold):
-    threshold = FLOOR + sum(COST[job["kind"]] for job in jobs)
-    return quota(floor=f"{profile}={threshold // 100}.{threshold % 100:02}",
-                 weekly=True, strict=True)
+    return driver.pilot_weekly_hold(profile, cost=sum(COST[job["kind"]] for job in jobs), quota=quota)
 
 
 def retained_attempts(root, job):

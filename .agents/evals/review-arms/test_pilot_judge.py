@@ -68,7 +68,7 @@ def setup(root, manifest, snapshot_bytes, defects):
         j.save(path.parent / "done.json", {field: j.sha(text.encode()), "session_id": f"job-{n}", "inputs": inputs})
         j.save(path.parent / "usage.json", {})
         if kind == "writer" and job["arm"] in {"R", "R-loc"}:
-            event = {"status": "ok", "page": 2, "latency_ms": 3, "payload": {"rows": [
+            event = {"status": "ok", "delivered": True, "page": 2, "latency_ms": 3, "payload": {"rows": [
                 {"sites": [{"path": "out.rs", "start_line": 2, "end_line": 2}]},
                 {"sites": [{"path": "out.rs", "start_line": 3, "end_line": 3}]},
             ]}}
@@ -155,6 +155,25 @@ class PilotFixture(unittest.TestCase):
                 self.assertRegex(item["output_id"], r"^[a-f0-9]{16}$")
                 entry = key["outputs"][item["output_id"]]
                 self.assertEqual(j.sha(item["text"].encode()), entry["text_sha256"])
+
+    # Hard-won: a19cfbf: changed rubric text wedged retries against a stale batch.
+    def test_changed_rubric_retires_old_batch_and_prepares_new_input(self):
+        manifest, labels, defects = fixture()
+        key = setup(self.root, manifest, labels, defects)
+        old_batch = next(iter(key["outputs"].values()))["batch"]
+        rubric = j.HERE / "judge/PILOT.md"
+        original = rubric.read_bytes()
+        try:
+            rubric.write_bytes(original + b"\nUpdated scoring rule.\n")
+            snapshot = j.load_snapshot(self.root / "pilot/manifest.json", manifest)
+            updated = j.prepare(self.root, manifest, snapshot, defects)
+            self.assertNotEqual(next(iter(updated["outputs"].values()))["batch"], old_batch)
+            self.assertTrue((self.root / j.KEY_PATH.parent / "retired" / old_batch / "key.json").is_file())
+            for batch in {entry["batch"] for entry in updated["outputs"].values()}:
+                payload = j.load(self.root / j.INPUT_PATH / batch / "items.json")
+                j.write_task(self.root / j.INPUT_PATH / batch, payload)
+        finally:
+            rubric.write_bytes(original)
 
     def test_collect_requires_exact_coverage_and_hash_bound_bytes(self):
         key = setup(self.root, *fixture())
@@ -326,8 +345,8 @@ class PilotFixture(unittest.TestCase):
         for oid, entry in key["outputs"].items():
             if entry["kind"] == "writer" and entry["arm"] == "R" and entry["replicate"] == 2:
                 judged[oid].update(contains_decisive=True, contained_facts=["1/1", "1/2", "1/3"])
-                deliveries[entry["job"]] = [{"status": "parse_error", "latency_ms": 2},
-                                            {"status": "engine_error", "latency_ms": 100}]
+                deliveries[entry["job"]] = [{"status": "parse_error", "delivered": True, "latency_ms": 2},
+                                            {"status": "engine_error", "delivered": True, "latency_ms": 100}]
         manifest = key["manifest"]
         result = r.readout(manifest, {"key": key, "judge": judged, "hand_check": judged},
                            deliveries, j.load_snapshot(self.root / "pilot/manifest.json", manifest))
@@ -423,7 +442,7 @@ class PilotFixture(unittest.TestCase):
 
         fake_driver = SimpleNamespace(use_named_instance=lambda name: instance, workspace_id=lambda: "workspace",
                                       mj_invocation=lambda *args: ["mj", "--instance", "fixture-instance", *args],
-                                      mj=command, quota_hold=lambda *a, **k: None, wait_idle=state, session=state,
+                                      mj=command, pilot_weekly_hold=lambda *a, **k: None, wait_idle=state, session=state,
                                       container=lambda sid: {"container": sid},
                                       inventory=lambda *args: {"head": pin, "head_tree":
                                           "4b825dc642cb6eb9a060e54bf8d69288fbee4904",

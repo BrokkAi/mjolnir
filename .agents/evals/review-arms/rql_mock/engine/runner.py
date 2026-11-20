@@ -107,6 +107,10 @@ class IsolationFailure(TurnFailure):
     """The evidence on disk belongs to a session that must be retired."""
 
 
+class LaunchHeld(RuntimeError):
+    """Quota admission refused before any session launch was attempted."""
+
+
 class SealedRunner:
     def __init__(self, config, manifest=None):
         import driver
@@ -192,6 +196,8 @@ class SealedRunner:
         self.verify(sid)
 
     def start(self, snapshot, record_id):
+        if hold := self.driver.pilot_weekly_hold(self.config["profile"], scope=MODEL):
+            raise LaunchHeld(hold)
         sid = self.launch(self.config["bundle"], snapshot["orphan"], self.config["profile"],
                           f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
         if not SESSION_ID.fullmatch(sid):
@@ -344,7 +350,7 @@ class SealedRunner:
         return {"expected_provider_model": expected_model,
                 "reported_provider_models": models, "pages": pages}
 
-    def retire(self, directory, record):
+    def retire(self, directory, record, *, require_clean_audit=False):
         from audit import audit_pilot
 
         sid = record["session_id"]
@@ -380,6 +386,8 @@ class SealedRunner:
             save_json(directory / "audit.json", result)
             if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in result["hits"]):
                 raise RuntimeError("the audit could not read the captured transcript")
+            if require_clean_audit and not result["passed"]:
+                raise RuntimeError("the stored fidelity transcript did not pass the audit")
             hashes = file_digests(directory)
             hashes.pop("capture.json", None)
             save_json(directory / "capture.json", {
