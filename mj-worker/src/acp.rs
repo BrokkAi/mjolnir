@@ -381,10 +381,8 @@ pub async fn run_with_shutdown(
 struct OpenedSession {
     native_session_id: String,
     started_at: tokio::time::Instant,
-    resume_required: Arc<AtomicBool>,
-    /// Set once this thread holds something only it can replay. Unlike
-    /// `resume_required`, it starts false for every harness, so it is evidence
-    /// about the thread rather than a policy about reloading it.
+    resumed: bool,
+    /// Set when a prompt may have reached the thread or Claude ran a model cycle.
     native_session_used: Arc<AtomicBool>,
 }
 
@@ -435,21 +433,23 @@ async fn run_inner(
             &shutdown,
         )
         .await;
-        let did_open = opened
+        let opened_as_resume = opened
             .lock()
             .expect("opened session lock poisoned")
-            .is_some();
-        if did_open {
+            .as_ref()
+            .map(|opened| opened.resumed);
+        if let Some(resumed) = opened_as_resume {
             spec.context_restore = None;
-            // The proof at worker startup was for the thread named by the
-            // relay then. Do not reuse it for a subsequent bridge restart.
-            if spec.native_session_history == NativeSessionHistory::CreatedHereUnused {
+            if !resumed {
+                // session/new establishes the proof for this new identity,
+                // including when it just replaced another unused thread.
+                spec.native_session_history = NativeSessionHistory::CreatedHereUnused;
+            } else if spec.native_session_history == NativeSessionHistory::CreatedHereUnused {
                 spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
             }
-        }
-        if did_open && spec.clear_context_request.is_some() {
-            spec.clear_context_request = None;
-            rollback = None;
+            if spec.clear_context_request.take().is_some() {
+                rollback = None;
+            }
         }
         let restart = match result {
             Err(error) if spec.clear_context_request.is_some() => {
@@ -515,7 +515,7 @@ async fn run_inner(
     }
 }
 
-/// Run one ACP bridge process. `Some` means reload the native session on a
+/// Run one ACP bridge process. `Some` means reopen the native session on a
 /// fresh bridge: a cancel that never acked, or a dead ACP child.
 async fn run_bridge(
     spec: &LaunchSpec,
@@ -738,18 +738,13 @@ async fn run_bridge(
             None => Err(error),
             Some(opened) => Ok(Some(BridgeRestart {
                 clear_context: None,
-                resume_session: opened
-                    .resume_required
-                    .load(Ordering::Acquire)
-                    .then_some(opened.native_session_id),
+                // Carry the identity even if we can replace it. The next
+                // session open decides whether to load or replace the thread.
+                resume_session: Some(opened.native_session_id),
                 native_session_used: opened.native_session_used.load(Ordering::Acquire),
                 unexpected: true,
                 session_age: opened.started_at.elapsed(),
-                message: if opened.resume_required.load(Ordering::Acquire) {
-                    ACP_BRIDGE_LOST_WARNING
-                } else {
-                    "The agent stopped before its first prompt; restarting with a new empty thread."
-                },
+                message: "ACP bridge exited; restarting the agent",
             })),
         },
     }
@@ -935,7 +930,6 @@ async fn read_stderr_tail(mut stderr: tokio::process::ChildStderr) -> Result<Str
     Ok(String::from_utf8_lossy(&tail).trim().to_owned())
 }
 
-const ACP_BRIDGE_LOST_WARNING: &str = "ACP bridge exited; reloading the native session";
 const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the native session";
 const OPENCODE_LOGINS_RELOAD_MESSAGE: &str =
     "The profile's OpenCode logins changed; reloading the session to use them";

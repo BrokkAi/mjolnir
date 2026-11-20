@@ -42,15 +42,9 @@ where
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
     let notification_agent_output_count = agent_output_count.clone();
-    let resume_required = Arc::new(AtomicBool::new(
-        spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
-    ));
-    let notification_resume_required = resume_required.clone();
-    // Evidence about the thread itself, as opposed to `resume_required`'s
-    // policy about reloading it: false until this thread holds something only
-    // it can replay. Codex writes a thread's rollout, and Claude Code a
-    // session's transcript, only when a model turn runs, so the evidence is a
-    // prompt sent (`session.rs`) or a Claude Code result. Agent output alone
+    // Codex writes a thread's rollout, and Claude Code a session's transcript,
+    // only when a model turn runs, so the evidence is a prompt sent
+    // (`session.rs`) or a Claude Code result. Agent output alone
     // is not: the Claude adapter publishes notices as agent text while it
     // answers a configuration request, and no turn runs for them (R4-3).
     let native_session_used = Arc::new(AtomicBool::new(false));
@@ -248,9 +242,6 @@ where
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
-                if !session_update_is_session_state(&update) {
-                    notification_resume_required.store(true, Ordering::Release);
-                }
                 notification_tool_content.observe(&update);
                 if !session_update_is_relay_visible(
                     &update,
@@ -1020,7 +1011,6 @@ where
                 agent_output_count,
                 last_agent_message,
                 live_history_enabled,
-                resume_required,
                 native_session_used,
                 replacing_previous_bridge,
                 grok_usage,
@@ -1613,7 +1603,6 @@ pub(super) async fn drive_connection(
     agent_output_count: AgentOutputCount,
     last_agent_message: LastAgentMessage,
     live_history_enabled: Arc<AtomicBool>,
-    resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: grok_usage::Collector,
@@ -1633,7 +1622,6 @@ pub(super) async fn drive_connection(
         &agent_output_count,
         &last_agent_message,
         &live_history_enabled,
-        resume_required,
         native_session_used,
         replacing_previous_bridge,
         &grok_usage,

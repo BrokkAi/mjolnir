@@ -5814,6 +5814,7 @@ mod terminals {
 }
 
 #[cfg(unix)]
+// Hard-won: 14b4b00de: a replacement bridge exiting before its first prompt reloaded the unwritten thread and aborted
 #[tokio::test]
 async fn unused_codex_bridge_restarts_with_a_new_thread() {
     codex_bridge_restart_preserves_only_used_threads(false).await;
@@ -5828,13 +5829,17 @@ async fn codex_bridge_restarts_with_the_used_thread_even_if_the_prompt_reply_was
 #[cfg(unix)]
 async fn codex_bridge_restart_preserves_only_used_threads(send_prompt: bool) {
     let temp = tempfile::tempdir().unwrap();
-    let marker = temp.path().join("restarted");
+    let launches = temp.path().join("launches");
+    let exit_requested = temp.path().join("exit-requested");
     let script = temp.path().join("codex_persistence.py");
     std::fs::write(&script, format!(r#"
 import json, os, sys, time
-marker = {marker:?}
+launches = {launches:?}
+exit_requested = {exit_requested:?}
 used = {send_prompt}
-second = os.path.exists(marker)
+launch = int(open(launches).read()) + 1 if os.path.exists(launches) else 1
+with open(launches, "w") as counter:
+    counter.write(str(launch))
 
 def write(payload):
     print(json.dumps(payload), flush=True)
@@ -5846,26 +5851,34 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}, "_meta": {{"jetbrains": {{"air": {{"version": 1, "capabilities": ["nativeSubagentSessions"]}}}}}}}}
     elif method in ("session/new", "session/load", "session/resume"):
-        if second and not used and method != "session/new":
-            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "no rollout found for thread id unused"}}}})
+        if not used and method != "session/new":
+            thread = request["params"]["sessionId"]
+            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "Internal error", "data": {{"details": f"thread not loaded: {{thread}}"}}}}}})
             continue
-        assert method == ("session/load" if second and used else "session/new"), request
-        result = {{"sessionId": "original" if not second or used else "replacement",
+        assert method == ("session/load" if launch > 1 and used else "session/new"), request
+        result = {{"sessionId": "original" if used else f"thread-{{launch}}",
                    "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Guardian"}}]}}}}
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
         continue
     elif method == "session/prompt":
-        assert not second and used
-        open(marker, "w").close()
-        # Crash after consuming the prompt, before replying.
-        break
+        if used:
+            assert launch == 1
+            # Crash after consuming the prompt, before replying.
+            break
+        assert launch == 2 and request["params"]["sessionId"] == "thread-2", request
+        write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+            "sessionId": request["params"]["sessionId"],
+            "update": {{"sessionUpdate": "agent_message_chunk",
+                       "content": {{"type": "text", "text": "recovered reply"}}}}}}}})
+        result = {{"stopReason": "end_turn"}}
     else:
         result = {{}}
     if ident is not None:
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
-    if method == "session/set_mode" and not second and not used:
-        open(marker, "w").close()
-        time.sleep(0.2)
+    if method == "session/set_mode" and not used and launch == 1:
+        # Wait until the runtime has published this open before exiting.
+        while not os.path.exists(exit_requested):
+            time.sleep(0.01)
         break
 "#, send_prompt = if send_prompt { "True" } else { "False" })).unwrap();
     let (request_tx, request_rx) = mpsc::channel(4);
@@ -5890,8 +5903,12 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             extra_mcp_servers: Vec::new(),
             project_memory: None,
-            resume_session: None,
-            native_session_history: NativeSessionHistory::LoadBeforeReplace,
+            resume_session: (!send_prompt).then(|| "unused".into()),
+            native_session_history: if send_prompt {
+                NativeSessionHistory::LoadBeforeReplace
+            } else {
+                NativeSessionHistory::CreatedHereUnused
+            },
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Codex,
@@ -5920,15 +5937,22 @@ for line in sys.stdin:
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
+                replaced_unused_native_session_id,
                 ..
             } => {
-                opened.push((native_session_id, resumed));
+                opened.push((
+                    native_session_id,
+                    resumed,
+                    replaced_unused_native_session_id,
+                ));
             }
             RuntimeEvent::SessionConfigured { .. } => {
-                if opened.len() == 2 {
+                if send_prompt && opened.len() == 2 {
                     break;
                 }
-                if send_prompt && !prompt_sent {
+                if !send_prompt && opened.len() == 1 {
+                    std::fs::write(&exit_requested, "").unwrap();
+                } else if !prompt_sent {
                     request_tx
                         .send(CommandRequest::Prompt {
                             request_id: "prompt-1".into(),
@@ -5939,6 +5963,14 @@ for line in sys.stdin:
                     prompt_sent = true;
                 }
             }
+            RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason,
+                ..
+            } if request_id == "prompt-1" && !send_prompt => {
+                assert_eq!(stop_reason, "EndTurn");
+                break;
+            }
             RuntimeEvent::Stopped => {
                 panic!("runtime stopped instead of recovering: {:?}", runtime.await)
             }
@@ -5947,18 +5979,17 @@ for line in sys.stdin:
     }
     assert_eq!(
         opened,
-        vec![
-            ("original".into(), false),
-            (
-                if send_prompt {
-                    "original"
-                } else {
-                    "replacement"
-                }
-                .into(),
-                send_prompt
-            ),
-        ]
+        if send_prompt {
+            vec![
+                ("original".into(), false, None),
+                ("original".into(), true, None),
+            ]
+        } else {
+            vec![
+                ("thread-1".into(), false, Some("unused".into())),
+                ("thread-2".into(), false, Some("thread-1".into())),
+            ]
+        }
     );
     assert_eq!(
         replay,
@@ -5968,7 +5999,12 @@ for line in sys.stdin:
                 mj_core::native_agent::NativeAgentEvent::ReplayCommit,
             ]
         } else {
-            Vec::new()
+            vec![
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+            ]
         }
     );
     drop(request_tx);

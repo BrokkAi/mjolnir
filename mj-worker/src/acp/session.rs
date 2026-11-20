@@ -18,7 +18,6 @@ async fn record_prompt_use(
         .expect("opened session lock poisoned")
         .as_mut()
     {
-        opened.resume_required.store(true, Ordering::Release);
         first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
     }
     // Persist the same fact durably, once, so a restart after this
@@ -135,7 +134,6 @@ pub(super) async fn serve_session(
     agent_output_count: &AgentOutputCount,
     last_agent_message: &LastAgentMessage,
     live_history_enabled: &Arc<AtomicBool>,
-    resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: &grok_usage::Collector,
@@ -349,7 +347,7 @@ pub(super) async fn serve_session(
     {
         // This bridge starts a new app-server. Codex keeps an unused thread
         // in the old process until its first turn writes a rollout. The
-        // relay proves no turn reached this thread, so there is no history
+        // history evidence proves no turn reached this thread, so there is no history
         // to recover and no need to ask Codex to load it.
         emit_runtime_event(
             events,
@@ -782,7 +780,7 @@ pub(super) async fn serve_session(
     *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
         native_session_id: session_id.to_string(),
         started_at: tokio::time::Instant::now(),
-        resume_required,
+        resumed,
         native_session_used,
     });
     // Drop anything the worker queued for the bridge this one replaced. The
