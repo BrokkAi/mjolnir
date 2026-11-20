@@ -183,7 +183,9 @@ pub const RELAY_RESTART_RECOVERY_PROTOCOL: u32 = 72;
 pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 73;
 /// 74 reserves the next quiescent boundary for cancellable adoption cuts.
 pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_LIVE_BASELINE_PROTOCOL;
+/// 75 reports the mail the relay holds at a ready checkpoint cut.
+pub const RELAY_CHECKPOINT_MAILBOX_PROTOCOL: u32 = 75;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_MAILBOX_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -412,6 +414,12 @@ pub struct RestoredRelaySeed {
     /// reads as `false`: the imported identity counts as used.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_session_unused: bool,
+    /// The archived worker's mail, already selected by the restore spec's
+    /// queue policy: pending events are absent when the controller admits them
+    /// after readiness, and claimed prompt mail is absent when the queue is
+    /// dropped. Seeds from older releases omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<crate::archive::CanonicalMailbox>,
 }
 
 impl RestoredRelaySeed {
@@ -423,6 +431,9 @@ impl RestoredRelaySeed {
         }
         if let Some(value) = &self.assessment_state {
             crate::assessment::Checkpoint::decode(value)?;
+        }
+        if let Some(mailbox) = &self.mailbox {
+            mailbox.validate()?;
         }
         validate_relay_digest(
             &self.event_frontier_digest,

@@ -491,6 +491,7 @@ mod tests {
                 })
                 .collect(),
             queued_prompts: Vec::new(),
+            mailbox: None,
         }
     }
 

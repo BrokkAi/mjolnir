@@ -2725,9 +2725,12 @@ impl Controller {
             );
             relay
         };
-        if !operation.queue_admission_finished && operation.queue == ResumeQueueDisposition::Start {
-            let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-            executor.notify_notice("Starting queued work");
+        // The destination's restore left the archived source's pending mail
+        // for this point, after the ownership commit: until then a failed Move
+        // hands the session back to a source that still holds it.
+        let verified = if operation.queue_admission_finished {
+            None
+        } else {
             let checkpoint = operation
                 .restore_artifact()
                 .context("move queue archive is missing")?;
@@ -2736,6 +2739,13 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            Some(verified)
+        };
+        if let Some(verified) = verified.as_ref()
+            && operation.queue == ResumeQueueDisposition::Start
+        {
+            let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+            executor.notify_notice("Starting queued work");
             relay
                 .update_command_retention(
                     Some(operation.operation_id.clone()),
@@ -2772,27 +2782,43 @@ impl Controller {
                     )
                     .await?;
             }
-            for queued in verified.canonical_session.queued_prompts {
-                if operation.queue_admission_finished {
-                    continue;
-                }
+            for queued in &verified.canonical_session.queued_prompts {
                 ensure!(
                     !executor.cancellation_requested(),
                     "move cancelled during queue admission; destination retained"
                 );
-                let command = match queued.kind {
+                let command = match &queued.kind {
                     CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
                         prompt: queued
                             .content
-                            .into_iter()
+                            .iter()
+                            .cloned()
                             .map(serde_json::from_value)
                             .collect::<serde_json::Result<_>>()?,
                     },
                     CanonicalQueuedCommandKind::SetConfig { key, value } => {
-                        RelayCommand::SetConfig { key, value }
+                        RelayCommand::SetConfig {
+                            key: key.clone(),
+                            value: value.clone(),
+                        }
                     }
                 };
-                relay.submit_accepted(queued.command_id, command).await?;
+                relay
+                    .submit_accepted(queued.command_id.clone(), command)
+                    .await?;
+            }
+        }
+        // Mail joins behind the admitted queue, whichever way the queue went:
+        // discarding queued prompts never discards messages sent to the session.
+        if let Some(verified) = &verified {
+            for (command_id, command) in
+                super::resume::deferred_mail_commands(&verified.canonical_session)
+            {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "move cancelled during queue admission; destination retained"
+                );
+                relay.submit_accepted(command_id, command).await?;
             }
         }
         operation.queue_admission_finished = true;

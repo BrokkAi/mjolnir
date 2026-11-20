@@ -903,6 +903,23 @@ impl RelayClient {
         }
     }
 
+    pub async fn read_checkpoint_mailbox(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<mj_core::archive::CanonicalMailbox> {
+        match self
+            .call(RelayRequest::ReadCheckpointMailbox {
+                barrier_command_id,
+                cut,
+            })
+            .await?
+        {
+            RelayResponsePayload::CheckpointMailbox { mailbox } => Ok(mailbox),
+            _ => bail!("relay returned an unexpected checkpoint mailbox response"),
+        }
+    }
+
     pub async fn read_pending_elicitation(
         &mut self,
         elicitation_id: String,

@@ -2828,6 +2828,7 @@ fn snapshot_of(
         },
         transcript,
         queued_prompts: Vec::new(),
+        mailbox: None,
     })
 }
 
@@ -3180,6 +3181,7 @@ mod tests {
                         ),
                     ],
                     queued_prompts: Vec::new(),
+                    mailbox: None,
                 },
                 native_artifacts: Vec::new(),
                 repositories: Vec::new(),

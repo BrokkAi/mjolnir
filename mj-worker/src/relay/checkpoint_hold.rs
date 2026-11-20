@@ -73,22 +73,62 @@ impl DurableRelay {
         barrier_command_id: &str,
         expected: &RelayCursor,
     ) -> Option<&'static str> {
+        if !self.at_checkpoint_cut(barrier_command_id, expected) {
+            return Some("close does not match the current checkpoint cut");
+        }
+        (self.cut_spoiled_for.as_deref() == self.snapshot.checkpoint_barrier.as_deref())
+            .then_some("background work started after the checkpoint cut")
+    }
+
+    /// Whether relay state is still exactly the cut this barrier made: the
+    /// barrier, its ready cursor, and a journal frontier that has not moved.
+    fn at_checkpoint_cut(&self, barrier_command_id: &str, expected: &RelayCursor) -> bool {
         let ready = self
             .snapshot
             .checkpoint_ready_through
             .zip(self.snapshot.checkpoint_ready_digest.as_ref());
-        let barrier = self.snapshot.checkpoint_barrier.as_deref();
-        let exact_cut = barrier == Some(barrier_command_id)
+        self.snapshot.checkpoint_barrier.as_deref() == Some(barrier_command_id)
             && ready.is_some_and(|(ordinal, digest)| {
                 ordinal == expected.ordinal && digest == &expected.digest
             })
             && self.snapshot.latest_ordinal == expected.ordinal
-            && self.snapshot.latest_digest == expected.digest;
-        if !exact_cut {
-            return Some("close does not match the current checkpoint cut");
+            && self.snapshot.latest_digest == expected.digest
+    }
+
+    /// The mail this relay holds at a ready barrier's cut, for the checkpoint
+    /// that archives the cut. Events leased to a hook come back first, where
+    /// returning the lease would put them: the hook never confirmed that the
+    /// agent saw them. The outer error is a frame-size failure; the inner one
+    /// is a refusal because the relay is no longer at that cut.
+    pub(super) fn checkpoint_mailbox(
+        &self,
+        barrier_command_id: &str,
+        cut: &RelayCursor,
+    ) -> Result<std::result::Result<mj_core::archive::CanonicalMailbox, &'static str>> {
+        if !self.at_checkpoint_cut(barrier_command_id, cut) {
+            return Ok(Err("the relay is no longer at this checkpoint cut"));
         }
-        (self.cut_spoiled_for.as_deref() == barrier)
-            .then_some("background work started after the checkpoint cut")
+        let mut pending_events = self
+            .snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .map(|lease| lease.events.clone())
+            .unwrap_or_default();
+        pending_events.extend(self.snapshot.pending_mailbox_events.iter().cloned());
+        let mailbox = mj_core::archive::CanonicalMailbox {
+            pending_events,
+            delivered_event_keys: self.snapshot.delivered_mailbox_event_keys.clone(),
+            prompt_contexts: self.snapshot.mailbox_prompt_contexts.clone(),
+        };
+        // The answer travels in one relay frame, which the relay snapshot that
+        // holds these fields may exceed. Refuse with an answer rather than a
+        // frame the transport would drop.
+        ensure_serialized_budget(
+            &mailbox,
+            mj_core::relay::MAX_FRAME_BYTES - RELAY_EVENT_ENVELOPE_RESERVE,
+            "checkpoint mailbox",
+        )?;
+        Ok(Ok(mailbox))
     }
 
     /// Spoil the ready barrier's cut: end its hold and remember that work
