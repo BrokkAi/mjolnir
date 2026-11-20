@@ -1592,6 +1592,18 @@ pub struct RelayDispatchRecord {
     pub state: RelayDispatchState,
 }
 
+impl RelayDispatchRecord {
+    /// Whether this prompt may already have reached the harness, so the
+    /// native session may hold its history.
+    pub fn prompt_may_have_reached_agent(&self) -> bool {
+        self.command.prompt_blocks().is_some()
+            && !matches!(
+                self.state,
+                RelayDispatchState::Queued | RelayDispatchState::Pending
+            )
+    }
+}
+
 /// The durable half of an open harness-initiated turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
