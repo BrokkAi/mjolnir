@@ -10669,7 +10669,12 @@ fn old_bridge_retirement_preserves_replacement_terminal_admission() {
 // Hard-won: bd33e3913: pruning a queued prompt lost its later delivery boundary on replay.
 #[test]
 fn replayed_delivery_without_queue_event_resets_the_previous_reply() {
-    for steered in [false, true] {
+    for (steered, finished, replied) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, true, true),
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "first-turn").unwrap();
         submit_relay(&mut relay, "first-prompt", prompt("first request"));
@@ -10700,6 +10705,16 @@ fn replayed_delivery_without_queue_event_resets_the_previous_reply() {
                 "second-prompt"
             );
         }
+        // Hard-won: c624e4aba: a completed prompt lost its boundary with its dispatch.
+        if finished {
+            if replied {
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"second answer"}
+                })).unwrap()).unwrap();
+            }
+            finish_prompt(&mut relay, "second-prompt");
+            assert!(!relay.snapshot.dispatches.contains_key("second-prompt"));
+        }
         drop(relay);
         let mut relay = DurableRelay::open(temp.path(), SESSION, "second-turn").unwrap();
         let context = relay.turn_context();
@@ -10712,14 +10727,20 @@ fn replayed_delivery_without_queue_event_resets_the_previous_reply() {
             )
         };
         assert_eq!(evidence().user_prompt_tail, "second request");
-        assert!(evidence().assistant_text_tail.is_empty());
+        assert_eq!(
+            evidence().assistant_text_tail,
+            if replied { "second answer" } else { "" }
+        );
         relay
             .record_observation(RelayObservation::SessionConfigured {
                 config_options: Vec::new(),
             })
             .unwrap();
         relay.claim_pending_commands(true).unwrap();
-        assert!(evidence().assistant_text_tail.is_empty());
+        assert_eq!(
+            evidence().assistant_text_tail,
+            if replied { "second answer" } else { "" }
+        );
     }
 }
 
@@ -10774,4 +10795,15 @@ fn restart_continuation_starts_a_new_authorization_message_for_an_unlabelled_que
             .text,
         "working"
     );
+    // Hard-won: c624e4aba: a completed continuation has no queue event or dispatch to replay.
+    finish_prompt(&mut relay, &recovery[0].command_id);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "completed-recovery").unwrap();
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Replied,
+        &Default::default(),
+        0,
+    );
+    assert_eq!(evidence.assistant_text_tail, "Which option?");
 }

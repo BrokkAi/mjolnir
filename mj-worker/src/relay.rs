@@ -1066,6 +1066,44 @@ impl DurableRelay {
                     prompt_text(&dispatch.command).map(|text| (id.clone(), text))
                 })
                 .collect();
+            // Terminal records retain command kinds after dispatch bodies are
+            // gone. Their starts still establish boundaries; missing text is
+            // supplied only as empty, never inferred from another request.
+            for event in &relay.hot_events {
+                let command_id = match &event.observation {
+                    RelayObservation::CommandCompleted {
+                        command_id,
+                        command: Some(RelayCommandKind::Prompt),
+                        ..
+                    }
+                    | RelayObservation::CommandCompleted {
+                        command_id,
+                        outcome: RelayCommandOutcome::Prompt { .. },
+                        ..
+                    }
+                    | RelayObservation::CommandRejected {
+                        command_id,
+                        command: RelayCommandKind::Prompt,
+                        ..
+                    }
+                    | RelayObservation::CommandInterrupted {
+                        command_id,
+                        command: RelayCommandKind::Prompt,
+                        ..
+                    } => Some(command_id),
+                    _ => None,
+                };
+                if let Some(command_id) = command_id {
+                    prompts.entry(command_id.clone()).or_default();
+                }
+                if let RelayObservation::CommandInterrupted {
+                    continuation_id: Some(continuation_id),
+                    ..
+                } = &event.observation
+                {
+                    prompts.entry(continuation_id.clone()).or_default();
+                }
+            }
             let earlier_history_omitted = relay
                 .hot_events
                 .front()
