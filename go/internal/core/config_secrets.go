@@ -18,19 +18,25 @@
 // that owner is about to be used.
 //
 // Rust scopes the active resolver and the sources-only switch to the reading
-// thread. Go has no goroutine-local state, so they are process-wide and every
-// scoped read holds secretReadMutex for its whole duration: one owner decides
-// which resolver a decode sees, and no other read can observe it.
+// thread. Here they belong to the reading goroutine: a scope records them
+// under the goroutine's id for the duration of its read, so a decode sees only
+// its own scope, scopes nest as Rust's do, and concurrent reads on other
+// goroutines are unaffected.
 
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
+	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -151,7 +157,17 @@ func NewEnvironment() Environment { return Environment{} }
 // EnvironmentFromSources resolves every entry with the active SecretResolver,
 // recording the ones that do not resolve rather than failing the read.
 func EnvironmentFromSources(sources map[string]EnvironmentValue) Environment {
-	panic("unported: mj-core/src/config/secrets.rs Environment::from_sources")
+	resolved := map[string]string{}
+	unresolved := map[string]string{}
+	for _, key := range sortedKeys(sources) {
+		value, err := resolveActive(key, sources[key])
+		if err != nil {
+			unresolved[key] = err.Error()
+			continue
+		}
+		resolved[key] = value
+	}
+	return Environment{sources: sources, resolved: resolved, unresolved: unresolved}.normalized()
 }
 
 // EnvironmentFromMap is From<BTreeMap<String, String>>: every value a
@@ -163,7 +179,7 @@ func EnvironmentFromMap(resolved map[string]string) Environment {
 		sources[key] = EnvironmentValueLiteral{Value: value}
 		values[key] = value
 	}
-	return Environment{sources: sources, resolved: values}
+	return Environment{sources: sources, resolved: values}.normalized()
 }
 
 // inherit supplies key from the loading process's environment, as
@@ -171,7 +187,15 @@ func EnvironmentFromMap(resolved map[string]string) Environment {
 // not an entry, so a save never writes it. An unset variable adds nothing: the
 // caller that needs the key reports it.
 func (e *Environment) inherit(key string) {
-	panic("unported: mj-core/src/config/secrets.rs Environment::inherit")
+	if _, named := e.sources[key]; named || !resolvesValues() {
+		return
+	}
+	if value, ok := environmentFromProcess(key); ok {
+		if e.resolved == nil {
+			e.resolved = map[string]string{}
+		}
+		e.resolved[key] = value
+	}
 }
 
 // environmentFromProcess is the value of key in the loading process's
@@ -291,6 +315,27 @@ func (e *Environment) Remove(key string) (string, bool) {
 	return previous, had
 }
 
+// normalized gives every empty table one representation, nil, so tables Rust
+// compares equal also compare equal with reflect.DeepEqual.
+func (e Environment) normalized() Environment {
+	if len(e.sources) == 0 {
+		e.sources = nil
+	}
+	if len(e.resolved) == 0 {
+		e.resolved = nil
+	}
+	if len(e.unresolved) == 0 {
+		e.unresolved = nil
+	}
+	return e
+}
+
+// Equal is Environment's PartialEq: the entries, the values and what each
+// unresolved entry needs.
+func (e Environment) Equal(other Environment) bool {
+	return reflect.DeepEqual(e.normalized(), other.normalized())
+}
+
 func (e *Environment) Clear() {
 	e.sources = nil
 	e.resolved = nil
@@ -321,7 +366,7 @@ func (e *Environment) UnmarshalJSON(data []byte) error {
 		sources[key] = value
 	}
 	if !resolvesValues() {
-		*e = Environment{sources: sources}
+		*e = Environment{sources: sources}.normalized()
 		return nil
 	}
 	*e = EnvironmentFromSources(sources)
@@ -368,64 +413,178 @@ func SecretResolverFixed(process, secrets map[string]string) SecretResolver {
 }
 
 func (r SecretResolver) resolve(key string, value EnvironmentValue) (string, error) {
-	panic("unported: mj-core/src/config/secrets.rs SecretResolver::resolve")
+	switch value := value.(type) {
+	case EnvironmentValueLiteral:
+		return value.Value, nil
+	case EnvironmentValueFromEnv:
+		name := value.Value
+		var found string
+		var ok bool
+		if r.process != nil {
+			found, ok = r.process[name]
+		} else {
+			found, ok = os.LookupEnv(name)
+		}
+		if ok && strings.TrimSpace(found) != "" {
+			return found, nil
+		}
+		return "", fmt.Errorf("%s = { from_env = %s } needs %s set, and not empty, in the environment of the process reading the configuration",
+			key, debugString(name), name)
+	case EnvironmentValueFromSecret:
+		name := value.Value
+		switch store := r.secrets.(type) {
+		case SecretStoreValues:
+			if found, ok := store.Value[name]; ok {
+				return found, nil
+			}
+			return "", fmt.Errorf("%s = { from_secret = %s } names a secret that is not defined", key, debugString(name))
+		case SecretStoreFile:
+			secrets, err := LoadSecrets(store.Value)
+			if err != nil {
+				return "", fmt.Errorf("%s = { from_secret = %s } needs %s: %w", key, debugString(name), store.Value, err)
+			}
+			if found, ok := secrets[name]; ok && strings.TrimSpace(found) != "" {
+				return found, nil
+			}
+			return "", fmt.Errorf("%s = { from_secret = %s } needs `%s = \"...\"` in %s", key, debugString(name), name, store.Value)
+		}
+		panic(fmt.Sprintf("unknown secret store %T", r.secrets))
+	}
+	panic(fmt.Sprintf("unknown environment value %T", value))
 }
 
-// secretReadMutex serializes the scoped reads below (Rust's thread_local!
-// ACTIVE and SOURCES_ONLY). It is held for the whole of a scoped read.
-var secretReadMutex sync.Mutex
+// secretScope is one goroutine's read scope: Rust's thread_local! ACTIVE and
+// SOURCES_ONLY.
+type secretScope struct {
+	// resolver is the resolver of the scoped read in progress, if any.
+	resolver *SecretResolver
+	// sourcesOnly is set while a projection is read with
+	// WithEnvironmentSourcesOnly.
+	sourcesOnly bool
+}
 
-// activeSecretResolver is the resolver of the scoped read in progress, if
-// any; guarded by secretReadMutex while a scope is open.
-var activeSecretResolver *SecretResolver
+// secretScopes holds the open scope of each goroutine reading inside one,
+// keyed by goroutine id. A goroutine with no entry has the zero scope.
+var secretScopes sync.Map
 
-// sourcesOnly is set while a projection is read with
-// WithEnvironmentSourcesOnly; guarded by secretReadMutex while a scope is
-// open.
-var sourcesOnly bool
+// currentGoroutineID is the runtime's id for the calling goroutine, read from
+// the first line of its stack trace ("goroutine 123 [running]:").
+func currentGoroutineID() uint64 {
+	var buffer [64]byte
+	line := buffer[:runtime.Stack(buffer[:], false)]
+	line = bytes.TrimPrefix(line, []byte("goroutine "))
+	if end := bytes.IndexByte(line, ' '); end >= 0 {
+		line = line[:end]
+	}
+	id, err := strconv.ParseUint(string(line), 10, 64)
+	if err != nil {
+		panic("read the goroutine id from its stack trace: " + err.Error())
+	}
+	return id
+}
+
+func currentSecretScope() secretScope {
+	if scope, ok := secretScopes.Load(currentGoroutineID()); ok {
+		return scope.(secretScope)
+	}
+	return secretScope{}
+}
+
+// withSecretScope runs read with change applied to this goroutine's scope,
+// restoring the previous scope when read returns or panics.
+func withSecretScope[T any](change func(*secretScope), read func() T) T {
+	id := currentGoroutineID()
+	previous, had := secretScopes.Load(id)
+	scope := secretScope{}
+	if had {
+		scope = previous.(secretScope)
+	}
+	change(&scope)
+	secretScopes.Store(id, scope)
+	defer func() {
+		if had {
+			secretScopes.Store(id, previous)
+		} else {
+			secretScopes.Delete(id)
+		}
+	}()
+	return read()
+}
 
 // WithEnvironmentSourcesOnly deserializes a configuration projection without
 // reading credentials or secret files. Its environments retain their
 // configured sources, but have no resolved values: serialize them for
 // background resolution before use.
 func WithEnvironmentSourcesOnly[T any](read func() T) T {
-	panic("unported: mj-core/src/config/secrets.rs with_environment_sources_only")
+	return withSecretScope(func(scope *secretScope) { scope.sourcesOnly = true }, read)
 }
 
 // resolvesValues is false while a projection is read with
 // WithEnvironmentSourcesOnly, which must neither resolve values nor read files
 // to find them.
-func resolvesValues() bool { return !sourcesOnly }
+func resolvesValues() bool { return !currentSecretScope().sourcesOnly }
 
 // WithSecretResolver runs read with resolver answering every environment
 // reference it meets. Without one, references resolve against this
 // instance's secrets file and the process environment.
 func WithSecretResolver[T any](resolver SecretResolver, read func() T) T {
-	panic("unported: mj-core/src/config/secrets.rs with_secret_resolver")
+	return withSecretScope(func(scope *secretScope) { scope.resolver = &resolver }, read)
 }
 
 func resolveActive(key string, value EnvironmentValue) (string, error) {
-	if activeSecretResolver != nil {
-		return activeSecretResolver.resolve(key, value)
+	if resolver := currentSecretScope().resolver; resolver != nil {
+		return resolver.resolve(key, value)
 	}
 	return SecretResolverForInstance().resolve(key, value)
 }
 
 // LoadSecrets reads a secrets file: a flat table of string values.
 func LoadSecrets(path string) (map[string]string, error) {
-	panic("unported: mj-core/src/config/secrets.rs load_secrets")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read secrets file %s: %w", path, err)
+	}
+	table, err := decodeTOMLDocument(string(contents))
+	if err != nil {
+		return nil, fmt.Errorf("parse secrets file %s: %w", path, err)
+	}
+	secrets := make(map[string]string, len(table))
+	for _, name := range sortedKeys(table) {
+		value, ok := table[name].(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: `%s` must be a string; the secrets file holds only `NAME = \"value\"` lines", path, name)
+		}
+		secrets[name] = value
+	}
+	return secrets, nil
 }
 
 // SecretsPermissionProblem says why a secrets file is not private to its
 // owner, if it is not.
 func SecretsPermissionProblem(path string) (string, bool, error) {
-	panic("unported: mj-core/src/config/secrets.rs secrets_permission_problem")
+	if runtime.GOOS == "windows" {
+		return "", false, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	mode := info.Mode().Perm()
+	if mode&0o077 != 0 {
+		return fmt.Sprintf("%s is readable by other users (mode %03o)", path, uint32(mode)), true, nil
+	}
+	return "", false, nil
 }
 
 // LooksLikeCredential reports whether an environment variable's name suggests
 // a credential, so a literal value under it belongs in the secrets file.
 func LooksLikeCredential(name string) bool {
-	upper := strings.ToUpper(name)
+	upper := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' {
+			return r - ('a' - 'A')
+		}
+		return r
+	}, name)
 	for _, word := range []string{"API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"} {
 		if strings.Contains(upper, word) {
 			return true

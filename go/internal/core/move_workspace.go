@@ -8,7 +8,11 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"slices"
+	"strings"
 )
 
 const LargeTransferBytes uint64 = 1_000_000_000
@@ -46,9 +50,18 @@ func (WorkspaceCommandCapture) isWorkspaceCommand() {}
 func (WorkspaceCommandRestore) isWorkspaceCommand() {}
 func (WorkspaceCommandVerify) isWorkspaceCommand()  {}
 
+// nonNilRepositories is a present empty list for a nil one.
+func nonNilRepositories(repositories []WorkspaceRepository) []WorkspaceRepository {
+	if repositories == nil {
+		return []WorkspaceRepository{}
+	}
+	return repositories
+}
+
 func (c WorkspaceCommandInspect) MarshalJSON() ([]byte, error) {
 	type wire WorkspaceCommandInspect
-	return json.Marshal(struct {
+	c.Repositories = nonNilRepositories(c.Repositories)
+	return marshalSerdeJSON(struct {
 		Action string `json:"action"`
 		wire
 	}{"inspect", wire(c)})
@@ -56,7 +69,8 @@ func (c WorkspaceCommandInspect) MarshalJSON() ([]byte, error) {
 
 func (c WorkspaceCommandCapture) MarshalJSON() ([]byte, error) {
 	type wire WorkspaceCommandCapture
-	return json.Marshal(struct {
+	c.Repositories = nonNilRepositories(c.Repositories)
+	return marshalSerdeJSON(struct {
 		Action string `json:"action"`
 		wire
 	}{"capture", wire(c)})
@@ -64,7 +78,8 @@ func (c WorkspaceCommandCapture) MarshalJSON() ([]byte, error) {
 
 func (c WorkspaceCommandRestore) MarshalJSON() ([]byte, error) {
 	type wire WorkspaceCommandRestore
-	return json.Marshal(struct {
+	c.Repositories = nonNilRepositories(c.Repositories)
+	return marshalSerdeJSON(struct {
 		Action string `json:"action"`
 		wire
 	}{"restore", wire(c)})
@@ -72,7 +87,7 @@ func (c WorkspaceCommandRestore) MarshalJSON() ([]byte, error) {
 
 func (c WorkspaceCommandVerify) MarshalJSON() ([]byte, error) {
 	type wire WorkspaceCommandVerify
-	return json.Marshal(struct {
+	return marshalSerdeJSON(struct {
 		Action string `json:"action"`
 		wire
 	}{"verify", wire(c)})
@@ -92,6 +107,9 @@ func unmarshalWorkspaceCommand(data []byte) (WorkspaceCommand, error) {
 	}
 	switch *tag.Action {
 	case "inspect":
+		if err := requireFields(data, "repositories"); err != nil {
+			return nil, err
+		}
 		type wire WorkspaceCommandInspect
 		var command struct {
 			Action string `json:"action"`
@@ -100,6 +118,9 @@ func unmarshalWorkspaceCommand(data []byte) (WorkspaceCommand, error) {
 		err := unmarshalDenyUnknown(data, &command)
 		return WorkspaceCommandInspect(command.wire), err
 	case "capture":
+		if err := requireFields(data, "repositories", "selection", "destination"); err != nil {
+			return nil, err
+		}
 		type wire WorkspaceCommandCapture
 		var command struct {
 			Action string `json:"action"`
@@ -108,6 +129,9 @@ func unmarshalWorkspaceCommand(data []byte) (WorkspaceCommand, error) {
 		err := unmarshalDenyUnknown(data, &command)
 		return WorkspaceCommandCapture(command.wire), err
 	case "restore":
+		if err := requireFields(data, "source", "repositories"); err != nil {
+			return nil, err
+		}
 		type wire WorkspaceCommandRestore
 		var command struct {
 			Action string `json:"action"`
@@ -116,6 +140,9 @@ func unmarshalWorkspaceCommand(data []byte) (WorkspaceCommand, error) {
 		err := unmarshalDenyUnknown(data, &command)
 		return WorkspaceCommandRestore(command.wire), err
 	case "verify":
+		if err := requireFields(data, "source"); err != nil {
+			return nil, err
+		}
 		type wire WorkspaceCommandVerify
 		var command struct {
 			Action string `json:"action"`
@@ -136,6 +163,9 @@ type WorkspaceRepository struct {
 }
 
 func (r *WorkspaceRepository) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "id", "root"); err != nil {
+		return err
+	}
 	type wire WorkspaceRepository
 	return unmarshalDenyUnknown(data, (*wire)(r))
 }
@@ -147,6 +177,9 @@ type TransferFile struct {
 }
 
 func (f *TransferFile) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "path", "bytes", "sha256"); err != nil {
+		return err
+	}
 	type wire TransferFile
 	return unmarshalDenyUnknown(data, (*wire)(f))
 }
@@ -162,7 +195,23 @@ type TransferredRepository struct {
 	Untracked    []WorkspacePath `json:"untracked"`
 }
 
+// MarshalJSON writes empty lists as `[]`, as serde writes an empty Vec.
+func (r TransferredRepository) MarshalJSON() ([]byte, error) {
+	type wire TransferredRepository
+	if r.Refs == nil {
+		r.Refs = [][2]string{}
+	}
+	if r.SymbolicRefs == nil {
+		r.SymbolicRefs = [][2]string{}
+	}
+	r.Untracked = nonNilWorkspacePaths(r.Untracked)
+	return marshalSerdeJSON(wire(r))
+}
+
 func (r *TransferredRepository) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "id", "head", "refs", "symbolic_refs", "status", "untracked"); err != nil {
+		return err
+	}
 	type wire TransferredRepository
 	return unmarshalDenyUnknown(data, (*wire)(r))
 }
@@ -173,7 +222,22 @@ type WorkspaceManifest struct {
 	Files        []TransferFile          `json:"files"`
 }
 
+// MarshalJSON writes empty lists as `[]`, as serde writes an empty Vec.
+func (m WorkspaceManifest) MarshalJSON() ([]byte, error) {
+	type wire WorkspaceManifest
+	if m.Repositories == nil {
+		m.Repositories = []TransferredRepository{}
+	}
+	if m.Files == nil {
+		m.Files = []TransferFile{}
+	}
+	return marshalSerdeJSON(wire(m))
+}
+
 func (m *WorkspaceManifest) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "version", "repositories", "files"); err != nil {
+		return err
+	}
 	type wire WorkspaceManifest
 	return unmarshalDenyUnknown(data, (*wire)(m))
 }
@@ -189,6 +253,9 @@ type WorkspaceTransfer struct {
 }
 
 func (t *WorkspaceTransfer) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "assessment", "source", "source_stage", "controller_stage", "phase"); err != nil {
+		return err
+	}
 	type wire WorkspaceTransfer
 	return unmarshalDenyUnknown(data, (*wire)(t))
 }
@@ -223,9 +290,23 @@ type WorkspaceSelection struct {
 	AcknowledgeLargeTransfer bool            `json:"acknowledge_large_transfer"`
 }
 
+// MarshalJSON writes no exclusions as `[]`, as serde writes an empty Vec.
+func (s WorkspaceSelection) MarshalJSON() ([]byte, error) {
+	type wire WorkspaceSelection
+	s.Exclusions = nonNilWorkspacePaths(s.Exclusions)
+	return marshalSerdeJSON(wire(s))
+}
+
 func (s *WorkspaceSelection) UnmarshalJSON(data []byte) error {
 	type wire WorkspaceSelection
 	return unmarshalDenyUnknown(data, (*wire)(s))
+}
+
+func nonNilWorkspacePaths(paths []WorkspacePath) []WorkspacePath {
+	if paths == nil {
+		return []WorkspacePath{}
+	}
+	return paths
 }
 
 type WorkspacePath struct {
@@ -234,13 +315,26 @@ type WorkspacePath struct {
 }
 
 func (p *WorkspacePath) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "repository", "path"); err != nil {
+		return err
+	}
 	type wire WorkspacePath
 	return unmarshalDenyUnknown(data, (*wire)(p))
 }
 
 // Compare is the Rust derived Ord: repository, then path by component.
 func (p WorkspacePath) Compare(other WorkspacePath) int {
-	panic("unported: mj-core/src/move_workspace.rs WorkspacePath Ord")
+	if order := strings.Compare(p.Repository, other.Repository); order != 0 {
+		return order
+	}
+	return comparePaths(p.Path, other.Path)
+}
+
+// sortedWorkspacePaths is a Rust BTreeSet<WorkspacePath> built from paths.
+func sortedWorkspacePaths(paths []WorkspacePath) []WorkspacePath {
+	sorted := slices.Clone(paths)
+	slices.SortFunc(sorted, WorkspacePath.Compare)
+	return slices.CompactFunc(sorted, func(a, b WorkspacePath) bool { return a.Compare(b) == 0 })
 }
 
 // LargeTransferConsentRequired: the selection is valid but the caller has
@@ -253,11 +347,23 @@ func (e LargeTransferConsentRequired) Error() string {
 }
 
 func (p *WorkspacePath) Validate() error {
-	panic("unported: mj-core/src/move_workspace.rs WorkspacePath::validate")
+	if p.Repository == "" {
+		return errors.New("Move repository is missing")
+	}
+	valid := p.Path != ""
+	for _, component := range pathComponents(p.Path) {
+		if component.kind != pathComponentNormal {
+			valid = false
+		}
+	}
+	if !valid {
+		return fmt.Errorf("Move path must be relative without parent traversal: %s", p.Path)
+	}
+	return nil
 }
 
 func (p *WorkspacePath) Contains(other *WorkspacePath) bool {
-	panic("unported: mj-core/src/move_workspace.rs WorkspacePath::contains")
+	return p.Repository == other.Repository && pathStartsWith(other.Path, p.Path)
 }
 
 type WorkspaceFile struct {
@@ -266,6 +372,9 @@ type WorkspaceFile struct {
 }
 
 func (f *WorkspaceFile) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "location", "bytes"); err != nil {
+		return err
+	}
 	type wire WorkspaceFile
 	return unmarshalDenyUnknown(data, (*wire)(f))
 }
@@ -284,9 +393,34 @@ type WorkspaceAssessment struct {
 	Storage         []WorkspaceStorage `json:"storage"`
 }
 
-func (a *WorkspaceAssessment) UnmarshalJSON(data []byte) error {
+// MarshalJSON writes empty lists as `[]`, as serde writes an empty Vec or
+// BTreeSet, and the expanded set in its order.
+func (a WorkspaceAssessment) MarshalJSON() ([]byte, error) {
 	type wire WorkspaceAssessment
-	return unmarshalDenyUnknown(data, (*wire)(a))
+	if a.Files == nil {
+		a.Files = []WorkspaceFile{}
+	}
+	if a.Roots == nil {
+		a.Roots = []FileNode{}
+	}
+	a.InitiallyExpanded = sortedWorkspacePaths(a.InitiallyExpanded)
+	a.Blockers = nonNilStrings(a.Blockers)
+	if a.Storage == nil {
+		a.Storage = []WorkspaceStorage{}
+	}
+	return marshalSerdeJSON(wire(a))
+}
+
+func (a *WorkspaceAssessment) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "files", "required_bytes", "ignored_files", "ignored_bytes", "credential_files", "blockers"); err != nil {
+		return err
+	}
+	type wire WorkspaceAssessment
+	if err := unmarshalDenyUnknown(data, (*wire)(a)); err != nil {
+		return err
+	}
+	a.InitiallyExpanded = sortedWorkspacePaths(a.InitiallyExpanded)
+	return nil
 }
 
 type WorkspaceStorage struct {
@@ -296,6 +430,32 @@ type WorkspaceStorage struct {
 	Location       string   `json:"location"`
 	AvailableBytes uint64   `json:"available_bytes"`
 	Copies         uint64   `json:"copies"`
+}
+
+// MarshalJSON writes the allocations as serde writes a BTreeSet: sorted,
+// and `[]` when empty.
+func (s WorkspaceStorage) MarshalJSON() ([]byte, error) {
+	type wire WorkspaceStorage
+	s.Allocations = slices.Compact(slices.Sorted(slices.Values(nonNilStrings(s.Allocations))))
+	if s.Allocations == nil {
+		s.Allocations = []string{}
+	}
+	return marshalSerdeJSON(wire(s))
+}
+
+func (s *WorkspaceStorage) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "location", "available_bytes", "copies"); err != nil {
+		return err
+	}
+	type wire WorkspaceStorage
+	if err := json.Unmarshal(data, (*wire)(s)); err != nil {
+		return err
+	}
+	if len(s.Allocations) > 0 {
+		slices.Sort(s.Allocations)
+		s.Allocations = slices.Compact(s.Allocations)
+	}
+	return nil
 }
 
 // SelectionProblem: capacity changes with the selection; consent is
@@ -319,19 +479,86 @@ func (s *WorkspaceSelection) Includes(path *WorkspacePath) bool {
 	return true
 }
 
+// saturatingAdd and saturatingMul are Rust's u64 saturating arithmetic.
+func saturatingAdd(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+
+func saturatingMul(a, b uint64) uint64 {
+	if a != 0 && b > math.MaxUint64/a {
+		return math.MaxUint64
+	}
+	return a * b
+}
+
 func (s *WorkspaceSelection) IncludedBytes(assessment *WorkspaceAssessment) uint64 {
-	panic("unported: mj-core/src/move_workspace.rs WorkspaceSelection::included_bytes")
+	sum := assessment.RequiredBytes
+	for i := range assessment.Files {
+		if s.Includes(&assessment.Files[i].Location) {
+			sum = saturatingAdd(sum, assessment.Files[i].Bytes)
+		}
+	}
+	return sum
 }
 
 func (s *WorkspaceSelection) Validate(assessment *WorkspaceAssessment) error {
-	panic("unported: mj-core/src/move_workspace.rs WorkspaceSelection::validate")
+	for i := range s.Exclusions {
+		path := &s.Exclusions[i]
+		if err := path.Validate(); err != nil {
+			return err
+		}
+		eligible := false
+		for j := range assessment.Files {
+			if path.Contains(&assessment.Files[j].Location) {
+				eligible = true
+				break
+			}
+		}
+		if !eligible {
+			return fmt.Errorf("excluded path is not an eligible untracked file or directory: %s/%s", path.Repository, path.Path)
+		}
+	}
+	if len(assessment.Blockers) > 0 {
+		return errors.New(strings.Join(assessment.Blockers, "; "))
+	}
+	bytes := s.IncludedBytes(assessment)
+	for _, storage := range assessment.Storage {
+		required := saturatingAdd(saturatingMul(bytes, storage.Copies), 64*1024*1024)
+		if storage.AvailableBytes < required {
+			return fmt.Errorf(
+				"%s needs approximately %s free for this selection; %s available. Choose fewer files or free space before Move",
+				storage.Location, FormatBytes(required), FormatBytes(storage.AvailableBytes),
+			)
+		}
+	}
+	if bytes >= LargeTransferBytes && !s.AcknowledgeLargeTransfer {
+		return LargeTransferConsentRequired(FormatBytes(bytes))
+	}
+	return nil
 }
 
 // SetIncluded: a checked parent includes all its descendants; an unchecked
 // parent excludes them. Selecting a child inside an excluded parent expands
 // the exclusion into the other exact files, preserving their selection.
 func (s *WorkspaceSelection) SetIncluded(assessment *WorkspaceAssessment, path *WorkspacePath, included bool) {
-	panic("unported: mj-core/src/move_workspace.rs WorkspaceSelection::set_included")
+	var excluded []WorkspacePath
+	for i := range assessment.Files {
+		location := &assessment.Files[i].Location
+		var exclude bool
+		if path.Contains(location) {
+			exclude = !included
+		} else {
+			exclude = !s.Includes(location)
+		}
+		if exclude {
+			excluded = append(excluded, *location)
+		}
+	}
+	s.Exclusions = nonNilWorkspacePaths(sortedWorkspacePaths(excluded))
+	s.AcknowledgeLargeTransfer = false
 }
 
 type FileSelectionState int
@@ -349,8 +576,42 @@ type FileNode struct {
 	Children []FileNode    `json:"children"`
 }
 
+// MarshalJSON writes no children as `[]`, as serde writes an empty Vec.
+func (n FileNode) MarshalJSON() ([]byte, error) {
+	type wire FileNode
+	if n.Children == nil {
+		n.Children = []FileNode{}
+	}
+	return marshalSerdeJSON(wire(n))
+}
+
+func (n *FileNode) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "location", "bytes", "files", "children"); err != nil {
+		return err
+	}
+	type wire FileNode
+	return json.Unmarshal(data, (*wire)(n))
+}
+
 func (n *FileNode) State(assessment *WorkspaceAssessment, selection *WorkspaceSelection) FileSelectionState {
-	panic("unported: mj-core/src/move_workspace.rs FileNode::state")
+	included, excluded := false, false
+	for i := range assessment.Files {
+		location := &assessment.Files[i].Location
+		if n.Location.Contains(location) {
+			if selection.Includes(location) {
+				included = true
+			} else {
+				excluded = true
+			}
+		}
+	}
+	switch {
+	case included && excluded:
+		return FileSelectionStateMixed
+	case included:
+		return FileSelectionStateIncluded
+	}
+	return FileSelectionStateExcluded
 }
 
 func (n *FileNode) Label() string {
@@ -361,13 +622,104 @@ func (n *FileNode) Label() string {
 	return fmt.Sprintf("%s/%s%s — %s", n.Location.Repository, n.Location.Path, suffix, FormatBytes(n.Bytes))
 }
 
+// compareFileNodes orders nodes by size, largest first, then by location.
+func compareFileNodes(a, b *FileNode) int {
+	switch {
+	case a.Bytes > b.Bytes:
+		return -1
+	case a.Bytes < b.Bytes:
+		return 1
+	}
+	return a.Location.Compare(b.Location)
+}
+
 func FileTree(assessment *WorkspaceAssessment) []FileNode {
-	panic("unported: mj-core/src/move_workspace.rs file_tree")
+	var insert func(nodes *[]FileNode, file *WorkspaceFile, parts []string, index int)
+	insert = func(nodes *[]FileNode, file *WorkspaceFile, parts []string, index int) {
+		path := parts[index]
+		position := slices.IndexFunc(*nodes, func(node FileNode) bool {
+			return node.Location.Repository == file.Location.Repository && comparePaths(node.Location.Path, path) == 0
+		})
+		if position < 0 {
+			*nodes = append(*nodes, FileNode{
+				Location: WorkspacePath{Repository: file.Location.Repository, Path: path},
+			})
+			position = len(*nodes) - 1
+		}
+		node := &(*nodes)[position]
+		node.Bytes = saturatingAdd(node.Bytes, file.Bytes)
+		node.Files++
+		if index+1 < len(parts) {
+			insert(&node.Children, file, parts, index+1)
+		}
+	}
+	var finish func(nodes []FileNode)
+	finish = func(nodes []FileNode) {
+		for i := range nodes {
+			finish(nodes[i].Children)
+			for len(nodes[i].Children) == 1 && len(nodes[i].Children[0].Children) > 0 {
+				nodes[i] = nodes[i].Children[0]
+			}
+		}
+		slices.SortStableFunc(nodes, func(a, b FileNode) int { return compareFileNodes(&a, &b) })
+	}
+	var roots []FileNode
+	for i := range assessment.Files {
+		file := &assessment.Files[i]
+		// Rust's `Path::ancestors`, without the empty one, outermost first.
+		var parts []string
+		for path, ok := file.Location.Path, true; ok; path, ok = pathParent(path) {
+			if path != "" {
+				parts = append(parts, path)
+			}
+		}
+		slices.Reverse(parts)
+		if len(parts) > 0 {
+			insert(&roots, file, parts, 0)
+		}
+	}
+	finish(roots)
+	return roots
 }
 
 // InitialExpansion returns a sorted set (Rust BTreeSet).
 func InitialExpansion(roots []FileNode) []WorkspacePath {
-	panic("unported: mj-core/src/move_workspace.rs initial_expansion")
+	var expanded []WorkspacePath
+	isExpanded := func(location WorkspacePath) bool {
+		return slices.ContainsFunc(expanded, func(other WorkspacePath) bool { return other.Compare(location) == 0 })
+	}
+	var visible []*FileNode
+	for i := range roots {
+		if roots[i].Bytes >= SubstantialRootBytes && len(visible) < 8 {
+			visible = append(visible, &roots[i])
+		}
+	}
+	for {
+		slices.SortStableFunc(visible, compareFileNodes)
+		candidate := slices.IndexFunc(visible, func(node *FileNode) bool {
+			var children []*FileNode
+			for i := range node.Children {
+				if node.Children[i].Bytes >= SubstantialRootBytes {
+					children = append(children, &node.Children[i])
+				}
+			}
+			return !isExpanded(node.Location) &&
+				len(children) > 0 &&
+				slices.ContainsFunc(children, func(child *FileNode) bool { return len(child.Children) > 0 }) &&
+				len(visible)+len(children) <= 8
+		})
+		if candidate < 0 {
+			break
+		}
+		node := visible[candidate]
+		expanded = append(expanded, node.Location)
+		for i := range node.Children {
+			if node.Children[i].Bytes >= SubstantialRootBytes {
+				visible = append(visible, &node.Children[i])
+			}
+		}
+	}
+	return sortedWorkspacePaths(expanded)
 }
 
 func FormatBytes(bytes uint64) string {
@@ -390,4 +742,19 @@ type RetainedMoveSource struct {
 	Source      SessionRecord   `json:"source"`
 	Exclusions  []WorkspacePath `json:"exclusions"`
 	CreatedAt   string          `json:"created_at"`
+}
+
+// MarshalJSON writes no exclusions as `[]`, as serde writes an empty Vec.
+func (r RetainedMoveSource) MarshalJSON() ([]byte, error) {
+	type wire RetainedMoveSource
+	r.Exclusions = nonNilWorkspacePaths(r.Exclusions)
+	return marshalSerdeJSON(wire(r))
+}
+
+func (r *RetainedMoveSource) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "operation_id", "session_id", "source", "exclusions", "created_at"); err != nil {
+		return err
+	}
+	type wire RetainedMoveSource
+	return json.Unmarshal(data, (*wire)(r))
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 )
 
@@ -254,7 +255,32 @@ func (f DeclinedFinding) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON reads the flattened entry and the optional repositories.
 func (f *DeclinedFinding) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-core/src/storage.rs DeclinedFinding deserialize (flatten)")
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	if members == nil {
+		return errors.New("invalid type: null, expected struct DeclinedFinding")
+	}
+	repositories, hasRepositories := members["repositories"]
+	// The flattened entry sees every member the outer struct does not
+	// claim, as serde's flatten hands them over.
+	delete(members, "repositories")
+	rest, err := json.Marshal(members)
+	if err != nil {
+		return err
+	}
+	var decoded DeclinedFinding
+	if err := json.Unmarshal(rest, &decoded.ReviewOverride); err != nil {
+		return err
+	}
+	if hasRepositories {
+		if err := json.Unmarshal(repositories, &decoded.Repositories); err != nil {
+			return err
+		}
+	}
+	*f = decoded
+	return nil
 }
 
 // Covers is whether a review of root must be told not to repeat this
@@ -356,7 +382,31 @@ func (s *TurnReviewState) AdvanceReviewBases(moved []string) {
 // DeclineFindings adds findings the author declined, then drops the oldest
 // entries until the list fits DeclinedFindingsBytes.
 func (s *TurnReviewState) DeclineFindings(entries []ReviewOverride, repositories []string) {
-	panic("unported: mj-core/src/storage.rs TurnReviewState::decline_findings")
+	for _, entry := range entries {
+		declined := DeclinedFinding{ReviewOverride: entry, Repositories: slices.Clone(repositories)}
+		if !slices.ContainsFunc(s.DeclinedFindings, func(existing DeclinedFinding) bool {
+			return existing.Equal(&declined)
+		}) {
+			s.DeclinedFindings = append(s.DeclinedFindings, declined)
+		}
+	}
+	size := func(entry *DeclinedFinding) int {
+		total := len(entry.Finding) + len(entry.Reason)
+		for _, root := range entry.Repositories {
+			total += len(root)
+		}
+		return total
+	}
+	total := 0
+	for index := range s.DeclinedFindings {
+		total += size(&s.DeclinedFindings[index])
+	}
+	drop := 0
+	for total > DeclinedFindingsBytes && drop < len(s.DeclinedFindings) {
+		total -= size(&s.DeclinedFindings[drop])
+		drop++
+	}
+	s.DeclinedFindings = slices.Delete(s.DeclinedFindings, 0, drop)
 }
 
 // ActiveReviewGroup is a reviewer group that survives daemon handoff.
@@ -807,7 +857,49 @@ func MarshalApiEventData(event ApiEventData) ([]byte, error) {
 
 // UnmarshalApiEventData reads `{"type":<kind>,"data":<variant>}`.
 func UnmarshalApiEventData(data []byte) (ApiEventData, error) {
-	panic("unported: mj-core/src/storage.rs ApiEventData deserialize")
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return nil, err
+	}
+	tag, ok := members["type"]
+	if !ok {
+		return nil, errors.New("missing field `type`")
+	}
+	var kind string
+	if err := json.Unmarshal(tag, &kind); err != nil {
+		return nil, err
+	}
+	body, ok := members["data"]
+	if !ok {
+		return nil, errors.New("missing field `data`")
+	}
+	decode := func(target ApiEventData) (ApiEventData, error) {
+		if err := json.Unmarshal(body, target); err != nil {
+			return nil, err
+		}
+		return reflect.ValueOf(target).Elem().Interface().(ApiEventData), nil
+	}
+	switch kind {
+	case "runtime_resolved":
+		return decode(&ApiEventDataRuntimeResolved{})
+	case "turn_started":
+		return decode(&ApiEventDataTurnStarted{})
+	case "turn_ended":
+		return decode(&ApiEventDataTurnEnded{})
+	case "command_ended":
+		return decode(&ApiEventDataCommandEnded{})
+	case "session_fault":
+		return decode(&ApiEventDataSessionFault{})
+	case "legacy_notice":
+		return decode(&ApiEventDataLegacyNotice{})
+	case "input_required":
+		return decode(&ApiEventDataInputRequired{})
+	case "input_resolved":
+		return decode(&ApiEventDataInputResolved{})
+	case "activity_changed":
+		return decode(&ApiEventDataActivityChanged{})
+	}
+	return nil, fmt.Errorf("unknown variant `%s`, expected one of `runtime_resolved`, `turn_started`, `turn_ended`, `command_ended`, `session_fault`, `legacy_notice`, `input_required`, `input_resolved`, `activity_changed`", kind)
 }
 
 // ApiActivityState is the same structured facts rendered by the web and

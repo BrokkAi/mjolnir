@@ -6,6 +6,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,14 +53,50 @@ func CarriedCommand(id string) string {
 }
 
 func RestartContinuationID(commandID string) string {
-	panic("unported: mj-core/src/continuation.rs restart_continuation_id")
+	// Decimal increment avoids imposing a machine-integer retry budget.
+	current := "0"
+	if generation, _, ok := restartParts(commandID); ok {
+		current = generation
+	}
+	generation := []byte(current)
+	carry := true
+	for i := len(generation) - 1; i >= 0; i-- {
+		if generation[i] == '9' {
+			generation[i] = '0'
+		} else {
+			generation[i]++
+			carry = false
+			break
+		}
+	}
+	if carry {
+		generation = append([]byte{'1'}, generation...)
+	}
+	return restartPrefix + string(generation) + "-" + CarriedCommand(commandID)
 }
 
 // ValidCommandID: ordinary IDs retain their 8–128 byte bound. The
 // worker-owned restart envelope adds only its prefix and generation to an
 // already valid root.
 func ValidCommandID(id string) bool {
-	panic("unported: mj-core/src/continuation.rs valid_command_id")
+	root := id
+	if IsRestartContinuation(id) {
+		_, carried, ok := restartParts(id)
+		if !ok || IsRestartContinuation(carried) {
+			return false
+		}
+		root = carried
+	}
+	if len(root) < 8 || len(root) > 128 {
+		return false
+	}
+	for i := 0; i < len(root); i++ {
+		c := root[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func IsRestartContinuation(commandID string) bool {
@@ -183,7 +220,40 @@ func (e *ContinuationEvidence) UnmarshalJSON(data []byte) error {
 }
 
 func (e *ContinuationEvidence) Validate() error {
-	panic("unported: mj-core/src/continuation.rs ContinuationEvidence::validate")
+	if len(e.Messages) == 0 || len(e.Messages) > 256 {
+		return errors.New("invalid continuation messages")
+	}
+	user, assistant := 0, 0
+	for _, message := range e.Messages {
+		if message.ID == "" || len(message.ID) > 256 {
+			return errors.New("invalid message id")
+		}
+		if strings.TrimSpace(message.Text) == "" {
+			return errors.New("empty continuation message")
+		}
+		switch message.Role {
+		case "user":
+			user += len(message.Text)
+		case "assistant":
+			assistant += len(message.Text)
+		default:
+			return errors.New("invalid continuation role")
+		}
+	}
+	if !(user > 0 && user <= UserBytes && assistant > 0 && assistant <= AssistantBytes) {
+		return errors.New("incomplete or oversized continuation context")
+	}
+	if e.Messages[len(e.Messages)-1].Role != "assistant" {
+		return errors.New("missing final assistant reply")
+	}
+	encoded, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > MaxBodyBytes {
+		return errors.New("continuation evidence exceeds byte limit")
+	}
+	return nil
 }
 
 func PromptBlocks() []acp.ContentBlock {

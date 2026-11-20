@@ -13,9 +13,15 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // InstalledHarnessHome is the harness home an installed launch configuration
@@ -25,7 +31,39 @@ import (
 // the fields that locate the home matter here. A configuration that states no
 // home was started with the harness's home variable.
 func InstalledHarnessHome(launchPath string) (home string, ok bool, err error) {
-	panic("unported: mj-core/src/worker_launch.rs installed_harness_home")
+	body, err := os.ReadFile(launchPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	var launch any
+	if err := json.Unmarshal(body, &launch); err != nil {
+		return "", false, err
+	}
+	fields, _ := launch.(map[string]any)
+	if stated, ok := fields["harness_home"].(string); ok && stated != "" {
+		return stated, true, nil
+	}
+	rawHarness, present := fields["harness"]
+	if !present {
+		return "", false, nil
+	}
+	encoded, err := json.Marshal(rawHarness)
+	if err != nil {
+		return "", false, nil
+	}
+	var harness HarnessKind
+	if err := json.Unmarshal(encoded, &harness); err != nil {
+		return "", false, nil
+	}
+	environment, _ := fields["environment"].(map[string]any)
+	value, ok := environment[harness.HomeEnv()].(string)
+	if !ok {
+		return "", false, nil
+	}
+	return harness.HomeFromEnvironment(value), true, nil
 }
 
 // HarnessRuntimePolicy is where a worker's ACP adapter and harness executable
@@ -858,7 +896,50 @@ func (c *WorkerLaunchConfig) RequiresHarnessPreparation() bool {
 }
 
 func WorkerLaunchConfigRead(path string) (WorkerLaunchConfig, error) {
-	panic("unported: mj-core/src/worker_launch.rs WorkerLaunchConfig::read")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return WorkerLaunchConfig{}, fmt.Errorf("read worker launch config %s: %w", path, err)
+	}
+	parse := func() (WorkerLaunchConfig, error) {
+		// Numbers keep their text so large integers survive the round trip.
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return WorkerLaunchConfig{}, err
+		}
+		if _, err := decoder.Token(); err != io.EOF {
+			return WorkerLaunchConfig{}, errors.New("trailing characters after the launch config")
+		}
+		// Shipped workers keep launch.json across upgrades. The removed
+		// runtime constraint and turn review's former Bifrost binary have no
+		// effect, but must not block loading that file.
+		if fields, ok := value.(map[string]any); ok {
+			delete(fields, "expected_runtime_identity")
+			delete(fields, "bifrost_binary")
+		}
+		cleaned, err := harnessMarshalJSON(value)
+		if err != nil {
+			return WorkerLaunchConfig{}, err
+		}
+		var launch WorkerLaunchConfig
+		err = json.Unmarshal(cleaned, &launch)
+		return launch, err
+	}
+	launch, err := parse()
+	if err != nil {
+		wrapped := fmt.Errorf("parse worker launch config %s with worker build %s: %w", path, WorkerBuildID(), err)
+		if strings.Contains(err.Error(), "unknown field") {
+			return WorkerLaunchConfig{}, fmt.Errorf("the worker may be older than the daemon that wrote launch.json; install the worker built with the running mj: %w", wrapped)
+		}
+		return WorkerLaunchConfig{}, wrapped
+	}
+	// Daemons from 2.11 through 2.23 stamped their instance identity here.
+	// For the default instance that is a data-directory fingerprint, which
+	// every `mj` in the session then read as a named instance. Workers
+	// launched then keep that config across upgrades, so drop it on load.
+	delete(launch.TargetEnvironment, InstanceEnv)
+	return launch, nil
 }
 
 func (c *WorkerLaunchConfig) Write(path string) error {
@@ -866,10 +947,15 @@ func (c *WorkerLaunchConfig) Write(path string) error {
 	if err := os.MkdirAll(parent, 0o777); err != nil {
 		return err
 	}
-	body, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
+	// serde_json::to_vec_pretty: two-space indent, no HTML escapes.
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(c); err != nil {
 		return err
 	}
+	body := bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))
 	if err := os.WriteFile(path, body, 0o666); err != nil {
 		return err
 	}
@@ -894,7 +980,23 @@ func WorkerExecutableDigest(path string) (string, error) {
 // under it - which is exactly what an upgrade does - still has its own image
 // there, while the resolved path no longer names it.
 func RunningExecutableDigest() (string, bool) {
-	panic("unported: mj-core/src/worker_launch.rs running_executable_digest")
+	var path string
+	if runtime.GOOS == "linux" {
+		path = "/proc/self/exe"
+	} else {
+		executable, err := os.Executable()
+		if err != nil {
+			slog.Warn("could not resolve this executable to report its build", "error", err)
+			return "", false
+		}
+		path = executable
+	}
+	digest, err := WorkerExecutableDigest(path)
+	if err != nil {
+		slog.Warn("could not hash this executable to report its build", "error", err.Error())
+		return "", false
+	}
+	return digest, true
 }
 
 // ProfileProbeSpec is private, prompt-free harness discovery. All paths

@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 )
 
 // These three limits shape what a reader sees. Counts stay exact whatever
@@ -275,16 +277,101 @@ func RenderProcess(process *RunningProcess) string {
 const processScope = "in the worker's process tree or carrying this session's marker"
 
 func renderProcesses(processes *ProcessFacts) []string {
-	panic("unported: mj-core/src/work_facts.rs render_processes")
+	var lines []string
+	if processes.Running == 0 {
+		lines = []string{fmt.Sprintf("No running processes found %s", processScope)}
+	} else {
+		lines = []string{fmt.Sprintf("Running processes found %s: %d", processScope, processes.Running)}
+		for i := range processes.Shown {
+			lines = append(lines, "  "+RenderProcess(&processes.Shown[i]))
+		}
+		if processes.Omitted > 0 {
+			lines = append(lines, fmt.Sprintf("  and %d more", processes.Omitted))
+		}
+	}
+	if processes.Unattributed > 0 {
+		lines = append(lines, fmt.Sprintf("  %d other processes of this user could not be attributed to this session (their environment is unreadable)", processes.Unattributed))
+	}
+	return lines
 }
 
 // displayText is text from the machine as a reader sees it: terminal
 // controls removed and a long value cut. Paths, branch names and subjects
 // are stored exactly as Git reported them; only this rendering changes them.
 func displayText(text string) string {
-	panic("unported: mj-core/src/work_facts.rs display_text")
+	clean := SanitizeTerminalText(text)
+	clean = strings.NewReplacer("\n", " ", "\t", " ").Replace(clean)
+	if utf8.RuneCountInString(clean) <= CommandChars {
+		return clean
+	}
+	return string([]rune(clean)[:CommandChars]) + "…"
 }
 
 func renderWorktree(tree *WorktreeFacts) []string {
-	panic("unported: mj-core/src/work_facts.rs render_worktree")
+	var head string
+	if tree.Head != nil {
+		short := tree.Head.Sha
+		if runes := []rune(short); len(runes) > 7 {
+			short = string(runes[:7])
+		}
+		if tree.Head.Subject.Value != nil {
+			head = fmt.Sprintf("HEAD %s %s", short, debugString(displayText(*tree.Head.Subject.Value)))
+		} else {
+			head = fmt.Sprintf("HEAD %s (subject unavailable: %s)", short, displayText(tree.Head.Subject.Reason))
+		}
+	} else {
+		head = "no commits yet"
+	}
+	branch := "detached HEAD"
+	if tree.Branch != nil {
+		branch = "branch " + displayText(*tree.Branch)
+	}
+	lines := []string{fmt.Sprintf("Working tree %s: %s; %s", displayText(tree.Directory), head, branch)}
+	if tree.Changed == 0 {
+		return append(lines, "Uncommitted changes: none")
+	}
+	plural := "paths"
+	if tree.Changed == 1 {
+		plural = "path"
+	}
+	var kinds []string
+	if tree.Modified > 0 {
+		kinds = append(kinds, fmt.Sprintf("%d modified", tree.Modified))
+	}
+	if tree.Untracked > 0 {
+		kinds = append(kinds, fmt.Sprintf("%d untracked", tree.Untracked))
+	}
+	counted := uint64(tree.Modified) + uint64(tree.Untracked)
+	if other := uint64(tree.Changed); other > counted {
+		kinds = append(kinds, fmt.Sprintf("%d other", other-counted))
+	}
+	lines = append(lines, fmt.Sprintf("Uncommitted changes: %d %s (%s)", tree.Changed, plural, strings.Join(kinds, ", ")))
+	for _, path := range tree.Shown {
+		lines = append(lines, fmt.Sprintf("  %s %s", path.Status, displayText(path.Path)))
+	}
+	if tree.Omitted > 0 {
+		lines = append(lines, fmt.Sprintf("  and %d more", tree.Omitted))
+	}
+	return lines
+}
+
+// MarshalJSON writes absent lists as empty arrays, as serde writes a Vec.
+func (f ProcessFacts) MarshalJSON() ([]byte, error) {
+	type plain ProcessFacts
+	if f.Shown == nil {
+		f.Shown = []RunningProcess{}
+	}
+	if f.Identities == nil {
+		f.Identities = []ProcessIdentity{}
+	}
+	return json.Marshal(plain(f))
+}
+
+// MarshalJSON writes an absent list as an empty array, as serde writes a Vec.
+func (f WorktreeFacts) MarshalJSON() ([]byte, error) {
+	type plain WorktreeFacts
+	if f.Shown == nil {
+		f.Shown = []ChangedPath{}
+	}
+	return json.Marshal(plain(f))
 }

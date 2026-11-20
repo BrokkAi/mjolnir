@@ -372,7 +372,33 @@ type NativeAgentView struct {
 // projected forms. A nil pendingElicitations leaves the projected forms as
 // they are; a non-nil (even empty) one replaces them.
 func (v *NativeAgentView) ApplyActivity(recordedAtMs int64, pendingElicitations *[]ElicitationRequest) {
-	panic("unported: mj-core/src/native_agent.rs NativeAgentView::apply_activity")
+	// Older projections omitted raise times. Capture the best recorded
+	// time before applying the next activity event.
+	if len(v.PendingInputTimes) == 0 {
+		previousTime := int64(0)
+		if v.Projection.LastActivityAtMs != nil {
+			previousTime = *v.Projection.LastActivityAtMs
+		}
+		for _, request := range v.Projection.PendingElicitations {
+			if v.PendingInputTimes == nil {
+				v.PendingInputTimes = map[string]int64{}
+			}
+			v.PendingInputTimes[request.ID] = previousTime
+		}
+	}
+	if pendingElicitations != nil {
+		times := map[string]int64{}
+		for _, request := range *pendingElicitations {
+			raisedAtMs, ok := v.PendingInputTimes[request.ID]
+			if !ok {
+				raisedAtMs = recordedAtMs
+			}
+			times[request.ID] = raisedAtMs
+		}
+		v.PendingInputTimes = times
+		v.Projection.PendingElicitations = *pendingElicitations
+	}
+	v.Projection.LastActivityAtMs = &recordedAtMs
 }
 
 // NativeAgentSummary is the transcript-free identity published by the
@@ -393,11 +419,63 @@ type NativeAgentSummary struct {
 }
 
 func NativeAgentSummaryOf(view *NativeAgentView) NativeAgentSummary {
-	panic("unported: mj-core/src/native_agent.rs NativeAgentSummary::of")
+	summary := NativeAgentSummary{
+		GenerationOrdinal: view.GenerationOrdinal,
+		Agent:             view.Agent.clone(),
+		ProjectionOrdinal: view.Projection.AppliedEventOrdinal,
+		ProjectionDigest:  view.Projection.AppliedEventDigest,
+	}
+	pending := view.Projection.PendingElicitations
+	if len(pending) == 0 {
+		return summary
+	}
+	request := pending[len(pending)-1]
+	summary.PendingInput = true
+	message, id := request.Message, request.ID
+	summary.PendingInputMessage = &message
+	summary.PendingInputRequestID = &id
+	if len(view.PendingInputTimes) == 0 {
+		if view.Projection.LastActivityAtMs != nil {
+			raised := *view.Projection.LastActivityAtMs
+			summary.PendingInputRaisedAtMs = &raised
+		}
+	} else if raised, ok := view.PendingInputTimes[request.ID]; ok {
+		summary.PendingInputRaisedAtMs = &raised
+	}
+	return summary
+}
+
+// clone copies the agent with its own optional strings.
+func (a NativeAgent) clone() NativeAgent {
+	a.AvailabilityReason = nativeAgentCloneString(a.AvailabilityReason)
+	a.StableID = nativeAgentCloneString(a.StableID)
+	a.ParentSessionID = nativeAgentCloneString(a.ParentSessionID)
+	return a
+}
+
+// equal is Rust's derived PartialEq: optional strings compare by value.
+func (a *NativeAgent) equal(other *NativeAgent) bool {
+	same := func(left, right *string) bool {
+		return (left == nil) == (right == nil) && (left == nil || *left == *right)
+	}
+	return a.Availability == other.Availability &&
+		same(a.AvailabilityReason, other.AvailabilityReason) &&
+		same(a.StableID, other.StableID) &&
+		a.OwnerSessionID == other.OwnerSessionID &&
+		a.SessionID == other.SessionID &&
+		same(a.ParentSessionID, other.ParentSessionID) &&
+		a.Name == other.Name &&
+		a.Task == other.Task &&
+		a.Capabilities == other.Capabilities &&
+		a.State == other.State
 }
 
 func (s *NativeAgentSummary) IsSatisfiedBy(view *NativeAgentView) bool {
-	panic("unported: mj-core/src/native_agent.rs NativeAgentSummary::is_satisfied_by")
+	return s.GenerationOrdinal == view.GenerationOrdinal &&
+		(view.Projection.AppliedEventOrdinal > s.ProjectionOrdinal ||
+			(view.Projection.AppliedEventOrdinal == s.ProjectionOrdinal &&
+				view.Projection.AppliedEventDigest == s.ProjectionDigest &&
+				view.Agent.equal(&s.Agent)))
 }
 
 type NativeAgentHistoryPage struct {

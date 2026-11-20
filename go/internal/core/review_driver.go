@@ -108,19 +108,28 @@ func UnmarshalReviewRequest(data []byte) (ReviewRequest, error) {
 	case "CaptureDelta":
 		return unit(ReviewRequestCaptureDelta{})
 	case "StartReviewer":
-		return agentDecodeInto[ReviewRequestStartReviewer, ReviewRequest](body)
+		return reviewRequestDecode[ReviewRequestStartReviewer](body, "role", "command_id", "prompt")
 	case "StartBriefWriter":
-		return agentDecodeInto[ReviewRequestStartBriefWriter, ReviewRequest](body)
+		return reviewRequestDecode[ReviewRequestStartBriefWriter](body, "command_id", "prompt")
 	case "CloseReviewer":
-		return agentDecodeInto[ReviewRequestCloseReviewer, ReviewRequest](body)
+		return reviewRequestDecode[ReviewRequestCloseReviewer](body, "role")
 	case "CloseBriefWriter":
 		return unit(ReviewRequestCloseBriefWriter{})
 	case "NoteBriefSkipped":
-		return agentDecodeInto[ReviewRequestNoteBriefSkipped, ReviewRequest](body)
+		return reviewRequestDecode[ReviewRequestNoteBriefSkipped](body, "reason")
 	case "Close":
 		return unit(ReviewRequestClose{})
 	}
 	return nil, fmt.Errorf("unknown variant `%s`", name)
+}
+
+// reviewRequestDecode decodes a struct variant's body, refusing a missing
+// field as serde does.
+func reviewRequestDecode[T ReviewRequest](body json.RawMessage, required ...string) (ReviewRequest, error) {
+	if err := agentRequireFields(body, required...); err != nil {
+		return nil, err
+	}
+	return agentDecodeInto[T, ReviewRequest](body)
 }
 
 // RoleState is which stage of a review one role is in.

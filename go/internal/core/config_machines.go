@@ -21,6 +21,9 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"slices"
+	"strings"
 )
 
 // LocalMachineID is the id of the machine Mjolnir itself runs on. It always
@@ -107,7 +110,47 @@ func machineSetBuildCache(machine *Machine, value *TargetBuildCache) {
 }
 
 func machineValidate(m Machine, id string) error {
-	panic("unported: mj-core/src/config/machines.rs Machine::validate")
+	if err := ValidateID("machine", id); err != nil {
+		return err
+	}
+	switch m := m.(type) {
+	case MachineLocal:
+		if !isLocalMachineID(id) {
+			return fmt.Errorf("machine %s is this machine, which is always called %s",
+				debugString(id), debugString(LocalMachineID))
+		}
+		if m.TargetBuildCache != nil {
+			return m.TargetBuildCache.validate(id)
+		}
+		return nil
+	case MachineSsh:
+		if isLocalMachineID(id) {
+			return fmt.Errorf("machine %s is reserved for this machine", debugString(LocalMachineID))
+		}
+		if err := m.SSH.validate(id); err != nil {
+			return err
+		}
+		if err := validateWorkspacePrefix("machine "+id, m.WorkspacePrefix); err != nil {
+			return err
+		}
+		if m.TargetBuildCache != nil {
+			return m.TargetBuildCache.validate(id)
+		}
+		return nil
+	case MachineAwsEc2:
+		if isLocalMachineID(id) {
+			return fmt.Errorf("machine %s is reserved for this machine", debugString(LocalMachineID))
+		}
+		if configBlank(m.Region) || configBlank(m.LaunchTemplate) || configBlank(m.SSHUser) {
+			return fmt.Errorf("AWS machine %s requires region, launch_template, and ssh_user", debugString(id))
+		}
+		if m.AWSProfile != nil && *m.AWSProfile == "" ||
+			m.LaunchTemplateVersion != nil && *m.LaunchTemplateVersion == "" {
+			return fmt.Errorf("AWS machine %s contains an empty optional value", debugString(id))
+		}
+		return nil
+	}
+	panic(fmt.Sprintf("unknown machine %T", m))
 }
 
 func marshalMachineJSON(m Machine) ([]byte, error) {
@@ -181,7 +224,31 @@ func UnmarshalMachineJSON(data []byte) (Machine, error) {
 // validateMachines validates every machine in machines, plus the checks that
 // only make sense across the whole collection.
 func validateMachines(machines map[string]Machine) error {
-	panic("unported: mj-core/src/config/machines.rs validate_machines")
+	ids := sortedKeys(machines)
+	for _, id := range ids {
+		if err := machines[id].validate(id); err != nil {
+			return err
+		}
+	}
+	type sshMachine struct {
+		id         string
+		connection SshConnection
+	}
+	var ssh []sshMachine
+	for _, id := range ids {
+		if machine, ok := machines[id].(MachineSsh); ok {
+			ssh = append(ssh, sshMachine{id, machine.SSH})
+		}
+	}
+	for index, current := range ssh {
+		for _, other := range ssh[:index] {
+			if sshConnectionEqual(other.connection, current.connection) {
+				return fmt.Errorf("machines %s and %s describe the same host",
+					debugString(other.id), debugString(current.id))
+			}
+		}
+	}
+	return nil
 }
 
 // StoredTarget is one runtime as the configuration file stores it: a kind,
@@ -358,35 +425,160 @@ func machineFor(id, machineID string, machines map[string]Machine) (Machine, err
 // ResolveTarget joins a stored runtime to its machine, producing the fused
 // target every other part of Mjolnir works with.
 func ResolveTarget(id string, target StoredTarget, machines map[string]Machine) (TargetTemplate, error) {
-	panic("unported: mj-core/src/config/machines.rs resolve_target")
+	machineID := target.Machine()
+	machine, err := machineFor(id, machineID, machines)
+	if err != nil {
+		return nil, err
+	}
+	if container := target.container(); container != nil && !isDefaultTargetBuildCache(container.BuildCache) {
+		return nil, fmt.Errorf("target %s sets build_cache, which now belongs to [machines.%s]", debugString(id), machineID)
+	}
+	withCache := func(container ContainerTemplate) ContainerTemplate {
+		container.BuildCache = cloneTargetBuildCache(machine.BuildCache())
+		return container
+	}
+	ec2Only := func() error {
+		return fmt.Errorf("target %s: an EC2 machine runs a bare harness only", debugString(id))
+	}
+	switch target := target.(type) {
+	case StoredTargetBare:
+		switch machine := machine.(type) {
+		case MachineLocal:
+			if target.Permissions != nil {
+				return nil, fmt.Errorf("target %s sets permissions, which only applies to a bare runtime on an SSH machine", debugString(id))
+			}
+			return TargetTemplateLocalBare{}, nil
+		case MachineSsh:
+			permissions := PermissionModeGuardian
+			if target.Permissions != nil {
+				permissions = *target.Permissions
+			}
+			return TargetTemplateSshBare{SSH: machine.SSH, Permissions: permissions, WorkspacePrefix: machine.WorkspacePrefix}, nil
+		case MachineAwsEc2:
+			if target.Permissions != nil {
+				return nil, fmt.Errorf("target %s sets permissions, which only applies to a bare runtime on an SSH machine", debugString(id))
+			}
+			return TargetTemplateAwsEc2{
+				AWSProfile:            cloneStringPointer(machine.AWSProfile),
+				Region:                machine.Region,
+				LaunchTemplate:        machine.LaunchTemplate,
+				LaunchTemplateVersion: cloneStringPointer(machine.LaunchTemplateVersion),
+				SSHUser:               machine.SSHUser,
+				AddressSource:         machine.AddressSource,
+				IdentityFile:          cloneStringPointer(machine.IdentityFile),
+				SSHArgs:               slices.Clone(machine.SSHArgs),
+			}, nil
+		}
+	case StoredTargetPodman:
+		switch machine := machine.(type) {
+		case MachineLocal:
+			return TargetTemplateLocalPodman{ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineSsh:
+			return TargetTemplateSshPodman{SSH: machine.SSH, ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineAwsEc2:
+			return nil, ec2Only()
+		}
+	case StoredTargetDocker:
+		switch machine := machine.(type) {
+		case MachineLocal:
+			return TargetTemplateLocalDocker{ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineSsh:
+			return TargetTemplateSshDocker{SSH: machine.SSH, ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineAwsEc2:
+			return nil, ec2Only()
+		}
+	case StoredTargetAppleContainer:
+		switch machine := machine.(type) {
+		case MachineLocal:
+			return TargetTemplateAppleContainer{ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineSsh:
+			return TargetTemplateSshAppleContainer{SSH: machine.SSH, ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineAwsEc2:
+			return nil, ec2Only()
+		}
+	case StoredTargetNitro:
+		switch machine := machine.(type) {
+		case MachineLocal:
+			return nil, fmt.Errorf("target %s: a Nitro sandbox runs on an SSH machine, not on this machine", debugString(id))
+		case MachineSsh:
+			return TargetTemplateSshNitro{SSH: machine.SSH, ContainerTemplate: withCache(target.ContainerTemplate)}, nil
+		case MachineAwsEc2:
+			return nil, ec2Only()
+		}
+	}
+	panic(fmt.Sprintf("unknown stored target %T on machine %T", target, machine))
 }
 
 // machineIDFor is the id of the machine in machines equal to wanted,
 // inserting it under a collision-free id derived from base when it is not
 // there yet.
 func machineIDFor(machines map[string]Machine, wanted Machine, base string) string {
-	panic("unported: mj-core/src/config/machines.rs machine_id_for")
+	for _, id := range sortedKeys(machines) {
+		if machineEqual(machines[id], wanted) {
+			return id
+		}
+	}
+	id := UniqueConfigID(machines, base)
+	machines[id] = wanted
+	return id
 }
 
 // localMachineFor is the id of this machine, making sure machines holds it
 // and that it owns the build cache settings a local container runtime
 // carried.
 func localMachineFor(machines map[string]Machine, buildCache *TargetBuildCache, targetID string) string {
-	panic("unported: mj-core/src/config/machines.rs local_machine_for")
+	entry, ok := machines[LocalMachineID]
+	if !ok {
+		entry = MachineLocal{}
+	}
+	foldBuildCache(&entry, buildCache, LocalMachineID, targetID)
+	machines[LocalMachineID] = entry
+	return LocalMachineID
 }
 
 // sshMachineID is the id of the SSH machine in machines reaching ssh,
 // creating it when absent. At most one machine may hold a given connection,
 // so the connection alone identifies it.
 func sshMachineID(machines map[string]Machine, ssh SshConnection, workspacePrefix *string, buildCache *TargetBuildCache, targetID string) string {
-	panic("unported: mj-core/src/config/machines.rs ssh_machine_id")
+	id, found := findSSHMachine(machines, ssh)
+	if !found {
+		base := targetID
+		if ValidateID("machine", ssh.Host) == nil {
+			base = ssh.Host
+		}
+		id = UniqueConfigID(machines, base)
+		prefix := defaultNamedMachinePrefix()
+		if workspacePrefix != nil {
+			prefix = *workspacePrefix
+		}
+		machines[id] = MachineSsh{SSH: ssh, WorkspacePrefix: prefix}
+	}
+	machine := machines[id]
+	if current, ok := machine.(MachineSsh); ok && workspacePrefix != nil &&
+		current.WorkspacePrefix != *workspacePrefix {
+		slog.Warn("keeping the workspace directory already set for this machine and ignoring the one on this runtime",
+			"machine", id, "target", targetID)
+	}
+	foldBuildCache(&machine, buildCache, id, targetID)
+	machines[id] = machine
+	return id
 }
 
 // foldBuildCache moves a container runtime's build cache overrides onto its
 // machine, which owns them now. The first non-default setting for a machine
 // wins.
 func foldBuildCache(machine *Machine, buildCache *TargetBuildCache, machineID, targetID string) {
-	panic("unported: mj-core/src/config/machines.rs fold_build_cache")
+	if buildCache == nil || buildCache.IsDefault() {
+		return
+	}
+	existing := (*machine).BuildCache()
+	switch {
+	case existing == nil:
+		machineSetBuildCache(machine, cloneTargetBuildCache(buildCache))
+	case !targetBuildCacheEqual(*existing, *buildCache):
+		slog.Warn("keeping the build cache settings already set for this machine and ignoring the ones on this runtime",
+			"machine", machineID, "target", targetID)
+	}
 }
 
 // StoredTargetOf takes a fused target apart (Rust's stored_target): it
@@ -397,7 +589,60 @@ func foldBuildCache(machine *Machine, buildCache *TargetBuildCache, machineID, t
 // version 11 is migrated, because a legacy [targets.<id>] table parses into
 // exactly the same fused TargetTemplate.
 func StoredTargetOf(id string, target TargetTemplate, machines map[string]Machine) StoredTarget {
-	panic("unported: mj-core/src/config/machines.rs stored_target")
+	withoutCache := func(container ContainerTemplate) ContainerTemplate {
+		container.BuildCache = nil
+		return container
+	}
+	switch target := target.(type) {
+	case TargetTemplateLocalBare:
+		return StoredTargetBare{MachineID: LocalMachineID}
+	case TargetTemplateLocalPodman:
+		return StoredTargetPodman{
+			MachineID:         localMachineFor(machines, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateLocalDocker:
+		return StoredTargetDocker{
+			MachineID:         localMachineFor(machines, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateAppleContainer:
+		return StoredTargetAppleContainer{
+			MachineID:         localMachineFor(machines, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateSshBare:
+		prefix := target.WorkspacePrefix
+		permissions := target.Permissions
+		return StoredTargetBare{
+			MachineID:   sshMachineID(machines, target.SSH, &prefix, nil, id),
+			Permissions: &permissions,
+		}
+	case TargetTemplateSshPodman:
+		return StoredTargetPodman{
+			MachineID:         sshMachineID(machines, target.SSH, nil, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateSshDocker:
+		return StoredTargetDocker{
+			MachineID:         sshMachineID(machines, target.SSH, nil, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateSshAppleContainer:
+		return StoredTargetAppleContainer{
+			MachineID:         sshMachineID(machines, target.SSH, nil, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateSshNitro:
+		return StoredTargetNitro{
+			MachineID:         sshMachineID(machines, target.SSH, nil, target.ContainerTemplate.BuildCache, id),
+			ContainerTemplate: withoutCache(target.ContainerTemplate),
+		}
+	case TargetTemplateAwsEc2:
+		machine, _ := awsMachine(target)
+		return StoredTargetBare{MachineID: machineIDFor(machines, machine, id)}
+	}
+	panic(fmt.Sprintf("unknown target template %T", target))
 }
 
 // awsMachine is the EC2 machine an EC2 target launches from. Two EC2 targets
@@ -413,7 +658,12 @@ func awsMachine(target TargetTemplate) (Machine, bool) {
 // findSSHMachine is the id of the SSH machine reaching ssh. At most one
 // machine may hold a given connection, so the connection alone identifies it.
 func findSSHMachine(machines map[string]Machine, ssh SshConnection) (string, bool) {
-	panic("unported: mj-core/src/config/machines.rs find_ssh_machine")
+	for _, id := range sortedKeys(machines) {
+		if machine, ok := machines[id].(MachineSsh); ok && sshConnectionEqual(machine.SSH, ssh) {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // TargetMachineID is the id of the machine in machines a fused target runs
@@ -421,7 +671,29 @@ func findSSHMachine(machines map[string]Machine, ssh SshConnection) (string, boo
 // it yet. Every local runtime runs on `local`, which exists whether or not
 // machines names it.
 func TargetMachineID(target TargetTemplate, machines map[string]Machine) (string, bool) {
-	panic("unported: mj-core/src/config/machines.rs target_machine_id")
+	switch target := target.(type) {
+	case TargetTemplateLocalBare, TargetTemplateLocalPodman, TargetTemplateLocalDocker, TargetTemplateAppleContainer:
+		return LocalMachineID, true
+	case TargetTemplateSshBare:
+		return findSSHMachine(machines, target.SSH)
+	case TargetTemplateSshPodman:
+		return findSSHMachine(machines, target.SSH)
+	case TargetTemplateSshDocker:
+		return findSSHMachine(machines, target.SSH)
+	case TargetTemplateSshAppleContainer:
+		return findSSHMachine(machines, target.SSH)
+	case TargetTemplateSshNitro:
+		return findSSHMachine(machines, target.SSH)
+	case TargetTemplateAwsEc2:
+		wanted, _ := awsMachine(target)
+		for _, id := range sortedKeys(machines) {
+			if machineEqual(machines[id], wanted) {
+				return id, true
+			}
+		}
+		return "", false
+	}
+	panic(fmt.Sprintf("unknown target template %T", target))
 }
 
 // RuntimeKindName is the runtime half of a fused target: `bare`, `podman`,
@@ -511,3 +783,63 @@ func (s StoredTargetAppleContainer) MarshalJSON() ([]byte, error)  { return mars
 func (s StoredTargetNitro) Machine() string               { return storedTargetMachine(s) }
 func (s StoredTargetNitro) container() *ContainerTemplate { return storedTargetContainer(s) }
 func (s StoredTargetNitro) MarshalJSON() ([]byte, error)  { return marshalStoredTargetJSON(s) }
+
+// configBlank is Rust's `value.trim().is_empty()`.
+func configBlank(value string) bool { return strings.TrimSpace(value) == "" }
+
+// sshConnectionEqual is SshConnection's PartialEq: an absent list equals an
+// empty one, as Rust's empty Vec does.
+func sshConnectionEqual(a, b SshConnection) bool {
+	return a.Host == b.Host && configOptionalEqual(a.User, b.User) && configOptionalEqual(a.IdentityFile, b.IdentityFile) &&
+		slices.Equal(a.ExtraArgs, b.ExtraArgs)
+}
+
+// targetBuildCacheEqual is TargetBuildCache's PartialEq.
+func targetBuildCacheEqual(a, b TargetBuildCache) bool {
+	return configOptionalEqual(a.Enabled, b.Enabled) && configOptionalEqual(a.Directory, b.Directory) &&
+		configOptionalEqual(a.ToolsDirectory, b.ToolsDirectory) && configOptionalEqual(a.MaxTotalSize, b.MaxTotalSize) &&
+		configOptionalEqual(a.Scheduler.CPUs, b.Scheduler.CPUs) && configOptionalEqual(a.Scheduler.Memory, b.Scheduler.Memory)
+}
+
+func optionalTargetBuildCacheEqual(a, b *TargetBuildCache) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return targetBuildCacheEqual(*a, *b)
+}
+
+func cloneTargetBuildCache(value *TargetBuildCache) *TargetBuildCache {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+// configOptionalEqual is Option<T>'s PartialEq on pointers.
+func configOptionalEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// machineEqual is Machine's PartialEq.
+func machineEqual(a, b Machine) bool {
+	switch a := a.(type) {
+	case MachineLocal:
+		b, ok := b.(MachineLocal)
+		return ok && optionalTargetBuildCacheEqual(a.TargetBuildCache, b.TargetBuildCache)
+	case MachineSsh:
+		b, ok := b.(MachineSsh)
+		return ok && sshConnectionEqual(a.SSH, b.SSH) && a.WorkspacePrefix == b.WorkspacePrefix &&
+			optionalTargetBuildCacheEqual(a.TargetBuildCache, b.TargetBuildCache)
+	case MachineAwsEc2:
+		b, ok := b.(MachineAwsEc2)
+		return ok && configOptionalEqual(a.AWSProfile, b.AWSProfile) && a.Region == b.Region &&
+			a.LaunchTemplate == b.LaunchTemplate && configOptionalEqual(a.LaunchTemplateVersion, b.LaunchTemplateVersion) &&
+			a.SSHUser == b.SSHUser && a.AddressSource == b.AddressSource &&
+			configOptionalEqual(a.IdentityFile, b.IdentityFile) && slices.Equal(a.SSHArgs, b.SSHArgs)
+	}
+	return false
+}

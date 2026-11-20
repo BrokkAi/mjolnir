@@ -34,9 +34,20 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
+	"math"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
+
+	"github.com/BurntSushi/toml"
 )
 
 // RawProjectContextID is the stable context identity for a bare project at
@@ -123,7 +134,17 @@ func (p *PhoneConfig) UnmarshalJSON(data []byte) error {
 }
 
 func (p PhoneConfig) validate() error {
-	panic("unported: mj-core/src/config.rs PhoneConfig::validate")
+	bind, err := netip.ParseAddrPort(p.Bind)
+	if err != nil {
+		return fmt.Errorf("parse phone bind address %s: invalid socket address syntax", debugString(p.Bind))
+	}
+	if (p.TLSCert != nil) != (p.TLSKey != nil) {
+		return errors.New("phone TLS requires both `tls_cert` and `tls_key`")
+	}
+	if !bind.Addr().IsLoopback() && p.TLSCert == nil {
+		return errors.New("a non-loopback phone bind requires TLS")
+	}
+	return nil
 }
 
 func (p PhoneConfig) isDefault() bool {
@@ -493,11 +514,92 @@ func (r ReviewConfig) IsPush() bool { return r.Trigger() == ReviewTriggerPush }
 // choice (nil for none). The effective reviewer list enables review unless
 // the session chose Off.
 func (r ReviewConfig) ForSession(session SessionReview) ReviewConfig {
-	panic("unported: mj-core/src/config.rs ReviewConfig::for_session")
+	config := r
+	switch choice := session.(type) {
+	case nil:
+	case SessionReviewOff:
+		config.Disabled = true
+	case SessionReviewLegacy:
+		config.Disabled = false
+		if choice.Model != nil {
+			config.Reviewers = ApplyLegacyOverride(config.Reviewers, choice.Count, choice.Model, choice.Effort, r)
+			config.ClearLegacy()
+			return config
+		}
+		config.Reviewers = ApplyLegacyOverride(config.Reviewers, choice.Count, nil, choice.Effort, r)
+		return config
+	case SessionReviewInherit:
+		config.Disabled = false
+		if choice.Reviewers != nil {
+			config.Reviewers = append([]SubagentChoice{}, *choice.Reviewers...)
+			config.ClearLegacy()
+		}
+	case SessionReviewPush:
+		config.Disabled = false
+		if choice.Reviewers != nil {
+			config.Reviewers = append([]SubagentChoice{}, *choice.Reviewers...)
+			config.ClearLegacy()
+		}
+	}
+	return config
 }
 
 func ApplyLegacyOverride(list []SubagentChoice, count *int, model, effort *string, global ReviewConfig) []SubagentChoice {
-	panic("unported: mj-core/src/config.rs apply_legacy_override")
+	if model != nil {
+		var uniform *SubagentChoice
+		if len(global.Reviewers) > 0 {
+			first := global.Reviewers[0]
+			uniform = &first
+			for _, slot := range global.Reviewers {
+				if !slot.equal(first) {
+					uniform = nil
+					break
+				}
+			}
+		}
+		n := 2
+		switch {
+		case count != nil:
+			n = *count
+		case uniform != nil:
+			n = len(global.Reviewers)
+		case global.Legacy != nil && global.Legacy.Count != nil:
+			n = *global.Legacy.Count
+		}
+		n = min(max(n, 1), MaxReviewers)
+		inheritedEffort := cloneStringPointer(effort)
+		if inheritedEffort == nil && uniform != nil {
+			inheritedEffort = cloneStringPointer(uniform.Effort)
+		}
+		if inheritedEffort == nil && global.Legacy != nil {
+			inheritedEffort = cloneStringPointer(global.Legacy.Effort)
+		}
+		result := make([]SubagentChoice, n)
+		for i := range result {
+			result[i] = SubagentChoice{Model: *model, Effort: cloneStringPointer(inheritedEffort)}
+		}
+		return result
+	}
+	result := append([]SubagentChoice{}, list...)
+	if effort != nil {
+		for i := range result {
+			result[i].Effort = cloneStringPointer(effort)
+		}
+	}
+	if count != nil && len(result) > 0 {
+		last := result[len(result)-1]
+		size := min(max(*count, 1), MaxReviewers)
+		for len(result) < size {
+			result = append(result, SubagentChoice{Model: last.Model, Effort: cloneStringPointer(last.Effort)})
+		}
+		result = result[:size]
+	}
+	return result
+}
+
+// equal is SubagentChoice's PartialEq.
+func (s SubagentChoice) equal(other SubagentChoice) bool {
+	return s.Model == other.Model && equalStringPointers(s.Effort, other.Effort)
 }
 
 // SessionWikiConfig controls indexing every session into the user's
@@ -613,7 +715,18 @@ type SubagentChoices struct {
 }
 
 func (s SubagentChoices) Choice(taskType SubagentTaskType) *SubagentChoice {
-	panic("unported: mj-core/src/config.rs SubagentChoices::choice")
+	return subagentChoiceFor(taskType, s.Straightforward, s.Subtle, s.Oracle)
+}
+
+// subagentChoiceFor picks the choice for taskType from one set.
+func subagentChoiceFor(taskType SubagentTaskType, straightforward, subtle, oracle *SubagentChoice) *SubagentChoice {
+	switch taskType {
+	case SubagentTaskTypeSubtle:
+		return subtle
+	case SubagentTaskTypeOracle:
+		return oracle
+	}
+	return straightforward
 }
 
 func (s SubagentChoices) isDefault() bool {
@@ -680,7 +793,7 @@ func DefaultSubagentConfig() SubagentConfig {
 
 // Choice is the shared task choice, ignoring the YOLO split.
 func (s SubagentConfig) Choice(taskType SubagentTaskType) *SubagentChoice {
-	panic("unported: mj-core/src/config.rs SubagentConfig::choice")
+	return subagentChoiceFor(taskType, s.Straightforward, s.Subtle, s.Oracle)
 }
 
 // ChoiceFor is the task choice a target with `yolo` permissions uses: its own
@@ -695,25 +808,30 @@ func (s SubagentConfig) ChoiceFor(taskType SubagentTaskType, yolo bool) *Subagen
 // EffectiveChoiceFor is a session's choice for taskType: its own override,
 // else the choice for this target mode.
 func (s SubagentConfig) EffectiveChoiceFor(policy SubagentPolicy, taskType SubagentTaskType, yolo bool) *SubagentChoice {
-	panic("unported: mj-core/src/config.rs SubagentConfig::effective_choice_for")
+	if choice := policy.OverrideChoice(taskType); choice != nil {
+		return choice
+	}
+	return s.ChoiceFor(taskType, yolo)
 }
 
 // OffersSubtleFor reports whether a parent with policy may spawn subtle
 // children. Without a subtle choice, every child uses the straightforward
 // choice.
 func (s SubagentConfig) OffersSubtleFor(policy SubagentPolicy, yolo bool) bool {
-	panic("unported: mj-core/src/config.rs SubagentConfig::offers_subtle_for")
+	return s.EffectiveChoiceFor(policy, SubagentTaskTypeSubtle, yolo) != nil
 }
 
 // OracleConfiguredFor reports whether sessions on this target mode can be
 // offered an oracle.
 func (s SubagentConfig) OracleConfiguredFor(yolo bool) bool {
-	panic("unported: mj-core/src/config.rs SubagentConfig::oracle_configured_for")
+	choice := s.ChoiceFor(SubagentTaskTypeOracle, yolo)
+	return choice != nil && strings.TrimSpace(choice.Model) != ""
 }
 
 // IsConfiguredFor: straightforward is required; subtle is optional.
 func (s SubagentConfig) IsConfiguredFor(yolo bool) bool {
-	panic("unported: mj-core/src/config.rs SubagentConfig::is_configured_for")
+	choice := s.ChoiceFor(SubagentTaskTypeStraightforward, yolo)
+	return choice != nil && strings.TrimSpace(choice.Model) != ""
 }
 
 // isDefault: the deprecated `enabled` key is never written, so a section
@@ -724,7 +842,20 @@ func (s SubagentConfig) isDefault() bool {
 }
 
 func (s SubagentConfig) validate() error {
-	panic("unported: mj-core/src/config.rs SubagentConfig::validate")
+	if err := validateSubagentChoices("subagents", s.Straightforward, s.Subtle, s.Oracle); err != nil {
+		return err
+	}
+	// Hidden choices are no-ops. They stay writable so re-checking the box
+	// never makes the configuration impossible to save.
+	if !s.UseSameOnAllTargets {
+		if err := s.Yolo.validate("subagents.yolo"); err != nil {
+			return err
+		}
+	}
+	if s.MaxConcurrent < 1 || s.MaxConcurrent > 64 {
+		return errors.New("[subagents] `max_concurrent` must be between 1 and 64")
+	}
+	return nil
 }
 
 // legacyBuildCacheConfig is the read-only legacy policy, folded into machine
@@ -816,7 +947,21 @@ func (c *legacyMailboxConfig) UnmarshalJSON(data []byte) error {
 // managed harness builds its probes would run, excluding policies and UI
 // defaults.
 func (c Config) ProfilesDiscoveryKey() string {
-	panic("unported: mj-core/src/config.rs Config::profiles_discovery_key")
+	inputs := []string{}
+	for _, id := range sortedKeys(c.Profiles) {
+		inputs = append(inputs, c.Profiles[id].CapabilitiesKey(id))
+	}
+	return sha256JSONHex(inputs, "profile identities serialize")
+}
+
+// sha256JSONHex is the lowercase hex SHA-256 of value's serde_json bytes.
+func sha256JSONHex(value any, what string) string {
+	data, err := serdeJSON(value)
+	if err != nil {
+		panic(fmt.Sprintf("%s: %v", what, err))
+	}
+	digest := sha256.Sum256(data)
+	return LowerHex(digest[:])
 }
 
 // SelectedModels is the models this configuration selects on profile id,
@@ -825,21 +970,42 @@ func (c Config) ProfilesDiscoveryKey() string {
 // Only these and each profile's current model have their efforts discovered
 // ahead of a request; aggregating harnesses advertise hundreds of models.
 func (c Config) SelectedModels(id string) []string {
-	panic("unported: mj-core/src/config.rs Config::selected_models")
+	models := map[string]struct{}{}
+	add := func(choices ...*SubagentChoice) {
+		for _, choice := range choices {
+			if choice != nil {
+				models[choice.Model] = struct{}{}
+			}
+		}
+	}
+	add(c.Subagents.Straightforward, c.Subagents.Subtle, c.Subagents.Oracle)
+	// Hidden YOLO choices do nothing, including their capability demand.
+	if !c.Subagents.UseSameOnAllTargets {
+		add(c.Subagents.Yolo.Straightforward, c.Subagents.Yolo.Subtle, c.Subagents.Yolo.Oracle)
+	}
+	_ = id
+	for _, choice := range c.Review.Reviewers {
+		models[choice.Model] = struct{}{}
+	}
+	return sortedKeys(models)
 }
 
 // CapabilityDemandKey is the identity of what capability hydration covers for
 // this configuration: its profile definitions and the models each enabled
 // profile is selected for.
 func (c Config) CapabilityDemandKey() string {
-	panic("unported: mj-core/src/config.rs Config::capability_demand_key")
+	selected := map[string][]string{}
+	for id := range c.EnabledProfiles() {
+		selected[id] = c.SelectedModels(id)
+	}
+	return sha256JSONHex([]any{c.ProfilesDiscoveryKey(), selected}, "capability demand serializes")
 }
 
 // SubagentDiscoveryKey is an opaque identity safe to send to control surfaces
 // without exposing profile environments. Policies and unrelated preferences
 // are absent.
 func (c Config) SubagentDiscoveryKey(parent string, model *string) string {
-	panic("unported: mj-core/src/config.rs Config::subagent_discovery_key")
+	return sha256JSONHex([]any{parent, model, c.SubagentDiscoveryInputs()}, "discovery inputs serialize")
 }
 
 // SubagentDiscoveryInputs: enabled installations determine sub-agent choices.
@@ -957,7 +1123,152 @@ func settingPath(path []string) []string { return path }
 // here on its own. Under a kind without the setting, such as a bare runtime or
 // an EC2 machine, the table was never read and still loads.
 func unreadBuildCacheKeys(document map[string]any) []string {
-	panic("unported: mj-core/src/config.rs unread_build_cache_keys")
+	readsBuildCache := func(section, kind string) bool {
+		if section == "machines" {
+			return kind == "local" || kind == "ssh"
+		}
+		// Container runtimes, under their current kinds and the fused kinds
+		// of files before version 12.
+		switch kind {
+		case "podman", "docker", "apple-container", "nitro", "local-podman", "local-docker",
+			"ssh-podman", "ssh-docker", "ssh-apple-container", "ssh-nitro":
+			return true
+		}
+		return false
+	}
+	unread := []string{}
+	for _, section := range []string{"machines", "targets"} {
+		tables, ok := document[section].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, id := range sortedKeys(tables) {
+			table, _ := tables[id].(map[string]any)
+			kind, _ := table["kind"].(string)
+			buildCache, ok := table["build_cache"]
+			if !ok || !readsBuildCache(section, kind) {
+				continue
+			}
+			// The whole file has already been read, this table with it, so
+			// only the names this read gathers matter.
+			walkUnreadSettings(reflect.TypeFor[TargetBuildCache](), buildCache, nil, func(key []string) {
+				unread = append(unread, section+"."+id+".build_cache."+strings.Join(key, "."))
+			})
+		}
+	}
+	return unread
+}
+
+// settingInputs maps a configuration type to the type serde actually reads
+// it through (`#[serde(from = ...)]`), so the unread-key walk sees the keys
+// its reader knows.
+var settingInputs = map[reflect.Type]reflect.Type{
+	reflect.TypeFor[Config]():           reflect.TypeFor[storedConfig](),
+	reflect.TypeFor[ReviewConfig]():     reflect.TypeFor[reviewConfigInput](),
+	reflect.TypeFor[TargetBuildCache](): reflect.TypeFor[buildCacheSettings](),
+}
+
+// consumedSettings is the keys a type reads whole without a field of its own
+// (discard_legacy_setting), which therefore count as read.
+var consumedSettings = map[reflect.Type][]string{
+	reflect.TypeFor[storedConfig](): {"startup"},
+	reflect.TypeFor[QuotaConfig]():  {"runtime"},
+}
+
+// walkUnreadSettings reports, as key paths, every key of value (a decoded
+// TOML or JSON document) that the reader of type t does not read: what
+// serde_ignored reports for a serde reader. Readers whose input serde
+// buffers (tagged and untagged enums, flattened members, generic values) read
+// everything, as interfaces, raw messages and types without exported fields
+// do here.
+func walkUnreadSettings(t reflect.Type, value any, path []string, report func([]string)) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if input, ok := settingInputs[t]; ok {
+		t = input
+	}
+	child := func(key string) []string {
+		return append(append([]string{}, path...), key)
+	}
+	switch t.Kind() {
+	case reflect.Map:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		for _, key := range sortedKeys(object) {
+			walkUnreadSettings(t.Elem(), object[key], child(key), report)
+		}
+	case reflect.Slice, reflect.Array:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return
+		}
+		items, ok := value.([]any)
+		if !ok {
+			return
+		}
+		for index, item := range items {
+			walkUnreadSettings(t.Elem(), item, child(strconv.Itoa(index)), report)
+		}
+	case reflect.Struct:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		fields := settingFields(t)
+		if fields == nil {
+			return
+		}
+		for _, key := range sortedKeys(object) {
+			field, known := fields[key]
+			if !known {
+				report(child(key))
+				continue
+			}
+			if field != nil {
+				walkUnreadSettings(field, object[key], child(key), report)
+			}
+		}
+	}
+}
+
+// settingFields is the keys a struct type reads, with the type each is read
+// as (nil for a key read whole). Nil for a type without exported fields,
+// which reads its input some other way.
+func settingFields(t reflect.Type) map[string]reflect.Type {
+	fields := map[string]reflect.Type{}
+	exported := false
+	var collect func(t reflect.Type)
+	collect = func(t reflect.Type) {
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if field.Anonymous && field.Type.Kind() == reflect.Struct {
+				collect(field.Type)
+				continue
+			}
+			if !field.IsExported() {
+				continue
+			}
+			exported = true
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			fields[name] = field.Type
+		}
+	}
+	collect(t)
+	if !exported {
+		return nil
+	}
+	for _, key := range consumedSettings[t] {
+		fields[key] = nil
+	}
+	return fields
 }
 
 // discardLegacySetting reads a retired setting whole without retaining or
@@ -1020,7 +1331,37 @@ var imagesReportedUnknownBundles = struct {
 }{ids: map[string]struct{}{}}
 
 func (i ImagesConfig) validate(bundles map[string]ProjectBundle) error {
-	panic("unported: mj-core/src/config.rs ImagesConfig::validate")
+	for _, bundleID := range sortedKeys(i.Bundles) {
+		images := i.Bundles[bundleID]
+		if _, known := bundles[bundleID]; !known {
+			imagesReportedUnknownBundles.Lock()
+			_, reported := imagesReportedUnknownBundles.ids[bundleID]
+			imagesReportedUnknownBundles.ids[bundleID] = struct{}{}
+			imagesReportedUnknownBundles.Unlock()
+			if !reported {
+				slog.Warn(fmt.Sprintf("image assignments for unknown bundle %s are ignored; the entry is retained in config.toml",
+					debugString(bundleID)), "bundle", bundleID)
+			}
+			continue
+		}
+		for _, platform := range sortedKeys(images) {
+			image := images[platform]
+			architecture, ok := strings.CutPrefix(platform, "linux/")
+			valid := ok && architecture != "" && !strings.Contains(architecture, "/")
+			for j := 0; valid && j < len(architecture); j++ {
+				c := architecture[j]
+				valid = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+			}
+			if !valid {
+				return fmt.Errorf("bundle %s image platform %s must be linux/<arch>", debugString(bundleID), debugString(platform))
+			}
+			if strings.TrimSpace(image) == "" || strings.IndexFunc(image, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("bundle %s image for %s must be a non-empty image reference without whitespace",
+					debugString(bundleID), debugString(platform))
+			}
+		}
+	}
+	return nil
 }
 
 func (i ImagesConfig) isDefault() bool { return i.Repository == nil && len(i.Bundles) == 0 }
@@ -1176,7 +1517,108 @@ func (s storedConfig) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON applies StoredConfig's defaults: every section but `version`
 // may be absent, and the polymorphic tables are read by their own readers.
 func (s *storedConfig) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-core/src/config.rs StoredConfig deserialize")
+	fields, err := decodeObject(data)
+	if err != nil {
+		return err
+	}
+	value := storedConfig{
+		SessionsSide: DefaultSessionsSide(),
+		SidebarSize:  PaneSizeStandard,
+		Advanced:     DefaultAdvancedConfig(),
+		Notify:       DefaultNotifyConfig(),
+		Spinner:      DefaultSpinnerStyle(),
+		Theme:        DefaultThemeChoice(),
+		Phone:        DefaultPhoneConfig(),
+		Daemon:       DefaultDaemonConfig(),
+		Github:       DefaultGithubConfig(),
+		Mailbox:      defaultLegacyMailboxConfig(),
+		Subagents:    DefaultSubagentConfig(),
+		BuildCache:   defaultLegacyBuildCacheConfig(),
+		Jev:          DefaultJevConfig(),
+		Keys:         DefaultKeysConfig(),
+		Profiles:     map[string]HarnessProfile{},
+		Bundles:      map[string]ProjectBundle{},
+		Machines:     map[string]Machine{},
+		Targets:      map[string]targetEntry{},
+	}
+	if _, ok := fields["version"]; !ok {
+		return missingField("version")
+	}
+	plain := map[string]any{
+		"show_stopped_sessions": &value.ShowStoppedSessions,
+		"sessions_side":         &value.SessionsSide,
+		"sidebar_size":          &value.SidebarSize,
+		"advanced":              &value.Advanced,
+		"notify":                &value.Notify,
+		"version":               &value.Version,
+		"spinner":               &value.Spinner,
+		"phone":                 &value.Phone,
+		"daemon":                &value.Daemon,
+		"github":                &value.Github,
+		"review":                &value.Review,
+		"continuation":          &value.Continuation,
+		"mailbox":               &value.Mailbox,
+		"sessionwiki":           &value.Sessionwiki,
+		"subagents":             &value.Subagents,
+		"build_cache":           &value.BuildCache,
+		"jev":                   &value.Jev,
+		"quota":                 &value.Quota,
+		"keys":                  &value.Keys,
+		"profiles":              &value.Profiles,
+		"bundles":               &value.Bundles,
+		"images":                &value.Images,
+	}
+	for _, key := range sortedKeys(fields) {
+		raw := fields[key]
+		var err error
+		switch key {
+		case "theme":
+			value.Theme, err = UnmarshalThemeChoiceJSON(raw)
+		case "startup":
+			err = discardLegacySetting(raw)
+		case "machines":
+			var machines map[string]json.RawMessage
+			if err = json.Unmarshal(raw, &machines); err != nil {
+				break
+			}
+			for id, encoded := range machines {
+				machine, machineErr := UnmarshalMachineJSON(encoded)
+				if machineErr != nil {
+					err = machineErr
+					break
+				}
+				value.Machines[id] = machine
+			}
+		case "targets":
+			var targets map[string]json.RawMessage
+			if err = json.Unmarshal(raw, &targets); err != nil {
+				break
+			}
+			for id, encoded := range targets {
+				entry, entryErr := unmarshalTargetEntryJSON(encoded)
+				if entryErr != nil {
+					err = entryErr
+					break
+				}
+				value.Targets[id] = entry
+			}
+		default:
+			if target, ok := plain[key]; ok {
+				err = json.Unmarshal(raw, target)
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if value.Profiles == nil {
+		value.Profiles = map[string]HarnessProfile{}
+	}
+	if value.Bundles == nil {
+		value.Bundles = map[string]ProjectBundle{}
+	}
+	*s = value
+	return nil
 }
 
 // targetEntry is one [targets.<id>] table. Reading keeps it raw, because
@@ -1277,57 +1719,436 @@ var newlyUnknownTargetKeysReported = struct {
 // what stops a person from believing it applies (R4-6). The configuration is
 // read many times in one process, so each key is reported only the first time.
 func newlyUnknownTargetKeys(id, kind string, table map[string]any) []string {
-	panic("unported: mj-core/src/config.rs newly_unknown_target_keys")
+	known := func(key string) bool {
+		if key == "kind" || key == "machine" {
+			return true
+		}
+		switch kind {
+		case "bare":
+			return key == "permissions"
+		case "podman", "docker", "apple-container", "nitro":
+			for _, setting := range containerTemplateKeys {
+				if key == setting {
+					return true
+				}
+			}
+			return false
+		}
+		return true
+	}
+	newlyUnknownTargetKeysReported.Lock()
+	defer newlyUnknownTargetKeysReported.Unlock()
+	unknown := []string{}
+	for _, key := range sortedKeys(table) {
+		if known(key) {
+			continue
+		}
+		pair := [2]string{id, key}
+		if _, reported := newlyUnknownTargetKeysReported.pairs[pair]; reported {
+			continue
+		}
+		newlyUnknownTargetKeysReported.pairs[pair] = struct{}{}
+		unknown = append(unknown, key)
+	}
+	return unknown
 }
 
 func interpretTarget(id string, value any, version uint32) (interpretedTarget, error) {
-	panic("unported: mj-core/src/config.rs interpret_target")
+	table, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("target %s must be a table", debugString(id))
+	}
+	kind, ok := table["kind"].(string)
+	if !ok {
+		return nil, fmt.Errorf("target %s needs a kind: one of %s", debugString(id), strings.Join(storedTargetKinds[:], ", "))
+	}
+	if _, ok := table["permissions"]; ok && kind != "bare" && kind != "ssh-bare" {
+		return nil, fmt.Errorf("target %s sets `permissions`, which only applies to a bare runtime", debugString(id))
+	}
+	// The message must stand alone: a failure here becomes a plain string
+	// inside the TOML or JSON deserializer's own error, which keeps no source
+	// chain.
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	stored := false
+	for _, candidate := range storedTargetKinds {
+		stored = stored || candidate == kind
+	}
+	if stored {
+		// `apple-container` is spelled the same before and after the split.
+		// In an old file without a `machine` key it is the fused kind.
+		_, hasMachine := table["machine"]
+		fused := kind == "apple-container" && !hasMachine && version <= 11
+		if !fused {
+			for _, key := range newlyUnknownTargetKeys(id, kind, table) {
+				slog.Warn(fmt.Sprintf("target %s (%s) has a key Mjolnir does not use, %s; it is ignored",
+					debugString(id), kind, debugString(key)), "target", id, "key", key)
+			}
+			target, err := UnmarshalStoredTargetJSON(data)
+			if err != nil {
+				return nil, fmt.Errorf("target %s (%s): %s", debugString(id), kind, err)
+			}
+			return interpretedTargetStored{Target: target}, nil
+		}
+	} else if newKind, machine, ok := legacyKindAdvice(kind); !ok {
+		return nil, fmt.Errorf("target %s has unknown kind %s; use one of %s",
+			debugString(id), debugString(kind), strings.Join(storedTargetKinds[:], ", "))
+	} else if version > 11 {
+		return nil, fmt.Errorf("target %s uses the old kind %s; write kind = %s and machine = %s",
+			debugString(id), debugString(kind), debugString(newKind), debugString(machine))
+	}
+	target, err := UnmarshalTargetTemplateJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("target %s (%s): %s", debugString(id), kind, err)
+	}
+	return interpretedTargetLegacy{Target: target}, nil
 }
 
 // configFromStored is TryFrom<StoredConfig> for Config.
 func configFromStored(stored storedConfig) (Config, error) {
-	panic("unported: mj-core/src/config.rs TryFrom<StoredConfig> for Config")
+	github := stored.Github
+	github.Watch.Enabled = github.Watch.Enabled && stored.Mailbox.Enabled
+	if err := github.Validate(); err != nil {
+		return Config{}, err
+	}
+	profiles := make(map[string]HarnessProfile, len(stored.Profiles))
+	for id, profile := range stored.Profiles {
+		profile.InheritProviderKey()
+		profiles[id] = profile
+	}
+	machines := make(map[string]Machine, len(stored.Machines))
+	for id, machine := range stored.Machines {
+		machines[id] = machine
+	}
+	runtimes := map[string]StoredTarget{}
+	disabledTargets := map[string]struct{}{}
+	for _, id := range sortedKeys(stored.Targets) {
+		var runtime StoredTarget
+		switch entry := stored.Targets[id].(type) {
+		case targetEntryStored:
+			runtime = entry.Target
+		case targetEntryDisabled:
+			if !entry.Value.Enabled {
+				disabledTargets[id] = struct{}{}
+			}
+			runtime = entry.Value.Target
+		case targetEntryRaw:
+			enabled, err := takeTargetEnabled(id, entry.Value)
+			if err != nil {
+				return Config{}, err
+			}
+			if !enabled {
+				disabledTargets[id] = struct{}{}
+			}
+			interpreted, err := interpretTarget(id, entry.Value, stored.Version)
+			if err != nil {
+				return Config{}, err
+			}
+			switch interpreted := interpreted.(type) {
+			case interpretedTargetStored:
+				runtime = interpreted.Target
+			case interpretedTargetLegacy:
+				// Migration and saving are the same operation, so an old
+				// file becomes exactly what the next save would write.
+				runtime = StoredTargetOf(id, interpreted.Target, machines)
+			}
+		}
+		runtimes[id] = runtime
+	}
+	// Fold the old global veto into each machine before resolving runtimes.
+	// Local is implicit even in files that only name remote machines.
+	if !stored.BuildCache.Enabled {
+		if _, ok := machines[LocalMachineID]; !ok {
+			machines[LocalMachineID] = MachineLocal{}
+		}
+		disabled := func(cache *TargetBuildCache) *TargetBuildCache {
+			var updated TargetBuildCache
+			if cache != nil {
+				updated = *cache
+			}
+			off := false
+			updated.Enabled = &off
+			return &updated
+		}
+		for id, machine := range machines {
+			switch machine := machine.(type) {
+			case MachineLocal:
+				machine.TargetBuildCache = disabled(machine.TargetBuildCache)
+				machines[id] = machine
+			case MachineSsh:
+				machine.TargetBuildCache = disabled(machine.TargetBuildCache)
+				machines[id] = machine
+			}
+		}
+	}
+	resolved := make(map[string]TargetTemplate, len(runtimes))
+	for _, id := range sortedKeys(runtimes) {
+		target, err := ResolveTarget(id, runtimes[id], machines)
+		if err != nil {
+			return Config{}, err
+		}
+		resolved[id] = target
+	}
+	// Up to version 14, a container target the user had touched carried the
+	// then-current default image in the file. Move that literal back onto the
+	// current session default; a customized image is left alone.
+	if stored.Version <= legacyDefaultImageLastVersion {
+		for id, target := range resolved {
+			migrateLegacyDefaultImage(&target, DefaultSessionImage)
+			resolved[id] = target
+		}
+	}
+	// Versions 1 through 22 acquire this build's defaults in memory and
+	// upgrade on the next ordinary save. Version 12 splits machines from
+	// runtimes; version 13 added automatic continuation (since removed);
+	// version 14 moves the global cache opt-out onto machines; version 15
+	// stops writing the default image into a container target; 16 adds
+	// native tool cache storage; 17 replaces per-profile delegation
+	// selectors with global task choices, without migrating them; 18 moves
+	// the GitHub event switch to github.watch.enabled; 19 adds `enabled` to
+	// runtimes; 20 adds `[daemon]`; 21 adds review counts; 22 adds the
+	// session GitHub credential default; 23 adds target-specific sub-agent
+	// choices.
+	version := stored.Version
+	if version >= 1 && version <= 22 {
+		version = ConfigVersion
+	}
+	bundles := stored.Bundles
+	if bundles == nil {
+		bundles = map[string]ProjectBundle{}
+	}
+	return Config{
+		SessionsSide:    stored.SessionsSide,
+		SidebarSize:     stored.SidebarSize,
+		Advanced:        stored.Advanced,
+		Notify:          stored.Notify,
+		Version:         version,
+		Spinner:         stored.Spinner,
+		Theme:           stored.Theme,
+		Phone:           stored.Phone,
+		Daemon:          stored.Daemon,
+		Github:          github,
+		Review:          stored.Review,
+		Sessionwiki:     stored.Sessionwiki,
+		Subagents:       stored.Subagents,
+		Jev:             stored.Jev,
+		Quota:           stored.Quota,
+		Keys:            stored.Keys,
+		Profiles:        profiles,
+		Bundles:         bundles,
+		Images:          stored.Images,
+		Machines:        machines,
+		Targets:         resolved,
+		DefaultTargets:  map[string]struct{}{},
+		DisabledTargets: disabledTargets,
+	}, nil
 }
 
 // storedConfigFrom is From<Config> for StoredConfig.
 func storedConfigFrom(config Config) storedConfig {
-	panic("unported: mj-core/src/config.rs From<Config> for StoredConfig")
+	machines := make(map[string]Machine, len(config.Machines))
+	for id, machine := range config.Machines {
+		machines[id] = machine
+	}
+	targets := make(map[string]targetEntry, len(config.Targets))
+	for _, id := range sortedKeys(config.Targets) {
+		runtime := StoredTargetOf(id, config.Targets[id], machines)
+		if _, disabled := config.DisabledTargets[id]; disabled {
+			targets[id] = targetEntryDisabled{Value: disabledTarget{Target: runtime, Enabled: false}}
+		} else {
+			targets[id] = targetEntryStored{Target: runtime}
+		}
+	}
+	// This machine is implied, so a file only names it when it carries
+	// settings of its own.
+	if local, ok := machines[LocalMachineID].(MachineLocal); ok && local.TargetBuildCache == nil {
+		delete(machines, LocalMachineID)
+	}
+	return storedConfig{
+		SessionsSide: config.SessionsSide,
+		SidebarSize:  config.SidebarSize,
+		Advanced:     config.Advanced,
+		Notify:       config.Notify,
+		Version:      config.Version,
+		Spinner:      config.Spinner,
+		Theme:        config.Theme,
+		Phone:        config.Phone,
+		Daemon:       config.Daemon,
+		Github:       config.Github,
+		Review:       config.Review,
+		Mailbox:      defaultLegacyMailboxConfig(),
+		Sessionwiki:  config.Sessionwiki,
+		Subagents:    config.Subagents,
+		BuildCache:   defaultLegacyBuildCacheConfig(),
+		Jev:          config.Jev,
+		Quota:        config.Quota,
+		Keys:         config.Keys,
+		Profiles:     config.Profiles,
+		Bundles:      config.Bundles,
+		Images:       config.Images,
+		Machines:     machines,
+		Targets:      targets,
+	}
 }
 
 // DefaultConfig is Config's Default.
 func DefaultConfig() Config {
-	panic("unported: mj-core/src/config.rs Config::default")
+	return Config{
+		SessionsSide:    DefaultSessionsSide(),
+		SidebarSize:     PaneSizeStandard,
+		Advanced:        DefaultAdvancedConfig(),
+		Notify:          DefaultNotifyConfig(),
+		Version:         ConfigVersion,
+		Spinner:         DefaultSpinnerStyle(),
+		Theme:           DefaultThemeChoice(),
+		Phone:           DefaultPhoneConfig(),
+		Daemon:          DefaultDaemonConfig(),
+		Github:          DefaultGithubConfig(),
+		Subagents:       DefaultSubagentConfig(),
+		Jev:             DefaultJevConfig(),
+		Keys:            DefaultKeysConfig(),
+		Profiles:        map[string]HarnessProfile{},
+		Bundles:         map[string]ProjectBundle{},
+		Machines:        map[string]Machine{},
+		Targets:         map[string]TargetTemplate{},
+		DefaultTargets:  map[string]struct{}{},
+		DisabledTargets: map[string]struct{}{},
+	}
 }
 
 // SessionImage is the image for a session on a container target. Bundle
 // assignments take precedence only for the target's platform; bare targets
 // have no image.
 func (c Config) SessionImage(bundleID *string, targetID, platform string) (string, bool) {
-	panic("unported: mj-core/src/config.rs Config::session_image")
+	target, ok := c.Targets[targetID]
+	if !ok {
+		return "", false
+	}
+	container := target.Container()
+	if container == nil {
+		return "", false
+	}
+	platform = CanonicalImagePlatform(platform)
+	if bundleID != nil {
+		if _, known := c.Bundles[*bundleID]; known {
+			if image, ok := c.Images.Bundles[*bundleID][platform]; ok {
+				return image, true
+			}
+		}
+	}
+	return container.Image, true
 }
 
 // SessionTarget applies the same resolution to a configured target without
 // changing it.
 func (c Config) SessionTarget(bundleID *string, targetID, platform string) (TargetTemplate, error) {
-	panic("unported: mj-core/src/config.rs Config::session_target")
+	target, ok := c.Targets[targetID]
+	if !ok {
+		return nil, fmt.Errorf("unknown target %s", debugString(targetID))
+	}
+	if image, ok := c.SessionImage(bundleID, targetID, platform); ok {
+		container := target.Container()
+		if container == nil {
+			panic("session image requires a container")
+		}
+		container.Image = image
+		target = target.withContainer(*container)
+	}
+	return target, nil
+}
+
+// configAdditions is the entries of discovered that existing does not hold
+// yet (by same), under collision-free ids derived from base.
+func configAdditions[T any](existing, discovered map[string]T, same func(T, T) bool, base func(string, T) string) map[string]T {
+	known := make(map[string]T, len(existing))
+	for id, value := range existing {
+		known[id] = value
+	}
+	added := map[string]T{}
+	for _, id := range sortedKeys(discovered) {
+		value := discovered[id]
+		duplicate := false
+		for _, entry := range known {
+			if same(entry, value) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		unique := UniqueConfigID(known, base(id, value))
+		known[unique] = value
+		added[unique] = value
+	}
+	return added
 }
 
 // SetupAdditions suggests additions for setup without replacing existing
 // entries. Both setup surfaces use the same identities and collision-free
 // names.
 func (c Config) SetupAdditions(discovered Config) Config {
-	panic("unported: mj-core/src/config.rs Config::setup_additions")
+	additions := DefaultConfig()
+	sameID := func(id string, _ any) string { return id }
+	additions.Profiles = configAdditions(c.Profiles, discovered.Profiles, HarnessProfile.SameInstallation,
+		func(id string, _ HarnessProfile) string { return id })
+	additions.Bundles = configAdditions(c.Bundles, discovered.Bundles, func(a, b ProjectBundle) bool { return serdeEqual(a, b) },
+		func(_ string, bundle ProjectBundle) string { return bundle.PrimaryRepo })
+	additions.Machines = configAdditions(c.Machines, discovered.Machines, func(a, b Machine) bool { return serdeEqual(a, b) },
+		func(id string, machine Machine) string { return sameID(id, machine) })
+	additions.Targets = configAdditions(c.Targets, discovered.Targets, func(a, b TargetTemplate) bool { return serdeEqual(a, b) },
+		func(id string, target TargetTemplate) string { return sameID(id, target) })
+	return additions
+}
+
+// serdeEqual compares two configuration values by their serialized form,
+// which is how they are written and read, so it stands in for Rust's
+// derived PartialEq without tripping over nil and empty collections.
+func serdeEqual(a, b any) bool {
+	left, errLeft := serdeJSON(a)
+	right, errRight := serdeJSON(b)
+	return errLeft == nil && errRight == nil && bytes.Equal(left, right)
 }
 
 // MachineRuntimes is the runtimes that run on machine machineID, in id order.
 func (c Config) MachineRuntimes(machineID string) iter.Seq2[string, TargetTemplate] {
-	panic("unported: mj-core/src/config.rs Config::machine_runtimes")
+	return func(yield func(string, TargetTemplate) bool) {
+		for _, id := range sortedKeys(c.Targets) {
+			target := c.Targets[id]
+			if found, ok := TargetMachineID(target, c.Machines); !ok || found != machineID {
+				continue
+			}
+			if !yield(id, target) {
+				return
+			}
+		}
+	}
 }
 
 // MachinesWithoutRuntimes is the SSH and EC2 machines no runtime runs on,
 // which no session can use until one does, in id order.
 func (c Config) MachinesWithoutRuntimes() iter.Seq2[string, Machine] {
-	panic("unported: mj-core/src/config.rs Config::machines_without_runtimes")
+	return func(yield func(string, Machine) bool) {
+		for _, id := range sortedKeys(c.Machines) {
+			machine := c.Machines[id]
+			if _, local := machine.(MachineLocal); local {
+				continue
+			}
+			used := false
+			for range c.MachineRuntimes(id) {
+				used = true
+				break
+			}
+			if used {
+				continue
+			}
+			if !yield(id, machine) {
+				return
+			}
+		}
+	}
 }
 
 // MachineRuntimeAdditions is the runtimes from found to add for machine
@@ -1338,7 +2159,33 @@ func (c Config) MachinesWithoutRuntimes() iter.Seq2[string, Machine] {
 // Every surface that adds a machine's runtimes, from the file under its lock
 // to the Settings draft, decides here.
 func (c Config) MachineRuntimeAdditions(machineID string, probed Machine, found iter.Seq2[string, TargetTemplate]) map[string]TargetTemplate {
-	panic("unported: mj-core/src/config.rs Config::machine_runtime_additions")
+	added := map[string]TargetTemplate{}
+	current, ok := c.Machines[machineID]
+	if !ok || !serdeEqual(current, probed) {
+		return added
+	}
+	kinds := map[string]struct{}{}
+	for _, target := range c.MachineRuntimes(machineID) {
+		kinds[RuntimeKindName(target)] = struct{}{}
+	}
+	known := make(map[string]TargetTemplate, len(c.Targets))
+	for id, target := range c.Targets {
+		known[id] = target
+	}
+	for base, target := range found {
+		if runsOn, ok := TargetMachineID(target, c.Machines); !ok || runsOn != machineID {
+			continue
+		}
+		kind := RuntimeKindName(target)
+		if _, taken := kinds[kind]; taken {
+			continue
+		}
+		kinds[kind] = struct{}{}
+		id := UniqueConfigID(known, base)
+		known[id] = target
+		added[id] = target
+	}
+	return added
 }
 
 func (c Config) IsUnconfigured() bool {
@@ -1348,7 +2195,14 @@ func (c Config) IsUnconfigured() bool {
 // EnabledProfiles is the profiles Mjolnir may choose or probe automatically,
 // in id order.
 func (c Config) EnabledProfiles() iter.Seq2[string, HarnessProfile] {
-	panic("unported: mj-core/src/config.rs Config::enabled_profiles")
+	return func(yield func(string, HarnessProfile) bool) {
+		for _, id := range sortedKeys(c.Profiles) {
+			profile := c.Profiles[id]
+			if profile.Enabled && !yield(id, profile) {
+				return
+			}
+		}
+	}
 }
 
 // NamedProfile looks up a profile explicitly named by a user or recorded on a
@@ -1373,7 +2227,13 @@ func (c Config) EnabledProfile(id string) (HarnessProfile, bool) {
 // EnabledTargets is the runtimes available for new work, in id order: every
 // one not switched off.
 func (c Config) EnabledTargets() iter.Seq2[string, TargetTemplate] {
-	panic("unported: mj-core/src/config.rs Config::enabled_targets")
+	return func(yield func(string, TargetTemplate) bool) {
+		for _, id := range sortedKeys(c.Targets) {
+			if target, ok := c.EnabledTarget(id); ok && !yield(id, target) {
+				return
+			}
+		}
+	}
 }
 
 // EnabledTarget is one runtime when it exists and is available for new work.
@@ -1394,7 +2254,18 @@ func (c Config) EnabledTarget(id string) (TargetTemplate, bool) {
 // EnsureTargetEnabled refuses new work on runtime id when it is not
 // configured or is switched off. Every launch, resume and move asks this.
 func (c Config) EnsureTargetEnabled(id string) (TargetTemplate, error) {
-	panic("unported: mj-core/src/config.rs Config::ensure_target_enabled")
+	target, ok := c.Targets[id]
+	if !ok {
+		return nil, fmt.Errorf("unknown target template %s", debugString(id))
+	}
+	if notice, refused := target.LaunchRefusal(); refused {
+		return nil, errors.New(notice)
+	}
+	if _, disabled := c.DisabledTargets[id]; disabled {
+		return nil, RefusalPrecondition(fmt.Sprintf(
+			"runtime %s is turned off; turn it on in Settings › Runtimes or choose another", debugString(id)))
+	}
+	return target, nil
 }
 
 // NativeContinuity reports whether a session recorded under sourceProfileID,
@@ -1407,7 +2278,34 @@ func (c Config) EnsureTargetEnabled(id string) (TargetTemplate, error) {
 // the source profile is gone or now runs another harness, only a harness
 // whose service does not depend on the profile continues.
 func (c Config) NativeContinuity(sourceKind HarnessKind, sourceProfileID, destinationProfileID string) (bool, error) {
-	panic("unported: mj-core/src/config.rs Config::native_continuity")
+	destination, ok := c.Profiles[destinationProfileID]
+	if !ok {
+		return false, fmt.Errorf("unknown profile %s", debugString(destinationProfileID))
+	}
+	if destination.Kind != sourceKind {
+		return false, nil
+	}
+	if destinationProfileID == sourceProfileID {
+		return true, nil
+	}
+	var sourceService ModelService
+	if source, ok := c.Profiles[sourceProfileID]; ok && source.Kind == sourceKind {
+		service, err := source.ModelService()
+		if err != nil {
+			return false, err
+		}
+		sourceService = service
+	} else if service, ok := ModelServiceOfHarness(sourceKind); ok {
+		sourceService = service
+	}
+	if sourceService == nil {
+		return false, nil
+	}
+	destinationService, err := destination.ModelService()
+	if err != nil {
+		return false, err
+	}
+	return sourceService == destinationService, nil
 }
 
 // Validate checks what this file itself declares. Whether a profile or target
@@ -1416,7 +2314,46 @@ func (c Config) NativeContinuity(sourceKind HarnessKind, sourceProfileID, destin
 // they are used, so one unusable profile never stops the configuration, and
 // the daemon, from loading.
 func (c Config) Validate() error {
-	panic("unported: mj-core/src/config.rs Config::validate")
+	if c.Version != ConfigVersion {
+		return fmt.Errorf("unsupported Mjolnir config version %d; expected %d", c.Version, ConfigVersion)
+	}
+	if err := c.Phone.validate(); err != nil {
+		return err
+	}
+	for _, id := range sortedKeys(c.Profiles) {
+		if err := c.Profiles[id].validate(id); err != nil {
+			return err
+		}
+	}
+	// Checked after the profiles, so a review pointing at a malformed profile
+	// reports the profile's own error first.
+	if err := c.Review.validate(c.Profiles); err != nil {
+		return err
+	}
+	if err := c.Sessionwiki.validate(); err != nil {
+		return err
+	}
+	if err := c.Subagents.validate(); err != nil {
+		return err
+	}
+	for _, id := range sortedKeys(c.Bundles) {
+		if err := c.Bundles[id].validate(id); err != nil {
+			return err
+		}
+	}
+	if err := c.Images.validate(c.Bundles); err != nil {
+		return err
+	}
+	if err := validateMachines(c.Machines); err != nil {
+		return err
+	}
+	for _, id := range sortedKeys(c.Targets) {
+		if err := c.Targets[id].validate(id); err != nil {
+			return err
+		}
+	}
+	_, err := c.Keys.Resolve()
+	return err
 }
 
 // Keybinds is the key bindings in force.
@@ -1444,7 +2381,18 @@ func ConfigLoad() (Config, error) {
 // config edits. Hold the opaque guard through the commit that relies on this
 // snapshot, and Close it after.
 func ConfigLoadLocked() (Config, *ConfigReadGuard, error) {
-	panic("unported: mj-core/src/config.rs Config::load_locked")
+	path := ConfigPath()
+	lock, err := configLockAcquire(path)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	guard := &ConfigReadGuard{lock: lock, path: path}
+	config, err := ConfigLoadFrom(guard.path)
+	if err != nil {
+		_ = guard.Close()
+		return Config{}, nil, err
+	}
+	return config.WithLocalTargets(), guard, nil
 }
 
 // WithLocalTargets supplies standard local choices without requiring setup or
@@ -1452,7 +2400,43 @@ func ConfigLoadLocked() (Config, *ConfigReadGuard, error) {
 // before offering launch. Explicit entries with the same name override the
 // standard defaults.
 func (c Config) WithLocalTargets() Config {
-	panic("unported: mj-core/src/config.rs Config::with_local_targets")
+	container := ContainerTemplate{
+		Image:            DefaultSessionImage,
+		PullPolicy:       ImagePullPolicyAuto,
+		WorkspaceStorage: PodmanWorkspaceStoragePodmanVolume{},
+	}
+	type candidate struct {
+		id       string
+		template TargetTemplate
+	}
+	var defaults []candidate
+	if HostRunsWorkers {
+		defaults = append(defaults, candidate{"localhost", TargetTemplateLocalBare{}})
+	}
+	defaults = append(defaults,
+		candidate{"podman", TargetTemplateLocalPodman{ContainerTemplate: container}},
+		candidate{"docker", TargetTemplateLocalDocker{ContainerTemplate: container}})
+	if runtime.GOOS == "darwin" {
+		defaults = append(defaults, candidate{"apple-container", TargetTemplateAppleContainer{ContainerTemplate: container}})
+	}
+	// The value is a copy, so the receiver's maps stay as they were.
+	targets := make(map[string]TargetTemplate, len(c.Targets)+len(defaults))
+	for id, target := range c.Targets {
+		targets[id] = target
+	}
+	defaultTargets := make(map[string]struct{}, len(c.DefaultTargets)+len(defaults))
+	for id := range c.DefaultTargets {
+		defaultTargets[id] = struct{}{}
+	}
+	for _, entry := range defaults {
+		if _, taken := targets[entry.id]; !taken {
+			targets[entry.id] = entry.template
+			defaultTargets[entry.id] = struct{}{}
+		}
+	}
+	c.Targets = targets
+	c.DefaultTargets = defaultTargets
+	return c
 }
 
 // IsDefaultTarget reports whether target id is a default candidate that
@@ -1470,14 +2454,97 @@ func (c Config) IsDefaultTarget(id string) bool {
 // word for word adds nothing the user chose, so callers that treat built-in
 // targets gently treat it as built-in too.
 func (c Config) ConfiguresTarget(id string) bool {
-	panic("unported: mj-core/src/config.rs Config::configures_target")
+	target, ok := c.Targets[id]
+	if !ok {
+		return false
+	}
+	standard, isStandard := DefaultConfig().WithLocalTargets().Targets[id]
+	return !isStandard || !serdeEqual(standard, target)
 }
 
 // ConfigLoadFrom reads the config from path, returning DefaultConfig when the
 // file is missing and an error when it is malformed or was written by a newer
 // Mjolnir.
 func ConfigLoadFrom(path string) (Config, error) {
-	panic("unported: mj-core/src/config.rs Config::load_from")
+	if _, err := os.Stat(path); err != nil {
+		return DefaultConfig(), nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read Mjolnir config %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(contents)) == "" {
+		return DefaultConfig(), nil
+	}
+	document, err := parseTOMLDocument(string(contents))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse Mjolnir config %s: %w", path, err)
+	}
+	if found, ok := newerVersion(document); ok {
+		return Config{}, fmt.Errorf("%s was written by a newer Mjolnir (config version %d; this build supports %d). Update Mjolnir",
+			path, found, ConfigVersion)
+	}
+	// Every file Mjolnir writes starts with this line, so only a hand-written
+	// one lacks it. Serde's "missing field `version`" does not say which
+	// value to add (R14-4).
+	if _, ok := document["version"]; !ok {
+		return Config{}, fmt.Errorf("%s: config.toml needs a `version = %d` line at the top (the current configuration schema); see %s",
+			path, ConfigVersion, ConfigurationDocumentationURL)
+	}
+	if err := rejectRemovedProfileOverrides(string(contents)); err != nil {
+		return Config{}, err
+	}
+	if removed := dropRemovedHarnessProfiles(document); len(removed) > 0 {
+		slog.Warn("ignoring profiles for a harness Mjolnir no longer supports; the next save removes them",
+			"config", path, "profiles", removed)
+	}
+	// Earlier configs acquire defaults in memory, and their fused target
+	// kinds become machines plus runtimes, on the next ordinary save. The
+	// version bump itself happens in configFromStored, which is also what
+	// decides whether an old `kind` is still accepted.
+	//
+	// Environment references resolve against the secrets file beside this
+	// configuration and the process environment. One that does not resolve
+	// makes its profile or target unusable, not this file unreadable; see
+	// HarnessProfile.EnsureReady.
+	data, err := json.Marshal(document)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse Mjolnir config %s: %w", path, err)
+	}
+	type read struct {
+		config Config
+		err    error
+	}
+	result := WithSecretResolver(SecretResolverBeside(path), func() read {
+		var config Config
+		err := json.Unmarshal(data, &config)
+		return read{config, err}
+	})
+	if result.err != nil {
+		return Config{}, fmt.Errorf("parse Mjolnir config %s: %w", path, result.err)
+	}
+	// The configuration types read past keys they have no field for, because
+	// the daemon serves this configuration to clients that may predate a
+	// field (#1557). A person writes the file, so here such a key is a
+	// mistake, refused by name wherever a type used to refuse it.
+	unread := []string{}
+	walkUnreadSettings(reflect.TypeFor[Config](), document, nil, func(key []string) {
+		// These sections never refused a key, and files still carry retired
+		// ones such as `advanced.show_stopped_sessions`. Refusing them now
+		// would stop an upgraded daemon from starting.
+		if len(key) > 1 && (key[0] == "advanced" || key[0] == "notify") {
+			return
+		}
+		unread = append(unread, strings.Join(key, "."))
+	})
+	unread = append(unread, unreadBuildCacheKeys(document)...)
+	if err := refuseUnreadKeys(path, unread); err != nil {
+		return Config{}, err
+	}
+	if err := result.config.Validate(); err != nil {
+		return Config{}, err
+	}
+	return result.config, nil
 }
 
 func (c Config) Save() error { return c.SaveTo(ConfigPath()) }
@@ -1495,14 +2562,50 @@ func ConfigUpdate[T any](edit func(*Config) (T, error)) (Config, T, error) {
 
 // ConfigUpdateWithLocalTargetsAt is ConfigUpdate using an explicit config path.
 func ConfigUpdateWithLocalTargetsAt[T any](path string, edit func(*Config) (T, error)) (Config, T, error) {
-	panic("unported: mj-core/src/config.rs Config::update_with_local_targets_at")
+	lock, err := configLockAcquire(path)
+	if err != nil {
+		var zero T
+		return Config{}, zero, err
+	}
+	guard := &ConfigReadGuard{lock: lock, path: path}
+	defer guard.Close()
+	return ConfigUpdateLocked(guard, edit)
 }
 
 // ConfigUpdateLocked edits and saves while an existing opaque owner retains
 // the config lock. The owner can span a subsequent reference migration or
 // rollback.
 func ConfigUpdateLocked[T any](guard *ConfigReadGuard, edit func(*Config) (T, error)) (Config, T, error) {
-	panic("unported: mj-core/src/config.rs Config::update_locked")
+	config, value, err := configUpdateToLocked(guard.path, func(config *Config) (T, error) {
+		// Edits see the same local candidates as reads, but unrelated
+		// changes must not write implicit defaults into the user's file.
+		runtime := config.WithLocalTargets()
+		implicit := map[string]TargetTemplate{}
+		for id, target := range runtime.Targets {
+			if _, written := config.Targets[id]; !written {
+				implicit[id] = target
+			}
+		}
+		value, err := edit(&runtime)
+		if err != nil {
+			return value, err
+		}
+		for _, id := range sortedKeys(implicit) {
+			// A standard runtime switched off is the user's choice and is
+			// written with it.
+			_, disabled := runtime.DisabledTargets[id]
+			if current, ok := runtime.Targets[id]; ok && serdeEqual(current, implicit[id]) && !disabled {
+				delete(runtime.Targets, id)
+			}
+		}
+		runtime.DefaultTargets = map[string]struct{}{}
+		*config = runtime
+		return value, nil
+	})
+	if err != nil {
+		return Config{}, value, err
+	}
+	return config.WithLocalTargets(), value, nil
 }
 
 // ConfigUpdateTo is ConfigUpdate using an explicit config path, without local
@@ -1572,14 +2675,39 @@ func (c Config) SaveTo(path string) error {
 // separate from SaveTo so a transaction does not try to lock the same sibling
 // file recursively.
 func (c Config) saveToLocked(path string) error {
-	panic("unported: mj-core/src/config.rs Config::save_to_locked")
+	if err := configEnsureWritable(path); err != nil {
+		return err
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	body, err := marshalTOMLPretty(c)
+	if err != nil {
+		return fmt.Errorf("serialize Mjolnir config: %w", err)
+	}
+	if edited, ok := configEditedFile(path, body); ok {
+		body = edited
+	}
+	return AtomicWrite(path, []byte(body))
 }
 
 // configEditedFile is the file at path edited in place to hold body, keeping
 // its comments and layout. False when there is no file to keep, or it cannot
 // be edited in place.
 func configEditedFile(path, body string) (string, bool) {
-	panic("unported: mj-core/src/config.rs Config::edited_file")
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	loadedConfig, err := ConfigLoadFrom(path)
+	if err != nil {
+		return "", false
+	}
+	loaded, err := marshalTOMLPretty(loadedConfig)
+	if err != nil {
+		return "", false
+	}
+	return editInPlace(string(existing), loaded, body)
 }
 
 // configEnsureWritable refuses to overwrite a file that a newer Mjolnir wrote
@@ -1610,16 +2738,42 @@ type ConfigLock struct {
 }
 
 func configLockAcquire(configPath string) (*ConfigLock, error) {
-	panic("unported: mj-core/src/config.rs ConfigLock::acquire")
+	lockPath := configLockPath(configPath)
+	parent := filepath.Dir(lockPath)
+	if err := os.MkdirAll(parent, 0o777); err != nil {
+		return nil, fmt.Errorf("create config lock directory %s: %w", parent, err)
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open config lock %s: %w", lockPath, err)
+	}
+	if err := configLockExclusive(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock config %s: %w", configPath, err)
+	}
+	return &ConfigLock{file: NewFileLock(file)}, nil
 }
 
-// Close releases the lock (Rust's Drop).
+// Close releases the lock (Rust's Drop), then closes the lock file.
 func (l *ConfigLock) Close() error {
-	panic("unported: mj-core/src/config.rs ConfigLock drop")
+	if l == nil || l.file == nil {
+		return nil
+	}
+	file := l.file.File()
+	err := l.file.Release()
+	l.file = nil
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func configLockPath(path string) string {
-	panic("unported: mj-core/src/config.rs config_lock_path")
+	name, ok := pathFileName(path)
+	if !ok {
+		return path + ".lock"
+	}
+	return filepath.Join(filepath.Dir(path), name+".lock")
 }
 
 // --- serde helpers shared by the config_*.go files ---
@@ -1795,17 +2949,520 @@ func cloneStringPointer(value *string) *string {
 // tomlToJSON converts a decoded TOML document or value (as BurntSushi/toml
 // decodes into any) into JSON for the serde-compatible readers.
 func tomlToJSON(value any) ([]byte, error) {
-	panic("unported: TOML to JSON conversion for config reading")
+	return json.Marshal(normalizeTOML(value))
+}
+
+// normalizeTOML turns what BurntSushi/toml decodes into the generic values
+// encoding/json writes: tables as map[string]any, arrays (of tables too) as
+// []any, integers as int64 and dates as their TOML text.
+func normalizeTOML(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		normalized := make(map[string]any, len(value))
+		for key, member := range value {
+			normalized[key] = normalizeTOML(member)
+		}
+		return normalized
+	case []map[string]any:
+		normalized := make([]any, len(value))
+		for i, member := range value {
+			normalized[i] = normalizeTOML(member)
+		}
+		return normalized
+	case []any:
+		normalized := make([]any, len(value))
+		for i, member := range value {
+			normalized[i] = normalizeTOML(member)
+		}
+		return normalized
+	case time.Time:
+		return value.Format(time.RFC3339Nano)
+	case fmt.Stringer:
+		return value.String()
+	}
+	return value
+}
+
+// parseTOMLDocument is `text.parse::<toml::Value>()`: the document as
+// generic values (normalizeTOML), with toml's "TOML parse error" wording.
+func parseTOMLDocument(text string) (map[string]any, error) {
+	var document map[string]any
+	if _, err := toml.Decode(text, &document); err != nil {
+		var parseError toml.ParseError
+		if errors.As(err, &parseError) {
+			return nil, fmt.Errorf("TOML parse error at line %d, column %d\n%s",
+				parseError.Position.Line, parseError.Position.Col, parseError.Message)
+		}
+		return nil, fmt.Errorf("TOML parse error: %w", err)
+	}
+	if document == nil {
+		document = map[string]any{}
+	}
+	return normalizeTOML(document).(map[string]any), nil
 }
 
 // marshalTOMLPretty is toml::to_string_pretty: value's JSON form written as a
 // TOML document in serde field order, with nulls (serde None) left out.
 func marshalTOMLPretty(value any) (string, error) {
-	panic("unported: toml::to_string_pretty")
+	return marshalTOMLWith(value, true)
+}
+
+// marshalTOML is toml::to_string: as marshalTOMLPretty, with every array on
+// one line.
+func marshalTOML(value any) (string, error) {
+	return marshalTOMLWith(value, false)
 }
 
 // unmarshalTOML is toml::from_str: text decoded with BurntSushi/toml and read
 // through value's JSON form.
 func unmarshalTOML(text string, value any) error {
-	panic("unported: toml::from_str")
+	document, err := parseTOMLDocument(text)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, value); err != nil {
+		return fmt.Errorf("TOML parse error: %w", err)
+	}
+	return nil
+}
+
+// orderedJSON is a JSON value with its object members in written order,
+// which serde's field order makes significant for TOML output.
+type orderedJSON struct {
+	// kind is one of 'o' (object), 'a' (array), 's' (string), 'n' (number),
+	// 'b' (boolean) or 'z' (null).
+	kind    byte
+	keys    []string
+	members []*orderedJSON
+	items   []*orderedJSON
+	text    string
+	boolean bool
+}
+
+func decodeOrderedJSON(decoder *json.Decoder) (*orderedJSON, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch token := token.(type) {
+	case json.Delim:
+		switch token {
+		case '{':
+			value := &orderedJSON{kind: 'o'}
+			for decoder.More() {
+				key, err := decoder.Token()
+				if err != nil {
+					return nil, err
+				}
+				member, err := decodeOrderedJSON(decoder)
+				if err != nil {
+					return nil, err
+				}
+				value.keys = append(value.keys, key.(string))
+				value.members = append(value.members, member)
+			}
+			_, err := decoder.Token()
+			return value, err
+		case '[':
+			value := &orderedJSON{kind: 'a'}
+			for decoder.More() {
+				item, err := decodeOrderedJSON(decoder)
+				if err != nil {
+					return nil, err
+				}
+				value.items = append(value.items, item)
+			}
+			_, err := decoder.Token()
+			return value, err
+		}
+		return nil, fmt.Errorf("unexpected delimiter %v", token)
+	case string:
+		return &orderedJSON{kind: 's', text: token}, nil
+	case json.Number:
+		return &orderedJSON{kind: 'n', text: token.String()}, nil
+	case bool:
+		return &orderedJSON{kind: 'b', boolean: token}, nil
+	case nil:
+		return &orderedJSON{kind: 'z'}, nil
+	}
+	return nil, fmt.Errorf("unexpected JSON token %v", token)
+}
+
+// tomlTable is a toml_edit table as toml's serializer leaves it: plain
+// values in field order, then tables and arrays of tables.
+type tomlTable struct {
+	entries []tomlEntry
+	// implicit is set on a table with entries, which is then written only
+	// when it holds values of its own (toml's DocumentFormatter).
+	implicit bool
+}
+
+type tomlEntry struct {
+	key   string
+	value *orderedJSON
+	table *tomlTable
+	array []*tomlTable
+}
+
+func tomlTableFrom(object *orderedJSON) *tomlTable {
+	table := &tomlTable{implicit: len(object.members) > 0}
+	for i, member := range object.members {
+		key := object.keys[i]
+		switch {
+		case member.kind == 'z':
+			// serde None: the field is skipped.
+		case member.kind == 'o':
+			table.entries = append(table.entries, tomlEntry{key: key, table: tomlTableFrom(member)})
+		case member.kind == 'a' && len(member.items) > 0 && allObjects(member.items):
+			tables := make([]*tomlTable, len(member.items))
+			for j, item := range member.items {
+				tables[j] = tomlTableFrom(item)
+			}
+			table.entries = append(table.entries, tomlEntry{key: key, array: tables})
+		default:
+			table.entries = append(table.entries, tomlEntry{key: key, value: member})
+		}
+	}
+	if len(table.entries) == 0 {
+		table.implicit = false
+	}
+	return table
+}
+
+func allObjects(items []*orderedJSON) bool {
+	for _, item := range items {
+		if item.kind != 'o' {
+			return false
+		}
+	}
+	return true
+}
+
+func marshalTOMLWith(value any, pretty bool) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	root, err := decodeOrderedJSON(decoder)
+	if err != nil {
+		return "", err
+	}
+	if root.kind != 'o' {
+		return "", errors.New("unsupported rust type")
+	}
+	var output strings.Builder
+	first := true
+	var visit func(table *tomlTable, path []string, isArray bool) error
+	visit = func(table *tomlTable, path []string, isArray bool) error {
+		var values []tomlEntry
+		for _, entry := range table.entries {
+			if entry.value != nil {
+				values = append(values, entry)
+			}
+		}
+		header := func(open, close string) {
+			if first {
+				first = false
+			} else {
+				output.WriteString("\n")
+			}
+			output.WriteString(open)
+			for i, key := range path {
+				if i > 0 {
+					output.WriteString(".")
+				}
+				output.WriteString(tomlKey(key))
+			}
+			output.WriteString(close + "\n")
+		}
+		switch {
+		case len(path) == 0:
+			if len(values) > 0 {
+				first = false
+			}
+		case isArray:
+			header("[[", "]]")
+		case !(table.implicit && len(values) == 0):
+			header("[", "]")
+		}
+		for _, entry := range values {
+			text, err := tomlValue(entry.value, pretty)
+			if err != nil {
+				return err
+			}
+			output.WriteString(tomlKey(entry.key) + " = " + text + "\n")
+		}
+		for _, entry := range table.entries {
+			child := append(append([]string{}, path...), entry.key)
+			switch {
+			case entry.table != nil:
+				if err := visit(entry.table, child, false); err != nil {
+					return err
+				}
+			case entry.array != nil:
+				for _, item := range entry.array {
+					if err := visit(item, child, true); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
+	if err := visit(tomlTableFrom(root), nil, false); err != nil {
+		return "", err
+	}
+	return output.String(), nil
+}
+
+// tomlKey is a key as toml_edit writes it: bare when it can be, else a basic
+// string.
+func tomlKey(key string) string {
+	bare := key != ""
+	for i := 0; bare && i < len(key); i++ {
+		c := key[i]
+		bare = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_'
+	}
+	if bare {
+		return key
+	}
+	return tomlBasicString(key, false)
+}
+
+// tomlValue is one value as toml_edit writes it inline.
+func tomlValue(value *orderedJSON, pretty bool) (string, error) {
+	switch value.kind {
+	case 's':
+		return tomlString(value.text), nil
+	case 'b':
+		if value.boolean {
+			return "true", nil
+		}
+		return "false", nil
+	case 'n':
+		if !strings.ContainsAny(value.text, ".eE") {
+			if _, err := strconv.ParseInt(value.text, 10, 64); err != nil {
+				return "", fmt.Errorf("out-of-range value for i64 type")
+			}
+			return value.text, nil
+		}
+		number, err := strconv.ParseFloat(value.text, 64)
+		if err != nil {
+			return "", err
+		}
+		return tomlFloat(number), nil
+	case 'a':
+		var items []string
+		for _, item := range value.items {
+			if item.kind == 'z' {
+				return "", errors.New("unsupported None value")
+			}
+			text, err := tomlValue(item, pretty)
+			if err != nil {
+				return "", err
+			}
+			items = append(items, text)
+		}
+		if pretty && len(items) > 1 {
+			return "[\n    " + strings.Join(items, ",\n    ") + ",\n]", nil
+		}
+		return "[" + strings.Join(items, ", ") + "]", nil
+	case 'o':
+		var members []string
+		for i, member := range value.members {
+			if member.kind == 'z' {
+				continue
+			}
+			text, err := tomlValue(member, pretty)
+			if err != nil {
+				return "", err
+			}
+			members = append(members, tomlKey(value.keys[i])+" = "+text)
+		}
+		if len(members) == 0 {
+			return "{}", nil
+		}
+		return "{ " + strings.Join(members, ", ") + " }", nil
+	}
+	return "", errors.New("unsupported None value")
+}
+
+// tomlFloat is toml_edit's float spelling: Rust's shortest decimal, with
+// `.0` on a whole number.
+func tomlFloat(number float64) string {
+	switch {
+	case math.IsNaN(number):
+		if math.Signbit(number) {
+			return "-nan"
+		}
+		return "nan"
+	case math.IsInf(number, 1):
+		return "inf"
+	case math.IsInf(number, -1):
+		return "-inf"
+	case number == 0:
+		if math.Signbit(number) {
+			return "-0.0"
+		}
+		return "0.0"
+	}
+	text := strconv.FormatFloat(number, 'f', -1, 64)
+	if !strings.Contains(text, ".") {
+		text += ".0"
+	}
+	return text
+}
+
+// tomlString is a string value as toml_edit writes it by default: a literal
+// string when it holds a backslash and a literal can carry it, else a basic
+// string, either multi-line when it holds a newline.
+func tomlString(value string) string {
+	multiline := strings.Contains(value, "\n")
+	maxSingles, singles := 0, 0
+	preferLiteral, canBeLiteral := false, true
+	for _, ch := range value {
+		if !canBeLiteral {
+			break
+		}
+		if ch == '\'' {
+			singles++
+			if singles >= 3 {
+				canBeLiteral = false
+			}
+		} else {
+			maxSingles = max(maxSingles, singles)
+			singles = 0
+		}
+		switch {
+		case ch == '\t':
+		case ch == '\\':
+			preferLiteral = true
+		case ch == '\n':
+		case ch <= 0x1f || ch == 0x7f:
+			canBeLiteral = false
+		}
+	}
+	if singles > 0 && strings.HasSuffix(value, "'") {
+		// The ending quote cannot be escaped, so a basic string it is.
+		canBeLiteral = false
+	}
+	if !preferLiteral || !canBeLiteral {
+		return tomlBasicString(value, multiline)
+	}
+	maxSingles = max(maxSingles, singles)
+	switch {
+	case multiline:
+		return "'''\n" + value + "'''"
+	case maxSingles >= 1:
+		return "'''" + value + "'''"
+	}
+	return "'" + value + "'"
+}
+
+// tomlBasicString is a basic string, multi-line when asked.
+func tomlBasicString(value string, multiline bool) string {
+	var builder strings.Builder
+	if multiline {
+		builder.WriteString("\"\"\"\n")
+	} else {
+		builder.WriteString("\"")
+	}
+	for _, ch := range value {
+		switch {
+		case ch == '\b':
+			builder.WriteString(`\b`)
+		case ch == '\t':
+			builder.WriteString(`\t`)
+		case ch == '\n':
+			if multiline {
+				builder.WriteString("\n")
+			} else {
+				builder.WriteString(`\n`)
+			}
+		case ch == '\f':
+			builder.WriteString(`\f`)
+		case ch == '\r':
+			builder.WriteString(`\r`)
+		case ch == '"':
+			builder.WriteString(`\"`)
+		case ch == '\\':
+			builder.WriteString(`\\`)
+		case ch <= 0x1f || ch == 0x7f:
+			fmt.Fprintf(&builder, `\u%04X`, ch)
+		default:
+			builder.WriteRune(ch)
+		}
+	}
+	if multiline {
+		builder.WriteString("\"\"\"")
+	} else {
+		builder.WriteString("\"")
+	}
+	return builder.String()
+}
+
+// serdeJSON is serde_json::to_vec: encoding/json's output without its HTML
+// escapes (`<`, `>`, `&`, U+2028 and U+2029 stay as written), so a digest of
+// it matches the one Rust takes.
+func serdeJSON(value any) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Contains(data, []byte(`\u`)) {
+		return data, nil
+	}
+	output := make([]byte, 0, len(data))
+	inString := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			output = append(output, c)
+			continue
+		}
+		switch c {
+		case '"':
+			inString = false
+			output = append(output, c)
+		case '\\':
+			if i+5 < len(data) && data[i+1] == 'u' {
+				switch string(data[i+2 : i+6]) {
+				case "003c":
+					output = append(output, '<')
+					i += 5
+					continue
+				case "003e":
+					output = append(output, '>')
+					i += 5
+					continue
+				case "0026":
+					output = append(output, '&')
+					i += 5
+					continue
+				case "2028":
+					output = append(output, " "...)
+					i += 5
+					continue
+				case "2029":
+					output = append(output, " "...)
+					i += 5
+					continue
+				}
+			}
+			output = append(output, c, data[i+1])
+			i++
+		default:
+			output = append(output, c)
+		}
+	}
+	return output, nil
 }

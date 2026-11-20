@@ -40,8 +40,8 @@ User-visible output must match the Rust build. Prove it with golden files captur
 - [x] (2026-11-20) Milestone 1 slice: Go module, `go/internal/core/config` instance and directory resolution, ID validation and atomic writes (port of `mj-core/src/config/loading.rs`) with its Rust tests; `go/cmd/mj` root command tree with clap-identical top-level help, version and usage errors, proven by golden files.
 - [x] (2026-11-20) Owner confirmed the approach and chose the crate-by-crate fan-out.
 - [x] (2026-11-20) First slice moved into package `core`; `go/scripts/sync-assets.sh` copies mj-core/assets for `//go:embed`.
-- [ ] mj-core declarations phase (ten groups) merged and compiling.
-- [ ] mj-core bodies and tests phase merged; `go test ./internal/core/` passes.
+- [x] (2026-11-20) mj-core declarations phase (ten groups) merged and compiling (823be3abb).
+- [x] (2026-11-20) mj-core bodies and tests phase merged: no unported bodies left, 678 of mj-core's 683 Rust tests ported, `go test ./...` passes, `go vet` passes for linux, windows and darwin. The five not ported: four test the Rust build's `worker_build_inputs.py` worker identity (the Go build needs its own; port with mj-worker-bin), plus one missed state test now added.
 - [ ] Milestone 1 rest: all of `mj-core` (config, state, relay protocol, transcript, subprocess, targets, credentials, harness install/runtime, acp on acp-go).
 - [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
 - [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).
@@ -52,6 +52,9 @@ User-visible output must match the Rust build. Prove it with golden files captur
 
 
 ## Surprises & Discoveries
+
+- Observation: mj-core needed declarations first: in the bodies phase, agents reported dozens of tests blocked on other groups' functions, and all of them passed once merged. Two real failures remained after the first merge (a serde `default` missed in a custom decoder, and a test fixture built from Go zero values instead of `DefaultConfig()`).
+  Evidence: bodies workflow wf_0dc3082d-c19, merge round 1 (675 of 677 passing) and round 2 (all passing).
 
 - Observation: clap lists a command's own options interleaved with the global ones by declaration index (`--instance`, `--session`, `--all`, `--no-splash`, ...), and shows the current environment value in `[env: NAME=value]`.
   Evidence: `mj sessions --help` on the Rust build. `go/internal/cli/clapstyle.go` reproduces the ordering with an `mj_order` annotation per flag.

@@ -9,7 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	acp "github.com/BrokkAi/acp-go"
+	"github.com/BrokkAi/acp-go/jsonvalue"
 
 	"github.com/BrokkAi/acp-go/schema"
 )
@@ -71,17 +77,152 @@ func PlanReviewProposal(request *ElicitationRequest) (string, bool) {
 }
 
 func PlanReviewKeepPlanning() ElicitationResponse {
-	panic("unported: mj-core/src/acp.rs plan_review_keep_planning")
+	return ElicitationResponse{
+		Action: ElicitationResponseAccept,
+		Content: map[string]ElicitationValue{
+			PlanReviewAction: ElicitationValueString("keep_planning"),
+		},
+	}
 }
 
 func NormalizedPlanReview(id string, value any) ElicitationRequest {
-	panic("unported: mj-core/src/acp.rs normalized_plan_review")
+	plan, ok := NestedString(value, []string{"plan", "plan_content", "planContent"})
+	if !ok {
+		plan = "The agent did not provide plan text in its review request."
+	}
+	str := func(s string) *string { return &s }
+	maxLength := 16 * 1024
+	return ElicitationRequest{
+		ID:          id,
+		Title:       str("Plan review"),
+		Message:     PlanReviewMessagePrefix + plan,
+		Description: str("Choose what Mjolnir should tell the planning harness."),
+		Fields: []ElicitationField{
+			{
+				ID:          PlanReviewAction,
+				Title:       "Decision",
+				Description: str("Implement approves the plan; revise sends the feedback below."),
+				Required:    true,
+				Kind: ElicitationFieldKindSingleSelect{
+					Options: []ElicitationOption{
+						{Value: "implement", Title: "Implement", Description: str("Approve and continue with implementation")},
+						{Value: "revise", Title: "Revise", Description: str("Keep planning and incorporate feedback")},
+						{Value: "keep_planning", Title: "Keep planning", Description: str("Decline this plan without leaving plan mode")},
+						{Value: "exit", Title: "Exit plan mode", Description: str("Abandon this review and return to normal mode")},
+					},
+					Default: str("keep_planning"),
+				},
+			},
+			{
+				ID:                 PlanReviewFeedback,
+				Title:              "Revision feedback",
+				Description:        str("Describe what the agent should change."),
+				CustomAnswerFor:    str(PlanReviewAction),
+				CustomAnswerOption: str("revise"),
+				Kind:               ElicitationFieldKindText{MaxLength: &maxLength},
+			},
+		},
+	}
 }
 
 // NestedString finds the first string under any of keys, searching value
-// depth first. value is a decoded JSON value (map[string]any, []any, ...).
+// depth first. value is a decoded JSON value (jsonvalue.Object or
+// map[string]any, []any, ...). A jsonvalue.Object is searched in member
+// order, as serde_json's preserve_order map is; a Go map has no order, so its
+// members are searched in sorted key order.
 func NestedString(value any, keys []string) (string, bool) {
-	panic("unported: mj-core/src/acp.rs nested_string")
+	if _, isObject := agentJSONMembers(value); isObject {
+		for _, key := range keys {
+			member, _ := agentJSONGet(value, key)
+			if found, ok := member.(string); ok {
+				return found, true
+			}
+		}
+		members, _ := agentJSONMembers(value)
+		for _, member := range members {
+			if found, ok := NestedString(member.Value, keys); ok {
+				return found, true
+			}
+		}
+		return "", false
+	}
+	if items, ok := value.([]any); ok {
+		for _, item := range items {
+			if found, ok := NestedString(item, keys); ok {
+				return found, true
+			}
+		}
+	}
+	return "", false
+}
+
+// agentJSONMembers lists the members of a decoded JSON object, in member
+// order for a jsonvalue.Object and sorted key order for a Go map.
+func agentJSONMembers(value any) ([]jsonvalue.Member, bool) {
+	switch value := value.(type) {
+	case jsonvalue.Object:
+		return value, true
+	case map[string]any:
+		names := make([]string, 0, len(value))
+		for name := range value {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		members := make([]jsonvalue.Member, 0, len(names))
+		for _, name := range names {
+			members = append(members, jsonvalue.Member{Key: name, Value: value[name]})
+		}
+		return members, true
+	}
+	return nil, false
+}
+
+// agentJSONGet reads one member of a decoded JSON object.
+func agentJSONGet(value any, key string) (any, bool) {
+	switch value := value.(type) {
+	case jsonvalue.Object:
+		return value.Get(key)
+	case map[string]any:
+		member, ok := value[key]
+		return member, ok
+	}
+	return nil, false
+}
+
+// agentJSONString reads a string member of a decoded JSON object.
+func agentJSONString(value any, key string) (string, bool) {
+	member, _ := agentJSONGet(value, key)
+	text, ok := member.(string)
+	return text, ok
+}
+
+// agentJSONPointer follows a slash-separated path of object keys, as
+// serde_json's Value::pointer does for object members.
+func agentJSONPointer(value any, path ...string) (any, bool) {
+	for _, key := range path {
+		member, ok := agentJSONGet(value, key)
+		if !ok {
+			return nil, false
+		}
+		value = member
+	}
+	return value, true
+}
+
+// sessionConfigSelectChoices flattens a select's ungrouped or grouped
+// options, in advertised order.
+func sessionConfigSelectChoices(options schema.SessionConfigSelectOptions) []schema.SessionConfigSelectOption {
+	switch options := options.(type) {
+	case []schema.SessionConfigSelectOption:
+		return options
+	case []schema.SessionConfigSelectGroup:
+		var flat []schema.SessionConfigSelectOption
+		for _, group := range options {
+			flat = append(flat, group.Options...)
+		}
+		return flat
+	}
+	return nil
 }
 
 // SessionConfigChoices returns every value the harness currently advertises
@@ -90,7 +231,24 @@ func NestedString(value any, keys []string) (string, bool) {
 // Empty when the harness advertises no such option or exposes it as something
 // other than a select, which callers read as "not configurable".
 func SessionConfigChoices(options []schema.SessionConfigOption, key string) []SessionConfigChoice {
-	panic("unported: mj-core/src/acp.rs session_config_choices")
+	option := FindSessionConfigOption(options, key)
+	if option == nil || option.Select == nil {
+		return []SessionConfigChoice{}
+	}
+	choices := []SessionConfigChoice{}
+	for _, choice := range sessionConfigSelectChoices(option.Select.Options) {
+		var description *string
+		if choice.Description != nil {
+			copied := *choice.Description
+			description = &copied
+		}
+		choices = append(choices, SessionConfigChoice{
+			Value:       string(choice.Value),
+			Name:        choice.Name,
+			Description: description,
+		})
+	}
+	return choices
 }
 
 // MissingConfigSelectorRefusal says what to report when the harness
@@ -119,20 +277,74 @@ func MissingConfigSelectorRefusal(harness *HarnessKind, key string) string {
 var EffortOptionIDs = [2]string{"effort", "reasoning_effort"}
 
 func FindSessionConfigOption(options []schema.SessionConfigOption, key string) *schema.SessionConfigOption {
-	panic("unported: mj-core/src/acp.rs find_session_config_option")
+	find := func(matches func(option *schema.SessionConfigOption) bool) *schema.SessionConfigOption {
+		for index := range options {
+			if matches(&options[index]) {
+				return &options[index]
+			}
+		}
+		return nil
+	}
+	hasCategory := func(option *schema.SessionConfigOption, category schema.SessionConfigOptionCategory) bool {
+		return option.Category != nil && *option.Category == category
+	}
+	isEffortID := func(option *schema.SessionConfigOption) bool {
+		return slices.Contains(EffortOptionIDs[:], string(option.ID))
+	}
+	if option := find(func(option *schema.SessionConfigOption) bool { return string(option.ID) == key }); option != nil {
+		return option
+	}
+	switch key {
+	case "model":
+		return find(func(option *schema.SessionConfigOption) bool {
+			return hasCategory(option, schema.SessionConfigOptionCategoryModel) && !isEffortID(option)
+		})
+	case "effort":
+		if option := find(func(option *schema.SessionConfigOption) bool {
+			return hasCategory(option, schema.SessionConfigOptionCategoryThoughtLevel)
+		}); option != nil {
+			return option
+		}
+		return find(isEffortID)
+	case "mode":
+		return find(func(option *schema.SessionConfigOption) bool {
+			return hasCategory(option, schema.SessionConfigOptionCategoryMode)
+		})
+	}
+	return nil
 }
 
 // ExecutionModeOption returns the config option that offers desired: selector
 // when the bridge lists it there, otherwise the bridge's Mode selector.
 func ExecutionModeOption(configOptions []schema.SessionConfigOption, selector *string, desired string) *schema.SessionConfigOption {
-	panic("unported: mj-core/src/acp.rs execution_mode_option")
+	if selector != nil {
+		for index := range configOptions {
+			option := &configOptions[index]
+			if string(option.ID) == *selector && SelectContains(option, desired) {
+				return option
+			}
+		}
+	}
+	for index := range configOptions {
+		option := &configOptions[index]
+		if option.Category != nil && *option.Category == schema.SessionConfigOptionCategoryMode &&
+			SelectContains(option, desired) {
+			return option
+		}
+	}
+	return nil
 }
 
 // SelectContains reports whether the option is a select offering desired.
 // The Rust signature takes the option's SessionConfigKind; acp-go keeps the
 // kind on the option itself.
 func SelectContains(option *schema.SessionConfigOption, desired string) bool {
-	panic("unported: mj-core/src/acp.rs select_contains")
+	if option == nil || option.Select == nil {
+		return false
+	}
+	return slices.ContainsFunc(sessionConfigSelectChoices(option.Select.Options), func(choice schema.SessionConfigSelectOption) bool {
+		return string(choice.Value) == desired
+	})
 }
 
 // SessionUpdateIsSessionState reports current session state, independent of
@@ -226,7 +438,36 @@ func ContextCommandOf(prompt []schema.ContentBlock) (ContextCommand, string, boo
 }
 
 func ContextCommandText(text string) (ContextCommand, string, bool) {
-	panic("unported: mj-core/src/acp.rs context_command_text")
+	text, ok := strings.CutPrefix(strings.TrimSpace(text), "/")
+	if !ok {
+		return 0, "", false
+	}
+	name, args := text, ""
+	if index := strings.IndexFunc(text, unicode.IsSpace); index >= 0 {
+		_, width := utf8.DecodeRuneInString(text[index:])
+		name, args = text[:index], text[index+width:]
+	}
+	var command ContextCommand
+	switch {
+	case strings.EqualFold(name, "clear") && agentIsASCII(name):
+		command = ContextCommandClear
+	case strings.EqualFold(name, "compact") && agentIsASCII(name):
+		command = ContextCommandCompact
+	default:
+		return 0, "", false
+	}
+	return command, strings.TrimSpace(args), true
+}
+
+// agentIsASCII reports whether text is plain ASCII, so strings.EqualFold matches
+// only as Rust's eq_ignore_ascii_case does.
+func agentIsASCII(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 func PromptRequestsCompaction(prompt []schema.ContentBlock) bool {
@@ -239,7 +480,27 @@ func PromptRequestsCompaction(prompt []schema.ContentBlock) bool {
 // letters, digits, `_`, `-` or `:`, so a prompt that opens with a path like
 // `/home/me/file` is a message.
 func PromptIsSlashCommand(prompt []schema.ContentBlock) bool {
-	panic("unported: mj-core/src/acp.rs prompt_is_slash_command")
+	if len(prompt) == 0 || prompt[0].Text == nil {
+		return false
+	}
+	rest, ok := strings.CutPrefix(strings.TrimLeftFunc(prompt[0].Text.Text, unicode.IsSpace), "/")
+	if !ok {
+		return false
+	}
+	name := rest
+	if index := strings.IndexFunc(rest, unicode.IsSpace); index >= 0 {
+		name = rest[:index]
+	}
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !(c < utf8.RuneSelf && (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9')) &&
+			c != '_' && c != '-' && c != ':' {
+			return false
+		}
+	}
+	return true
 }
 
 // SteeringTextContext returns prompt text that can be represented faithfully
@@ -297,7 +558,73 @@ const CodexThreadNotFoundMessage = "thread not found: "
 // it can never degrade into silently replacing a native session that still
 // exists.
 func ErrorReportsMissingNativeSession(harness HarnessKind, nativeSessionID string, err error) bool {
-	panic("unported: mj-core/src/acp.rs error_reports_missing_native_session")
+	switch harness {
+	case HarnessKindCodex:
+		text := agentErrorChainText(err)
+		return strings.Contains(text, CodexMissingThreadMessage) ||
+			strings.Contains(text, CodexThreadNotFoundMessage+nativeSessionID)
+	case HarnessKindClaude:
+		// Claude Code writes a session's transcript at the first prompt, so a
+		// session that was opened and never prompted does not exist to resume.
+		// `@agentclientprotocol/claude-agent-acp` answers the ACP "resource not
+		// found" error naming the session in its data: `sessionId` from 0.99,
+		// `uri` before. Requiring the session being resumed means an unrelated
+		// missing resource can never be read as a missing session.
+		for _, cause := range agentErrorChain(err) {
+			rpc, ok := cause.(*acp.RPCError)
+			if !ok || rpc.Code != acp.ErrorCodeResourceNotFound || len(rpc.Data) == 0 {
+				continue
+			}
+			var data map[string]any
+			if json.Unmarshal(rpc.Data, &data) != nil {
+				continue
+			}
+			for _, key := range []string{"sessionId", "uri"} {
+				if named, ok := data[key].(string); ok && named == nativeSessionID {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// dsh-acp writes a session's record at `session/new`, before its first
+	// prompt, so a missing one is a real failure.
+	return false
+}
+
+// agentErrorChain lists err and every error it wraps, depth first, as
+// anyhow's chain() walks the sources of an error.
+func agentErrorChain(err error) []error {
+	var chain []error
+	var walk func(err error)
+	walk = func(err error) {
+		if err == nil {
+			return
+		}
+		chain = append(chain, err)
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() error }:
+			walk(wrapped.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, inner := range wrapped.Unwrap() {
+				walk(inner)
+			}
+		}
+	}
+	walk(err)
+	return chain
+}
+
+// agentErrorChainText renders err as anyhow's `{:#}` does, including the data
+// of an ACP error in the chain, which the Rust ACP error's Display carries
+// and acp-go's does not.
+func agentErrorChainText(err error) string {
+	text := err.Error()
+	var rpc *acp.RPCError
+	if errors.As(err, &rpc) && len(rpc.Data) > 0 {
+		text += ": " + string(rpc.Data)
+	}
+	return text
 }
 
 // AcceptedSessionConfig: only model and reasoning effort survive a bridge
@@ -876,6 +1203,30 @@ func (v RuntimeEventCommandInterrupted) MarshalJSON() ([]byte, error) {
 	return agentTaggedJSON("type", "command_interrupted", body(v))
 }
 
+// UnmarshalJSON mirrors Rust's #[serde(default)] on reason: events written
+// before outcome reasons existed decode as LegacyUnclassified.
+func (v *RuntimeEventCommandRejected) UnmarshalJSON(data []byte) error {
+	type body RuntimeEventCommandRejected
+	b := body{Reason: OutcomeReasonLegacyUnclassified}
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	*v = RuntimeEventCommandRejected(b)
+	return nil
+}
+
+// UnmarshalJSON mirrors Rust's #[serde(default)] on reason: events written
+// before outcome reasons existed decode as LegacyUnclassified.
+func (v *RuntimeEventCommandInterrupted) UnmarshalJSON(data []byte) error {
+	type body RuntimeEventCommandInterrupted
+	b := body{Reason: OutcomeReasonLegacyUnclassified}
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	*v = RuntimeEventCommandInterrupted(b)
+	return nil
+}
+
 func (v RuntimeEventCancelApplied) MarshalJSON() ([]byte, error) {
 	type body RuntimeEventCancelApplied
 	return agentTaggedJSON("type", "cancel_applied", body(v))
@@ -1018,7 +1369,18 @@ type AcpSessionFacts struct {
 }
 
 func AcceptedSessionConfigFromConfiguration(values map[string]string, options []schema.SessionConfigOption) AcceptedSessionConfig {
-	panic("unported: mj-core/src/acp.rs AcceptedSessionConfig::from_configuration")
+	accepted := func(key string) *string {
+		if recorded, ok := values[key]; ok {
+			return &recorded
+		}
+		if option := FindSessionConfigOption(options, key); option != nil {
+			if recorded, ok := values[string(option.ID)]; ok {
+				return &recorded
+			}
+		}
+		return nil
+	}
+	return AcceptedSessionConfig{Model: accepted("model"), Effort: accepted("effort")}
 }
 
 // AcceptedSessionConfigFromArchivedValues returns the accepted pair as an
@@ -1027,11 +1389,54 @@ func AcceptedSessionConfigFromConfiguration(values map[string]string, options []
 // `reasoning_effort`) and no option catalogue, so the known effort ids are
 // read here. values holds decoded JSON values.
 func AcceptedSessionConfigFromArchivedValues(values map[string]any) map[string]string {
-	panic("unported: mj-core/src/acp.rs AcceptedSessionConfig::from_archived_values")
+	read := func(ids []string) (string, bool) {
+		for _, id := range ids {
+			if value, ok := values[id].(string); ok {
+				if strings.TrimSpace(value) != "" {
+					return value, true
+				}
+			}
+		}
+		return "", false
+	}
+	accepted := map[string]string{}
+	if model, ok := read([]string{"model"}); ok {
+		accepted["model"] = model
+	}
+	if effort, ok := read(EffortOptionIDs[:]); ok {
+		accepted["effort"] = effort
+	}
+	return accepted
 }
 
 func (c *AcceptedSessionConfig) Remember(key, value string, options []schema.SessionConfigOption) bool {
-	panic("unported: mj-core/src/acp.rs AcceptedSessionConfig::remember")
+	isSelector := func(canonical string) bool {
+		if key == canonical {
+			return true
+		}
+		option := FindSessionConfigOption(options, canonical)
+		return option != nil && string(option.ID) == key
+	}
+	current := func(canonical string) *string {
+		return ConfigCurrentValue(options, canonical)
+	}
+	switch {
+	case isSelector("model"):
+		c.Model = &value
+		// A model change can reset effort or remove that selector.
+		c.Effort = current("effort")
+	case isSelector("effort"):
+		c.Effort = &value
+		// An effort response may describe the running model by its
+		// transcript ID rather than the selectable alias we accepted.
+		// Only a model selection owns replacing that accepted value.
+		if c.Model == nil {
+			c.Model = current("model")
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 // AcceptedSessionConfigRecordCompleted folds a completed selector command
@@ -1039,13 +1444,40 @@ func (c *AcceptedSessionConfig) Remember(key, value string, options []schema.Ses
 // bridge. Startup advertisements alone must never replace it with the
 // provider's defaults.
 func AcceptedSessionConfigRecordCompleted(values map[string]string, key, value string, options []schema.SessionConfigOption) {
-	panic("unported: mj-core/src/acp.rs AcceptedSessionConfig::record_completed")
+	accepted := AcceptedSessionConfigFromConfiguration(values, options)
+	if !accepted.Remember(key, value, options) {
+		return
+	}
+	for _, canonical := range []string{"model", "effort"} {
+		delete(values, canonical)
+		if option := FindSessionConfigOption(options, canonical); option != nil {
+			delete(values, string(option.ID))
+		}
+	}
+	if accepted.Model != nil {
+		values["model"] = *accepted.Model
+	}
+	if accepted.Effort != nil {
+		values["effort"] = *accepted.Effort
+	}
 }
 
 // AcpSessionFactsFromOperational reads the facts out of one relay
 // operational snapshot.
 func AcpSessionFactsFromOperational(harnessKind HarnessKind, configuration map[string]string, configOptions []schema.SessionConfigOption, modes *schema.SessionModeState) AcpSessionFacts {
-	panic("unported: mj-core/src/acp.rs AcpSessionFacts::from_operational")
+	values := make(map[string]any, len(configuration))
+	for key, value := range configuration {
+		values[key] = value
+	}
+	surface := AcpSessionSurfaceFromConfiguration(values)
+	surface.SetHarnessKind(harnessKind)
+	surface.SetConfigOptions(configOptions)
+	if modes != nil {
+		copied := *modes
+		modes = &copied
+	}
+	surface.SetSessionModes(modes)
+	return AcpSessionFacts{surface: surface}
 }
 
 func (f *AcpSessionFacts) SupportsPlanMode() bool {
@@ -1091,7 +1523,19 @@ func (f *AcpSessionFacts) PlanControl(active bool) (PlanControl, error) {
 // PlanReviewAnswer reads the action and the optional revision feedback out of
 // a plan review response.
 func PlanReviewAnswer(response ElicitationResponse) (string, *string) {
-	panic("unported: mj-core/src/acp.rs plan_review_answer")
+	if response.Action != ElicitationResponseAccept {
+		return "keep_planning", nil
+	}
+	action := "keep_planning"
+	if value, ok := response.Content[PlanReviewAction].(ElicitationValueString); ok {
+		action = string(value)
+	}
+	var feedback *string
+	if value, ok := response.Content[PlanReviewFeedback].(ElicitationValueString); ok && strings.TrimSpace(string(value)) != "" {
+		text := string(value)
+		feedback = &text
+	}
+	return action, feedback
 }
 
 // agentTaggedJSON encodes body as a JSON object and puts tagKey: tag in
@@ -1176,6 +1620,21 @@ func agentDecodeStrict(data []byte, v any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(v)
+}
+
+// agentRequireFields refuses a JSON object that lacks one of names, with
+// serde's "missing field" error. A non-object is left to the decoder.
+func agentRequireFields(data []byte, names ...string) error {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(data, &members) != nil {
+		return nil
+	}
+	for _, name := range names {
+		if _, ok := members[name]; !ok {
+			return fmt.Errorf("missing field `%s`", name)
+		}
+	}
+	return nil
 }
 
 // agentDecodeInto decodes data as the variant T of the sealed interface I.

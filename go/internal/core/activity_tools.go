@@ -17,6 +17,9 @@
 package core
 
 import (
+	"cmp"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/BrokkAi/acp-go/schema"
@@ -83,7 +86,29 @@ func (t *ToolsInFlight) Close(toolCallID string) {
 // Snapshot returns every open call, oldest first, so the first is the one
 // whose age bounds the turn.
 func (t *ToolsInFlight) Snapshot() []InFlightToolCall {
-	panic("unported: mj-core/src/activity/tools.rs ToolsInFlight::snapshot")
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	calls := make([]InFlightToolCall, 0, len(t.entries))
+	for toolCallID, entry := range t.entries {
+		var title *string
+		if entry.title != nil {
+			copied := *entry.title
+			title = &copied
+		}
+		calls = append(calls, InFlightToolCall{
+			ToolCallID:  toolCallID,
+			Title:       title,
+			Status:      entry.status,
+			StartedAtMs: entry.startedAtMs,
+		})
+	}
+	slices.SortFunc(calls, func(left, right InFlightToolCall) int {
+		if order := cmp.Compare(left.StartedAtMs, right.StartedAtMs); order != 0 {
+			return order
+		}
+		return strings.Compare(left.ToolCallID, right.ToolCallID)
+	})
+	return calls
 }
 
 func (t *ToolsInFlight) IsEmpty() bool {
@@ -115,5 +140,52 @@ func (t *ToolsInFlight) Clear() {
 }
 
 func (t *ToolsInFlight) observeAt(update *schema.SessionUpdate, nowMs int64) {
-	panic("unported: mj-core/src/activity/tools.rs ToolsInFlight::observe_at")
+	var toolCallID string
+	var status *schema.ToolCallStatus
+	var title *string
+	switch {
+	case update.ToolCall != nil:
+		toolCallID = string(update.ToolCall.ToolCallID)
+		// An absent status is `pending`, ACP's default.
+		pending := schema.ToolCallStatusPending
+		status = &pending
+		if update.ToolCall.Status != nil {
+			status = update.ToolCall.Status
+		}
+		copied := update.ToolCall.Title
+		title = &copied
+	case update.ToolCallUpdate != nil:
+		toolCallID = string(update.ToolCallUpdate.ToolCallID)
+		status = update.ToolCallUpdate.Status
+	default:
+		return
+	}
+	if status == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if *status != schema.ToolCallStatusPending && *status != schema.ToolCallStatusInProgress {
+		delete(t.entries, toolCallID)
+		return
+	}
+	if t.entries == nil {
+		t.entries = map[string]toolsInFlightEntry{}
+	}
+	entry, ok := t.entries[toolCallID]
+	if !ok {
+		t.entries[toolCallID] = toolsInFlightEntry{title: title, status: *status, startedAtMs: nowMs}
+		return
+	}
+	if title != nil {
+		entry.title = title
+	}
+	// A call that moves from pending to in-progress has begun a new step, so
+	// its clock restarts; repeated updates under an unchanged status are the
+	// same work going on.
+	if entry.status != *status {
+		entry.status = *status
+		entry.startedAtMs = nowMs
+	}
+	t.entries[toolCallID] = entry
 }

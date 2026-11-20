@@ -19,7 +19,10 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // DefaultPrefix is the default prefix key, spelled as it is written in
@@ -115,7 +118,7 @@ func (k KeyCombo) String() string { return FormatKeyCombo(k) }
 
 func parseModifierToken(token string) (Modifiers, bool) {
 	var modifiers Modifiers
-	switch strings.ToLower(token) {
+	switch configASCIILower(token) {
 	case "ctrl", "control":
 		modifiers.Ctrl = true
 	case "alt", "option", "meta":
@@ -131,13 +134,119 @@ func parseModifierToken(token string) (Modifiers, bool) {
 }
 
 func parseKeyName(token string) (KeyName, bool) {
-	panic("unported: mj-core/src/config/keys.rs parse_key_name")
+	lower := configASCIILower(token)
+	switch lower {
+	case "space":
+		return KeyNameChar{' '}, true
+	case "enter", "return":
+		return KeyNameEnter{}, true
+	case "esc", "escape":
+		return KeyNameEsc{}, true
+	case "tab":
+		return KeyNameTab{}, true
+	case "backspace", "bs":
+		return KeyNameBackspace{}, true
+	case "delete":
+		return KeyNameDelete{}, true
+	case "insert":
+		return KeyNameInsert{}, true
+	case "home":
+		return KeyNameHome{}, true
+	case "end":
+		return KeyNameEnd{}, true
+	case "pageup":
+		return KeyNamePageUp{}, true
+	case "pagedown":
+		return KeyNamePageDown{}, true
+	case "left":
+		return KeyNameLeft{}, true
+	case "right":
+		return KeyNameRight{}, true
+	case "up":
+		return KeyNameUp{}, true
+	case "down":
+		return KeyNameDown{}, true
+	case "minus":
+		return KeyNameChar{'-'}, true
+	case "plus":
+		return KeyNameChar{'+'}, true
+	case "comma":
+		return KeyNameChar{','}, true
+	case "period":
+		return KeyNameChar{'.'}, true
+	case "slash":
+		return KeyNameChar{'/'}, true
+	case "backslash":
+		return KeyNameChar{'\\'}, true
+	case "quote":
+		return KeyNameChar{'\''}, true
+	case "semicolon":
+		return KeyNameChar{';'}, true
+	case "colon":
+		return KeyNameChar{':'}, true
+	case "percent":
+		return KeyNameChar{'%'}, true
+	case "ampersand":
+		return KeyNameChar{'&'}, true
+	case "backtick":
+		return KeyNameChar{'`'}, true
+	}
+	// A single character is itself; otherwise only `f1`..`f12` remain.
+	if token == "" {
+		return nil, false
+	}
+	first, size := utf8.DecodeRuneInString(token)
+	if size == len(token) {
+		return KeyNameChar{first}, true
+	}
+	number, ok := strings.CutPrefix(lower, "f")
+	if !ok {
+		return nil, false
+	}
+	value, err := strconv.ParseUint(number, 10, 8)
+	if err != nil || value < 1 || value > 12 {
+		return nil, false
+	}
+	return KeyNameF{uint8(value)}, true
+}
+
+// configASCIILower is Rust's str::to_ascii_lowercase: only ASCII letters
+// change case.
+func configASCIILower(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
 }
 
 // ParseKeyCombo parses one key combination, such as `ctrl+b`, `shift+tab`,
 // `f5` or `?`.
 func ParseKeyCombo(text string) (KeyCombo, bool) {
-	panic("unported: mj-core/src/config/keys.rs parse_key_combo")
+	var modifiers Modifiers
+	key, haveKey := "", false
+	for _, part := range strings.Split(text, "+") {
+		token := strings.TrimSpace(part)
+		if token == "" {
+			return KeyCombo{}, false
+		}
+		if modifier, ok := parseModifierToken(token); ok {
+			modifiers = modifiers.Or(modifier)
+		} else if haveKey {
+			return KeyCombo{}, false
+		} else {
+			key, haveKey = token, true
+		}
+	}
+	if !haveKey {
+		return KeyCombo{}, false
+	}
+	name, ok := parseKeyName(key)
+	if !ok {
+		return KeyCombo{}, false
+	}
+	return NormalizeKeyCombo(KeyCombo{Name: name, Modifiers: modifiers}), true
 }
 
 // NormalizeKeyCombo folds the two spellings a terminal may deliver into one.
@@ -146,7 +255,36 @@ func ParseKeyCombo(text string) (KeyCombo, bool) {
 // on any other character is dropped because the terminal already delivered
 // the shifted symbol itself.
 func NormalizeKeyCombo(combo KeyCombo) KeyCombo {
-	panic("unported: mj-core/src/config/keys.rs normalize_key_combo")
+	if character, ok := combo.Name.(KeyNameChar); ok {
+		if unicode.IsLetter(character.Value) {
+			if unicode.IsUpper(character.Value) {
+				combo.Name = KeyNameChar{unicode.ToLower(character.Value)}
+				combo.Modifiers.Shift = true
+			}
+		} else {
+			combo.Modifiers.Shift = false
+		}
+	}
+	// Legacy terminals share control bytes 0x1c..=0x1f between these
+	// punctuation keys and the number keys. Crossterm decodes the bytes as
+	// numbers; enhanced keyboard protocols can deliver the punctuation
+	// instead. Normalize configuration and events alike so matching and
+	// conflict detection agree across both encodings.
+	if combo.Modifiers.Ctrl {
+		if character, ok := combo.Name.(KeyNameChar); ok {
+			switch character.Value {
+			case '4':
+				combo.Name = KeyNameChar{'\\'}
+			case '5':
+				combo.Name = KeyNameChar{']'}
+			case '6':
+				combo.Name = KeyNameChar{'^'}
+			case '7':
+				combo.Name = KeyNameChar{'_'}
+			}
+		}
+	}
+	return combo
 }
 
 func superLabel() string {
@@ -157,7 +295,44 @@ func superLabel() string {
 }
 
 func keyNameLabel(name KeyName) string {
-	panic("unported: mj-core/src/config/keys.rs key_name_label")
+	switch name := name.(type) {
+	case KeyNameChar:
+		if name.Value == ' ' {
+			return "space"
+		}
+		return strings.ToLower(string(name.Value))
+	case KeyNameEnter:
+		return "enter"
+	case KeyNameEsc:
+		return "esc"
+	case KeyNameTab:
+		return "tab"
+	case KeyNameBackspace:
+		return "backspace"
+	case KeyNameDelete:
+		return "delete"
+	case KeyNameInsert:
+		return "insert"
+	case KeyNameHome:
+		return "home"
+	case KeyNameEnd:
+		return "end"
+	case KeyNamePageUp:
+		return "pageup"
+	case KeyNamePageDown:
+		return "pagedown"
+	case KeyNameLeft:
+		return "left"
+	case KeyNameRight:
+		return "right"
+	case KeyNameUp:
+		return "up"
+	case KeyNameDown:
+		return "down"
+	case KeyNameF:
+		return fmt.Sprintf("f%d", name.Value)
+	}
+	panic(fmt.Sprintf("unknown key name %T", name))
 }
 
 // FormatKeyCombo spells a combination the way config.toml does, so that
@@ -184,7 +359,8 @@ func FormatKeyCombo(combo KeyCombo) string {
 // isUnmodifiedPrintable is a printable character with no modifier but
 // `shift`: plain typing.
 func isUnmodifiedPrintable(combo KeyCombo) bool {
-	panic("unported: mj-core/src/config/keys.rs is_unmodified_printable")
+	character, ok := combo.Name.(KeyNameChar)
+	return ok && !unicode.IsControl(character.Value) && combo.Modifiers.shiftOnly()
 }
 
 // BindingConfig is one binding value: a single key string, or several
@@ -877,7 +1053,61 @@ func DefaultKeybinds() Keybinds {
 // and workspace commands add Alt so they do not replace the composer's
 // Ctrl+H/J/K/M editing keys. Ctrl+B is never bound.
 func SimpleKeybinds() Keybinds {
-	panic("unported: mj-core/src/config/keys.rs simple_keybinds")
+	keys := DefaultKeysConfig()
+	// The router does not arm this prefix in Simple mode. Keeping it outside
+	// the command map lets the ordinary Keybinds representation remain the
+	// single owner of key interpretation.
+	keys.Prefix = "ctrl+f12"
+	keys.Help = BindingConfigFrom("ctrl+f1")
+	keys.Settings = BindingConfigFrom("ctrl+s")
+	keys.Detach = BindingConfigFrom("ctrl+q")
+	keys.NewSession = BindingConfigFrom("ctrl+n")
+	keys.Resume = BindingConfigFrom("ctrl+g")
+	keys.WorkspaceManager = BindingConfigFrom("ctrl+alt+n")
+	keys.FocusWorkspaces = BindingConfigFrom("ctrl+alt+w")
+	keys.NextWorkspace = BindingConfigFrom("ctrl+pagedown")
+	keys.PreviousWorkspace = BindingConfigFrom("ctrl+pageup")
+	keys.SwitchWorkspace = BindingConfigFrom("ctrl+1..9")
+	keys.NextPane = BindingConfigFrom("ctrl+tab")
+	keys.PreviousPane = BindingConfigFrom("ctrl+shift+tab")
+	keys.PaneSize = BindingConfigFrom("ctrl+shift+z")
+	keys.PanePreset = BindingConfigFrom("ctrl+alt+p")
+	keys.Refresh = BindingConfigFrom("ctrl+r")
+	keys.Palette = BindingConfigFrom("ctrl+p")
+	keys.CancelOperation = BindingConfigFrom("ctrl+shift+x")
+	keys.MarkAllRead = BindingConfigFrom("ctrl+alt+a")
+	keys.NextAttention = BindingConfigFrom("ctrl+o")
+	keys.PreviousAttention = BindingConfigFrom("ctrl+alt+o")
+	keys.WebViewer = BindingConfigFrom("ctrl+alt+u")
+	keys.RenameSession = BindingConfigFrom("ctrl+alt+t")
+	keys.ToggleTranscriptRendering = BindingConfigFrom("ctrl+t")
+	keys.ToggleDictation = BindingConfigFrom("ctrl+alt+m")
+	keys.ChangedFiles = BindingConfigFrom("ctrl+d")
+	keys.SplitVertical = BindingConfigFrom("ctrl+alt+v")
+	keys.SplitHorizontal = BindingConfigFrom("ctrl+alt+minus")
+	keys.ClosePane = BindingConfigFrom("ctrl+alt+x")
+	keys.FocusPaneLeft = BindingConfigFrom("ctrl+alt+left")
+	keys.FocusPaneDown = BindingConfigFrom("ctrl+alt+down")
+	keys.FocusPaneUp = BindingConfigFrom("ctrl+alt+up")
+	keys.FocusPaneRight = BindingConfigFrom("ctrl+alt+right")
+	keys.Zoom = BindingConfigFrom("ctrl+alt+z")
+	keys.LastPane = BindingConfigFrom("ctrl+alt+semicolon")
+	keys.ResizeMode = BindingConfigFrom("ctrl+alt+r")
+	keys.SwapPaneLeft = BindingConfigFrom("ctrl+alt+shift+left")
+	keys.SwapPaneDown = BindingConfigFrom("ctrl+alt+shift+down")
+	keys.SwapPaneUp = BindingConfigFrom("ctrl+alt+shift+up")
+	keys.SwapPaneRight = BindingConfigFrom("ctrl+alt+shift+right")
+	keys.SuspendSession = BindingConfigFrom("ctrl+alt+shift+x")
+	keys.RenameWorkspace = BindingConfigFrom("ctrl+alt+shift+w")
+	keys.CloseWorkspace = BindingConfigFrom("ctrl+alt+shift+d")
+	keys.OpenSubagents = BindingConfigFrom("ctrl+alt+shift+a")
+	keys.SessionActions = BindingConfigFrom("ctrl+a")
+	keys.InterruptTurn = BindingConfigFrom("ctrl+x")
+	keybinds, err := keys.Resolve()
+	if err != nil {
+		panic("the simple-mode key bindings resolve without conflicts: " + err.Error())
+	}
+	return keybinds
 }
 
 func keyError(field, raw string, reason any) error {
@@ -887,7 +1117,24 @@ func keyError(field, raw string, reason any) error {
 // parseRangeModifiers is the modifiers of a `1..9` range form, such as `1..9`
 // itself or `ctrl+1..9`.
 func parseRangeModifiers(text string) (Modifiers, bool) {
-	panic("unported: mj-core/src/config/keys.rs parse_range_modifiers")
+	var modifiers Modifiers
+	sawRange := false
+	for _, part := range strings.Split(text, "+") {
+		token := strings.TrimSpace(part)
+		if token == "1..9" {
+			if sawRange {
+				return Modifiers{}, false
+			}
+			sawRange = true
+			continue
+		}
+		modifier, ok := parseModifierToken(token)
+		if !ok {
+			return Modifiers{}, false
+		}
+		modifiers = modifiers.Or(modifier)
+	}
+	return modifiers, sawRange
 }
 
 // Resolve turns the configured strings into the bindings the interface uses.
@@ -895,7 +1142,79 @@ func parseRangeModifiers(text string) (Modifiers, bool) {
 // Every failure is a configuration error, except that a binding the user
 // wrote silently displaces a default binding on the same key.
 func (k KeysConfig) Resolve() (Keybinds, error) {
-	panic("unported: mj-core/src/config/keys.rs KeysConfig::resolve")
+	prefix, ok := ParseKeyCombo(k.Prefix)
+	if !ok {
+		return Keybinds{}, keyError("prefix", k.Prefix, "not a valid key combination")
+	}
+	modified := prefix.Modifiers.Ctrl || prefix.Modifiers.Alt || prefix.Modifiers.Super
+	if _, function := prefix.Name.(KeyNameF); !modified && !function {
+		return Keybinds{}, keyError("prefix", k.Prefix,
+			"the prefix must use ctrl, alt or super, or be a function key")
+	}
+
+	defaults := DefaultKeysConfig()
+	actions := map[KeyAction][]Binding{}
+	type claimKey struct {
+		trigger Trigger
+		combo   KeyCombo
+	}
+	type claim struct {
+		action KeyAction
+		isUser bool
+	}
+	// (trigger, combo) -> the action that claimed it, and whether the user
+	// wrote it.
+	claimed := map[claimKey]claim{}
+
+	// User fields first, so a default that collides with them can be dropped.
+	for _, userPass := range []bool{true, false} {
+		for _, action := range KeyActionAll {
+			value := k.Field(action)
+			isUser := !reflect.DeepEqual(value, defaults.Field(action))
+			if isUser != userPass {
+				continue
+			}
+			field := action.FieldName()
+			for _, raw := range value.Entries() {
+				trigger, body := TriggerDirect, raw
+				if rest, ok := strings.CutPrefix(raw, "prefix+"); ok {
+					trigger, body = TriggerPrefix, rest
+				}
+				combos, err := expandEntry(action, field, raw, body)
+				if err != nil {
+					return Keybinds{}, err
+				}
+				for _, expanded := range combos {
+					if err := checkCombo(field, raw, trigger, expanded.Combo, prefix); err != nil {
+						return Keybinds{}, err
+					}
+					key := claimKey{trigger, expanded.Combo}
+					if existing, ok := claimed[key]; ok {
+						// A default yields to whatever the user bound.
+						if existing.isUser && !isUser {
+							continue
+						}
+						// Help is a saved compatibility name for Palette; the
+						// same chord on both fields is one binding.
+						if existing.action == KeyActionHelp && action == KeyActionPalette ||
+							existing.action == KeyActionPalette && action == KeyActionHelp {
+							continue
+						}
+						return Keybinds{}, keyError(field, raw,
+							"already bound by keys."+existing.action.FieldName())
+					}
+					claimed[key] = claim{action, isUser}
+					actions[action] = append(actions[action], Binding{
+						Trigger: trigger,
+						Combo:   expanded.Combo,
+						Index:   expanded.Index,
+					})
+				}
+			}
+		}
+	}
+
+	return Keybinds{Prefix: prefix, actions: actions}, nil
 }
 
 // expandedCombo is one combination an entry stands for, with its range slot.
@@ -907,9 +1226,46 @@ type expandedCombo struct {
 // expandEntry is the combinations one entry stands for: one, or the nine of a
 // `1..9` range.
 func expandEntry(action KeyAction, field, raw, body string) ([]expandedCombo, error) {
-	panic("unported: mj-core/src/config/keys.rs expand_entry")
+	if modifiers, ok := parseRangeModifiers(body); ok {
+		if action != KeyActionSwitchWorkspace {
+			return nil, keyError(field, raw, "the 1..9 range form is only valid for keys.switch_workspace")
+		}
+		combos := make([]expandedCombo, 0, 9)
+		for number := 1; number <= 9; number++ {
+			index := number - 1
+			combo := NormalizeKeyCombo(NewKeyCombo(KeyNameChar{rune('0' + number)}, modifiers))
+			combos = append(combos, expandedCombo{Combo: combo, Index: &index})
+		}
+		return combos, nil
+	}
+	combo, ok := ParseKeyCombo(body)
+	if !ok {
+		return nil, keyError(field, raw, "not a valid key combination")
+	}
+	return []expandedCombo{{Combo: combo}}, nil
 }
 
 func checkCombo(field, raw string, trigger Trigger, combo, prefix KeyCombo) error {
-	panic("unported: mj-core/src/config/keys.rs check_combo")
+	label := FormatKeyCombo(combo)
+	if trigger == TriggerDirect {
+		if combo == prefix {
+			return keyError(field, raw, "the prefix key cannot also be a direct binding")
+		}
+		if isUnmodifiedPrintable(combo) {
+			return keyError(field, raw, fmt.Sprintf(
+				"a direct binding needs a modifier, because the composer reads %s as text; "+
+					"write \"prefix+%s\" to bind it after the prefix", label, label))
+		}
+		if character, ok := combo.Name.(KeyNameChar); ok && combo.Modifiers == ModifiersCtrl &&
+			(character.Value == 'c' || character.Value == 'v') {
+			return keyError(field, raw, fmt.Sprintf(
+				"%s is reserved for cancel and paste; "+
+					"write \"prefix+%s\" to bind it after the prefix", label, label))
+		}
+	}
+	if trigger == TriggerPrefix && combo == prefix {
+		return keyError(field, raw, fmt.Sprintf(
+			"%s after the prefix sends the literal prefix key and cannot be bound", label))
+	}
+	return nil
 }

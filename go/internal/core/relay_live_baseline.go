@@ -7,6 +7,7 @@ package core
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -103,5 +104,39 @@ func LiveBaselinePageCapacity(protocolVersion uint32, requestID string) (int, er
 // download. Capture is separate so callers can release the relay lock before
 // serialization and encoding.
 func LiveBaselineReply(request RelayRequest, cut *LiveSessionBaseline, download **FrozenSnapshotDownload, requestID string, protocolVersion uint32) (RelayResponsePayload, error) {
-	panic("unported: mj-core/src/relay/live_baseline.rs live_baseline_reply")
+	switch request := request.(type) {
+	case RelayRequestBeginLiveBaseline:
+		if *download != nil {
+			return nil, errors.New("connection already owns a live baseline download")
+		}
+		if cut == nil {
+			return nil, errors.New("live baseline capture is missing")
+		}
+		bytes, err := relayMarshalJSON(cut)
+		if err != nil {
+			return nil, err
+		}
+		*download = NewFrozenSnapshotDownload(bytes)
+		return RelayResponsePayloadLiveBaselineStarted{TotalBytes: uint64(len(bytes))}, nil
+	case RelayRequestReadLiveBaselinePage:
+		capacity, err := LiveBaselinePageCapacity(protocolVersion, requestID)
+		if err != nil {
+			return nil, err
+		}
+		if *download == nil {
+			return nil, errors.New("connection has no live baseline download")
+		}
+		page, err := (*download).Read(request.Offset, capacity)
+		if err != nil {
+			return nil, err
+		}
+		if page.Complete {
+			*download = nil
+		}
+		return RelayResponsePayloadLiveBaselinePage{Page: page}, nil
+	case RelayRequestAbortLiveBaseline:
+		*download = nil
+		return RelayResponsePayloadLiveBaselineAborted{}, nil
+	}
+	return nil, errors.New("not a live baseline download request")
 }

@@ -2,6 +2,16 @@
 
 package core
 
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
+)
+
 type Distribution[T any] struct {
 	Probabilities T `json:"probabilities"`
 }
@@ -116,5 +126,56 @@ var optionalAxes = []string{"attention"}
 // ProbabilitiesParse validates a GLiDE response's answers against the
 // bundled questions and decodes them.
 func ProbabilitiesParse(response any) (Probabilities, error) {
-	panic("unported: mj-core/src/activity/eot_glide/types.rs Probabilities::parse")
+	answers, ok := agentJSONGet(response, "answers")
+	if !ok {
+		return Probabilities{}, errors.New("missing GLiDE answers")
+	}
+	parsed, err := jsonvalue.Parse([]byte(Questions))
+	if err != nil {
+		return Probabilities{}, err
+	}
+	questions, _ := agentJSONMembers(parsed)
+	for _, question := range questions {
+		axis := question.Key
+		if _, present := agentJSONGet(answers, axis); slices.Contains(optionalAxes, axis) && !present {
+			continue
+		}
+		distribution, _ := agentJSONPointer(answers, axis, "probabilities")
+		scores, isObject := agentJSONMembers(distribution)
+		if !isObject {
+			return Probabilities{}, errors.New("missing GLiDE distribution")
+		}
+		criteriaValue, _ := agentJSONGet(question.Value, "criteria")
+		criteria, _ := agentJSONMembers(criteriaValue)
+		valid := len(scores) == len(criteria)
+		for _, criterion := range criteria {
+			if !valid {
+				break
+			}
+			score, present := agentJSONGet(distribution, criterion.Key)
+			probability, isNumber := agentJSONFloat(score)
+			valid = present && isNumber && !math.IsInf(probability, 0) && !math.IsNaN(probability) &&
+				probability >= 0 && probability <= 1
+		}
+		if !valid {
+			return Probabilities{}, fmt.Errorf("invalid GLiDE distribution for %s", axis)
+		}
+		var sum float64
+		for _, score := range scores {
+			probability, _ := agentJSONFloat(score.Value)
+			sum += probability
+		}
+		if math.Abs(sum-1.0) > 0.03 {
+			return Probabilities{}, fmt.Errorf("unnormalized GLiDE distribution for %s", axis)
+		}
+	}
+	data, err := jsonvalue.Marshal(answers)
+	if err != nil {
+		return Probabilities{}, err
+	}
+	var probabilities Probabilities
+	if err := json.Unmarshal(data, &probabilities); err != nil {
+		return Probabilities{}, err
+	}
+	return probabilities, nil
 }

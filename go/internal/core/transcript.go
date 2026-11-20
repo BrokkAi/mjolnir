@@ -20,14 +20,19 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
+	"github.com/BrokkAi/acp-go/schema"
 	acp "github.com/BrokkAi/acp-go/schema/unstable"
 )
 
@@ -99,7 +104,59 @@ func (o *TerminalOutputs[R]) tool(id string, embedded []R, refs []string) {
 
 // ForTool is the output shown under the tool item stableID.
 func (o *TerminalOutputs[R]) ForTool(stableID string) []R {
-	panic("unported: mj-core/src/transcript.rs TerminalOutputs::for_tool")
+	tool, ok := o.tools[stableID]
+	if !ok {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	borrowed := true
+	for _, record := range tool.embedded {
+		id := record.GetTerminalID()
+		if _, dup := seen[id]; dup {
+			borrowed = false
+			break
+		}
+		seen[id] = struct{}{}
+		if _, replaced := o.standalone[id]; replaced {
+			borrowed = false
+			break
+		}
+	}
+	if borrowed {
+		for _, id := range tool.refs {
+			if _, ok := o.standalone[id]; ok {
+				borrowed = false
+				break
+			}
+		}
+	}
+	if borrowed {
+		return tool.embedded
+	}
+	clear(seen)
+	var records []R
+	for _, record := range tool.embedded {
+		id := record.GetTerminalID()
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if standalone, ok := o.standalone[id]; ok {
+			records = append(records, standalone)
+		} else {
+			records = append(records, record)
+		}
+	}
+	for _, id := range tool.refs {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if record, ok := o.standalone[id]; ok {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 func (o *TerminalOutputs[R]) EmbeddedForTool(stableID string) []R {
@@ -219,19 +276,97 @@ func (c *OpaqueToolCall) UnmarshalJSON(data []byte) error {
 
 // Equal is the Rust PartialEq: equal text, or equal values.
 func (c OpaqueToolCall) Equal(other OpaqueToolCall) bool {
-	panic("unported: mj-core/src/transcript.rs OpaqueToolCall::eq")
+	if c.json.Equal(other.json) {
+		return true
+	}
+	return transcriptValueEqual(transcriptParse([]byte(c.json.Text())), transcriptParse([]byte(other.json.Text())))
 }
 
 // OpaqueToolCallFromValue builds the call and its cached metadata from a
 // JSON value.
 func OpaqueToolCallFromValue(value json.RawMessage) OpaqueToolCall {
-	panic("unported: mj-core/src/transcript.rs OpaqueToolCall::from")
+	parsed := transcriptParse(value)
+	text := string(value)
+	if encoded, err := jsonvalue.Marshal(parsed); err == nil {
+		text = string(encoded)
+	}
+	metadata := &toolCallMetadata{terminalIDs: ToolCallTerminalIDs(value)}
+	if status, ok := transcriptGetStr(parsed, "status"); ok {
+		metadata.rawStatus = &status
+	}
+	if id, ok := transcriptGetStr(parsed, "toolCallId"); ok {
+		metadata.id = &id
+	}
+	var decoded acp.ToolCall
+	if err := json.Unmarshal(value, &decoded); err == nil {
+		status := acp.ToolCallStatusPending
+		if decoded.Status != nil {
+			status = *decoded.Status
+		}
+		metadata.typedStatus = &status
+		// The fallback marker is read through the acp module's owner of
+		// the rule, which takes the stable schema's ToolCall.
+		var stable schema.ToolCall
+		if err := json.Unmarshal(value, &stable); err == nil {
+			metadata.fallback = IsFallbackTerminalToolCall(&stable)
+		}
+	}
+	metadata.rawResult = toolCallRawResultOf(parsed)
+	return OpaqueToolCall{json: NewPackedText(text), metadata: metadata}
+}
+
+// toolCallRawResultOf reads the exit code, output length and output digest
+// of a completed call's raw result.
+func toolCallRawResultOf(value any) *toolCallRawResult {
+	status, _ := transcriptGetStr(value, "status")
+	if status != "completed" && status != "failed" {
+		return nil
+	}
+	raw, ok := transcriptGet(value, "rawOutput")
+	if !ok {
+		return nil
+	}
+	exitValue, ok := transcriptGet(raw, "exit_code")
+	if !ok {
+		return nil
+	}
+	exit, ok := transcriptAsU64(exitValue)
+	if !ok || exit > math.MaxUint32 {
+		return nil
+	}
+	output, ok := transcriptGet(raw, "output")
+	if !ok {
+		return nil
+	}
+	switch output := output.(type) {
+	case string:
+		return &toolCallRawResult{exit: uint32(exit), len: len(output), digest: sha256.Sum256([]byte(output))}
+	case []any:
+		hash := sha256.New()
+		for _, value := range output {
+			b, ok := transcriptAsU64(value)
+			if !ok || b > math.MaxUint8 {
+				return nil
+			}
+			hash.Write([]byte{byte(b)})
+		}
+		result := &toolCallRawResult{exit: uint32(exit), len: len(output)}
+		copy(result.digest[:], hash.Sum(nil))
+		return result
+	}
+	return nil
 }
 
 // Edit applies edit to the call's value (in jsonvalue form) and rebuilds the
 // cached metadata from the result.
 func (c *OpaqueToolCall) Edit(edit func(value *any)) {
-	panic("unported: mj-core/src/transcript.rs OpaqueToolCall::edit")
+	value := transcriptParse([]byte(c.json.Text()))
+	edit(&value)
+	encoded, err := jsonvalue.Marshal(value)
+	if err != nil {
+		panic(fmt.Sprintf("edited tool call is not JSON: %v", err))
+	}
+	*c = OpaqueToolCallFromValue(encoded)
 }
 
 func (c OpaqueToolCall) Value() json.RawMessage {
@@ -281,14 +416,44 @@ func (c OpaqueToolCall) IsFallback() bool {
 }
 
 func (c OpaqueToolCall) MatchesRawResult(record *TerminalOutputRecord, digest *[32]byte) bool {
-	panic("unported: mj-core/src/transcript.rs OpaqueToolCall::matches_raw_result")
+	if c.metadata == nil || c.metadata.rawResult == nil {
+		return false
+	}
+	result := c.metadata.rawResult
+	return record.ExitCode != nil && *record.ExitCode == result.exit && record.Signal == nil &&
+		record.Output.Len() == result.len && result.digest == *digest &&
+		// Keep exact ownership even in the event of a digest collision.
+		record.MatchesToolRawResult(c.Value())
 }
 
 // ToolCallTerminalIDs is the one interpretation of ACP terminal references
 // for opaque metadata and transient JSON readers (for example summaries and
 // relay update fields).
 func ToolCallTerminalIDs(call json.RawMessage) []string {
-	panic("unported: mj-core/src/transcript.rs tool_call_terminal_ids")
+	content, ok := transcriptGet(transcriptParse(call), "content")
+	if !ok {
+		return nil
+	}
+	values, ok := content.([]any)
+	if !ok {
+		return nil
+	}
+	var ids []string
+	for _, value := range values {
+		encoded, err := jsonvalue.Marshal(value)
+		if err != nil {
+			continue
+		}
+		var decoded acp.ToolCallContent
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			slog.Warn("ignoring malformed tool-call content while locating terminal output", "error", err)
+			continue
+		}
+		if decoded.Terminal != nil {
+			ids = append(ids, string(decoded.Terminal.TerminalID))
+		}
+	}
+	return ids
 }
 
 // TranscriptBody is the current value of one logical transcript item. ACP
@@ -503,7 +668,25 @@ func DecodeTranscriptBody(data []byte) (TranscriptBody, error) {
 // key (such as meta) and every other content key (such as annotations) is
 // identical. Anything else is pushed as its own chunk.
 func PushContentChunk(chunks *[]json.RawMessage, chunk json.RawMessage) {
-	panic("unported: mj-core/src/transcript.rs push_content_chunk")
+	if count := len(*chunks); count > 0 {
+		last := transcriptParse((*chunks)[count-1])
+		next := transcriptParse(chunk)
+		if textChunksMergeable(last, next) {
+			content, _ := transcriptGet(next, "content")
+			addition, _ := transcriptGetStr(content, "text")
+			lastObject := last.(jsonvalue.Object)
+			lastMember, _ := lastObject.Get("content")
+			lastContent := lastMember.(jsonvalue.Object)
+			text, _ := lastContent.Get("text")
+			lastContent.Set("text", text.(string)+addition)
+			lastObject.Set("content", lastContent)
+			if encoded, err := jsonvalue.Marshal(lastObject); err == nil {
+				(*chunks)[count-1] = encoded
+				return
+			}
+		}
+	}
+	*chunks = append(*chunks, chunk)
 }
 
 // CoalesceContentChunks collapses runs of per-token text chunks that were
@@ -527,7 +710,44 @@ func CoalesceContentChunks(chunks *[]json.RawMessage) {
 // definition of the merge rule used by both PushContentChunk and
 // CoalesceContentChunks.
 func textChunksMergeable(last, next any) bool {
-	panic("unported: mj-core/src/transcript.rs text_chunks_mergeable")
+	lastObject, lastOK := last.(jsonvalue.Object)
+	nextObject, nextOK := next.(jsonvalue.Object)
+	if !lastOK || !nextOK {
+		return false
+	}
+	lastMember, _ := lastObject.Get("content")
+	nextMember, _ := nextObject.Get("content")
+	lastContent, lastOK := lastMember.(jsonvalue.Object)
+	nextContent, nextOK := nextMember.(jsonvalue.Object)
+	if !lastOK || !nextOK {
+		return false
+	}
+	isText := func(content jsonvalue.Object) bool {
+		kind, _ := transcriptGetStr(content, "type")
+		_, textOK := transcriptGetStr(content, "text")
+		return kind == "text" && textOK
+	}
+	if !isText(lastContent) || !isText(nextContent) {
+		return false
+	}
+	// Every other top-level key, messageId and meta included, must match ...
+	sameExcept := func(a, b jsonvalue.Object, except string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for _, member := range a {
+			if member.Key == except {
+				continue
+			}
+			other, ok := b.Get(member.Key)
+			if !ok || !transcriptValueEqual(member.Value, other) {
+				return false
+			}
+		}
+		return true
+	}
+	// ... as must every other content key, such as annotations.
+	return sameExcept(lastObject, nextObject, "content") && sameExcept(lastContent, nextContent, "text")
 }
 
 // TerminalOutputRecord is what one client-run terminal produced, as hel
@@ -550,7 +770,7 @@ func (r *TerminalOutputRecord) UnmarshalJSON(data []byte) error {
 // RawResultDigest is computed once before comparing one terminal event with
 // the tool window.
 func (r *TerminalOutputRecord) RawResultDigest() [32]byte {
-	panic("unported: mj-core/src/transcript.rs TerminalOutputRecord::raw_result_digest")
+	return sha256.Sum256([]byte(r.Output.Text()))
 }
 
 // ExitedCleanly reports whether the command ended the way a caller asked
@@ -567,7 +787,41 @@ func (r *TerminalOutputRecord) ExitedCleanly() bool {
 // reference, so the exact result is the only ownership information it
 // publishes.
 func (r *TerminalOutputRecord) MatchesToolRawResult(call json.RawMessage) bool {
-	panic("unported: mj-core/src/transcript.rs TerminalOutputRecord::matches_tool_raw_result")
+	value := transcriptParse(call)
+	status, _ := transcriptGetStr(value, "status")
+	if status != "completed" && status != "failed" {
+		return false
+	}
+	raw, ok := transcriptGet(value, "rawOutput")
+	if !ok {
+		return false
+	}
+	exitValue, _ := transcriptGet(raw, "exit_code")
+	exitCode, ok := transcriptAsU64(exitValue)
+	if !ok || exitCode > math.MaxUint32 {
+		return false
+	}
+	if r.ExitCode == nil || uint64(*r.ExitCode) != exitCode || r.Signal != nil {
+		return false
+	}
+	output, _ := transcriptGet(raw, "output")
+	switch output := output.(type) {
+	case []any:
+		if len(output) != r.Output.Len() {
+			return false
+		}
+		text := r.Output.Text()
+		for i, value := range output {
+			b, ok := transcriptAsU64(value)
+			if !ok || b != uint64(text[i]) {
+				return false
+			}
+		}
+		return true
+	case string:
+		return output == r.Output.Text()
+	}
+	return false
 }
 
 // TranscriptItem is one materialized logical transcript item.
@@ -643,11 +897,66 @@ func (t *TranscriptItem) IsTurnStart() bool {
 }
 
 func (t *TranscriptItem) IsNonemptyAgentMessage() bool {
-	panic("unported: mj-core/src/transcript.rs TranscriptItem::is_nonempty_agent_message")
+	agent, ok := t.Body.(TranscriptBodyAgent)
+	if !ok {
+		return false
+	}
+	for _, chunk := range agent.Chunks {
+		content, ok := transcriptGet(transcriptParse(chunk), "content")
+		if !ok {
+			continue
+		}
+		kindValue, ok := transcriptGet(content, "type")
+		if !ok {
+			continue
+		}
+		kind, ok := kindValue.(string)
+		if !ok {
+			continue
+		}
+		if kind != "text" {
+			return true
+		}
+		if text, ok := transcriptGetStr(content, "text"); ok && strings.TrimSpace(text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *TranscriptItem) Validate(through uint64) error {
-	panic("unported: mj-core/src/transcript.rs TranscriptItem::validate")
+	if strings.TrimSpace(t.StableID) == "" {
+		return errors.New("materialized transcript item has an empty stable id")
+	}
+	if t.Position == 0 || t.Position > through {
+		return fmt.Errorf("materialized transcript item %s has invalid position %d at frontier %d",
+			debugString(t.StableID), t.Position, through)
+	}
+	_, agent := t.Body.(TranscriptBodyAgent)
+	switch ordinal := t.LatestContentEventOrdinal; {
+	case agent && ordinal != nil && *ordinal >= t.Position && *ordinal <= through:
+	case agent && ordinal != nil:
+		return fmt.Errorf("materialized agent message %s has invalid latest content ordinal %d at position %d and frontier %d",
+			debugString(t.StableID), *ordinal, t.Position, through)
+	case agent:
+		return fmt.Errorf("materialized agent message %s has no latest content ordinal", debugString(t.StableID))
+	case ordinal != nil:
+		return fmt.Errorf("non-agent transcript item %s has latest content ordinal %d", debugString(t.StableID), *ordinal)
+	}
+	if message, ok := t.Body.(TranscriptBodyMessage); ok {
+		valid := message.Event != nil && strings.TrimSpace(message.Event.Key) != ""
+		if valid {
+			_, hasText := message.Event.MessageText()
+			valid = hasText && t.StableID == MessageItemID(message.Event.Key)
+		}
+		if !valid {
+			return fmt.Errorf("invalid message transcript entry %s", debugString(t.StableID))
+		}
+	}
+	if t.LastChangedAtMs < t.CreatedAtMs {
+		return fmt.Errorf("materialized transcript item %s changed before it was created", debugString(t.StableID))
+	}
+	return nil
 }
 
 // ChatRole is the chat view's role for an entry. It serializes with the Rust
@@ -722,6 +1031,26 @@ func (e *ChatEntry) UnmarshalJSON(data []byte) error {
 	return transcriptStrictDecode(data, (*plain)(e), false)
 }
 
+// MarshalJSON writes the entry as serde does: an empty list is [] even when
+// the Go slice is nil.
+func (e ChatEntry) MarshalJSON() ([]byte, error) {
+	type plain ChatEntry
+	p := plain(e)
+	if p.ToolContent == nil {
+		p.ToolContent = []string{}
+	}
+	if p.ToolDiffstats == nil {
+		p.ToolDiffstats = []string{}
+	}
+	if p.ToolLocations == nil {
+		p.ToolLocations = []string{}
+	}
+	if p.Plan == nil {
+		p.Plan = []PlanLine{}
+	}
+	return transcriptMarshal(p)
+}
+
 // TranscriptSource is a handle on the transcript item an entry was derived
 // from. Unchanged items keep the same pointer from one projection to the
 // next, so a pointer comparison replaces re-reading the item and re-parsing
@@ -741,7 +1070,16 @@ func (s TranscriptSource) Is(item *TranscriptItem) bool {
 func (s TranscriptSource) Equal(TranscriptSource) bool { return true }
 
 func ChatEntryReceivedMessage(seq uint64, event *MailboxEvent) ChatEntry {
-	panic("unported: mj-core/src/transcript.rs ChatEntry::received_message")
+	text, ok := event.MessageText()
+	if !ok {
+		panic("message entry carries a message event")
+	}
+	entry := ChatEntryPlain(seq, ChatRoleMessage, text)
+	id := MessageItemID(event.Key)
+	entry.MessageID = &id
+	incoming := *event
+	entry.IncomingMessage = &incoming
+	return entry
 }
 
 // IsSessionRestart reports whether this entry is the durable marker emitted
@@ -760,7 +1098,16 @@ func (e *ChatEntry) IsSessionRestart() bool {
 // text marked as generated. Authorization evidence asks the same two
 // predicates, so the two cannot disagree.
 func (e *ChatEntry) IsUserAuthored() bool {
-	panic("unported: mj-core/src/transcript.rs ChatEntry::is_user_authored")
+	// An entry without a source is a prompt submitted from this client that
+	// the controller has not yet projected.
+	if e.Role != ChatRoleUser {
+		return false
+	}
+	var stableID *string
+	if e.Source.Item != nil {
+		stableID = &e.Source.Item.StableID
+	}
+	return IsUserAuthoredMessage(stableID, e.Text)
 }
 
 func ChatEntryPlan(seq uint64, plan []PlanLine) ChatEntry {
@@ -788,7 +1135,55 @@ func (e ChatEntry) BoundedForDashboard() ChatEntry {
 }
 
 func (e *ChatEntry) boundDashboardContent() {
-	panic("unported: mj-core/src/transcript.rs ChatEntry::bound_dashboard_content")
+	const textBytes = 64 * 1024
+	const detailBytes = 2 * 1024
+	const detailCount = 8
+
+	if TruncateStringStart(&e.Text, textBytes) {
+		e.LeadingOmitted = true
+	}
+	// Dashboard summaries do not expand tool arguments.
+	e.ToolInput = nil
+	if e.ToolError != nil {
+		toolError := *e.ToolError
+		TruncateStringStart(&toolError, detailBytes)
+		e.ToolError = &toolError
+	}
+	// The slices are copied before they are cut: a Go entry shares its
+	// backing arrays with the value it was copied from.
+	bound := func(values []string) []string {
+		if values == nil {
+			return nil
+		}
+		values = append([]string{}, values[:min(len(values), detailCount)]...)
+		for i := range values {
+			TruncateStringStart(&values[i], detailBytes)
+		}
+		return values
+	}
+	e.ToolContent = bound(e.ToolContent)
+	e.ToolDiffstats = bound(e.ToolDiffstats)
+	e.ToolLocations = bound(e.ToolLocations)
+	if e.ToolSummary != nil {
+		summary := *e.ToolSummary
+		TruncateStringStart(&summary, detailBytes)
+		e.ToolSummary = &summary
+	}
+	if e.ToolPresentation != nil {
+		presentation := *e.ToolPresentation
+		TruncateStringStart(&presentation.Summary, detailBytes)
+		source := presentation.Source.Text()
+		TruncateStringStart(&source, textBytes)
+		presentation.Source = NewPackedText(source)
+		e.ToolPresentation = &presentation
+	}
+	if e.Plan != nil {
+		plan := append([]PlanLine{}, e.Plan[:min(len(e.Plan), detailCount)]...)
+		for i := range plan {
+			TruncateStringStart(&plan[i].Text, detailBytes)
+		}
+		e.Plan = plan
+	}
 }
 
 func (e ChatEntry) WithRecordedAt(recordedAtMs *int64) ChatEntry {
@@ -838,7 +1233,33 @@ func PlanStatusOf(status acp.PlanEntryStatus) PlanStatus {
 // SanitizeTerminalText removes terminal controls while preserving
 // user-visible whitespace.
 func SanitizeTerminalText(text string) string {
-	panic("unported: mj-core/src/transcript.rs sanitize_terminal_text")
+	var sanitized strings.Builder
+	sanitized.Grow(len(text))
+	chars := []rune(text)
+	for i := 0; i < len(chars); {
+		ch := chars[i]
+		i++
+		switch {
+		case ch == '\x1b':
+			// One escape can end at the ESC introducing the next one, so keep
+			// consuming rather than recursing: transcript text is untrusted
+			// and may nest these arbitrarily deep.
+			for {
+				var more bool
+				i, more = consumeEscapeBody(chars, i)
+				if !more {
+					break
+				}
+			}
+		case ch == '\r':
+			if i >= len(chars) || chars[i] != '\n' {
+				sanitized.WriteByte('\n')
+			}
+		case ch == '\n' || ch == '\t' || !unicode.IsControl(ch):
+			sanitized.WriteRune(ch)
+		}
+	}
+	return sanitized.String()
 }
 
 // consumeEscapeBody consumes one escape sequence's body, after its
@@ -850,18 +1271,64 @@ func SanitizeTerminalText(text string) string {
 // the window title) or the second byte of a charset selection would
 // otherwise reach the transcript as visible text.
 func consumeEscapeBody(chars []rune, i int) (int, bool) {
-	panic("unported: mj-core/src/transcript.rs consume_escape_body")
+	if i >= len(chars) {
+		// A trailing ESC with nothing after it.
+		return i, false
+	}
+	ch := chars[i]
+	i++
+	switch ch {
+	// CSI: parameter and intermediate bytes up to a final byte.
+	case '[':
+		for i < len(chars) {
+			final := chars[i]
+			i++
+			if final >= '@' && final <= '~' {
+				break
+			}
+		}
+		return i, false
+	// OSC, DCS, SOS, PM, and APC all carry a string payload.
+	case ']', 'P', 'X', '^', '_':
+		return consumeStringBody(chars, i)
+	// Two-byte sequences: charset selection (ESC ( B), ESC # 8, ESC SP F.
+	case '(', ')', '*', '+', '-', '.', '/', '#', '%', ' ':
+		if i < len(chars) {
+			i++
+		}
+		return i, false
+	}
+	// Everything else is a complete one-byte escape: ESC 7, ESC 8, ESC M,
+	// ESC =.
+	return i, false
 }
 
 // consumeStringBody consumes a string payload, which ends at BEL or at ST
 // (ESC \). A line break or a cancel control aborts it instead, so one
 // malformed OSC cannot swallow the rest of a transcript.
 func consumeStringBody(chars []rune, i int) (int, bool) {
-	panic("unported: mj-core/src/transcript.rs consume_string_body")
+	for i < len(chars) {
+		switch chars[i] {
+		case '\n', '\r', '\x18', '\x1a':
+			return i, false
+		case '\x07':
+			return i + 1, false
+		case '\x1b':
+			return i + 1, true
+		}
+		i++
+	}
+	return i, false
 }
 
 func MaterializedContentText(content []json.RawMessage) string {
-	panic("unported: mj-core/src/transcript.rs materialized_content_text")
+	texts := make([]string, 0, len(content))
+	for _, value := range content {
+		if text := materializedValueText(value); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return StripHiddenPromptContext(strings.Join(texts, "\n"))
 }
 
 // TranscriptRole is what produced a transcript item, as a stable wire name.
@@ -935,11 +1402,35 @@ func MaterializedAgentMessageText(items []TranscriptItem, stableID string) (stri
 }
 
 func MaterializedChunksText(chunks []json.RawMessage) string {
-	panic("unported: mj-core/src/transcript.rs materialized_chunks_text")
+	var text strings.Builder
+	for _, value := range chunks {
+		var chunk acp.ContentChunk
+		if err := json.Unmarshal(value, &chunk); err != nil {
+			slog.Warn("could not decode a stored content chunk", "error", err)
+			continue
+		}
+		if block, ok := ContentBlockText(&chunk.Content); ok {
+			text.WriteString(SanitizeTerminalText(block))
+		}
+	}
+	return text.String()
 }
 
 func materializedValueText(value json.RawMessage) string {
-	panic("unported: mj-core/src/transcript.rs materialized_value_text")
+	var block acp.ContentBlock
+	if err := json.Unmarshal(value, &block); err == nil {
+		if text, ok := ContentBlockText(&block); ok {
+			return SanitizeTerminalText(text)
+		}
+	}
+	if text, ok := transcriptParse(value).(string); ok {
+		return SanitizeTerminalText(text)
+	}
+	encoded, err := transcriptNormalizeValue(value)
+	if err != nil {
+		return SanitizeTerminalText("[content]")
+	}
+	return SanitizeTerminalText(string(encoded))
 }
 
 // ToolStatusOf maps an ACP tool call status. (Rust tool_status; renamed
@@ -957,7 +1448,25 @@ func ToolStatusOf(status acp.ToolCallStatus) ToolStatus {
 }
 
 func ContentBlockText(content *acp.ContentBlock) (string, bool) {
-	panic("unported: mj-core/src/transcript.rs content_block_text")
+	switch {
+	case content.Text != nil:
+		return content.Text.Text, true
+	case content.Image != nil:
+		return "[image]", true
+	case content.Audio != nil:
+		return "[audio]", true
+	case content.ResourceLink != nil:
+		return fmt.Sprintf("[%s](%s)", content.ResourceLink.Name, content.ResourceLink.URI), true
+	case content.Resource != nil:
+		switch resource := content.Resource.Resource; {
+		case resource.TextResourceContents != nil:
+			return resource.TextResourceContents.Text, true
+		case resource.BlobResourceContents != nil:
+			return fmt.Sprintf("[embedded resource: %s]", resource.BlobResourceContents.URI), true
+		}
+		return "[embedded resource]", true
+	}
+	return "", false
 }
 
 // TruncateStringStart keeps the last maximumBytes bytes of value, moving
@@ -1222,4 +1731,105 @@ func transcriptNormalizeValue(data []byte) (json.RawMessage, error) {
 		return nil, err
 	}
 	return jsonvalue.Marshal(value)
+}
+
+// transcriptParse reads a stored JSON value in jsonvalue form; nil when it
+// is not valid JSON.
+func transcriptParse(data []byte) any {
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
+		return nil
+	}
+	return value
+}
+
+// transcriptGet is serde_json::Value::get with a string key: a member of an
+// object, absent for anything else.
+func transcriptGet(value any, key string) (any, bool) {
+	object, ok := value.(jsonvalue.Object)
+	if !ok {
+		return nil, false
+	}
+	return object.Get(key)
+}
+
+// transcriptGetStr is value.get(key).and_then(Value::as_str).
+func transcriptGetStr(value any, key string) (string, bool) {
+	member, ok := transcriptGet(value, key)
+	if !ok {
+		return "", false
+	}
+	text, ok := member.(string)
+	return text, ok
+}
+
+// transcriptValueEqual is serde_json::Value equality on jsonvalue values:
+// object members compare by key whatever their order, as Rust's Map does.
+func transcriptValueEqual(a, b any) bool {
+	switch x := a.(type) {
+	case jsonvalue.Object:
+		y, ok := b.(jsonvalue.Object)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for _, member := range x {
+			other, ok := y.Get(member.Key)
+			if !ok || !transcriptValueEqual(member.Value, other) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !transcriptValueEqual(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	if _, ok := b.(jsonvalue.Object); ok {
+		return false
+	}
+	if _, ok := b.([]any); ok {
+		return false
+	}
+	return jsonvalue.Equal(a, b)
+}
+
+// transcriptValuesEqual compares two Go values as Rust's derived PartialEq
+// compares the types they port: by their serialized JSON values, so stored
+// serde_json::Value members compare as Values.
+func transcriptValuesEqual(a, b any) bool {
+	left, leftErr := transcriptMarshal(a)
+	right, rightErr := transcriptMarshal(b)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return transcriptValueEqual(transcriptParse(left), transcriptParse(right))
+}
+
+// transcriptNonNilValues writes a nil list of values as [], as serde writes
+// an empty Vec.
+func transcriptNonNilValues(values []json.RawMessage) []json.RawMessage {
+	if values == nil {
+		return []json.RawMessage{}
+	}
+	return values
+}
+
+// transcriptAsU64 is serde_json::Value::as_u64.
+func transcriptAsU64(value any) (uint64, bool) {
+	switch number := value.(type) {
+	case int64:
+		if number >= 0 {
+			return uint64(number), true
+		}
+	case uint64:
+		return number, true
+	}
+	return 0, false
 }

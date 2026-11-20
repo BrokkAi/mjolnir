@@ -4,7 +4,14 @@
 
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"unicode/utf8"
+
+	"github.com/klauspost/compress/zstd"
+)
 
 // PackedText holds text either plain or as a zstd frame (level 3) when that
 // is smaller. The zero value is empty plain text.
@@ -25,15 +32,45 @@ func PackedTextPlain(text string) PackedText {
 // NewPackedText compresses text when its zstd frame is smaller (Rust's
 // From<String> and From<&str>).
 func NewPackedText(text string) PackedText {
-	panic("unported: mj-core/src/packed_text.rs From<String> for PackedText (needs a zstd codec)")
+	frame := packedTextEncoder().EncodeAll([]byte(text), nil)
+	if len(frame) < len(text) {
+		return PackedText{frame: frame, length: len(text)}
+	}
+	return PackedTextPlain(text)
 }
 
 func (p PackedText) Text() string {
 	if p.frame == nil {
 		return p.plain
 	}
-	panic("unported: mj-core/src/packed_text.rs PackedText::text (needs a zstd codec)")
+	text, err := packedTextDecoder().DecodeAll(p.frame, make([]byte, 0, p.length))
+	if err != nil {
+		panic(fmt.Sprintf("internally generated zstd frame: %v", err))
+	}
+	if !utf8.Valid(text) {
+		panic("packed UTF-8")
+	}
+	return string(text)
 }
+
+// The shared codec (Rust kept one per thread); EncodeAll and DecodeAll are
+// safe for concurrent use.
+var (
+	packedTextEncoder = sync.OnceValue(func() *zstd.Encoder {
+		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)), zstd.WithEncoderConcurrency(1))
+		if err != nil {
+			panic(fmt.Sprintf("zstd compressor: %v", err))
+		}
+		return encoder
+	})
+	packedTextDecoder = sync.OnceValue(func() *zstd.Decoder {
+		decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
+		if err != nil {
+			panic(fmt.Sprintf("zstd decompressor: %v", err))
+		}
+		return decoder
+	})
+)
 
 func (p PackedText) IntoText() string {
 	return p.Text()

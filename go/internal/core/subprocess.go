@@ -16,16 +16,24 @@
 // Rust's std::process::Command and tokio::process::Command are both
 // *exec.Cmd here; an ExitStatus is the finished command's *os.ProcessState.
 // Async helpers take a context.Context whose cancellation kills the
-// command's process group.
+// command's process group, as dropping the Rust future does.
+//
+// The platform parts live in subprocess_unix.go, subprocess_linux.go,
+// subprocess_darwin.go, subprocess_unix_other.go, subprocess_exitwatch.go
+// and subprocess_windows.go.
 
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,23 +96,6 @@ type ExitWatch struct {
 	pidfd int
 }
 
-// NewExitWatch must be called before the child is reaped, so the pid cannot
-// be reused.
-func NewExitWatch(process *os.Process) *ExitWatch {
-	panic("unported: mj-core/src/subprocess.rs ExitWatch::new")
-}
-
-// Wait sleeps up to timeout, returning early once the child exits. Returns
-// whether the child may have exited.
-func (w *ExitWatch) Wait(timeout time.Duration) bool {
-	panic("unported: mj-core/src/subprocess.rs ExitWatch::wait")
-}
-
-// Close releases the pidfd.
-func (w *ExitWatch) Close() {
-	panic("unported: mj-core/src/subprocess.rs ExitWatch drop")
-}
-
 // ProcessGroupGuard owns a child-created process group through all of its
 // I/O and cleanup. The group can outlive its leader, so reaping the child
 // does not disarm it; Close (Rust's Drop) kills the group.
@@ -124,25 +115,13 @@ func NewProcessGroupGuard(pid int) *ProcessGroupGuard {
 
 // Kill kills the guarded group (Unix only).
 func (g *ProcessGroupGuard) Kill() {
-	panic("unported: mj-core/src/subprocess.rs ProcessGroupGuard::kill")
+	if g.pid != 0 {
+		killProcessGroup(g.pid)
+	}
 }
 
 // Close is the guard's Drop: it kills the group.
 func (g *ProcessGroupGuard) Close() { g.Kill() }
-
-// childJob is a Windows job object that kills its processes when closed.
-type childJob struct {
-	handle uintptr
-}
-
-func childJobAttach(process *os.Process) (*childJob, error) {
-	panic("unported: mj-core/src/subprocess.rs ChildJob::attach")
-}
-
-// close is the job's Drop.
-func (j *childJob) close() {
-	panic("unported: mj-core/src/subprocess.rs ChildJob drop")
-}
 
 // SupervisedChild is a long-lived child whose supervisor owns termination
 // and reaping. Close (Rust's Drop) requests cleanup; Terminate also waits
@@ -162,7 +141,83 @@ type SupervisedChild struct {
 // SupervisedChildSpawn starts command with null stdin/stdout and
 // concurrently captured stderr.
 func SupervisedChildSpawn(command *exec.Cmd) (*SupervisedChild, error) {
-	panic("unported: mj-core/src/subprocess.rs SupervisedChild::spawn")
+	command.Stdin = nil
+	command.Stdout = nil
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("start supervised subprocess: %w", err)
+	}
+	command.Stderr = writer
+	prepareOwnedGroup(command)
+	err = command.Start()
+	_ = writer.Close()
+	if err != nil {
+		_ = reader.Close()
+		return nil, fmt.Errorf("start supervised subprocess: %w", err)
+	}
+	job, err := childJobAttach(command.Process)
+	if err != nil {
+		killAndReap(command)
+		_ = reader.Close()
+		return nil, err
+	}
+	group := NewProcessGroupGuard(command.Process.Pid)
+	child := &SupervisedChild{stop: make(chan struct{}), done: make(chan struct{})}
+	readDone := make(chan error, 1)
+	go func() {
+		defer reader.Close()
+		chunk := make([]byte, 8192)
+		for {
+			count, err := reader.Read(chunk)
+			if count > 0 {
+				child.stderrM.Lock()
+				child.stderr = append(child.stderr, chunk[:count]...)
+				child.stderrM.Unlock()
+			}
+			if errors.Is(err, io.EOF) {
+				readDone <- nil
+				return
+			}
+			if err != nil {
+				readDone <- err
+				return
+			}
+		}
+	}()
+	waited := make(chan waitResult, 1)
+	go func() { waited <- waitForExit(command) }()
+	go func() {
+		var outcome waitResult
+		select {
+		case outcome = <-waited:
+			if outcome.err != nil {
+				outcome.err = fmt.Errorf("wait for supervised subprocess: %w", outcome.err)
+			}
+		case <-child.stop:
+			group.Kill()
+			job.close()
+			if err := command.Process.Kill(); err != nil {
+				slog.Debug("supervised subprocess already exited during termination", "error", err)
+			}
+			outcome = <-waited
+			if outcome.err != nil {
+				outcome.err = fmt.Errorf("reap supervised subprocess: %w", outcome.err)
+			}
+		}
+		group.Close()
+		job.close()
+		if err := <-readDone; err != nil && outcome.err == nil {
+			outcome.err = fmt.Errorf("read supervised stderr: %w", err)
+		}
+		if outcome.err != nil {
+			child.failure = outcome.err.Error()
+			slog.Warn("supervised subprocess failed", "error", child.failure)
+		} else {
+			child.state = outcome.state
+		}
+		close(child.done)
+	}()
+	return child, nil
 }
 
 // Stderr is the diagnostics captured so far, including output received
@@ -246,18 +301,194 @@ type ProcessOutput struct {
 	Stderr []byte
 }
 
+// waitResult is a reaped child's status, or why it could not be waited for.
+type waitResult struct {
+	state *os.ProcessState
+	err   error
+}
+
+// waitForExit waits for command. A nonzero exit or a signal is a status, as
+// Rust's ExitStatus is, not an error.
+func waitForExit(command *exec.Cmd) waitResult {
+	err := command.Wait()
+	var exit *exec.ExitError
+	if err == nil || errors.As(err, &exit) {
+		return waitResult{state: command.ProcessState}
+	}
+	if command.ProcessState != nil {
+		// The child was reaped, but copying its standard streams failed.
+		return waitResult{state: command.ProcessState, err: err}
+	}
+	return waitResult{err: err}
+}
+
+// killAndReap kills a started command and waits for it.
+func killAndReap(command *exec.Cmd) {
+	_ = command.Process.Kill()
+	_ = command.Wait()
+}
+
+// boundedOutput is pipe output owned by the caller: a reader abandoned at
+// the drain deadline leaves what it read so far.
+type boundedOutput struct {
+	mu    sync.Mutex
+	bytes []byte
+}
+
+func (o *boundedOutput) take() []byte {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	taken := o.bytes
+	o.bytes = nil
+	if taken == nil {
+		taken = []byte{}
+	}
+	return taken
+}
+
+// readBounded reads pipe into output until end of file, failing once the
+// output passes max bytes.
+func readBounded(pipe *os.File, output *boundedOutput, max int) error {
+	chunk := make([]byte, 8192)
+	for {
+		count, err := pipe.Read(chunk)
+		if count > 0 {
+			output.mu.Lock()
+			output.bytes = append(output.bytes, chunk[:count]...)
+			over := len(output.bytes) > max
+			output.mu.Unlock()
+			if over {
+				return fmt.Errorf("subprocess output exceeds %d bytes", max)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// outputPipes makes the stdout and stderr pipes of command, whose write ends
+// go to the child and are closed here once it has started.
+type outputPipes struct {
+	stdoutRead, stdoutWrite *os.File
+	stderrRead, stderrWrite *os.File
+}
+
+func newOutputPipes(command *exec.Cmd) (*outputPipes, error) {
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrRead, stderrWrite, err := os.Pipe()
+	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		return nil, err
+	}
+	command.Stdout, command.Stderr = stdoutWrite, stderrWrite
+	return &outputPipes{stdoutRead, stdoutWrite, stderrRead, stderrWrite}, nil
+}
+
+func (p *outputPipes) closeWriteEnds() {
+	_ = p.stdoutWrite.Close()
+	_ = p.stderrWrite.Close()
+}
+
+// closeReadEnds closes our ends, which ends any reader still waiting on a
+// descendant that holds the pipes.
+func (p *outputPipes) closeReadEnds() {
+	_ = p.stdoutRead.Close()
+	_ = p.stderrRead.Close()
+}
+
+// readBoth drains both pipes concurrently; the result is the first failure,
+// or nil once both reached end of file.
+func (p *outputPipes) readBoth(stdout, stderr *boundedOutput, max int) <-chan error {
+	results := make(chan error, 2)
+	go func() { results <- readBounded(p.stdoutRead, stdout, max) }()
+	go func() { results <- readBounded(p.stderrRead, stderr, max) }()
+	done := make(chan error, 1)
+	go func() {
+		first := <-results
+		if first != nil {
+			done <- first
+			return
+		}
+		done <- <-results
+	}()
+	return done
+}
+
 // Capture captures a finite command without an application-imposed deadline
 // or size limit. Cancelling ctx kills its process group; output pipes drain
 // concurrently.
 func Capture(ctx context.Context, command *exec.Cmd) (ProcessOutput, error) {
-	panic("unported: mj-core/src/subprocess.rs capture")
+	var stdout, stderr bytes.Buffer
+	command.Stdin = nil
+	command.Stdout, command.Stderr = &stdout, &stderr
+	prepareOwnedGroup(command)
+	if err := command.Start(); err != nil {
+		return ProcessOutput{}, fmt.Errorf("start captured subprocess: %w", err)
+	}
+	job, err := childJobAttach(command.Process)
+	if err != nil {
+		killAndReap(command)
+		return ProcessOutput{}, err
+	}
+	defer job.close()
+	group := NewProcessGroupGuard(command.Process.Pid)
+	defer group.Close()
+	waited := make(chan waitResult, 1)
+	go func() { waited <- waitForExit(command) }()
+	select {
+	case outcome := <-waited:
+		if outcome.err != nil {
+			return ProcessOutput{}, fmt.Errorf("capture subprocess output: %w", outcome.err)
+		}
+		return ProcessOutput{Status: outcome.state, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, nil
+	case <-ctx.Done():
+		group.Kill()
+		_ = command.Process.Kill()
+		<-waited
+		return ProcessOutput{}, ctx.Err()
+	}
 }
 
 // RunToFileAsync streams combined output straight to a log without a
 // deadline or pipe buffers. Cancelling ctx kills the process group, including
 // package-manager children.
 func RunToFileAsync(ctx context.Context, command *exec.Cmd, output *os.File) (*os.ProcessState, error) {
-	panic("unported: mj-core/src/subprocess.rs run_to_file_async")
+	command.Stdin = nil
+	command.Stdout, command.Stderr = output, output
+	prepareOwnedGroup(command)
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("start logged subprocess: %w", err)
+	}
+	job, err := childJobAttach(command.Process)
+	if err != nil {
+		killAndReap(command)
+		return nil, err
+	}
+	defer job.close()
+	group := NewProcessGroupGuard(command.Process.Pid)
+	defer group.Close()
+	waited := make(chan waitResult, 1)
+	go func() { waited <- waitForExit(command) }()
+	select {
+	case outcome := <-waited:
+		if outcome.err != nil {
+			return nil, fmt.Errorf("wait for logged subprocess: %w", outcome.err)
+		}
+		return outcome.state, nil
+	case <-ctx.Done():
+		group.Kill()
+		_ = command.Process.Kill()
+		<-waited
+		return nil, ctx.Err()
+	}
 }
 
 // RunBounded captures a process with byte/time bounds, draining both pipes
@@ -267,19 +498,188 @@ func RunBounded(ctx context.Context, command *exec.Cmd, maxBytes int, timeout ti
 	return RunBoundedObserved(ctx, command, maxBytes, timeout, func(int) {})
 }
 
+// errSubprocessTimedOut stands for the elapsed deadline of a bounded command.
+var errSubprocessTimedOut = errors.New("subprocess timed out")
+
 // RunBoundedObserved is RunBounded that tells spawned the child's process ID
 // as soon as it exists, before anything is read from it. A caller that must
 // know which processes it started (to tell them from the work it observes)
 // records the ID there.
 func RunBoundedObserved(ctx context.Context, command *exec.Cmd, maxBytes int, timeout time.Duration, spawned func(pid int)) (ProcessOutput, error) {
-	panic("unported: mj-core/src/subprocess.rs run_bounded_observed")
+	cancellation := PreparationCancellation(ctx)
+	if cancellation.Err() != nil {
+		return ProcessOutput{}, PreparationCancelled{}
+	}
+	command.Stdin = nil
+	pipes, err := newOutputPipes(command)
+	if err != nil {
+		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
+	}
+	prepareOwnedGroup(command)
+	err = command.Start()
+	pipes.closeWriteEnds()
+	defer pipes.closeReadEnds()
+	if err != nil {
+		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
+	}
+	spawned(command.Process.Pid)
+	job, err := childJobAttach(command.Process)
+	if err != nil {
+		killAndReap(command)
+		return ProcessOutput{}, err
+	}
+	group := NewProcessGroupGuard(command.Process.Pid)
+	var stdout, stderr boundedOutput
+	readers := pipes.readBoth(&stdout, &stderr, maxBytes)
+	waited := make(chan waitResult, 1)
+	go func() { waited <- waitForExit(command) }()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	var status *os.ProcessState
+	var failure error
+	reaped := false
+	select {
+	case err := <-readers:
+		if err != nil {
+			failure = err
+			break
+		}
+		select {
+		case outcome := <-waited:
+			reaped = true
+			status, failure = outcome.state, outcome.err
+		case <-deadline.C:
+			failure = errSubprocessTimedOut
+		case <-cancellation.Done():
+			failure = PreparationCancelled{}
+		case <-ctx.Done():
+			failure = ctx.Err()
+		}
+	case outcome := <-waited:
+		// The command completes when its leader exits. A descendant that
+		// keeps the pipes open only gets the drain bound.
+		reaped = true
+		status, failure = outcome.state, outcome.err
+		if failure != nil {
+			break
+		}
+		drain := time.NewTimer(ioDrainTimeout)
+		select {
+		case err := <-readers:
+			failure = err
+		case <-drain.C:
+		case <-deadline.C:
+			failure = errSubprocessTimedOut
+		case <-cancellation.Done():
+			failure = PreparationCancelled{}
+		case <-ctx.Done():
+			failure = ctx.Err()
+		}
+		drain.Stop()
+	case <-deadline.C:
+		failure = errSubprocessTimedOut
+	case <-cancellation.Done():
+		failure = PreparationCancelled{}
+	case <-ctx.Done():
+		failure = ctx.Err()
+	}
+	if failure == nil {
+		// Completed pipes do not authorize a background descendant to keep
+		// running after this bounded command releases ownership.
+		group.Close()
+		job.close()
+		pipes.closeReadEnds()
+		return ProcessOutput{Status: status, Stdout: stdout.take(), Stderr: stderr.take()}, nil
+	}
+	group.Close()
+	job.close()
+	if !reaped {
+		if err := command.Process.Kill(); err != nil {
+			slog.Debug("bounded subprocess already exited during termination", "error", err)
+		}
+		// The operation deadline stops execution, not cleanup ownership.
+		// Callers may remove working files as soon as this returns.
+		if outcome := <-waited; outcome.err != nil && outcome.state == nil {
+			return ProcessOutput{}, fmt.Errorf("reap terminated bounded subprocess: %w", outcome.err)
+		}
+	}
+	return ProcessOutput{}, failure
 }
 
 // RunBoundedWithInput captures a process with byte and time bounds while
 // writing its complete stdin concurrently. This avoids filling either output
 // pipe while a child is still consuming a large input.
 func RunBoundedWithInput(ctx context.Context, command *exec.Cmd, input []byte, maxBytes int, timeout time.Duration) (ProcessOutput, error) {
-	panic("unported: mj-core/src/subprocess.rs run_bounded_with_input")
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
+	}
+	command.Stdin = stdinRead
+	pipes, err := newOutputPipes(command)
+	if err != nil {
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
+	}
+	prepareOwnedGroup(command)
+	err = command.Start()
+	_ = stdinRead.Close()
+	pipes.closeWriteEnds()
+	defer pipes.closeReadEnds()
+	if err != nil {
+		_ = stdinWrite.Close()
+		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
+	}
+	group := NewProcessGroupGuard(command.Process.Pid)
+	var stdout, stderr boundedOutput
+	readers := pipes.readBoth(&stdout, &stderr, maxBytes)
+	written := make(chan error, 1)
+	go func() {
+		_, err := stdinWrite.Write(input)
+		_ = stdinWrite.Close()
+		if err != nil && isBrokenPipe(err) {
+			err = nil
+		}
+		written <- err
+	}()
+	waited := make(chan waitResult, 1)
+	go func() { waited <- waitForExit(command) }()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	var status *os.ProcessState
+	var failure error
+	reaped := false
+	for pending := 3; pending > 0 && failure == nil; pending-- {
+		select {
+		case outcome := <-waited:
+			reaped = true
+			status, failure = outcome.state, outcome.err
+		case err := <-written:
+			failure = err
+		case err := <-readers:
+			failure = err
+		case <-deadline.C:
+			failure = errSubprocessTimedOut
+		case <-ctx.Done():
+			failure = ctx.Err()
+		}
+	}
+	group.Close()
+	if failure == nil {
+		return ProcessOutput{Status: status, Stdout: stdout.take(), Stderr: stderr.take()}, nil
+	}
+	_ = stdinWrite.Close()
+	if !reaped {
+		if err := command.Process.Kill(); err != nil {
+			slog.Debug("bounded subprocess already exited during termination", "error", err)
+		}
+		if outcome := <-waited; outcome.err != nil && outcome.state == nil {
+			return ProcessOutput{}, fmt.Errorf("reap terminated bounded subprocess: %w", outcome.err)
+		}
+	}
+	return ProcessOutput{}, failure
 }
 
 // SpawnDetached launches a long-lived background process with no inherited
@@ -293,47 +693,19 @@ func RunBoundedWithInput(ctx context.Context, command *exec.Cmd, input []byte, m
 // works. Exec errors are reported before this returns; it is not an
 // application-readiness barrier.
 func SpawnDetached(command *exec.Cmd, logPath string) (uint32, error) {
-	panic("unported: mj-core/src/subprocess.rs spawn_detached")
-}
-
-// disinheritStandardHandles keeps this process's standard handles out of
-// every child that is not handed them explicitly (Windows only). A detached
-// child that kept the launcher's stdout pipe would hold it open for its
-// whole life.
-func disinheritStandardHandles() {
-	panic("unported: mj-core/src/subprocess.rs disinherit_standard_handles")
-}
-
-// spawnDetachedUnix double-forks command and reports the grandchild's PID.
-func spawnDetachedUnix(command *exec.Cmd) (uint32, error) {
-	panic("unported: mj-core/src/subprocess.rs spawn_detached_unix")
-}
-
-// inheritedDescriptorLimit is one past the highest descriptor this process
-// can hold, for the last-resort per-fd loop in
-// markInheritedDescriptorsCloexec.
-func inheritedDescriptorLimit() int {
-	panic("unported: mj-core/src/subprocess.rs inherited_descriptor_limit")
-}
-
-// markInheritedDescriptorsCloexec sets FD_CLOEXEC on every descriptor from 3
-// upward, so a detached process keeps nothing of its launcher beyond its
-// stdio.
-func markInheritedDescriptorsCloexec(limit int) {
-	panic("unported: mj-core/src/subprocess.rs mark_inherited_descriptors_cloexec")
-}
-
-// markRangeCloexec marks the whole range in one close_range call (Linux
-// 5.11+).
-func markRangeCloexec() bool {
-	panic("unported: mj-core/src/subprocess.rs mark_range_cloexec")
-}
-
-// markListedDescriptorsCloexec marks the descriptors the kernel lists for
-// this process, and only those. Returns false when the listing was
-// unavailable or incomplete, so the caller must scan by number instead.
-func markListedDescriptorsCloexec() bool {
-	panic("unported: mj-core/src/subprocess.rs mark_listed_descriptors_cloexec")
+	if parent := filepath.Dir(logPath); parent != "" {
+		if err := os.MkdirAll(parent, 0o777); err != nil {
+			return 0, fmt.Errorf("create detached process log directory %s: %w", parent, err)
+		}
+	}
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("open detached process log %s: %w", logPath, err)
+	}
+	defer log.Close()
+	command.Stdin = nil
+	command.Stdout, command.Stderr = log, log
+	return spawnDetachedPlatform(command)
 }
 
 // RaiseOpenFileLimit raises this process's soft open-file limit as far as
@@ -350,18 +722,6 @@ func RaiseOpenFileLimit() {
 	}
 }
 
-func raiseOpenFileLimitImpl() error {
-	panic("unported: mj-core/src/subprocess.rs raise_open_file_limit_impl")
-}
-
-// openFileLimitTarget is the soft limit to ask for given the hard limit.
-// macOS reports an unlimited hard limit but refuses a soft limit above
-// kern.maxfilesperproc. Linux refuses anything above fs.nr_open, which is
-// what an unlimited hard limit really means there.
-func openFileLimitTarget(hard uint64) (uint64, error) {
-	panic("unported: mj-core/src/subprocess.rs open_file_limit_target")
-}
-
 // RunWithInput runs command with input written to its stdin, returning the
 // captured output.
 //
@@ -372,38 +732,95 @@ func openFileLimitTarget(hard uint64) (uint64, error) {
 // real exit status and stderr are more useful to the caller than a generic
 // I/O error, so the output is still returned.
 func RunWithInput(command *exec.Cmd, input []byte) (ProcessOutput, error) {
-	panic("unported: mj-core/src/subprocess.rs run_with_input")
-}
-
-// ForegroundGroup hands the login terminal's foreground to a child's process
-// group and gives it back on Close (Rust's Drop). Unix only.
-type ForegroundGroup struct {
-	tty      *os.File
-	previous int
-}
-
-// foregroundGroup makes group the foreground process group of terminal fd,
-// with SIGTTOU blocked around the call.
-func foregroundGroup(fd uintptr, group int) error {
-	panic("unported: mj-core/src/subprocess.rs foreground_group")
-}
-
-// foregroundGroupPrepare arranges for command's process group to take the
-// login terminal's foreground; nil when there is no controlling terminal.
-func foregroundGroupPrepare(command *exec.Cmd) (*ForegroundGroup, error) {
-	panic("unported: mj-core/src/subprocess.rs ForegroundGroup::prepare")
-}
-
-// Close restores the previous foreground group.
-func (g *ForegroundGroup) Close() {
-	panic("unported: mj-core/src/subprocess.rs ForegroundGroup drop")
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		return ProcessOutput{}, fmt.Errorf("spawn child process: %w", err)
+	}
+	var stdout, stderr bytes.Buffer
+	command.Stdin = stdinRead
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err = command.Start()
+	_ = stdinRead.Close()
+	if err != nil {
+		_ = stdinWrite.Close()
+		return ProcessOutput{}, fmt.Errorf("spawn child process: %w", err)
+	}
+	written := make(chan error, 1)
+	go func() {
+		_, err := stdinWrite.Write(input)
+		// Close stdin whether or not the write succeeded, so a child that is
+		// blocked reading stdin (e.g. waiting for EOF) can proceed.
+		_ = stdinWrite.Close()
+		written <- err
+	}()
+	outcome := waitForExit(command)
+	writeErr := <-written
+	if outcome.err != nil {
+		return ProcessOutput{}, fmt.Errorf("wait for child process: %w", outcome.err)
+	}
+	if writeErr != nil && !isBrokenPipe(writeErr) {
+		// The child exited, or otherwise stopped reading, before we finished
+		// writing: that is a broken pipe and reports the child's status.
+		// Anything else is a real failure.
+		return ProcessOutput{}, fmt.Errorf("write child process stdin: %w", writeErr)
+	}
+	return ProcessOutput{Status: outcome.state, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, nil
 }
 
 // RunCapturingStdoutCancellable captures an interactive answer while
 // retaining cancellation ownership of the command's group. Cancellation
 // finishes cleanup before the caller returns.
 func RunCapturingStdoutCancellable(ctx context.Context, command *exec.Cmd) (ProcessOutput, error) {
-	panic("unported: mj-core/src/subprocess.rs run_capturing_stdout_cancellable")
+	cancellation := PreparationCancellation(ctx)
+	if cancellation.Err() != nil {
+		return ProcessOutput{}, PreparationCancelled{}
+	}
+	var stdout bytes.Buffer
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, &stdout, os.Stderr
+	prepareOwnedGroup(command)
+	foreground, err := foregroundGroupPrepare(command)
+	if err != nil {
+		return ProcessOutput{}, err
+	}
+	if foreground != nil {
+		defer foreground.Close()
+	}
+	if err := command.Start(); err != nil {
+		return ProcessOutput{}, fmt.Errorf("spawn interactive command: %w", err)
+	}
+	job, err := childJobAttach(command.Process)
+	if err != nil {
+		killAndReap(command)
+		return ProcessOutput{}, err
+	}
+	group := NewProcessGroupGuard(command.Process.Pid)
+	waited := make(chan waitResult, 1)
+	go func() { waited <- waitForExit(command) }()
+	var outcome waitResult
+	cancelled := false
+	select {
+	case outcome = <-waited:
+	case <-cancellation.Done():
+		outcome.err, cancelled = PreparationCancelled{}, true
+	case <-ctx.Done():
+		outcome.err, cancelled = ctx.Err(), true
+	}
+	group.Close()
+	job.close()
+	if cancelled {
+		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			<-waited
+			return ProcessOutput{}, fmt.Errorf("terminate interactive command: %w", err)
+		}
+		if reaped := <-waited; reaped.err != nil && reaped.state == nil {
+			return ProcessOutput{}, fmt.Errorf("reap interactive command: %w", reaped.err)
+		}
+		return ProcessOutput{}, outcome.err
+	}
+	if outcome.err != nil {
+		return ProcessOutput{}, outcome.err
+	}
+	return ProcessOutput{Status: outcome.state, Stdout: stdout.Bytes(), Stderr: []byte{}}, nil
 }
 
 // RunCapturingStdout runs a foreground child that talks to the terminal but
@@ -413,48 +830,57 @@ func RunCapturingStdoutCancellable(ctx context.Context, command *exec.Cmd) (Proc
 // machine-readable answer on stdout. Inheriting stdin and stderr keeps the
 // prompts and any typed reply on the real terminal, while stdout is captured.
 func RunCapturingStdout(command *exec.Cmd) (ProcessOutput, error) {
-	panic("unported: mj-core/src/subprocess.rs run_capturing_stdout")
+	var stdout bytes.Buffer
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, &stdout, os.Stderr
+	if err := command.Start(); err != nil {
+		return ProcessOutput{}, fmt.Errorf("spawn child process: %w", err)
+	}
+	outcome := waitForExit(command)
+	if outcome.err != nil {
+		return ProcessOutput{}, fmt.Errorf("wait for child process: %w", outcome.err)
+	}
+	return ProcessOutput{Status: outcome.state, Stdout: stdout.Bytes(), Stderr: []byte{}}, nil
 }
 
 // RunInherited runs a foreground child with no stdin and with its output
 // inherited.
 func RunInherited(command *exec.Cmd) (*os.ProcessState, error) {
-	panic("unported: mj-core/src/subprocess.rs run_inherited")
+	command.Stdin, command.Stdout, command.Stderr = nil, os.Stdout, os.Stderr
+	return runForStatus(command, "run child process")
 }
 
 // RunToFile runs a noninteractive child with stdout sent directly to a file.
 // No payload pipe or in-memory output buffer is created.
 func RunToFile(command *exec.Cmd, output *os.File) (*os.ProcessState, error) {
-	panic("unported: mj-core/src/subprocess.rs run_to_file")
+	command.Stdin, command.Stdout, command.Stderr = nil, output, os.Stderr
+	return runForStatus(command, "run child process with file output")
 }
 
 // RunInteractive transfers the terminal to a foreground child, including its
 // input. Used for process replacement on platforms without exec; the caller
 // must have released its own terminal event reader before waiting here.
 func RunInteractive(command *exec.Cmd) (*os.ProcessState, error) {
-	panic("unported: mj-core/src/subprocess.rs run_interactive")
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return runForStatus(command, "run interactive child process")
 }
 
-// SignalProcessGroup sends signal to the process group led by pid (Unix
-// only).
-//
-// Every caller signals a group it created for its own child, and wants that
-// group gone. ESRCH means it already is, so it reports success rather than a
-// failure. Darwin excludes zombies while counting signalable members of a
-// group and returns EPERM once that count reaches zero, which for a group we
-// own likewise means only exiting descendants remain. Any other error is a
-// real teardown failure and is returned so the caller can report it.
-func SignalProcessGroup(pid int, signal syscall.Signal) error {
-	panic("unported: mj-core/src/subprocess.rs signal_process_group")
+// runForStatus is Rust's Command::status with context.
+func runForStatus(command *exec.Cmd, context string) (*os.ProcessState, error) {
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("%s: %w", context, err)
+	}
+	outcome := waitForExit(command)
+	if outcome.err != nil {
+		return nil, fmt.Errorf("%s: %w", context, outcome.err)
+	}
+	return outcome.state, nil
 }
 
 // TerminateProcessGroup signals a whole process group. Terminals reuse this
 // so process-group termination lives in one place. A group that is already
 // gone counts as success; anything else is logged rather than dropped.
 func TerminateProcessGroup(pid int, signal syscall.Signal) {
-	panic("unported: mj-core/src/subprocess.rs terminate_process_group")
-}
-
-func groupSignalErrorIsIgnorable(err error) bool {
-	panic("unported: mj-core/src/subprocess.rs group_signal_error_is_ignorable")
+	if err := SignalProcessGroup(pid, signal); err != nil {
+		slog.Warn("could not signal process group", "pid", pid, "signal", int(signal), "error", err)
+	}
 }
