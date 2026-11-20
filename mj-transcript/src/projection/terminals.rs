@@ -145,10 +145,7 @@ pub(super) fn replace_or_push_terminal_record(
 }
 
 pub(super) fn fallback_terminal_tool_item_id(terminal_id: &str) -> String {
-    format!(
-        "tool:{}",
-        mj_core::acp::fallback_terminal_tool_call_id(terminal_id)
-    )
+    crate::tool_item_id(mj_core::acp::fallback_terminal_tool_call_id(terminal_id))
 }
 
 pub(super) fn fallback_tool_item(item: &TranscriptItem) -> Result<bool> {

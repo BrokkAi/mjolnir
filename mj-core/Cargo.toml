@@ -82,6 +82,7 @@ memchr.workspace = true
 regex = "1"
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 reqwest.workspace = true
+httpdate = "1"
 ruzstd.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }

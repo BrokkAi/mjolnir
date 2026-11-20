@@ -1020,6 +1020,9 @@ type ChatEntry struct {
 	// ended later on its own, so its completion is not the agent's finished
 	// work.
 	EndedAfterInterrupt bool `json:"ended_after_interrupt,omitempty"`
+	// AwaitingApproval is whether the session has an open permission request
+	// for this row.
+	AwaitingApproval bool `json:"awaiting_approval,omitempty"`
 	// Source is the materialized transcript item this entry was derived
 	// from, when it came from the controller's projection. Provenance only,
 	// so it is neither serialized nor part of the entry's value.

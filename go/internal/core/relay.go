@@ -456,6 +456,12 @@ type RestoredRelaySeed struct {
 	// opened and never used. Seeds from older releases omit the field, which
 	// reads as false: the imported identity counts as used.
 	NativeSessionUnused bool `json:"native_session_unused,omitempty"`
+	// The archived worker's mail, already selected by the restore spec's
+	// queue policy: pending events are absent when the controller admits
+	// them after readiness, and claimed prompt mail is absent when the queue
+	// is dropped. Seeds from older releases omit it. (Rust commit 39722ace5,
+	// after this file's base; ported for mj-worker's relay.)
+	Mailbox *CanonicalMailbox `json:"mailbox,omitempty"`
 }
 
 // UnmarshalJSON refuses unknown fields, as serde's deny_unknown_fields does.
@@ -465,6 +471,17 @@ func (s *RestoredRelaySeed) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	return json.Unmarshal(data, (*plain)(s))
+}
+
+// MarshalJSON writes absent queued prompts as [], as serde writes the Vec;
+// a Rust worker refuses a null queue.
+func (s RestoredRelaySeed) MarshalJSON() ([]byte, error) {
+	type plain RestoredRelaySeed
+	v := plain(s)
+	if v.QueuedPrompts == nil {
+		v.QueuedPrompts = []CanonicalQueuedPrompt{}
+	}
+	return transcriptMarshal(v)
 }
 
 // Validate applies the same frontier checks a canonical session snapshot
@@ -481,6 +498,11 @@ func (s *RestoredRelaySeed) Validate() error {
 			return err
 		}
 		if _, err := CheckpointDecode(value); err != nil {
+			return err
+		}
+	}
+	if s.Mailbox != nil {
+		if err := s.Mailbox.Validate(); err != nil {
 			return err
 		}
 	}

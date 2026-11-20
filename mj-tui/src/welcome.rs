@@ -24,7 +24,7 @@ pub(crate) enum WelcomeAction {
 pub(crate) struct WelcomeDialog {
     lines: Vec<String>,
     status: Option<&'static str>,
-    managed_setup_available: bool,
+    agents_found: Option<bool>,
     scroll: usize,
     max_scroll: Cell<usize>,
     pub(crate) form: RefCell<Dialog<WelcomeAction>>,
@@ -42,7 +42,7 @@ impl DashboardState {
         self.pending_welcome = Some(WelcomeDialog {
             lines: Vec::new(),
             status: Some("Finding your agents…"),
-            managed_setup_available: false,
+            agents_found: None,
             scroll: 0,
             max_scroll: Cell::new(0),
             form: RefCell::new(Dialog::default()),
@@ -63,16 +63,11 @@ impl DashboardState {
         open_welcome(&mut self.mode).or(self.pending_welcome.as_mut())
     }
 
-    pub fn welcome_configured(&mut self, lines: Vec<String>) {
+    pub fn welcome_configured(&mut self, lines: Vec<String>, agents_found: bool) {
         if let Some(dialog) = self.welcome_mut() {
             dialog.lines = lines;
+            dialog.agents_found = Some(agents_found);
             dialog.status = Some("Checking prerequisites…");
-        }
-    }
-
-    pub fn welcome_managed_setup_available(&mut self, available: bool) {
-        if let Some(dialog) = self.welcome_mut() {
-            dialog.managed_setup_available = available;
         }
     }
 
@@ -152,13 +147,31 @@ pub(crate) fn render_welcome(
     if let Some(status) = dialog.status {
         lines.push(Line::styled(status, theme::muted()));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(
-        match dashboard.first_key_label(CommandId::NewSessionWizard) {
-            Some(key) => format!("Press {key} to create a session."),
-            None => "Choose Create session from Commands to start.".to_owned(),
-        },
-    ));
+    match dialog.agents_found {
+        Some(true) => {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(
+                match dashboard.first_key_label(CommandId::NewSessionWizard) {
+                    Some(key) => format!("Press {key} to create a session."),
+                    None => "Choose Create session from Commands to start.".to_owned(),
+                },
+            ));
+        }
+        Some(false) => {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                match dashboard.first_key_label(CommandId::OpenConfig) {
+                    Some(key) => format!(
+                        "Already have an account? Choose Continue and add it in Settings ({key})."
+                    ),
+                    None => "Already have an account? Choose Continue and add it in Settings."
+                        .to_owned(),
+                },
+                theme::muted(),
+            ));
+        }
+        None => {}
+    }
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let width = area.width.saturating_sub(4).min(78);
     let height =
@@ -202,7 +215,7 @@ pub(crate) fn render_welcome(
         inner.height.min(1),
     );
     let mut actions = Vec::new();
-    if dialog.managed_setup_available {
+    if dialog.agents_found == Some(false) {
         actions.push((WelcomeAction::ManagedSetup, "Set up a managed agent", true));
     }
     actions.push((WelcomeAction::Continue, "Continue", true));

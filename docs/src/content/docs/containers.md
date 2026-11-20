@@ -180,7 +180,7 @@ scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:latest --pul
 
 Create a session and choose a local runtime in the target picker. Mjolnir checks
 its availability in the background and blocks unavailable choices. Start a
-stopped service, then press **prefix+shift+r** to recheck. No `mj setup` command is required.
+stopped service, then press **prefix+shift+r** to recheck.
 
 Use **prefix+s Settings → Runtimes** to override the container image,
 resource defaults, or environment, or to add an SSH or EC2 connection. The

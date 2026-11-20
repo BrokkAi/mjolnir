@@ -79,8 +79,7 @@ do not point a test build at your live default instance. Explicit `MJ_CONFIG_DIR
 and `MJ_DATA_DIR` override instance paths, so keep test overrides isolated too.
 
 Bare `mj` opens the workspace dashboard; a fresh instance shows the welcome
-dialog and creates its first workspace from the current directory name. `mj setup`
-is optional. The `brokk-mj-voice-worker` workspace member provides local
+dialog and creates its first workspace from the current directory name. The `brokk-mj-voice-worker` workspace member provides local
 `prefix+m` dictation (`ctrl+b`, then `m`, by default).
 On Debian or Ubuntu, install the ALSA development headers before building it:
 

@@ -46,6 +46,10 @@ pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
 pub const ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES: u32 = 11;
 /// Older readers reject the new canonical notification record.
 pub const ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK: u32 = 12;
+/// Mail the worker accepted and had not delivered at the cut. Older readers
+/// reject the canonical field, so an archive that carries it declares this
+/// schema whatever else it carries.
+pub const ARCHIVE_SCHEMA_VERSION_MAILBOX: u32 = 13;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -318,6 +322,77 @@ pub struct CanonicalSessionSnapshot {
     pub session: CanonicalSessionState,
     pub transcript: Vec<CanonicalTranscriptItem>,
     pub queued_prompts: Vec<CanonicalQueuedPrompt>,
+    /// The worker's mail at the cut, copied from its relay. Absent when it
+    /// had none, and in archives from workers that could not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<CanonicalMailbox>,
+}
+
+/// Mail a worker accepted, as its relay held it at a checkpoint cut. The
+/// daemon marked each event accepted when the worker took it and will not send
+/// it again, so restore must reinstate this for the mail to arrive at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalMailbox {
+    /// Accepted events not yet handed to the agent, in delivery order. Events
+    /// a hook had taken without confirming come first, where returning its
+    /// lease puts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_events: Vec<crate::mailbox::MailboxEvent>,
+    /// Recently delivered event keys and the journal ordinal of their
+    /// delivery. A producer that retries one is acknowledged without a second
+    /// delivery; this is the worker's only deduplication record for mail.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub delivered_event_keys: BTreeMap<String, u64>,
+    /// Mail already rendered into the hidden context of a queued prompt, keyed
+    /// by that prompt's command ID. A worker restart moves an interrupted
+    /// prompt's claim to its recovery prompt, which carries it from then on.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prompt_contexts: BTreeMap<String, String>,
+}
+
+impl CanonicalMailbox {
+    pub fn is_empty(&self) -> bool {
+        self.pending_events.is_empty()
+            && self.delivered_event_keys.is_empty()
+            && self.prompt_contexts.is_empty()
+    }
+
+    /// The shape the worker's own admission guarantees, checked again before
+    /// an archive or seed can become relay state.
+    pub fn validate(&self) -> Result<()> {
+        let mut pending = BTreeSet::new();
+        for event in &self.pending_events {
+            ensure!(
+                !event.key.trim().is_empty()
+                    && !event.source.trim().is_empty()
+                    && event.has_renderable_content(),
+                "archived mailbox event '{}' has no key, source, or content",
+                event.key
+            );
+            ensure!(
+                pending.insert(event.key.as_str()),
+                "archived mailbox event '{}' is pending more than once",
+                event.key
+            );
+            ensure!(
+                !self.delivered_event_keys.contains_key(&event.key),
+                "archived mailbox event '{}' is both pending and delivered",
+                event.key
+            );
+        }
+        ensure!(
+            self.delivered_event_keys.len() <= crate::relay::RELAY_RETRY_ID_RETENTION,
+            "archived mailbox retains more delivered keys than a worker keeps"
+        );
+        for (command_id, context) in &self.prompt_contexts {
+            ensure!(
+                !command_id.trim().is_empty() && !context.trim().is_empty(),
+                "archived mailbox prompt context for '{command_id}' is empty"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl CanonicalSessionSnapshot {
@@ -345,6 +420,7 @@ impl CanonicalSessionSnapshot {
             && self.notification_stack == other.notification_stack
             && self.transcript == other.transcript
             && self.queued_prompts == other.queued_prompts
+            && self.mailbox == other.mailbox
             && self.session.without_activity_watermark()
                 == other.session.without_activity_watermark()
     }
@@ -869,6 +945,18 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
                     prompt.command_id
                 )
             })?;
+        }
+    }
+    if let Some(mailbox) = &snapshot.mailbox {
+        mailbox.validate()?;
+        for command_id in mailbox.prompt_contexts.keys() {
+            ensure!(
+                snapshot
+                    .queued_prompts
+                    .iter()
+                    .any(|prompt| { prompt.command_id == *command_id && prompt.kind.is_prompt() }),
+                "canonical mailbox context belongs to '{command_id}', which is not a queued prompt"
+            );
         }
     }
     Ok(())

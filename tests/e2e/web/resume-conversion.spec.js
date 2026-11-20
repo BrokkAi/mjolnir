@@ -91,7 +91,9 @@ async function mount(page, { answer = { kind: 'converting-raw-checkout', preview
       return json(state.answer);
     }
     if (pathname === '/api/actions') {
-      state.actions.push(route.request().postDataJSON());
+      const body = route.request().postDataJSON();
+      if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
+      state.actions.push(body);
       return route.fulfill({ status: 202, body: '' });
     }
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);

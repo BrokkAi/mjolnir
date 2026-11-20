@@ -207,8 +207,25 @@ fn scoped_repositories(
         };
         // Resolved as discovery resolves a root, so an override's recapture
         // reports the same repository keys the verdict recorded.
-        let root = crate::review::capture::repository_root(git, &directory)
-            .ok_or_else(|| anyhow::anyhow!("{} is not in a Git repository", path.display()))?;
+        let root = crate::review::capture::repository_root(git, &directory).ok_or_else(|| {
+            let named = if path == std::path::Path::new(".") {
+                "the working directory".to_owned()
+            } else {
+                path.display().to_string()
+            };
+            let choices = discovered
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if choices.is_empty() {
+                anyhow::anyhow!("{named} is not in a Git repository")
+            } else {
+                anyhow::anyhow!(
+                    "{named} is not in a Git repository; name one of the workspace repositories: {choices}"
+                )
+            }
+        })?;
         let repository = common(&root)?;
         let Some((_, origin)) = allowed.iter().find(|(common, _)| common == &repository) else {
             anyhow::bail!(

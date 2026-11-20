@@ -1,5 +1,5 @@
 use super::*;
-use mj_client::runtime_feed::RuntimeProjection;
+use mj_client::runtime_feed::{RuntimeMetadata, RuntimeProjection};
 use mj_core::snapshot_map::SnapshotMap;
 
 pub struct RemoteDashboardWorkerPoller {
@@ -20,8 +20,25 @@ pub struct RemoteDashboardWorkerPoller {
     pub quotas: tokio::sync::watch::Receiver<mj_client::quota::QuotaSnapshot>,
     pub profile_capabilities:
         tokio::sync::watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
-    pub config: tokio::sync::watch::Receiver<mj_core::config::Config>,
+    pub config: tokio::sync::watch::Receiver<RuntimeLaunchConfig>,
     pub health: tokio::sync::watch::Receiver<RuntimeFeedHealth>,
+}
+
+/// Configuration and launch verdicts from the same capture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeLaunchConfig {
+    pub config: mj_core::config::Config,
+    pub availability:
+        mj_core::snapshot_map::SharedSnapshot<mj_client::availability::RuntimeAvailability>,
+}
+
+impl From<&RuntimeMetadata> for RuntimeLaunchConfig {
+    fn from(metadata: &RuntimeMetadata) -> Self {
+        Self {
+            config: metadata.installed_config(),
+            availability: metadata.availability.clone(),
+        }
+    }
 }
 
 /// Records and lifecycle ownership must reach the surface in the same frame.
@@ -55,6 +72,7 @@ pub struct RuntimeStateUpdate {
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
     pub failed_launch_retries: std::collections::BTreeSet<String>,
+    pub host_capacities: Vec<mj_client::runtime_feed::RuntimeHostCapacity>,
     /// The daemon storage owner's verdict per target host.
     pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
     /// The daemon's reservation-adjusted container headroom per deployment

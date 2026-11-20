@@ -266,7 +266,7 @@ pub fn stage_worker_files_for(
         profile,
         mj_core::config::HarnessHost::current(),
         &profile_stage,
-        claude_environment_login_present(profile, &launch.environment),
+        &launch.environment,
         executor,
     )?;
     stage_managed_skills(
@@ -746,7 +746,7 @@ pub fn session_launch_config(
             "1".into(),
         );
     }
-    apply_jev_switch(&mut launch, config.jev.enabled);
+    apply_jev_settings(&mut launch, &config.jev);
     launch.agent_mailboxes_enabled = true;
     launch.subagents = session
         .subagents
@@ -815,17 +815,13 @@ pub fn session_launch_config(
                 .collect::<Result<Vec<_>>>()?;
         }
     }
-    // Top-level sessions and ordinary sub-agents may request review. A
-    // reviewer or the oracle never does. The worker derives the review
-    // tools and the push gate from this one value. An ordinary sub-agent
-    // takes its parent's effective review choice.
-    launch.review_trigger = if subagent
-        .as_ref()
-        .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
-    {
+    // Only top-level sessions request review, before they push. A sub-agent
+    // never does: its parent reviews the integrated work. The worker derives
+    // the review tools and the push gate from this one value.
+    launch.review_trigger = if subagent.is_none() {
         if let Err(missing) = state.effective_review(session_id) {
             tracing::warn!(session_id, missing = %missing,
-                "review choice cannot be resolved through the parent chain; launching without review tools");
+                "review choice cannot be resolved; launching without review tools");
         }
         state
             .effective_review_config(&config.review, session_id)

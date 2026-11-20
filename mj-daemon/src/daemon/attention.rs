@@ -2203,7 +2203,10 @@ mod tests {
         let previous = runtime.clone();
         materialized.pending_elicitations[0].id = "tool-approval".into();
         materialized.pending_elicitations[0].tool_permission =
-            Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+            Some(mj_core::elicitation::ToolPermissionForm {
+                skip: true,
+                tool_call_id: None,
+            });
         runtime.transcripts.insert(
             "child".into(),
             mj_client::runtime_feed::SessionTail::of(&materialized, &window, 12),

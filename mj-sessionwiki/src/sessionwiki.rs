@@ -2828,6 +2828,7 @@ fn snapshot_of(
         },
         transcript,
         queued_prompts: Vec::new(),
+        mailbox: None,
     })
 }
 
@@ -3180,6 +3181,7 @@ mod tests {
                         ),
                     ],
                     queued_prompts: Vec::new(),
+                    mailbox: None,
                 },
                 native_artifacts: Vec::new(),
                 repositories: Vec::new(),
@@ -5097,6 +5099,7 @@ mod tests {
                     legacy_muse_auto_review: None,
                     load_balancing_may_consume_credits: false,
                     claude_permission_mode: None,
+                    mjolnir_guardian: true,
                     aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home)
                 },

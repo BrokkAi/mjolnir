@@ -1,9 +1,11 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
 mod auto_afk;
+mod availability;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
+mod jev_limit;
 mod owner;
 mod record_index;
 mod restart;
@@ -249,7 +251,7 @@ pub(crate) enum QuotaRefreshIntent {
 
 struct SurfaceNotice {
     notice: RuntimeNotice,
-    public: bool,
+    public_text: Option<String>,
 }
 
 pub struct RuntimeState {
@@ -271,6 +273,8 @@ pub struct RuntimeState {
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
+    availability: Mutex<availability::Availability>,
+    availability_requested: tokio::sync::Notify,
     recent_launch: tokio::sync::watch::Sender<Option<mj_core::go::RecentLaunch>>,
     recent_launch_update: Mutex<()>,
     committed: Option<
@@ -874,6 +878,7 @@ mod resume;
 mod snapshot;
 pub(crate) mod startup_followup;
 mod state;
+pub(crate) use state::ChildReview;
 mod subagent_park;
 mod support;
 pub(crate) mod ui_requests;

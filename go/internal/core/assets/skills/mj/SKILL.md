@@ -38,8 +38,8 @@ sessions, while daemon startup settings may need a restart; consult the
 reference and do not restart a daemon just to apply an ordinary preference.
 Summarize the edited path and settings and any remaining diagnostics.
 
-To rerun automatic agent and repository discovery, use `mj setup`. For host prerequisites,
-`mj setup instructions --platform linux` or `--platform macos` prints an
+To rerun agent discovery, use **Detect profiles** in Settings. For host prerequisites,
+`mj doctor instructions --platform linux` or `--platform macos` prints an
 agent preparation guide. `mj set-config` changes one live session's harness
 settings (model, effort, etc.); it does not edit the user's mj defaults. In an
 interactive conversation, `/config` lists user-settable settings the harness advertises,

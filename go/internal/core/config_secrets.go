@@ -141,6 +141,51 @@ func UnmarshalEnvironmentValueJSON(data []byte) (EnvironmentValue, error) {
 	return found, nil
 }
 
+// EnvironmentValueTypedReference interprets a TOML inline table or the JSON
+// form Settings displays (Rust's EnvironmentValue::typed_reference). Anything
+// else is a literal, which the caller validates in context: ok is false. With
+// ok, err says the table is not a reference.
+func EnvironmentValueTypedReference(text string) (value EnvironmentValue, ok bool, err error) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "{") {
+		return nil, false, nil
+	}
+	parsed, decodeErr := UnmarshalEnvironmentValueJSON([]byte(text))
+	if decodeErr != nil {
+		parsed = environmentValueFromTOMLTable("value = " + text)
+	}
+	if parsed == nil || !parsed.IsReference() {
+		return nil, true, errors.New("Enter a reference like { from_secret = \"NAME\" } or { from_env = \"NAME\" }.")
+	}
+	return parsed, true, nil
+}
+
+// environmentValueFromTOMLTable is Rust's
+// `toml::from_str::<BTreeMap<String, EnvironmentValue>>(document)` followed
+// by taking `value`: nil unless the document parses and every entry is an
+// environment value.
+func environmentValueFromTOMLTable(document string) EnvironmentValue {
+	table, err := decodeTOMLDocument(document)
+	if err != nil {
+		return nil
+	}
+	var found EnvironmentValue
+	for key, entry := range table {
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return nil
+		}
+		value, err := UnmarshalEnvironmentValueJSON(encoded)
+		if err != nil {
+			return nil
+		}
+		if key == "value" {
+			found = value
+		}
+	}
+	return found
+}
+
 // Environment is an environment table: the entries as written, and the values
 // they stand for. Reading gives the resolved values; serializing gives the
 // entries as written.

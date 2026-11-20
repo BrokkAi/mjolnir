@@ -237,6 +237,7 @@ mod tests {
             },
             transcript,
             queued_prompts: Vec::new(),
+            mailbox: None,
         }
     }
 

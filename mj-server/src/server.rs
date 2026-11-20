@@ -163,7 +163,6 @@ pub struct ServerOptions {
     /// Checks the engine behind each local container target for the launch
     /// options route. Tests replace it so the answer does not depend on the
     /// engines the test host has.
-    engine_checks: Arc<api::LocalEngineChecks>,
     worker_source_check: Option<WorkerSourceCheck>,
     /// The daemon's upgrade admission. A closed gate refuses new requests, and
     /// tells the long requests a shutdown ends that the daemon is being
@@ -228,7 +227,6 @@ impl ServerOptions {
             api_token: String::new(),
             subagent: None,
             preferences_path: mj_core::go::GoPreferences::path(),
-            engine_checks: Arc::new(api::LocalEngineChecks::on_this_host()),
             worker_source_check: None,
             upgrade_gate: mj_controller::upgrade::gate().clone(),
         })
@@ -310,12 +308,6 @@ impl ServerOptions {
     /// of the user's own. Tests point this at a temporary path.
     pub fn set_preferences_path(&mut self, path: PathBuf) {
         self.preferences_path = path;
-    }
-
-    /// Answer local engine checks with `probe` instead of this host's engines.
-    #[cfg(test)]
-    fn set_engine_probe(&mut self, probe: api::EngineProbe) {
-        self.engine_checks = Arc::new(api::LocalEngineChecks::new(probe));
     }
 
     #[cfg(test)]

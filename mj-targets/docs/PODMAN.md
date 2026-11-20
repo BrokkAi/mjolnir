@@ -1,7 +1,7 @@
 # Podman for Mjolnir
 
 This is the operational contract for a host that runs Mjolnir Podman
-targets. For a coding-agent handoff, run `mj setup instructions --platform
+targets. For a coding-agent handoff, run `mj doctor instructions --platform
 linux` (or `macos`) and `mj doctor --json`, then give the instructions page
 plus the output of `mj doctor --json` to the coding agent. The host is ready
 only when every postcondition in the Verification section below passes: for

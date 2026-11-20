@@ -246,6 +246,7 @@ impl RuntimeState {
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
+                                    None,
                                 )
                                 .await?
                         }
@@ -273,6 +274,106 @@ impl RuntimeState {
         }
     }
 
+    pub(super) async fn switch_child_quota_profile(
+        self: &Arc<Self>,
+        child: String,
+        source: String,
+        destination: String,
+        completed_ordinal: u64,
+    ) -> Result<()> {
+        use mj_controller::controller::ParkOutcome;
+        use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+
+        let key = format!("quota-retry-{child}-{completed_ordinal}");
+        let mut start =
+            super::lifecycle::LifecycleStart::request(key.clone(), None, None).automatic();
+        start.deferrable_admission = Some("subagent quota switch");
+        let result = self
+            .admit_lifecycle(
+                child,
+                LifecycleKind::Park,
+                start,
+                move |state, session_id, cancelled, admission| async move {
+                    let controller = blocking(Controller::load).await?;
+                    ensure!(
+                        controller.config.quota_recovery_enabled()
+                            && controller
+                                .state
+                                .sessions
+                                .get(&session_id)
+                                .is_some_and(|record| {
+                                    record.state == SessionState::Running
+                                        && record.last_profile == source
+                                }),
+                        "the sub-agent's quota frontier changed before switching"
+                    );
+                    let parked = controller
+                        .park_subagent_worker(
+                            &admission,
+                            &session_id,
+                            &CancellableProcessExecutor::with_timeout(PARK_TIMEOUT),
+                            &state.session_manager,
+                            Some(completed_ordinal),
+                        )
+                        .await?;
+                    ensure!(
+                        parked == ParkOutcome::Parked,
+                        "the quota-limited sub-agent is no longer idle"
+                    );
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled).with_deadline(UNPARK_TIMEOUT),
+                        state.clone(),
+                        session_id.clone(),
+                    );
+                    executor.begin_resumable_work()?;
+                    let controller = blocking(Controller::load).await?;
+                    controller
+                        .unpark_subagent_worker(
+                            &admission,
+                            &session_id,
+                            Some((&source, &destination)),
+                            &executor,
+                        )
+                        .await?;
+                    let event = MailboxEvent {
+                        key,
+                        source: "mjolnir".into(),
+                        wake: true,
+                        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                        body: MailboxEventBody::PlainText {
+                            text: mj_core::continuation::PROMPT.into(),
+                        },
+                    };
+                    let child = session_id.clone();
+                    blocking(move || {
+                        let json = serde_json::to_string(&event)?;
+                        mj_controller::database::enqueue_mailbox_event(
+                            &event.key, &child, &json, true, false,
+                        )
+                    })
+                    .await?;
+                    // Keep the lifecycle visible until the actor observes
+                    // the replacement. The outbox already owns the retry.
+                    let observed = async {
+                        state.session_manager
+                            .wait_for_session(&session_id, Duration::from_secs(5))
+                            .await?
+                            .sync_now()
+                            .await
+                    }.await;
+                    if let Err(error) = observed {
+                        tracing::warn!(%session_id, %error, "replacement child actor could not synchronize");
+                    }
+                    Ok(DaemonLifecycleResult::Done)
+                },
+            )
+            .await?;
+        let outcome = Self::wait_lifecycle_result(result.clone()).await;
+        self.remove_completed_lifecycle(&result);
+        self.publish_revision();
+        outcome.map(|_| ())
+    }
+
     /// Accept a durable wake and launch the worker. Its actor observes startup
     /// independently, including after daemon replacement.
     pub async fn unpark_subagent(self: &Arc<Self>, child_session_id: String) -> Result<()> {
@@ -298,7 +399,7 @@ impl RuntimeState {
                     );
                     let controller = blocking(Controller::load).await?;
                     controller
-                        .unpark_subagent_worker(&session_admission, &session_id, &executor)
+                        .unpark_subagent_worker(&session_admission, &session_id, None, &executor)
                         .await?;
                     Ok(DaemonLifecycleResult::Done)
                 },
@@ -342,12 +443,17 @@ impl RuntimeState {
         }
     }
 
+    pub(crate) fn child_park_snapshot(&self, child: &str) -> (Option<SessionRecord>, bool) {
+        let owner = self.owner();
+        (
+            owner.controller().state.sessions.get(child).cloned(),
+            owner.subagent_park_running(child),
+        )
+    }
+
     /// Whether a park of this child has started and not finished.
-    pub fn subagent_park_running(&self, child_session_id: &str) -> bool {
-        self.owner()
-            .lifecycle
-            .get(child_session_id)
-            .is_some_and(|active| active.kind == LifecycleKind::Park && active.is_running())
+    pub fn subagent_park_running(&self, child: &str) -> bool {
+        self.owner().subagent_park_running(child)
     }
 
     /// Wait for a park of this child that is still running, if there is one.
@@ -368,5 +474,13 @@ impl RuntimeState {
             }
             self.remove_completed_lifecycle(&pending);
         }
+    }
+}
+
+impl super::owner::RuntimeStateOwner {
+    fn subagent_park_running(&self, child: &str) -> bool {
+        self.lifecycle
+            .get(child)
+            .is_some_and(|active| active.kind == LifecycleKind::Park && active.is_running())
     }
 }

@@ -397,7 +397,7 @@ pub(super) async fn upload_attachment(
 pub(super) async fn action(
     State(state): State<ServerState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     if body.get("action").and_then(serde_json::Value::as_str) == Some("set-container-settings")
         && (body.get("cpus").is_some() || body.get("memory").is_some())
     {
@@ -415,6 +415,34 @@ pub(super) async fn action(
         *remember_launch_choices = true;
     }
     validate_action_live(&state, &action).await?;
+    if let ControllerAction::SetContainerSettings {
+        session_id,
+        resource_allocation,
+        mounts,
+    } = action
+    {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state
+            .client_state_tx
+            .send(ClientStateRequest::ContainerSettings {
+                session_id,
+                resource_allocation,
+                mounts,
+                reply,
+            })
+            .await
+            .map_err(|_| ApiError::controller_unavailable())?;
+        return match answer
+            .await
+            .map_err(|_| ApiError::controller_unavailable())?
+        {
+            Ok(Some(preview)) => Ok(Json(preview).into_response()),
+            Ok(None) => Ok(StatusCode::ACCEPTED.into_response()),
+            Err(outcome) => Err(outcome
+                .rejection()
+                .unwrap_or_else(ApiError::controller_unavailable)),
+        };
+    }
     identify_raw_project(&mut action);
     let action = decode_prompt_images_off_task(action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
@@ -428,7 +456,7 @@ pub(super) async fn action(
         .map_err(|_| ApiError::controller_unavailable())?;
     match outcome.rejection() {
         Some(rejection) => Err(rejection),
-        None => Ok(StatusCode::ACCEPTED),
+        None => Ok(StatusCode::ACCEPTED.into_response()),
     }
 }
 
@@ -480,7 +508,7 @@ pub(super) async fn create_bundle(
             for source in &sources {
                 validate_bundle_source(source)?;
             }
-            request_bundle(&state, String::new(), Some(sources)).await?
+            request_bundle(&state, String::new(), Some(sources), false).await?
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -499,7 +527,7 @@ pub(super) async fn create_quick_bundle(
     source: String,
 ) -> Result<String, ApiError> {
     validate_bundle_source(&source)?;
-    request_bundle(state, source, None).await
+    request_bundle(state, source, None, false).await
 }
 
 fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
@@ -514,10 +542,11 @@ fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn request_bundle(
+pub(super) async fn request_bundle(
     state: &ServerState,
     source: String,
     exact_sources: Option<Vec<String>>,
+    discovered: bool,
 ) -> Result<String, ApiError> {
     let (reply, result) = tokio::sync::oneshot::channel();
     state
@@ -525,6 +554,7 @@ async fn request_bundle(
         .send(BundleRequest {
             source,
             exact_sources,
+            discovered,
             reply,
         })
         .await
@@ -534,8 +564,9 @@ async fn request_bundle(
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|failure| match failure {
             BundleFailure::InvalidSource => ApiError::bad_request(
-                "use a GitHub owner/repository or an existing Git checkout on the controller host",
+                "use a Git URL, GitHub owner/repository, or an existing Git checkout on the controller host",
             ),
+            BundleFailure::Refused(refusal) => ApiError::bad_request(refusal.message().to_owned()),
             BundleFailure::Controller => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the controller could not create the bundle",
@@ -908,12 +939,13 @@ pub(super) async fn prepare_move(
     let preparation = result
         .await
         .map_err(|_| ApiError::controller_unavailable())?
-        .map_err(|error| {
-            tracing::debug!(error = %error, "move preparation was rejected");
-            ApiError::new(
+        .map_err(|refusal| match refusal {
+            Some(refusal) => ApiError::new(StatusCode::CONFLICT, refusal.message().to_owned())
+                .with_code(refusal.code()),
+            None => ApiError::new(
                 StatusCode::CONFLICT,
                 "move preparation was rejected; refresh and try again",
-            )
+            ),
         })?;
     Ok(Json(preparation))
 }

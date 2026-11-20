@@ -172,7 +172,7 @@ mod tests {
                 },
                 agent_mailboxes_enabled: true,
                 subtle_subagents: true,
-                review_tools: matches!(role, None | Some(InstructionRole::Worker)),
+                review_tools: role.is_none(),
                 profile_registration: false,
             });
             let (events, _rx) = mpsc::channel(256);

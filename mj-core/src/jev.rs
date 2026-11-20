@@ -29,10 +29,94 @@ pub fn request_body(evidence: &impl Serialize, direct_questions: Option<Value>) 
 /// Workers re-exec with a cleared environment and may run on another
 /// machine, so the switch travels in the launch configuration.
 pub const DISABLED_ENVIRONMENT: &str = "MJ_JEV_DISABLED";
+pub const FASTINO_KEY_ENVIRONMENT: &str = "MJ_JEV_FASTINO_KEY";
+
+/// Add a key only to hosted Jev requests. Mark the header sensitive for diagnostics.
+pub fn fastino_header(key: &str) -> Result<reqwest::header::HeaderValue> {
+    let mut header =
+        reqwest::header::HeaderValue::from_str(key).context("invalid Fastino key header")?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
+pub const FASTINO_KEY_HEADER: &str = "x-fastino-key";
 
 /// Whether this process was launched with Jev turned off.
 pub fn disabled_by_environment() -> bool {
     std::env::var(DISABLED_ENVIRONMENT).is_ok_and(|value| value == "1")
+}
+
+/// Rate-limit responses that can affect hosted Jev checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitKind {
+    SharedProxy,
+    Fastino,
+}
+
+type RateLimit = (
+    RateLimitKind,
+    std::time::Instant,
+    Option<std::time::Duration>,
+);
+
+static RATE_LIMIT: std::sync::LazyLock<tokio::sync::watch::Sender<Option<RateLimit>>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(None));
+
+pub fn rate_limit_changes() -> tokio::sync::watch::Receiver<Option<RateLimit>> {
+    RATE_LIMIT.subscribe()
+}
+
+pub fn current_rate_limit() -> Option<RateLimitKind> {
+    RATE_LIMIT
+        .borrow()
+        .and_then(|(kind, received_at, retry_after)| {
+            retry_after
+                .is_none_or(|duration| received_at.elapsed() < duration)
+                .then_some(kind)
+        })
+}
+
+/// Observe a successful HTTP response at the headers. Refusals include the
+/// body because the proxy identifies its own limit with the JSON error code.
+pub fn observe_response(
+    status: reqwest::StatusCode,
+    retry_after: Option<&reqwest::header::HeaderValue>,
+    refusal: &[u8],
+) {
+    if status.is_success() {
+        RATE_LIMIT.send_if_modified(|limit| limit.take().is_some());
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        use std::time::{Duration, Instant, SystemTime};
+
+        let kind = if serde_json::from_slice::<Value>(refusal)
+            .is_ok_and(|body| body["error"] == "rate_limited")
+        {
+            RateLimitKind::SharedProxy
+        } else {
+            RateLimitKind::Fastino
+        };
+        let retry_after = retry_after
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                let value = value.trim();
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .map(Duration::from_secs)
+                    .or_else(|| {
+                        let deadline = httpdate::parse_http_date(value).ok()?;
+                        Some(
+                            deadline
+                                .duration_since(SystemTime::now())
+                                .unwrap_or_default(),
+                        )
+                    })
+            })
+            // The shared proxy limit has a 60-second window (services/jev-proxy/wrangler.jsonc).
+            .or_else(|| (kind == RateLimitKind::SharedProxy).then(|| Duration::from_secs(60)));
+        RATE_LIMIT.send_replace(Some((kind, Instant::now(), retry_after)));
+    }
 }
 
 const SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
@@ -406,6 +490,32 @@ use std::io::Read;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latest_jev_http_response_controls_rate_limit_observation() {
+        use reqwest::StatusCode;
+        use reqwest::header::HeaderValue;
+
+        observe_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            None,
+            br#"{"error":"rate_limited"}"#,
+        );
+        assert_eq!(current_rate_limit(), Some(RateLimitKind::SharedProxy));
+        observe_response(StatusCode::TOO_MANY_REQUESTS, None, b"");
+        assert_eq!(current_rate_limit(), Some(RateLimitKind::Fastino));
+        observe_response(StatusCode::SERVICE_UNAVAILABLE, None, b"");
+        assert_eq!(current_rate_limit(), Some(RateLimitKind::Fastino));
+        observe_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(&HeaderValue::from_static("Thu, 01 Jan 1970 00:00:00 GMT")),
+            b"",
+        );
+        assert_eq!(current_rate_limit(), None);
+        observe_response(StatusCode::TOO_MANY_REQUESTS, None, b"");
+        observe_response(StatusCode::NO_CONTENT, None, b"");
+        assert_eq!(current_rate_limit(), None);
+    }
+
     #[test]
     fn exact_input_and_final_action_are_correlated_without_exposing_inputs_in_lists() {
         let dir = tempfile::tempdir().unwrap();

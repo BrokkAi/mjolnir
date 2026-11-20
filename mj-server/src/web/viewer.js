@@ -389,6 +389,8 @@ function selectedWorkspaceId() {
   undefined)?.id;
 }
 
+let availabilityPicker = null;
+
 function applyRoute() {
   cancelSessionPress();
   const previousRoute = route;
@@ -476,6 +478,13 @@ function applyRoute() {
   }
   if (name !== 'move') moveDraft = null;
   if (name === 'settings') syncSettingsRoute();
+  const picker = name === 'new' || (name === 'resume' && (route.sessionId || route.wikiId))
+    ? routeHash(route)
+    : null;
+  if (picker !== availabilityPicker) {
+    availabilityPicker = picker;
+    if (picker) void requestAvailabilityCheck();
+  }
   renderRoute();
   // A screen reader should land at the top of the page it just moved to
   // rather than wherever it happened to be.
@@ -2880,6 +2889,7 @@ let pendingNewPreflight = null;
 let pendingNewPreflightController = null;
 let renderedNewDraft = null;
 let renderedNewSignature = null;
+let renderedNewSteps = [];
 
 function abortPendingNewPreflight() {
   if (newDraft) newDraft.preflighted = false;
@@ -2888,44 +2898,56 @@ function abortPendingNewPreflight() {
   pendingNewPreflight = null;
 }
 
-// The id of the only profile there is to choose, or '' when the Account
-// choice is real. The terminal wizard skips that step the same way.
+async function requestAvailabilityCheck() {
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'check-availability' }),
+    });
+  } catch (error) {
+    announce(`Could not request an availability check: ${error.message}`);
+  }
+}
+
+function availabilityMissing(item) {
+  return item?.availability?.status === 'missing';
+}
+
+function offeredProfiles() {
+  return (snapshot?.profiles || []).filter(profile => !availabilityMissing(profile));
+}
+
+function launchableTargets(targets) {
+  return (targets || []).filter(target => !availabilityMissing(target));
+}
+
+function targetLaunchable(id) {
+  return !availabilityMissing((snapshot?.targets || []).find(target => target.id === id));
+}
+
+function missingProfileNotes() {
+  return (snapshot?.profiles || []).filter(availabilityMissing).map(profile => ({
+    full: `${profile.id}: ${profile.availability.reason}`,
+  }));
+}
+
+function appendAvailabilityNotes(body, notes) {
+  for (const note of notes) {
+    const line = el('p', note.routine ? 'dim' : 'move-warning', note.text || note.full);
+    if (note.text && note.text !== note.full) line.title = note.full;
+    body.append(line);
+  }
+}
+
+// Single choices are filled in when the wizard can skip their step.
 function soleProfileId() {
-  const profiles = snapshot?.profiles || [];
+  const profiles = offeredProfiles();
   return profiles.length === 1 ? profiles[0].id : '';
 }
 
-// The id of the only target the Where-to-run step could offer, or '' when it
-// has a decision to make. This is the terminal wizard's rule (`lone_target`):
-// a target counts unless its runtime is missing or its last check failed; the
-// one left must be a raw host, because a container or EC2 target is sized on
-// that step. A check that has not answered yet still counts.
 function loneNewTargetId() {
-  const offered = launchableTargets(snapshot?.targets).filter(target => target.availability !== 'unavailable');
-  return offered.length === 1 && offered[0].requires_project_directory === true ? offered[0].id : '';
-}
-
-// A target whose runtime (Docker, Podman) is not installed on the daemon's
-// host will never run a session there, so no picker lists it. A host that
-// merely did not answer its last check is a different fact and stays listed.
-function launchableTargets(targets) {
-  return (targets || []).filter(target => !target.runtime_missing);
-}
-
-// What to say beside a target whose host did not answer its last check. The
-// target stays selectable: the check may be out of date, and only the daemon
-// knows whether a launch would work. A missing runtime is filtered out before
-// this is asked, and `unknown` (nobody has checked yet) says nothing.
-function targetStatus(target) {
-  return target?.availability === 'unavailable' && !target.runtime_missing
-    ? 'did not answer its last check'
-    : '';
-}
-
-// Whether a target id may be offered: unknown ids pass, because the server
-// answers for those.
-function targetLaunchable(id) {
-  return !(snapshot?.targets || []).find(target => target.id === id)?.runtime_missing;
+  const targets = launchableTargets(snapshot?.targets);
+  return targets.length === 1 && targets[0].requires_project_directory === true ? targets[0].id : '';
 }
 
 // The daemon's saved default pair, read from `/api/v1/options` (the snapshot
@@ -3156,7 +3178,7 @@ function freshDraft() {
   const draft = {
     workspaceId: selectedWorkspaceId(),
     step: 0,
-    profileId: preferredId(snapshot?.profiles || [], launchDefault?.profile_id),
+    profileId: preferredId(offeredProfiles(), launchDefault?.profile_id),
     targetId: preferredId(launchableTargets(snapshot?.targets), launchDefault?.target_id),
     bundleId: '',
     projectDirectory: '',
@@ -3384,6 +3406,23 @@ function derivedTitle() {
   return `${project} via ${newDraft.profileId}`;
 }
 
+function selectNewTarget(draft, value) {
+  const previousTargetId = draft.targetId;
+  cancelProjectRequests();
+  draft.projectPicker = freshProjectPicker();
+  draft.projectPickers = {};
+  draft.projectDirectories[previousTargetId] = draft.projectDirectory;
+  draft.targetId = value;
+  draft.projectDirectory = draft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
+  setNewTargetSizing(draft, value);
+  // Changing the target changes which project question is asked, and
+  // invalidates anything the previous project answer was checked for.
+  draft.preflighted = false;
+  draft.remoteRepositories = [];
+  draft.localChangesExcluded = false;
+  draft.preflightError = '';
+}
+
 function renderNewForm() {
   if (!newDraft || newDraft.workspaceId !== selectedWorkspaceId()) {
     if (newDraft && newDraft.workspaceId !== selectedWorkspaceId()) {
@@ -3393,9 +3432,36 @@ function renderNewForm() {
     newDraft = freshDraft();
     newError.textContent = '';
   }
-  settleSkippedNewSteps(newDraft);
+  let changedChoice = null;
+  const profile = snapshot.profiles.find(profile => profile.id === newDraft.profileId);
+  const target = snapshot.targets.find(target => target.id === newDraft.targetId);
+  if (!newDraft.committing) {
+    if (availabilityMissing(profile)) {
+      abortPendingNewPreflight();
+      selectNewProfile(newDraft, preferredId(offeredProfiles(), launchDefault?.profile_id));
+      changedChoice = 'profile';
+    }
+    if (availabilityMissing(target)) {
+      abortPendingNewPreflight();
+      selectNewTarget(newDraft, preferredId(launchableTargets(snapshot.targets), launchDefault?.target_id));
+      changedChoice ??= 'target';
+    }
+    settleSkippedNewSteps(newDraft);
+  }
   const steps = visibleSteps();
+  if (renderedNewDraft === newDraft) {
+    const previous = renderedNewSteps[newDraft.step];
+    const sameStep = steps.findIndex(step => step.key === previous?.key);
+    newDraft.step = sameStep >= 0 ? sameStep : renderedNewSteps
+      .slice(0, newDraft.step)
+      .filter(previousStep => steps.some(step => step.key === previousStep.key)).length;
+  }
+  if (changedChoice) {
+    const choiceStep = steps.findIndex(step => step.key === changedChoice);
+    newDraft.step = Math.min(newDraft.step, Math.max(0, choiceStep));
+  }
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
+  renderedNewSteps = steps;
   const step = steps[newDraft.step];
   if (step.key === 'project' && !newDraft.catalogStep) {
     newDraft.catalogStep = true;
@@ -3405,9 +3471,11 @@ function renderNewForm() {
   // mounted so it cannot interrupt a touch gesture or dismiss a native picker.
   const signature = JSON.stringify({
     step: step.key,
-    profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
+    profiles: step.key === 'profile' ? offeredProfiles().map(p => [p.id, p.harness_kind]) : null,
+    profileNotes: missingProfileNotes(),
+    targetNotes: snapshot.target_availability_notes,
     targets: step.key === 'target' ? [
-      launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t), t.resource_allocation_kind,
+      launchableTargets(snapshot.targets).map(t => [t.id, t.kind, t.resource_allocation_kind,
         t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
       newDraft.rememberContainerSize,
@@ -3443,7 +3511,7 @@ function renderNewForm() {
       field.append(el('span', '', 'Account'));
       const select = el('select');
       select.id = 'new-profile';
-      for (const profile of snapshot.profiles) {
+      for (const profile of offeredProfiles()) {
         const option = el('option', '', profile.label ?? profile.id);
         option.value = profile.id;
         select.append(option);
@@ -3461,25 +3529,12 @@ function renderNewForm() {
       };
       field.append(select, description);
       body.append(field);
-      if (!snapshot.profiles.length) body.append(el('p', 'dim', 'No accounts configured.'));
+      if (!offeredProfiles().length) body.append(el('p', 'dim', 'No account is available here.'));
       break;
     }
     case 'target': {
       body.append(pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), newDraft.targetId, value => {
-          const previousTargetId = newDraft.targetId;
-          cancelProjectRequests();
-          newDraft.projectPicker = freshProjectPicker();
-          newDraft.projectPickers = {};
-          newDraft.projectDirectories[previousTargetId] = newDraft.projectDirectory;
-          newDraft.targetId = value;
-          newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
-          setNewTargetSizing(newDraft, value);
-          // Changing the target changes which project question is asked, and
-          // invalidates anything the previous project answer was checked for.
-          newDraft.preflighted = false;
-          newDraft.remoteRepositories = [];
-          newDraft.localChangesExcluded = false;
-          newDraft.preflightError = '';
+          selectNewTarget(newDraft, value);
           renderNewTargetSizingControls(newDraft, sizing);
           syncNewSizingState(newDraft);
         }));
@@ -3619,6 +3674,8 @@ function renderNewForm() {
 
     }
   }
+  appendAvailabilityNotes(body, missingProfileNotes());
+  appendAvailabilityNotes(body, snapshot.target_availability_notes || []);
   newStep.replaceChildren(body);
   const checking = pendingNewPreflight === newDraft;
   if (checking) {
@@ -3642,7 +3699,7 @@ function renderNewForm() {
 function pickerField(label, id, items, value, onChange) {
   const field = choiceControl({
     label,
-    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: [item.kind || item.harness_kind, targetStatus(item)].filter(Boolean).join(' · ') })),
+    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: item.kind || item.harness_kind || '' })),
     values: [value],
     onChange: () => onChange(field.querySelector('input:checked')?.value || ''),
   });
@@ -3732,7 +3789,7 @@ function renderProjectChooser(body) {
   for (const [mode, title, detail] of [
     ['github', 'GitHub', 'Your repositories and search'],
     ['directory', 'Browse folders', 'On your Mjolnir computer'],
-    ['url', 'Paste URL', 'GitHub URL or owner/repository'],
+    ['url', 'Paste URL', 'Git URL or GitHub owner/repository'],
   ]) {
     const button = projectButton('', () => setProjectMode(mode), `new-project-${mode}`);
     button.setAttribute('aria-pressed', String(picker.mode === mode));
@@ -3769,10 +3826,10 @@ function renderProjectChooser(body) {
   } else if (!home) {
     body.append(projectButton('Recent & saved projects', () => setProjectMode('home'), 'new-project-saved'));
     if (picker.mode === 'url') {
-      body.append(pathField('GitHub URL or owner/repository', 'new-project-source', newDraft.bundleSource, value => {
+      body.append(pathField('Git URL or GitHub owner/repository', 'new-project-source', newDraft.bundleSource, value => {
         newDraft.bundleSource = value;
       }));
-      body.append(el('p', 'dim', 'You can also enter a repository path on the computer running Mjolnir.'));
+      body.append(el('p', 'dim', 'HTTP credentials are removed. You can also enter a repository path on the computer running Mjolnir.'));
       const use = projectButton(newDraft.projectMultiple ? 'Add repository' : newDraft.creatingBundle ? 'Opening project…' : 'Use repository', () => selectProjectRepository(), 'new-project-use');
       body.append(use);
     } else {
@@ -3814,7 +3871,7 @@ function selectProjectRepository(selectedSource) {
   if (!draft || draft.creatingBundle) return;
   const source = (selectedSource ?? draft.bundleSource).trim();
   if (!source) {
-    newError.textContent = 'Paste a GitHub URL, owner/repository, or repository path.';
+    newError.textContent = 'Paste a Git URL, GitHub owner/repository, or repository path.';
     return;
   }
   if (!draft.projectMultiple) return createNewProject([source]);
@@ -3937,7 +3994,7 @@ function renderProjectBrowser(body) {
   }, 'new-project-cancel'));
   if (picker.error) browser.append(projectButton('Retry', () => discoverProjects(), 'new-project-retry'));
   if (github && !picker.error && picker.loaded && !picker.entries.length && !picker.loading) {
-    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a GitHub URL.'));
+    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a Git URL.'));
   }
   if (!picker.loading && !picker.error) {
     if (targetDirectory && picker.loaded) browser.append(projectButton('Use this folder', () => {
@@ -4331,7 +4388,7 @@ async function advanceNew() {
   const steps = visibleSteps();
   const step = steps[newDraft.step];
   newError.textContent = '';
-  if (step.key === 'profile' && !snapshot.profiles.some(p => p.id === newDraft.profileId)) {
+  if (step.key === 'profile' && !offeredProfiles().some(p => p.id === newDraft.profileId)) {
     newError.textContent = 'Choose an available account before continuing.';
     return;
   }
@@ -4942,9 +4999,9 @@ function wikiDraft(wikiId) {
     const row = wikiState.rows.find(item => item.id === wikiId);
     const held = (list, id) => (list || []).some(item => item.id === id);
     draft = {
-      profileId: held(snapshot?.profiles, row?.profile)
+      profileId: held(offeredProfiles(), row?.profile)
         ? row.profile
-        : (snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : ''),
+        : soleProfileId(),
       targetId: held(launchableTargets(snapshot?.targets), row?.target)
         ? row.target
         : (launchableTargets(snapshot?.targets).length === 1 ? launchableTargets(snapshot.targets)[0].id : ''),
@@ -5002,11 +5059,10 @@ function renderWikiDetail(wikiId) {
   else if (brief.status === 'error') briefBox.append(el('p', 'resume-status error', brief.error));
   else briefBox.append(renderMarkdown(brief.markdown));
   card.append(briefBox);
-  const profileItems = (snapshot?.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
+  const profileItems = offeredProfiles().map(profile => ({ id: profile.id, label: profile.id }));
   const targetItems = launchableTargets(snapshot?.targets).map(target => ({
     id: target.id,
     label: target.label || target.name || target.id,
-    status: targetStatus(target),
   }));
   if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
   if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
@@ -5021,6 +5077,8 @@ function renderWikiDetail(wikiId) {
   });
   targetField.dataset.role = 'wiki-target';
   card.append(profileField, targetField);
+  appendAvailabilityNotes(card, missingProfileNotes());
+  appendAvailabilityNotes(card, snapshot.target_availability_notes || []);
   const submit = action('Restore', '', { action: 'wiki-restore', id: wikiId });
   submit.disabled = submit.disabled || !draft.profileId || !draft.targetId;
   const row2 = el('div', 'row');
@@ -5121,7 +5179,7 @@ function conversionApplies(session, targetId) {
 function ensureResumeConversionPreflight(session) {
   const draft = resumeDraft(session);
   const targetId = draft.targetId;
-  if (!conversionApplies(session, targetId)) {
+  if (!targetLaunchable(targetId) || !conversionApplies(session, targetId)) {
     if (draft.conversion) draft.conversion = null;
     return;
   }
@@ -5169,8 +5227,9 @@ function resumeCardSignature(session) {
     draft.conversion?.status || '',
     draft.conversion?.detail || '',
     draft.conversion?.preview || null,
-    (snapshot.profiles || []).map(profile => [profile.id, profile.harness_kind]),
-    resumeTargetItems(session).map(item => item.status),
+    offeredProfiles().map(profile => [profile.id, profile.harness_kind]),
+    missingProfileNotes(),
+    snapshot.target_availability_notes,
     session.move_recovery,
     session.profile_id,
     session.target_id,
@@ -5193,7 +5252,7 @@ function resumeCardSignature(session) {
 function resumeTargetItems(session) {
   return (session.compatible_resume_targets || []).filter(targetLaunchable).map(id => {
     const target = (snapshot.targets || []).find(item => item.id === id);
-    return { id, label: target?.label || target?.name || id, status: targetStatus(target) };
+    return { id, label: target?.label || target?.name || id };
   });
 }
 
@@ -5218,11 +5277,13 @@ function updateResumeCard(card, session, rebuild = false) {
     const draft = resumeDraft(session);
     card._errorNode.textContent = draft.error;
     card._pendingNode.textContent = pendingActions.has(`destroy:${session.id}`) ? 'Destroying…' : pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '';
-    card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
+    card._invalid = !session.failed_launch_retry && (!draft.profileId || !draft.targetId || conversionBlocksResume(draft));
     const submit = card.querySelector('button[data-action="resume"]');
     if (submit) {
-      submit.dataset.profile = draft.profileId;
-      submit.dataset.target = draft.targetId;
+      if (!session.failed_launch_retry) {
+        submit.dataset.profile = draft.profileId;
+        submit.dataset.target = draft.targetId;
+      }
       submit.disabled = pendingActions.has(`resume:${session.id}`) || card._invalid === true;
       submit.setAttribute('aria-busy', String(pendingActions.has(`resume:${session.id}`)));
     }
@@ -5233,18 +5294,20 @@ function updateResumeCard(card, session, rebuild = false) {
   const recovery = session.move_recovery;
   const draft = resumeDraft(session);
   const targetItems = resumeTargetItems(session);
-  const profileItems = (snapshot.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
-  if (!draft.initialized) {
-    if (!profileItems.some(item => item.id === draft.profileId)) {
-      draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
+  const profileItems = offeredProfiles().map(profile => ({ id: profile.id, label: profile.id }));
+  if (!session.failed_launch_retry) {
+    if (!draft.initialized) {
+      if (!profileItems.some(item => item.id === draft.profileId)) {
+        draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
+      }
+      if (!targetItems.some(item => item.id === draft.targetId)) {
+        draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
+      }
+      draft.initialized = true;
+    } else {
+      if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = '';
+      if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = '';
     }
-    if (!targetItems.some(item => item.id === draft.targetId)) {
-      draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
-    }
-    draft.initialized = true;
-  } else {
-    if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = '';
-    if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = '';
   }
   const body = el('div');
   const heading = el('h3', '', session.title || session.id);
@@ -5347,6 +5410,10 @@ function updateResumeCard(card, session, rebuild = false) {
     body.append(row);
     card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
   }
+  if (canResume && !stale && !session.failed_launch_retry) {
+    appendAvailabilityNotes(body, missingProfileNotes());
+    appendAvailabilityNotes(body, snapshot.target_availability_notes || []);
+  }
   const pendingNode = el('p', 'dim', pendingActions.has(`destroy:${session.id}`) ? 'Destroying…' : pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '');
   pendingNode.setAttribute('role', 'status');
   card._pendingNode = pendingNode;
@@ -5409,17 +5476,18 @@ function freshMoveDraft(session) {
   const compatible = (session.compatible_resume_targets || []).filter(targetLaunchable);
   const recovery = session.move_recovery;
   const recoveryTarget = recovery?.destination_target_template_id;
+  const queueLocked = recovery?.queue_admission_started === true && recovery?.queue_admission_finished !== true;
   return {
     workspaceId: session.workspace_id || selectedWorkspaceId(),
     sessionId: session.id,
     profileId: recovery?.destination_profile_id || session.profile_id || snapshot.profiles[0]?.id || '',
-    targetId: compatible.includes(recoveryTarget)
+    targetId: (queueLocked && recoveryTarget) || compatible.includes(recoveryTarget)
       ? recoveryTarget
       : compatible.includes(session.target_id) ? session.target_id : compatible[0] || '',
     clearResourceAllocation: recovery?.clear_resource_allocation === true,
     destinationAdditionalMounts: recovery ? (recovery.destination_additional_mounts || []) : null,
     destinationResourceAllocation: recovery ? (recovery.destination_resource_allocation ?? null) : null,
-    queueLocked: recovery?.queue_admission_started === true && recovery?.queue_admission_finished !== true,
+    queueLocked,
     preparation: null,
     preparing: false,
     committing: false,
@@ -5560,6 +5628,17 @@ function renderMoveFiles(draft) {
   moveBackButton.disabled = draft.preparing || draft.committing;
 }
 
+function moveAvailabilityError(draft) {
+  if (draft.queueLocked) return '';
+  if (availabilityMissing(snapshot.profiles.find(profile => profile.id === draft.profileId))) {
+    return 'Choose an available profile before moving.';
+  }
+  if (!targetLaunchable(draft.targetId)) {
+    return 'Choose an available target before moving.';
+  }
+  return '';
+}
+
 function renderMoveForm() {
   if (!moveStep || route.name !== 'move') return;
   const session = sessionById(route.sessionId);
@@ -5578,6 +5657,7 @@ function renderMoveForm() {
   if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
   const draft = moveDraft;
   const preparation = draft.preparation;
+  const availabilityError = moveAvailabilityError(draft);
   moveProgress.textContent = preparation ? 'Review the destination and confirm the interruption.' : 'Choose a compatible destination. The source is not changed during preparation.';
   moveStep.replaceChildren();
   if (preparation?.workspace && draft.filePage) { renderMoveFiles(draft); return; }
@@ -5585,20 +5665,21 @@ function renderMoveForm() {
   if (!preparation) {
     moveStep.append(el('p', '', `Move “${session.title || session.id}” while keeping its session identity, transcript, and recoverable workspace state.`));
     // A sole profile has nothing to choose; the terminal's Move skips it too.
-    const soleProfile = !draft.queueLocked && soleProfileId();
-    if (soleProfile) draft.profileId = soleProfile;
-    const profilePicker = pickerField('Profile', `move-profile-${session.id}`, snapshot.profiles, draft.profileId, value => {
+    const soleProfile = !draft.queueLocked && draft.profileId && soleProfileId() === draft.profileId;
+    const profiles = draft.queueLocked ? snapshot.profiles : offeredProfiles();
+    const profilePicker = pickerField('Profile', `move-profile-${session.id}`, profiles, draft.profileId, value => {
       if (draft.queueLocked) return;
       draft.profileId = value;
       draft.filesReviewed = false;
       draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
+      if (availabilityError) renderMoveForm();
     });
     if (!soleProfile) moveStep.append(profilePicker);
     const targetIds = [...new Set([
       ...(session.compatible_resume_targets || []),
       recoveryTarget,
-    ].filter(Boolean).filter(targetLaunchable))];
+    ].filter(Boolean).filter(id => (draft.queueLocked && id === recoveryTarget) || targetLaunchable(id)))];
     const targets = targetIds.map(id => snapshot.targets.find(target => target.id === id) || { id });
     const targetPicker = pickerField('Target', `move-target-${session.id}`, targets, draft.targetId, value => {
       if (draft.queueLocked) return;
@@ -5606,6 +5687,7 @@ function renderMoveForm() {
       draft.filesReviewed = false;
       draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
+      if (availabilityError) renderMoveForm();
     });
     if (draft.queueLocked) {
       for (const input of [...profilePicker.querySelectorAll('input'), ...targetPicker.querySelectorAll('input')]) {
@@ -5720,8 +5802,9 @@ function renderMoveForm() {
     }
     moveNextButton.textContent = 'Confirm move';
   }
+  if (availabilityError) moveStep.append(el('p', 'move-warning', availabilityError));
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy || (!preparation && !!subagentSelectionError(draft))
+  moveNextButton.disabled = busy || Boolean(availabilityError) || (!preparation && !!subagentSelectionError(draft))
     || (preparation?.active === true && !draft.acknowledge)
     || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
@@ -5731,9 +5814,9 @@ function renderMoveForm() {
 async function prepareMove() {
   const draft = moveDraft;
   if (!draft || draft.preparing) return;
-  const subagentError = subagentSelectionError(draft);
-  if (subagentError) {
-    moveError.textContent = subagentError;
+  const error = moveAvailabilityError(draft) || subagentSelectionError(draft);
+  if (error) {
+    moveError.textContent = error;
     return;
   }
   if (!draft.profileId && !draft.targetId) {
@@ -5760,6 +5843,17 @@ async function prepareMove() {
         oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
       }),
     });
+    if (draft.preparation.container_upgrade) {
+      const preview = draft.preparation.container_upgrade;
+      draft.preparation = null;
+      if (await confirmContainerUpgrade(preview, true)) {
+        await applyContainerSettingsReplacement(preview);
+        await refresh();
+        announce('Container settings replacement pending');
+        navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
+      }
+      return;
+    }
     if (draft.preparation.workspace && !draft.filesReviewed) {
       const assessment = draft.preparation.workspace;
       draft.fileExpanded = new Set((assessment.initially_expanded || []).map(moveFileKey));
@@ -5776,6 +5870,11 @@ async function prepareMove() {
 async function commitMove() {
   const draft = moveDraft;
   if (!draft || !draft.preparation || draft.committing) return;
+  const availabilityError = moveAvailabilityError(draft);
+  if (availabilityError) {
+    moveError.textContent = availabilityError;
+    return;
+  }
   draft.committing = true;
   moveError.textContent = '';
   renderMoveForm();
@@ -6554,10 +6653,17 @@ function reconcileLifecycleActions() {
   }
 }
 
+function applyContainerSettingsReplacement(preview) {
+  return request('/api/actions', { method: 'POST', body: JSON.stringify({
+    action: 'upgrade-container',
+    request: { selection: preview, acknowledge_writable_layer_loss: true },
+  }) });
+}
+
 function confirmContainerUpgrade(preview, upgradeOnly) {
   return new Promise(resolve => {
     const dialog = openSessionDialog('container-upgrade-dialog', 'Upgrade container and restart');
-    dialog.append(el('h2', '', upgradeOnly ? 'Upgrade container and restart?' : 'Restart agent'));
+    dialog.append(el('h2', '', preview.settings ? 'Apply container settings and restart?' : upgradeOnly ? 'Upgrade container and restart?' : 'Restart agent'));
     dialog.append(el('p', '', `Current image: ${preview.current_image} (${preview.current_image_id})`), el('p', '', `Target image: ${preview.target_image} (${preview.target_image_id || 'not cached'})`));
     dialog.append(el('p', '', 'Restart agent keeps the existing container and its filesystem; any running turn is interrupted. A container upgrade reattaches the existing workspace and build cache mounts.'));
     dialog.append(el('p', 'warning', 'State in the writable layer, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.'));
@@ -6568,7 +6674,7 @@ function confirmContainerUpgrade(preview, upgradeOnly) {
     cancel.onclick = () => finish(null);
     controls.append(cancel);
     if (!upgradeOnly) { const restart = button('Restart agent', 'secondary'); restart.onclick = () => finish('restart'); controls.append(restart); }
-    const upgrade = button('Upgrade container and restart…');
+    const upgrade = button(preview.settings ? 'Apply settings and restart…' : 'Upgrade container and restart…');
     upgrade.onclick = () => finish('upgrade');
     controls.append(upgrade);
     dialog.oncancel = event => { event.preventDefault(); finish(null); };
@@ -6892,7 +6998,7 @@ function openContainerSettings(session) {
     memoryField,
     renderMountEditor(editor, 'container', session.target_id),
     error,
-    el('p', 'dim', 'Saved settings apply when a new environment is explicitly created. Restart and container upgrade retain the existing mounts and limits.'),
+    el('p', 'dim', 'When the workspace can be retained, applying changed settings requires replacing the container. Otherwise settings apply the next time a new environment is created.'),
     controls,
   );
   confirm.onclick = async () => {
@@ -6903,7 +7009,7 @@ function openContainerSettings(session) {
     confirm.disabled = true;
     error.textContent = '';
     try {
-      await request('/api/actions', {
+      const preview = await request('/api/actions', {
         method: 'POST',
         body: JSON.stringify({
           action: 'set-container-settings',
@@ -6912,6 +7018,13 @@ function openContainerSettings(session) {
           mounts: mountEditorWire(editor),
         }),
       });
+      if (preview) {
+        if (!await confirmContainerUpgrade(preview, true)) { confirm.disabled = false; return; }
+        await applyContainerSettingsReplacement(preview);
+        announce('Container settings replacement pending');
+      } else {
+        announce('Container settings saved for next creation');
+      }
       dialog.close();
       await refresh();
     } catch (failure) {

@@ -540,6 +540,39 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
+fn directory_discovery_keeps_the_saved_transport_for_an_existing_identity() {
+    let mut config = Config::default();
+    let saved =
+        create_quick_bundle_in_config(&mut config, "ssh://git@github.com/BrokkAi/hel.git").unwrap();
+    let before = config.clone();
+    let discovered = add_project_sources(
+        &mut config,
+        &["https://github.com/BrokkAi/hel.git".into()],
+        true,
+    )
+    .unwrap();
+    assert_eq!(discovered, saved);
+    assert_eq!(config, before);
+}
+
+// Hard-won: 85ee0a63d: matching a network identity silently reused a different SSH login.
+#[test]
+fn project_selection_refuses_a_different_ssh_login_on_the_same_identity() {
+    let mut config = Config::default();
+    let saved = create_quick_bundle_in_config(&mut config, "alice@git.example:hel.git").unwrap();
+    let before = config.clone();
+    for discovered in [false, true] {
+        let error =
+            add_project_sources(&mut config, &["bob@git.example:hel.git".into()], discovered)
+                .unwrap_err();
+        let refusal = mj_core::refusal::Refusal::of(&error).unwrap();
+        assert!(refusal.message().contains(&saved));
+        assert!(refusal.message().contains("alice"));
+        assert_eq!(config, before);
+    }
+}
+
+#[test]
 fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     let checkout = super::test_support::committed_repository();
     let worktree_parent = tempfile::tempdir().unwrap();
@@ -1792,7 +1825,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
             &id,
             None,
             vec![mount(&missing)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap_err();
@@ -1815,7 +1848,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
             &id,
             None,
             vec![mount(&present)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -1830,7 +1863,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
                 memory_bytes: 4 << 30,
             }),
             vec![mount(&present)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -1896,7 +1929,7 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
                 memory_bytes: 4 << 30,
             }),
             Vec::new(),
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -2322,6 +2355,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
             },
             transcript,
             queued_prompts: queued,
+            mailbox: None,
         }
     };
     let assignment_item = CanonicalTranscriptItem {
@@ -3602,7 +3636,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         worker.child_session_id, child.child_session_id,
         "kind belongs to the idempotent key"
     );
-    // An ordinary sub-agent is offered the review tools but is not push-gated.
+    // An ordinary sub-agent is neither offered the review tools nor push-gated.
     let ordinary_launch = controller
         .current_worker_launch_config(
             &worker.child_session_id,
@@ -3615,7 +3649,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             },
         )
         .unwrap();
-    assert!(ordinary_launch.review_tools());
+    assert!(!ordinary_launch.review_tools());
     assert!(!ordinary_launch.review_gate());
     let child_record = controller
         .state
@@ -3683,13 +3717,13 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
 
 #[test]
 #[cfg_attr(windows, ignore = "local bare target fixture")]
-fn ordinary_children_inherit_the_parent_effective_review_setting() {
+fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
     const MARKER: &str = "MJ_TEST_CHILD_EFFECTIVE_REVIEW";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "ordinary_children_inherit_the_parent_effective_review_setting",
+            "ordinary_children_get_no_review_tools_when_the_parent_reviews",
             directory.path(),
         );
         return;
@@ -3700,8 +3734,7 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    // Global review is off; the first parent enables it with a session
-    // selection, then the same parent explicitly disables it.
+    // Global review is off; the parent enables it with a session selection.
     config.review = mj_core::config::ReviewConfig::default();
     let mut controller = Controller {
         config,
@@ -3746,51 +3779,22 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
             })
             .unwrap()
     };
-    let enabled = register_worker(&mut controller, "review-enabled");
-    let backend = |child_id: &str| targets::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(child_id)
-            .to_string_lossy()
-            .into_owned(),
-    };
-    let enabled_launch = controller
+    let child = register_worker(&mut controller, "review-enabled");
+    let launch = controller
         .current_worker_launch_config(
-            &enabled.child_session_id,
-            &backend(&enabled.child_session_id),
+            &child.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&child.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
         )
         .unwrap();
     assert!(
-        enabled_launch.review_tools(),
-        "session-specific parent review enables child review tools"
-    );
-    // The review host asks the same function, so the child is reviewed by
-    // the parent's selected reviewers, not the global list.
-    let child_choice = controller
-        .state
-        .effective_review(&enabled.child_session_id)
-        .unwrap();
-    assert_eq!(
-        controller.config.review.for_session(child_choice).reviewers,
-        vec![mj_core::config::SubagentChoice {
-            model: "review-model".into(),
-            effort: None,
-        }]
-    );
-
-    controller.state.sessions.get_mut(parent_id).unwrap().review =
-        Some(Box::new(mj_core::config::SessionReview::Off));
-    crate::database::save_state(&controller.state).unwrap();
-    let disabled = register_worker(&mut controller, "review-disabled");
-    let disabled_launch = controller
-        .current_worker_launch_config(
-            &disabled.child_session_id,
-            &backend(&disabled.child_session_id),
-        )
-        .unwrap();
-    assert!(
-        !disabled_launch.review_tools(),
-        "explicitly disabled parent review disables child review tools"
+        !launch.review_tools(),
+        "a sub-agent never requests review, whatever its parent's choice"
     );
 }
 
@@ -3818,6 +3822,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };
@@ -3900,6 +3905,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };

@@ -878,33 +878,89 @@ func (c *legacyBuildCacheConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// JevConfig is the one switch for the hosted Jev service. When it is off,
+// JevConfig is the settings for the hosted Jev service. When it is off,
 // Mjolnir sends nothing to Jev: no turn or GitHub-item classification and no
 // quota recovery. `[jev] enabled = false`.
 type JevConfig struct {
 	Enabled bool `json:"enabled" toml:"enabled"`
+	// FastinoKey is the user's own Fastino key, used in place of the shared
+	// Jev limits. Nil when absent.
+	FastinoKey EnvironmentValue `json:"fastino_key,omitempty" toml:"fastino_key,omitempty"`
 }
 
 // DefaultJevConfig is JevConfig's Default.
 func DefaultJevConfig() JevConfig { return JevConfig{Enabled: true} }
 
+// String is Rust's Debug for JevConfig, which never shows the key.
+func (j JevConfig) String() string {
+	return fmt.Sprintf("JevConfig { enabled: %t, fastino_key_set: %t }", j.Enabled, j.FastinoKey != nil)
+}
+
 func (j JevConfig) MarshalJSON() ([]byte, error) {
 	var object serdeObject
 	object.fieldUnless(isTrue(j.Enabled), "enabled", j.Enabled)
+	object.fieldUnless(j.FastinoKey == nil, "fastino_key", j.FastinoKey)
 	return object.finish()
 }
 
 func (j *JevConfig) UnmarshalJSON(data []byte) error {
 	type plain JevConfig
 	value := plain(DefaultJevConfig())
-	if err := json.Unmarshal(data, &value); err != nil {
+	aux := struct {
+		*plain
+		FastinoKey json.RawMessage `json:"fastino_key"`
+	}{plain: &value}
+	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
+	}
+	value.FastinoKey = nil
+	if len(aux.FastinoKey) > 0 && string(bytes.TrimSpace(aux.FastinoKey)) != "null" {
+		key, err := UnmarshalEnvironmentValueJSON(aux.FastinoKey)
+		if err != nil {
+			return err
+		}
+		value.FastinoKey = key
 	}
 	*j = JevConfig(value)
 	return nil
 }
 
 func (j JevConfig) isDefault() bool { return j == DefaultJevConfig() }
+
+// JevConfigValidateFastinoKey is Rust's JevConfig::validate_fastino_key.
+func JevConfigValidateFastinoKey(key string) error {
+	if len(key) > 4096 {
+		return errors.New("A Fastino key can be at most 4096 bytes.")
+	}
+	if strings.IndexFunc(key, unicode.IsSpace) >= 0 {
+		return errors.New("A Fastino key can contain no whitespace.")
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
+			return errors.New("A Fastino key must use printable ASCII.")
+		}
+	}
+	return nil
+}
+
+// ResolveFastinoKey resolves the optional key on the host, before creating
+// the caller. Nil when Jev is off, no key is set, or the key is empty.
+func (j JevConfig) ResolveFastinoKey() (*string, error) {
+	if j.FastinoKey == nil || !j.Enabled {
+		return nil, nil
+	}
+	key, err := resolveActive("jev.fastino_key", j.FastinoKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := JevConfigValidateFastinoKey(key); err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, nil
+	}
+	return &key, nil
+}
 
 // QuotaConfig holds quota display and profile preferences.
 type QuotaConfig struct {

@@ -216,7 +216,10 @@ pub(crate) enum DashboardIoUpdate {
     },
     ContainerSettings {
         session_id: String,
-        result: std::result::Result<DashboardMetadata, String>,
+        result: std::result::Result<
+            std::result::Result<DashboardMetadata, mj_core::state::ContainerUpgradePreview>,
+            String,
+        >,
     },
     /// Whether a configured project's local directory exists; `None` when
     /// the check could not tell.
@@ -246,6 +249,7 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    CapacityRefreshRequested(std::result::Result<(), String>),
     /// The daemon's answer to a single profile's Refresh: it accepted the
     /// probe, or it could not be reached.
     QuotaProbeRequested {
@@ -331,10 +335,7 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<BTreeMap<String, mj_core::credentials::LoginStatus>, String>,
     },
-    AvailabilityChecked {
-        generation: u64,
-        result: std::result::Result<mj_tui::AvailabilityChecked, String>,
-    },
+    AvailabilityCheckRequested(Result<(), String>),
     BuildCachePreviewed {
         generation: u64,
         key: serde_json::Value,
@@ -1177,7 +1178,8 @@ impl DashboardContext {
                 )),
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
-                Ok(controller) => {
+                Ok(Err(preview)) => self.dashboard.show_container_upgrade_preview(preview, true),
+                Ok(Ok(controller)) => {
                     self.apply_controller_metadata(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
@@ -1260,6 +1262,11 @@ impl DashboardContext {
             }
             DashboardIoUpdate::GitIdentitySaved(result) => {
                 self.dashboard.apply_git_identity_save(result)
+            }
+            DashboardIoUpdate::CapacityRefreshRequested(Ok(())) => {}
+            DashboardIoUpdate::CapacityRefreshRequested(Err(error)) => {
+                self.dashboard
+                    .set_notice(format!("Could not refresh target capacity: {error}"));
             }
             DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
             DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {
@@ -1411,14 +1418,15 @@ impl DashboardContext {
                     tracing::warn!(%error, "could not read profile sign-in status");
                 }
             },
-            DashboardIoUpdate::AvailabilityChecked { generation, result } => self
-                .dashboard
-                .apply_availability_check(generation, result),
+            DashboardIoUpdate::AvailabilityCheckRequested(result) => {
+                if let Err(error) = result {
+                    self.dashboard.set_failure_notice(format!("Could not request an availability check: {error}"));
+                }
+            }
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
-                let no_agents = report.agents.is_empty();
-                self.dashboard.welcome_configured(report.summary());
-                self.dashboard.welcome_managed_setup_available(no_agents);
+                self.dashboard
+                    .welcome_configured(report.summary(), !report.agents.is_empty());
             }
             DashboardIoUpdate::FirstRunChecked(result) => {
                 self.dashboard.release_availability_check();
@@ -1426,7 +1434,7 @@ impl DashboardContext {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
                 Ok(None) => self.dashboard.welcome_not_needed(),
                 Err(error) => self.dashboard.welcome_checked(vec![format!(
-                    "Setup could not finish: {error}. Run `mj setup` to retry."
+                    "Setup could not finish: {error}. Run `mj doctor` to check the installation, and restart `mj` to retry."
                 )]),
                 }
             }

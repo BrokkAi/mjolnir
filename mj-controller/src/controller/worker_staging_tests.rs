@@ -481,6 +481,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     };
     let executor = CacheLinkExecutor {
@@ -680,6 +681,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };

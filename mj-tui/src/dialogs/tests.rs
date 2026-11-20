@@ -1683,7 +1683,7 @@ fn golden_tui_container_editor_details() {
     open_container_editor(&mut mounted);
     append_dialog_render(
         &mut output,
-        "mount change applies to a new environment",
+        "container settings can replace the container",
         100,
         40,
         &drawn(&mut mounted, 100, 40),
@@ -1693,6 +1693,7 @@ fn golden_tui_container_editor_details() {
     mounted.focus_sessions();
     mounted.set_container_upgrade_sessions(["session-1".into()].into());
     let preview = mj_core::state::ContainerUpgradePreview {
+        settings: None,
         session_id: "session-1".into(),
         source_container_id: "existing-container".into(),
         warning: mj_core::state::CONTAINER_UPGRADE_WARNING.into(),

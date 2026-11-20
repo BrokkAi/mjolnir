@@ -745,6 +745,26 @@ impl DurableRelay {
                 None,
             )));
         }
+        if self.snapshot.managed_subagent
+            && matches!(command, RelayCommand::Prompt { .. })
+            && let Some(ordinal) =
+                mj_core::continuation::GeneratedPrompt::QuotaRetry.retry_ordinal(command_id)
+        {
+            let continuation = &self.snapshot.continuation;
+            if !self.snapshot.assessment.as_ref().is_some_and(|assessment| {
+                assessment.completed_ordinal == ordinal
+                    && continuation.user_command_id.as_ref().is_some_and(|user| {
+                        self.quota_recovery_admissible(user, &assessment.turn_id)
+                    })
+            }) {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidRequest,
+                    "the child quota continuation no longer matches its completed turn",
+                    false,
+                    None,
+                )));
+            }
+        }
         if let RelayCommand::SetQuotaRecovery { expected, recovery } = &command {
             let valid = expected.ordinal == self.snapshot.latest_ordinal
                 && expected.digest == self.snapshot.latest_digest
@@ -2188,6 +2208,17 @@ impl DurableRelay {
     /// checkpoint cut from the moment it accepts one.
     pub fn close_pending(&self) -> bool {
         self.close_requested()
+    }
+
+    /// Whether an accepted Close has sealed the relay, so no harness may
+    /// start for it. The one predicate both sides of the preparation handoff
+    /// read under the relay lock: the request handler, to cancel preparation,
+    /// and the bridge start, to refuse publishing Started.
+    pub fn sealed_by_close(&self) -> bool {
+        matches!(
+            self.snapshot.execution,
+            RelayExecutionState::Closing | RelayExecutionState::Closed
+        )
     }
 
     /// Whether a cancellation is accepted but not yet delivered to the harness,

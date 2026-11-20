@@ -69,7 +69,7 @@ async fn wait_for_turn(
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     let mut snapshot_rx = state.snapshot_rx.clone();
-    let mut handle = backend.session_handle(session_id.clone()).await?;
+    let mut handle: Option<SessionHandle> = None;
     // What the previous pass decided from, apart from the live actor's view.
     // An idle waiter used to read the store again for every other session's
     // revision, which with many waiters kept the daemon busy opening
@@ -81,6 +81,13 @@ async fn wait_for_turn(
     let mut report_deadline = None;
 
     loop {
+        // Follow a replacement actor before interpreting a durable turn.
+        if handle.as_ref().is_none_or(SessionHandle::is_stopped) {
+            handle = backend.session_handle(session_id.clone()).await?;
+            if handle.is_some() {
+                wake = Wake::Session;
+            }
+        }
         let durable_revision = backend.wait_revision(&session_id)?;
         // Check shared durable identity before copying reports or interpreting
         // startup steps. Unrelated streaming sessions must cost no such reads.
@@ -178,6 +185,12 @@ async fn wait_for_turn(
                         let now = mj_core::clock::epoch_millis();
                         observation.work_liveness = child_liveness.clone();
                         observation.apply_subagent_report(*handback_tool, report, now);
+                        // A child can briefly lose its actor while a park
+                        // lifecycle switches its profile.
+                        observation.resuming |=
+                            session.operation.as_ref().is_some_and(|operation| {
+                                operation.kind == crate::server::ViewerOperationKind::Stop
+                            });
                         report_deadline = [
                             reminder_grace_end(&observation, report, now),
                             hold_give_up_end(&observation, now),
@@ -250,13 +263,6 @@ async fn wait_for_turn(
             () = state.shutdown.cancelled() => {
                 return Err(ApiFailure::shutdown(&state));
             }
-        }
-        // A stopped actor stops publishing; re-acquire so a session that was
-        // replaced or resumed under us is followed rather than waited on
-        // forever.
-        if handle.as_ref().is_some_and(SessionHandle::is_stopped) {
-            handle = backend.session_handle(session_id.clone()).await?;
-            wake = Wake::Session;
         }
     }
 }

@@ -423,6 +423,9 @@ fn bootstrap_login_environment(
                 launch.no_github_credentials,
             )?;
         }
+        // The worker consumes this setting from its launch map. It never
+        // enters the process environment where subprocesses could inherit it.
+        environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
         environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
         // environment-isolating re-exec. Carry only those feature-gated test

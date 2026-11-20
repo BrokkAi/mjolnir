@@ -1210,6 +1210,71 @@ fn run_viewer_script(name: &str, script: &str) {
 }
 
 #[test]
+fn viewer_availability_keeps_unchecked_choices_and_shows_missing_reasons() {
+    let source = [
+        viewer_source(
+            "async function requestAvailabilityCheck()",
+            "// The daemon's saved default pair",
+        ),
+        viewer_source("function pickerField(", "\nfunction "),
+        viewer_source(
+            "function choiceControl(",
+            "function elicitationOptionLabel(",
+        ),
+        viewer_source(
+            "function resumeChoiceField(",
+            "// ---------------------------------------------------------------------------",
+        ),
+        viewer_source("function resumeTargetItems(", "function resumeCard("),
+    ]
+    .join("\n");
+    run_web_check(
+        "viewer-picker-availability",
+        &format!(
+            r#"
+import {{ installDocument, elements, checkEqual }} from './test-dom.js';
+installDocument();
+let choiceControlSequence = 0;
+const el = (tag, className = '', text = '') => {{
+  const node = document.createElement(tag);
+  node.className = className;
+  node.textContent = text;
+  return node;
+}};
+const snapshot = {{
+  profiles: [
+    {{ id: 'codex', availability: {{ status: 'available' }} }},
+    {{ id: 'kimi', availability: {{ status: 'unknown' }} }},
+  ],
+  targets: [
+    {{ id: 'local', availability: {{ status: 'available' }} }},
+    {{ id: 'ssh', availability: {{ status: 'unknown' }} }},
+  ],
+}};
+const session = {{ compatible_resume_targets: ['local', 'ssh'] }};
+{source}
+function rendered() {{
+  const pane = el('div');
+  const launch = pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), '', () => {{}});
+  const resume = resumeChoiceField('Target', 'resume-target', resumeTargetItems(session), '', () => {{}});
+  const profiles = resumeChoiceField('Profile', 'resume-profile', offeredProfiles(), '', () => {{}});
+  const values = (field, tag) => elements(field, tag).map(input => input.value).filter(Boolean).join(',');
+  appendAvailabilityNotes(pane, [...missingProfileNotes(), ...(snapshot.target_availability_notes || [])]);
+  return [values(launch, 'input'), values(resume, 'option'), values(profiles, 'option'),
+    elements(pane, 'p').map(node => node.textContent).join(' | ')].join('\n');
+}}
+checkEqual(rendered(), 'local,ssh\nlocal,ssh\ncodex,kimi\n', 'unchecked profiles and targets are offered');
+snapshot.profiles[1].availability = {{ status: 'missing', reason: 'Install Kimi Code.' }};
+snapshot.targets[1].availability = {{ status: 'missing', reason: 'SSH to builder failed.' }};
+snapshot.target_availability_notes = [{{ text: 'ssh: SSH to builder failed.', full: 'ssh: SSH to builder failed.' }}];
+checkEqual(rendered(), 'local\nlocal\ncodex\nkimi: Install Kimi Code. | ssh: SSH to builder failed.',
+  'both pickers omit missing choices and use the published reasons');
+"#
+        ),
+    );
+}
+
+#[test]
 fn browser_runtime_deltas_are_atomic_and_do_not_visit_history() {
     let source = viewer_source("class ViewerRuntimeState", "const viewerState =");
     let checks = r#"
@@ -3414,6 +3479,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         resource_allocation: None,
     };
     let preparation = MovePreparation {
+        container_upgrade: None,
         destination_checks: Default::default(),
         workspace: None,
         in_place: false,

@@ -72,8 +72,15 @@ pub(super) async fn events(
         let stopped = 'stream: loop {
             let next = page.next_after_seq;
             let caught_up = next >= page.latest_seq;
-            for event in page.events.drain(..) {
+            for mut event in page.events.drain(..) {
                 let seq = event.seq;
+                if let ApiEventData::InputRequired {
+                    request: Some(request),
+                    ..
+                } = &mut event.event
+                {
+                    super::types::to_v1_elicitation(request);
+                }
                 let encoded = Event::default()
                     .id(seq.to_string())
                     .event(event.event.kind())

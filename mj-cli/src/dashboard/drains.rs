@@ -91,7 +91,6 @@ impl DashboardContext {
         while let Some(capabilities) = self.profile_capabilities.next_ready() {
             self.dashboard.set_profile_capabilities(capabilities);
         }
-        self.drain_capacity_updates();
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
@@ -123,7 +122,6 @@ impl DashboardContext {
             self.runtime_ui_requests.take_delivered(),
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
-            self.capacity.take_delivered(),
             self.import_profiles.take_delivered(),
             self.import_tasks.take_delivered(),
             self.dashboard_io.take_delivered(),
@@ -477,6 +475,7 @@ impl DashboardContext {
             .set_container_upgrade_sessions(update.container_upgrade_sessions);
         self.dashboard
             .set_failed_launch_retries(update.failed_launch_retries);
+        self.dashboard.set_host_capacities(update.host_capacities);
         self.dashboard.set_target_storage(update.storage);
         self.dashboard
             .set_container_capacities(update.container_capacities);
@@ -587,9 +586,15 @@ impl DashboardContext {
         while let Some(config) = self.runtime_config.next_ready() {
             latest = Some(config);
         }
-        let Some(config) = latest else {
+        let Some(mj_daemon::pollers::RuntimeLaunchConfig {
+            config,
+            availability,
+        }) = latest
+        else {
             return;
         };
+        self.dashboard
+            .set_runtime_config(config.clone(), availability);
         self.auto_afk
             .set_enabled(config.advanced.auto_afk_minutes > 0);
         // The chat's copy of `[review]` follows the daemon's, so `/review
@@ -605,7 +610,6 @@ impl DashboardContext {
         // where a changed `[daemon]` setting is carried out.
         let daemon_changed = config.daemon != self.controller.config.daemon;
         self.controller.config = config.clone();
-        self.dashboard.set_config(config);
         self.refresh_chat_context();
         if daemon_changed {
             super::actions::spawn_daemon_placement(self);
@@ -697,29 +701,6 @@ impl DashboardContext {
         self.reconcile_question_drafts();
         self.refresh_chat_context();
         self.controller_changed = true;
-    }
-
-    pub(crate) fn drain_capacity_updates(&mut self) {
-        while let Some(update) = self.capacity.next_ready() {
-            self.dashboard.apply_deployment_capacity(
-                &update.target_id,
-                update.result,
-                update.sampled_at_epoch_seconds,
-            );
-        }
-    }
-
-    pub(crate) fn request_capacity_refresh(&mut self) {
-        self.dashboard.begin_capacity_refresh();
-        match self.capacity_triggers_tx.try_send(()) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
-                self.dashboard.set_notice("Refreshing target capacity…");
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                self.dashboard
-                    .set_notice("Could not refresh target capacity: poller stopped.");
-            }
-        }
     }
 
     pub(crate) fn drain_import_profiles(&mut self) {

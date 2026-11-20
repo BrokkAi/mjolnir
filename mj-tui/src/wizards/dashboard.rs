@@ -62,16 +62,6 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
             let can_attach = offers_attached_directories(
                 &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target())],
             );
-            if !wizard.mounts().mounts.is_empty() {
-                form.declare_with_enabled(
-                    WizardControl::ReviewAttachments,
-                    ControlKind::ChoiceList {
-                        len: wizard.mounts().mounts.len(),
-                        selected: wizard.mounts().selected_mount,
-                    },
-                    true,
-                );
-            }
             let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
             declare_review_controls(&mut form, can_attach, submit_enabled);
         }
@@ -187,6 +177,7 @@ mod new_session;
 pub(crate) mod paths;
 mod resume;
 mod targets;
+pub(super) use targets::SandboxOffer;
 
 impl DashboardState {
     /// Handles a wizard event through its persistent component form.
@@ -286,17 +277,7 @@ impl DashboardState {
                     .get(row)
                     .copied()
                     .unwrap_or_else(|| wizard.target());
-                let target_changed = wizard.target() != selected;
-                if target_changed {
-                    wizard.note_draft_change(self, DraftChange::TargetSelected);
-                }
-                wizard.set_target(selected);
-                if target_changed && wizard.prepares_target_on_select(self) {
-                    let action = self.prepare_wizard_target(&mut wizard);
-                    self.mode = wizard.into_mode();
-                    return action;
-                }
-                self.keep(wizard)
+                self.select_wizard_target(wizard, selected)
             }
             Interaction::Select(WizardControl::MountHistory, selected) => {
                 let len = wizard.mounts().available_history().len();
@@ -579,6 +560,17 @@ impl DashboardState {
             }
             WizardControl::Add => {}
             WizardControl::Submit => return wizard.submit_review(self),
+            WizardControl::UseSandboxedTarget => {
+                if let Some(index) = self
+                    .sandbox_offer(&wizard)
+                    .and_then(|offer| offer.alternative)
+                {
+                    wizard.set_target_step_skipped(false);
+                    wizard.set_step(WizardStep::Target);
+                    wizard.form_mut().focus(WizardControl::Next);
+                    return self.select_wizard_target(wizard, index);
+                }
+            }
 
             _ => {
                 return match wizard.activate_extra(self, id) {

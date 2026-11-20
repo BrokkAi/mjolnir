@@ -516,7 +516,7 @@ func TestReviewToolsBelongToTheReviewServerAndNoMjAgentsRole(t *testing.T) {
 	if ReviewMCPServer != "mj-review" {
 		t.Fatal(ReviewMCPServer)
 	}
-	if !slices.Equal(ReviewMCPTools, []string{"request_review", "override_review", "set_review_baseline"}) {
+	if !slices.Equal(ReviewMCPTools, []string{"request_review", "override_review", "set_baseline"}) {
 		t.Fatal(ReviewMCPTools)
 	}
 	for _, role := range []SubagentMcpRole{SubagentMcpRoleParent, SubagentMcpRoleMessageOnly, SubagentMcpRoleFetchOnly, SubagentMcpRoleChild} {

@@ -268,6 +268,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             capacity_retry: None,
             retry_assessment_pending: false,
             authentication_retry_waiting: None,
+            jev_rate_limit: None,
             held_login_fingerprint: None,
             authentication_retry_intent: None,
             activity_turn_started_at_ms: None,
@@ -2030,6 +2031,8 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         active_stages: std::sync::Mutex<Vec<ProvisionStage>>,
         stage_events: std::sync::Mutex<Vec<(ProvisionStage, bool)>>,
         observed_stages: std::sync::Mutex<Vec<(String, Vec<ProvisionStage>)>>,
+        exported_mailbox: std::sync::Mutex<Option<Option<mj_core::archive::CanonicalMailbox>>>,
+        notices: std::sync::Mutex<Vec<String>>,
     }
 
     impl RecordingExecutor {
@@ -2090,9 +2093,17 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         fn execute_with_stdin(
             &self,
             command: &CommandSpec,
-            _input: &mut (dyn std::io::Read + Send),
+            input: &mut (dyn std::io::Read + Send),
         ) -> Result<CommandOutput> {
+            if command.purpose == "export target checkpoint" {
+                let spec: CheckpointExportSpec = serde_json::from_reader(input)?;
+                *self.exported_mailbox.lock().unwrap() = Some(spec.canonical_session.mailbox);
+            }
             self.refused(command)
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
         }
 
         fn stage_started(&self, stage: ProvisionStage) {
@@ -2338,7 +2349,31 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         .unwrap();
     handle.sync_now().await.unwrap();
 
-    // Real session content, and the same policy has to export again.
+    // Real session content, and the same policy has to export again. This
+    // stand-in speaks a protocol older than checkpoint mail, so a message it
+    // accepted but has not handed to the agent cannot be saved; the export
+    // says nothing about it and the person is told (#1616).
+    let waiting = mj_core::mailbox::MailboxEvent {
+        key: "waiting-message".into(),
+        source: "parent".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "read this with your next prompt".into(),
+        },
+    };
+    crate::database::enqueue_mailbox_event(
+        &waiting.key,
+        LATCH_RELAY_SESSION,
+        &serde_json::to_string(&waiting).unwrap(),
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(matches!(
+        handle.deliver_mailbox_event(waiting.clone()).await.unwrap(),
+        crate::mailbox_outbox::MailboxEventDelivery::Accepted(_)
+    ));
     handle
         .submit(
             new_command_id("resume-notice").unwrap(),
@@ -2387,6 +2422,22 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     assert!(
         format!("{error:#}").contains("no target is provisioned for this test"),
         "{error:#}"
+    );
+    assert_eq!(
+        executor
+            .exported_mailbox
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the export spec was not read"),
+        None
+    );
+    let notices = executor.notices.lock().unwrap().clone();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.starts_with("1 accepted message not yet delivered")),
+        "the unsaved message went unreported: {notices:?}"
     );
     assert!(
         executor.observed_stages().iter().any(|(purpose, stages)| {
@@ -3654,6 +3705,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         "upgrade-test",
         cancel.clone(),
         plan.clone(),
+        None,
     )
     .unwrap();
     let engine = BusyEngine {
@@ -3768,11 +3820,39 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     })
     .await
     .expect("the dead worker actor did not retire");
+    // Mail the worker accepted and never handed to the agent; the daemon has
+    // marked it accepted and will not send it again (#1616).
+    let waiting = mj_core::mailbox::MailboxEvent {
+        key: "waiting-message".into(),
+        source: "parent".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "read this with your next prompt".into(),
+        },
+    };
+    let accepted = mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+        .unwrap()
+        .handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "deliver-waiting".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: "deliver-waiting".into(),
+                command: RelayCommand::DeliverMailboxEvent {
+                    event: waiting.clone(),
+                },
+            },
+        });
+    assert!(
+        matches!(accepted.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+        "{accepted:?}"
+    );
     let mut restored_target =
         latch_relay_target(&relay_root, Some(&starts), ReleaseSupport::Supported, false);
+    // A current worker: it exports its notification stack and its mail.
     restored_target.spec.env.insert(
         LATCH_RELAY_MAX_PROTOCOL.into(),
-        mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL.to_string(),
+        mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
     );
     let targets = channels.targets.clone();
     let restore_actor = mj_core::runtime::spawn(async move {
@@ -3826,6 +3906,14 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         .notification_stack
         .expect("a stack-capable worker exports an explicit stack");
     assert!(stack.entries.is_empty());
+    assert_eq!(
+        archived
+            .canonical_session
+            .mailbox
+            .expect("the restart archive kept the worker's mail")
+            .pending_events,
+        vec![waiting]
+    );
     assert_eq!(
         intent.checkpoint_sha256.as_ref(),
         intent.handoff.as_ref().map(|handoff| &handoff.sha256)

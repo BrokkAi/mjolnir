@@ -1,5 +1,27 @@
 use super::*;
 
+/// HTTP API v1 clients reject the call ID in a permission form.
+pub(super) fn to_v1_elicitation(request: &mut mj_core::elicitation::ElicitationRequest) {
+    if let Some(form) = request.tool_permission.as_mut() {
+        form.tool_call_id = None;
+    }
+}
+
+pub(super) fn v1_elicitations(
+    requests: &[mj_core::elicitation::ElicitationRequest],
+) -> Vec<mj_core::elicitation::ElicitationRequest> {
+    let mut requests = requests.to_vec();
+    requests.iter_mut().for_each(to_v1_elicitation);
+    requests
+}
+
+fn serialize_v1_elicitations<S: serde::Serializer>(
+    requests: &[mj_core::elicitation::ElicitationRequest],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&v1_elicitations(requests), serializer)
+}
+
 /// An externally produced item waiting in a session's durable mailbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,7 +179,11 @@ pub struct ApiSession {
     pub config_options: Vec<crate::server::ViewerConfigOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_controls: Option<mj_core::relay::TurnControls>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_v1_elicitations"
+    )]
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
 }
 
@@ -309,6 +335,8 @@ pub struct StartSessionRequest {
     pub target_id: Option<String>,
     #[serde(default)]
     pub bundle_id: Option<String>,
+    /// A directory on the bare target, or a checkout on the controller host
+    /// from which to discover a bundle for an isolated target.
     #[serde(default)]
     pub project_directory: Option<PathBuf>,
     #[serde(default)]
@@ -520,7 +548,11 @@ pub struct WaitResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_v1_elicitations"
+    )]
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<mj_core::usage::TokenUsage>,
@@ -915,9 +947,7 @@ pub struct LaunchTarget {
     /// instead of provisioning repositories into a workspace.
     pub requires_project_directory: bool,
     pub availability: LaunchAvailability,
-    /// What to tell a person when the host did not answer. This repository
-    /// composes the sentence: a probe's own message names hosts and commands
-    /// and stays on the controller.
+    /// The daemon's launch-availability reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
     /// Whether the target's runtime (Docker, Podman) is not installed on the
@@ -937,22 +967,17 @@ pub struct LaunchTarget {
     pub host: Option<String>,
 }
 
-/// How much this daemon knows about a target's host.
-///
-/// A reading arrives from a background poll, so it can be absent, old, or
-/// failed. Only `Unavailable` is a statement that the target cannot be used;
-/// `Unknown` means nobody has checked yet, which is the ordinary state
-/// immediately after startup.
+/// The launch verdict for a configured profile or target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchAvailability {
-    /// A reading covers this target and its last check succeeded.
+    /// A check found the entry usable.
     Ready,
-    /// A reading covers this target but is marked stale.
+    /// Historical host-capacity status accepted when reading older replies.
     Stale,
-    /// A reading covers this target and its last check failed.
+    /// A check found the entry missing or its engine is absent.
     Unavailable,
-    /// No reading covers this target yet.
+    /// The current configuration has no completed check. Offer the entry.
     Unknown,
 }
 
@@ -969,7 +994,7 @@ pub struct LaunchBundle {
 #[serde(deny_unknown_fields)]
 pub struct LaunchRepository {
     pub id: String,
-    /// The GitHub source, when this repository has one. A repository sourced
+    /// The Git URL or GitHub shorthand, when this repository has one. A repository sourced
     /// from a local directory publishes nothing here, because that source is a
     /// path on the controller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -989,6 +1014,63 @@ pub struct LaunchHost {
     pub stale: bool,
     pub refreshing: bool,
     pub has_error: bool,
+}
+
+/// Decide the profile and target of a new session from what the caller named,
+/// the saved default, and what is configured. The daemon's start route and
+/// `mj new` both call it, so a caller that is told what to name is told by
+/// the rule that would have chosen for it.
+///
+/// A choice left unnamed takes the saved default, else the only candidate.
+/// Every choice that remains open is reported together, each with its
+/// candidates, so the caller can fix them in one step. `need_profile` is false
+/// for a model-first request, where the profile is only a quota tie-break and
+/// the saved profile, when there is one, is returned as it stands.
+pub fn resolve_launch_choices<'a>(
+    profile: Option<&str>,
+    target: Option<&str>,
+    need_profile: bool,
+    profiles: impl IntoIterator<Item = &'a str>,
+    targets: impl IntoIterator<Item = &'a str>,
+    saved: Option<&LaunchDefault>,
+) -> Result<(Option<String>, String), Vec<String>> {
+    let mut open = Vec::new();
+    let mut choose =
+        |field: &str, named: Option<&str>, saved: Option<&str>, candidates: Vec<&str>| {
+            if let Some(value) = named.or(saved) {
+                return Some(value.to_owned());
+            }
+            if let [only] = candidates[..] {
+                return Some(only.to_owned());
+            }
+            open.push(match candidates.is_empty() {
+                true => format!("a {field} (none is configured)"),
+                false => format!("a {field} (one of: {})", candidates.join(", ")),
+            });
+            None
+        };
+    let profile_id = if need_profile {
+        choose(
+            "profile_id",
+            profile,
+            saved.map(|saved| saved.profile_id.as_str()),
+            profiles.into_iter().collect(),
+        )
+    } else {
+        profile
+            .map(str::to_owned)
+            .or_else(|| saved.map(|saved| saved.profile_id.clone()))
+    };
+    let target_id = choose(
+        "target_id",
+        target,
+        saved.map(|saved| saved.target_id.as_str()),
+        targets.into_iter().collect(),
+    );
+    match target_id {
+        Some(target_id) if open.is_empty() => Ok((profile_id, target_id)),
+        _ => Err(open),
+    }
 }
 
 /// The pair a caller may leave unnamed when it starts a session.

@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 137;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 143;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2733,6 +2733,33 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Breaking: checkpoint archives now carry the worker's accepted,
+    // undelivered mail in their canonical session (archive schema 13). Older
+    // daemons reject that field, so they could not resume a session this
+    // daemon suspended, and the mail the daemon already marked accepted would
+    // be lost with it. Refuse their reads and writes. No table changes.
+    if version < 142 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 142 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (142, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 142;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: saved permission forms can name their tool call. Older
+    // readers reject the new field and cannot replay these forms.
+    if version < 143 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 143 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (143, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 143;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5146,6 +5173,9 @@ mod reader_tests {
         if (132..136).contains(&version) {
             connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1", []).unwrap();
         }
+        if (137..142).contains(&version) {
+            connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=137 WHERE singleton=1", []).unwrap();
+        }
         if version == 30 {
             connection
                 .execute(
@@ -5538,6 +5568,62 @@ mod reader_tests {
         }
         let encoded = serde_json::to_value(&event).unwrap();
         assert!(serde_json::from_value::<LegacyInputEvent>(encoded["data"].clone()).is_err());
+    }
+
+    #[test]
+    fn permission_call_ids_raise_the_store_compatibility_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut record = super::super::tests::session("approval", "project");
+        record.state = mj_core::state::SessionState::Stopped;
+        save_session_to(&path, &record).unwrap();
+        let mut request = mj_core::elicitation::ElicitationRequest::from_acp_params(
+            "tool-permission-0",
+            serde_json::json!({
+                "mode": "form", "sessionId": "approval", "message": "Run it?",
+                "requestedSchema": {"type":"object", "required":["choice"],"properties":{
+                    "choice":{"type":"string", "oneOf":[{"const":"approved", "title":"Yes"}]}}}
+            }),
+        )
+        .unwrap();
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip: true,
+            tool_call_id: None,
+        });
+        let mut materialized = super::super::test_fixtures::materialized_session("approval");
+        materialized.pending_elicitations = vec![request.clone()];
+        save_materialized_session_to(&path, &materialized).unwrap();
+
+        stamp_schema_version(&path, 142);
+        let previous = read_schema_state(&Connection::open(&path).unwrap()).unwrap();
+        assert_eq!(previous.minimum_compatible, Some(142));
+        previous.ensure_supported_by(142).unwrap();
+        let upgraded = open_writer(&path).unwrap();
+        let schema = read_schema_state(&upgraded).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert!(matches!(
+            schema
+                .ensure_supported_by(142)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 143
+            }
+        ));
+        drop(upgraded);
+
+        let load = || {
+            load_materialized_session_from(&path, "approval")
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(load().pending_elicitations, [request.clone()]);
+        request.tool_permission.as_mut().unwrap().tool_call_id = Some("call-1".into());
+        materialized.pending_elicitations = vec![request.clone()];
+        save_materialized_session_to(&path, &materialized).unwrap();
+        assert_eq!(load().pending_elicitations, [request]);
     }
 
     #[test]

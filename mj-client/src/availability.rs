@@ -1,6 +1,6 @@
 //! Daemon-computed environment readiness; profile environments retain sources only.
 use crate::settings::RejectedRuntime;
-use mj_core::config::{HarnessProfile, Machine, TargetTemplate};
+use mj_core::config::{Machine, TargetTemplate};
 use std::collections::BTreeMap;
 /// What probing one machine found.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -31,27 +31,54 @@ pub enum MachineFinding {
     },
 }
 
-/// One of this computer's container engines, as a check found it.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct LocalEngine {
-    /// Why it cannot run sessions, or `None` when it can.
-    pub missing: Option<String>,
-    /// Whether its command is on this computer at all. A standard runtime
-    /// for an engine that was never installed is left out without a word;
-    /// one that is installed but not working is named.
-    pub installed: bool,
+/// A verdict applies to the entry's current configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AvailabilityVerdict {
+    Available,
+    Missing {
+        reason: String,
+    },
+    #[default]
+    Unknown,
 }
 
-/// What one availability check found and changed.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct AvailabilityChecked {
-    /// Every configured profile as it was checked, and why it is missing.
-    pub profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
-    /// This computer's engines, by runtime kind (`podman`, `docker`,
-    /// `apple-container`).
-    pub local: BTreeMap<String, LocalEngine>,
-    /// What each SSH and EC2 machine can run.
-    pub machines: Vec<MachineRuntimeProbe>,
-    pub added_profiles: Vec<String>,
-    pub added_runtimes: BTreeMap<String, Vec<String>>,
+impl AvailabilityVerdict {
+    pub fn missing_reason(&self) -> Option<&str> {
+        match self {
+            Self::Missing { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// One line under a target picker. A machine that did not answer is muted
+/// and can name several runtimes in one line.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AvailabilityNote {
+    pub text: String,
+    pub full: String,
+    pub routine: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeAvailability {
+    pub profiles: BTreeMap<String, AvailabilityVerdict>,
+    pub targets: BTreeMap<String, AvailabilityVerdict>,
+    pub target_notes: Vec<AvailabilityNote>,
+    pub machines_without_runtime: BTreeMap<String, String>,
+    /// Explanations prepared for browser and API clients in the daemon.
+    #[serde(skip)]
+    pub browser: BrowserAvailabilityReasons,
+    /// The local engine command is absent regardless of the last probe.
+    pub uninstalled_engines: std::collections::BTreeSet<String>,
+}
+
+/// Public wording for the same missing verdicts. Only in-process projection
+/// code needs both versions. The terminal feed carries its own wording.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowserAvailabilityReasons {
+    pub profiles: BTreeMap<String, String>,
+    pub targets: BTreeMap<String, String>,
+    pub target_notes: Vec<AvailabilityNote>,
 }

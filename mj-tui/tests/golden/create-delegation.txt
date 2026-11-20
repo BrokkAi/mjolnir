@@ -17,7 +17,7 @@
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation Native ▾                                                              │                           │
+│                           │ Sub-agents Native ▾                                                              │                           │
 │                           │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
 │                           │ subagents on all targets")                                                       │                           │
 │                           │                                                                                  │  ─────────────────────────╯
@@ -58,7 +58,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation None ▾                                                                │                           │
+│                           │ Sub-agents None ▾                                                                │                           │
 │                           │ Set up YOLO╭ Values ─╮-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
 │                           │ subagents o│Native   │ts")                                                       │                           │
 │                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
@@ -100,7 +100,7 @@ action: CreateSession { remember_container_size: false, create_managed_worktree:
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation Mjolnir ▾                                                             │                           │
+│                           │ Sub-agents Mjolnir ▾                                                             │                           │
 │                           │ Oracle     enabled ▾                                                             │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
@@ -141,7 +141,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation None ▾                                                                │                           │
+│                           │ Sub-agents None ▾                                                                │                           │
 │                           │ Oracle     ╭ Values ─╮                                                           │                           │
 │                           │            │Native   │                                                           │                           │
 │                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
@@ -183,7 +183,7 @@ action: CreateSession { remember_container_size: false, create_managed_worktree:
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation None ▾                                                                │                           │
+│                           │ Sub-agents None ▾                                                                │                           │
 │                           │            ╭ Values ─╮                                                           │                           │
 │                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
 │                           │            │None     │                                                           │  ─────────────────────────╮
@@ -224,7 +224,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation Mjolnir ▾                                                             │                           │
+│                           │ Sub-agents Mjolnir ▾                                                             │                           │
 │                           │            ╭ Values ─╮                                                           │                           │
 │                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
 │                           │            │None     │                                                           │  ─────────────────────────╮
@@ -265,7 +265,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │ Attached directories: 0                                                          │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
-│                           │ Delegation None ▾                                                                │                           │
+│                           │ Sub-agents None ▾                                                                │                           │
 │                           │ Set up YOLO╭ Values ─╮-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
 │                           │ subagents o│Mjolnir  │ts")                                                       │  ─────────────────────────╯
 │                           │            │None     │                                                           │  ─────────────────────────╮

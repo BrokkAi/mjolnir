@@ -287,6 +287,15 @@ pub struct WorkerLaunchConfig {
         skip_serializing_if = "crate::config::ClaudePermissionMode::is_auto"
     )]
     pub claude_permission_mode: crate::config::ClaudePermissionMode,
+    /// The profile's `mjolnir_guardian`, which decides whether the worker
+    /// reviews a Kimi Code, OpenCode, or DSH session's approvals under
+    /// configured approvals. Written only when off, so launches that keep the
+    /// default stay readable by older workers.
+    #[serde(
+        default = "crate::config::default_true",
+        skip_serializing_if = "crate::config::is_true"
+    )]
+    pub mjolnir_guardian: bool,
     /// Accepted from older daemon launch files, which carried Brokk Observe
     /// guardrail settings here; no longer used or written. This struct
     /// rejects unknown fields, so dropping the name would make a new worker
@@ -486,10 +495,18 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
+    /// The profile's approval choices the controller resolved into this
+    /// launch.
+    pub fn approval_choices(&self) -> crate::config::ApprovalChoices {
+        crate::config::ApprovalChoices {
+            claude_permission_mode: self.claude_permission_mode,
+            mjolnir_guardian: self.mjolnir_guardian,
+        }
+    }
+
     /// Whether this session is offered the `mj-review` tools. The controller
-    /// writes `review_trigger` as push only for sessions that may request
-    /// review: top-level sessions and ordinary sub-agents, never reviewers or
-    /// the oracle. This is the one owner of that fact.
+    /// writes `review_trigger` as push only for top-level sessions, never for
+    /// a sub-agent. This is the one owner of that fact.
     pub fn review_tools(&self) -> bool {
         offers_review_tools(self.review_trigger, self.harness)
     }
@@ -505,7 +522,7 @@ impl WorkerLaunchConfig {
 
     /// Whether pushes from this session are held to review: the pre-push
     /// hook, `MJ_REVIEW_GATE` and the session-start pin. Only top-level
-    /// sessions are gated; a sub-agent gets the tools without the gate.
+    /// sessions are gated.
     pub fn review_gate(&self) -> bool {
         self.review_tools()
             && !self.is_managed_subagent()
@@ -826,9 +843,8 @@ mod tests {
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
-                // A sub-agent is offered the review tools but never gated.
+                // A sub-agent is never gated.
                 assert!(!launch.review_gate());
-                assert_eq!(launch.review_tools(), expected);
                 assert_eq!(
                     launch.subagent_mcp_role(),
                     Some(crate::subagent::SubagentMcpRole::FetchOnly)

@@ -44,6 +44,12 @@ func (r ProjectDiscoveryRequestDirectory) MarshalJSON() ([]byte, error) {
 	}{"directory", wire(r)})
 }
 
+// UnmarshalProjectDiscoveryRequestJSON decodes a ProjectDiscoveryRequest for
+// other packages (mj-client's DaemonAction::DiscoverProjects carries one).
+func UnmarshalProjectDiscoveryRequestJSON(data []byte) (ProjectDiscoveryRequest, error) {
+	return unmarshalProjectDiscoveryRequest(data)
+}
+
 // unmarshalProjectDiscoveryRequest decodes the "kind"-tagged form.
 func unmarshalProjectDiscoveryRequest(data []byte) (ProjectDiscoveryRequest, error) {
 	var wire struct {

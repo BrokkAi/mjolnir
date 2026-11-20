@@ -768,12 +768,17 @@ impl RuntimeState {
     /// Record something the daemon did on its own, for every attached surface
     /// to report once.
     pub(crate) fn push_notice(&self, session_id: &str, text: impl Into<String>) {
-        self.push_surface_notice(session_id, text.into(), false);
+        self.push_surface_notice(session_id, text.into(), None);
     }
 
     /// Only safe, deliberately public text may cross the browser boundary.
     pub(crate) fn push_public_notice(&self, session_id: &str, text: impl Into<String>) {
-        self.push_surface_notice(session_id, text.into(), true);
+        let text = text.into();
+        self.push_surface_notice(session_id, text.clone(), Some(text));
+    }
+
+    pub(super) fn push_notice_with_public_text(&self, text: String, public_text: String) {
+        self.push_surface_notice("", text, Some(public_text));
     }
 
     pub(crate) fn public_notices(&self) -> Vec<RuntimeNotice> {
@@ -781,12 +786,16 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|entry| entry.public)
-            .map(|entry| entry.notice.clone())
+            .filter_map(|entry| {
+                Some(RuntimeNotice {
+                    text: entry.public_text.clone()?,
+                    ..entry.notice.clone()
+                })
+            })
             .collect()
     }
 
-    fn push_surface_notice(&self, session_id: &str, text: String, public: bool) {
+    fn push_surface_notice(&self, session_id: &str, text: String, public_text: Option<String>) {
         const RETAINED_NOTICES: usize = 32;
 
         let notice = RuntimeNotice {
@@ -796,7 +805,10 @@ impl RuntimeState {
         };
         {
             let mut notices = self.notices.lock().unwrap_or_else(PoisonError::into_inner);
-            notices.push_back(SurfaceNotice { notice, public });
+            notices.push_back(SurfaceNotice {
+                notice,
+                public_text,
+            });
             while notices.len() > RETAINED_NOTICES {
                 notices.pop_front();
             }

@@ -265,15 +265,41 @@ where
     tokio::spawn(boxed)
 }
 
+tokio::task_local! {
+    static BLOCKING_OWNER: tokio_util::task::TaskTracker;
+}
+
+/// Run `future` so that every closure it hands to [`spawn_blocking`] from its
+/// own task is counted by `tracker` until the closure returns.
+///
+/// A thread blocked in a system call cannot be stopped from outside, and
+/// dropping the future that awaited it detaches it. An owner that cancels
+/// `future` closes `tracker` and waits on it, so nothing the future started is
+/// still running when the owner reports it stopped. Tasks the future spawns
+/// are their own owners and are not counted.
+pub async fn track_blocking_work<F: Future>(
+    tracker: tokio_util::task::TaskTracker,
+    future: F,
+) -> F::Output {
+    BLOCKING_OWNER.scope(tracker, future).await
+}
+
 /// Run blocking work on tokio's blocking pool, as
 /// `tokio::task::spawn_blocking` does, with the closure boxed first for the
-/// same reason as [`spawn`].
+/// same reason as [`spawn`]. Inside [`track_blocking_work`] the closure is
+/// counted by that tracker until it returns.
 #[track_caller]
 pub fn spawn_blocking<R>(work: impl FnOnce() -> R + Send + 'static) -> tokio::task::JoinHandle<R>
 where
     R: Send + 'static,
 {
-    let boxed: Box<dyn FnOnce() -> R + Send> = Box::new(work);
+    let owner = BLOCKING_OWNER
+        .try_with(tokio_util::task::TaskTracker::token)
+        .ok();
+    let boxed: Box<dyn FnOnce() -> R + Send> = Box::new(move || {
+        let _owner = owner;
+        work()
+    });
     #[allow(
         clippy::disallowed_methods,
         reason = "this is the one place blocking work is handed to tokio"

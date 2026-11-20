@@ -13,13 +13,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 	"weak"
 
@@ -65,11 +69,129 @@ func RequestBody(evidence any, directQuestions json.RawMessage) json.RawMessage 
 // configuration.
 const DisabledEnvironment = "MJ_JEV_DISABLED"
 
+const FastinoKeyEnvironment = "MJ_JEV_FASTINO_KEY"
+
+// FastinoHeader is the value of the key header added only to hosted Jev
+// requests. Rust marks the header sensitive for diagnostics; Go's HTTP
+// client never logs header values. The key must be a valid header value, as
+// http's HeaderValue::from_str checks it: no control characters but tab.
+func FastinoHeader(key string) (string, error) {
+	for i := 0; i < len(key); i++ {
+		if b := key[i]; (b < 32 && b != '\t') || b == 127 {
+			return "", fmt.Errorf("invalid Fastino key header: %w", errors.New("failed to parse header value"))
+		}
+	}
+	return key, nil
+}
+
+const FastinoKeyHeader = "x-fastino-key"
+
 // DisabledByEnvironment reports whether this process was launched with Jev
 // turned off.
 func DisabledByEnvironment() bool {
 	value, ok := os.LookupEnv(DisabledEnvironment)
 	return ok && value == "1"
+}
+
+// RateLimitKind is a rate-limit response that can affect hosted Jev checks.
+type RateLimitKind string
+
+const (
+	RateLimitKindSharedProxy RateLimitKind = "shared_proxy"
+	RateLimitKindFastino     RateLimitKind = "fastino"
+)
+
+func (k *RateLimitKind) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	switch RateLimitKind(text) {
+	case RateLimitKindSharedProxy, RateLimitKindFastino:
+		*k = RateLimitKind(text)
+		return nil
+	}
+	return fmt.Errorf("unknown variant `%s`, expected `shared_proxy` or `fastino`", text)
+}
+
+// RateLimit is the latest rate-limit refusal: its kind, when it was
+// received, and how long the refusal said to wait, when it said.
+type RateLimit struct {
+	Kind       RateLimitKind
+	ReceivedAt time.Time
+	RetryAfter *time.Duration
+}
+
+// jevRateLimit holds the latest rate-limit refusal, nil once a response
+// succeeds. jevRateLimitDecision serializes ObserveResponse, its only writer,
+// so each observation reads and replaces the value in one decision.
+var (
+	jevRateLimit         = NewWatch[*RateLimit](nil)
+	jevRateLimitDecision sync.Mutex
+)
+
+// RateLimitChanges is the current rate limit and its changes.
+func RateLimitChanges() *Watch[*RateLimit] { return jevRateLimit }
+
+// CurrentRateLimit is the rate limit still in force, if any.
+func CurrentRateLimit() (RateLimitKind, bool) {
+	limit := jevRateLimit.Borrow()
+	if limit == nil || (limit.RetryAfter != nil && time.Since(limit.ReceivedAt) >= *limit.RetryAfter) {
+		return "", false
+	}
+	return limit.Kind, true
+}
+
+// ObserveResponse observes a hosted Jev HTTP response: a success at its
+// headers, and a refusal with its body, because the proxy identifies its own
+// limit with the JSON error code. retryAfter is the Retry-After header, nil
+// when absent.
+func ObserveResponse(status int, retryAfter *string, refusal []byte) {
+	jevRateLimitDecision.Lock()
+	defer jevRateLimitDecision.Unlock()
+	if status >= 200 && status < 300 {
+		if jevRateLimit.Borrow() != nil {
+			jevRateLimit.SendReplace(nil)
+		}
+		return
+	}
+	if status != http.StatusTooManyRequests {
+		return
+	}
+	kind := RateLimitKindFastino
+	if body, err := jsonvalue.Parse(refusal); err == nil {
+		if code, ok := agentJSONGet(body, "error"); ok && code == "rate_limited" {
+			kind = RateLimitKindSharedProxy
+		}
+	}
+	var wait *time.Duration
+	if retryAfter != nil && jevVisibleASCII(*retryAfter) {
+		value := strings.TrimSpace(*retryAfter)
+		if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+			duration := time.Duration(min(seconds, uint64(math.MaxInt64/int64(time.Second)))) * time.Second
+			wait = &duration
+		} else if deadline, err := http.ParseTime(value); err == nil {
+			duration := max(time.Until(deadline), 0)
+			wait = &duration
+		}
+	}
+	if wait == nil && kind == RateLimitKindSharedProxy {
+		// The shared proxy limit has a 60-second window (services/jev-proxy/wrangler.jsonc).
+		duration := 60 * time.Second
+		wait = &duration
+	}
+	jevRateLimit.SendReplace(&RateLimit{Kind: kind, ReceivedAt: time.Now(), RetryAfter: wait})
+}
+
+// jevVisibleASCII is reqwest's HeaderValue::to_str check: visible ASCII,
+// spaces and tabs.
+func jevVisibleASCII(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if b := text[i]; (b < 32 || b >= 127) && b != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 const jevSegmentBytes uint64 = 8 * 1024 * 1024

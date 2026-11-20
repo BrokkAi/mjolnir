@@ -13,21 +13,22 @@ function sourceBetween(from, to) {
   return viewerSource.slice(start, end);
 }
 
-// A host with no Docker: `docker` is permanently unavailable here and must not
-// be offered; `macbook` did not answer its last check, which is transient, so
-// it stays listed.
+// Probe-dependent failures and absent commands are both missing. Unchecked
+// entries are offered until a verdict arrives.
 const snapshot = {
   profiles: [{ id: 'codex' }],
   targets: [
-    { id: 'docker', kind: 'local-docker', runtime_missing: true },
-    { id: 'macbook', kind: 'ssh-bare', availability: 'unavailable', unavailable_reason: 'the host "macbook" did not answer its last check' },
-    { id: 'podman', kind: 'local-podman' },
+    { id: 'docker', kind: 'local-docker', availability: { status: 'missing', reason: 'Docker is not installed.' } },
+    { id: 'macbook', kind: 'ssh-bare', availability: { status: 'missing', reason: 'macbook did not answer.' } },
+    { id: 'podman', kind: 'local-podman', availability: { status: 'unknown' } },
   ],
 };
 
 function loaded() {
-  const context = vm.createContext({ snapshot, structuredClone, freshProjectPicker: () => ({}), selectedWorkspaceId: () => 'w1' });
-  vm.runInContext(sourceBetween('// A target whose runtime', '\nfunction freshDraft() {'), context);
+  const context = vm.createContext({ snapshot: structuredClone(snapshot), structuredClone, freshProjectPicker: () => ({}), selectedWorkspaceId: () => 'w1' });
+  vm.runInContext(sourceBetween('function availabilityMissing(', '\nfunction targetResourceKind('), context);
+  context.setNewTargetSizing = () => {};
+  context.delegationPolicy = value => value;
   vm.runInContext(sourceBetween('function subagentChoiceApplies(', '\nfunction targetIsBare('), context);
   vm.runInContext(sourceBetween('function freshDraft() {', '\n}\n') + '\n}\n', context);
   vm.runInContext(sourceBetween('function rememberedDelegationPolicy(', '\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
@@ -44,10 +45,10 @@ test('a new session preselects the daemon default when it is launchable, else th
   assert.equal(vm.runInContext('freshDraft().profileId', context), 'codex');
   // A default that is a missing runtime, or no longer configured, is not offered.
   vm.runInContext("launchDefault = { profile_id: 'gone', target_id: 'docker' }", context);
-  assert.equal(vm.runInContext('freshDraft().targetId', context), 'macbook');
+  assert.equal(vm.runInContext('freshDraft().targetId', context), 'podman');
   assert.equal(vm.runInContext('freshDraft().profileId', context), 'claude');
   vm.runInContext('launchDefault = null', context);
-  assert.equal(vm.runInContext('freshDraft().targetId', context), 'macbook');
+  assert.equal(vm.runInContext('freshDraft().targetId', context), 'podman');
 });
 
 // A minimal element: enough for `el`, `pickerField` and `resumeChoiceField`.
@@ -70,32 +71,30 @@ function rendering() {
   return context;
 }
 
-test('a host that did not answer is listed with a status and stays selectable', () => {
+test('the new picker omits missing targets and still offers an unchecked one', () => {
   const context = rendering();
-  assert.equal(vm.runInContext('targetStatus(snapshot.targets[1])', context), 'did not answer its last check');
-  // No reading yet, a ready host and a missing runtime say nothing here.
-  assert.equal(vm.runInContext("targetStatus({ id: 'a', availability: 'unknown' })", context), '');
-  assert.equal(vm.runInContext("targetStatus({ id: 'a', availability: 'ready' })", context), '');
-  assert.equal(vm.runInContext('targetStatus(snapshot.targets[2])', context), '');
-
-  // New and Move: the picker option carries the status and is not disabled.
-  const field = vm.runInContext('pickerField("Where to run", "new-target", launchableTargets(snapshot.targets), "macbook", () => {})', context);
-  const options = field.choice.options;
-  assert.deepEqual(options.map(option => option.value), ['macbook', 'podman']);
-  assert.equal(options[0].description, 'ssh-bare · did not answer its last check');
-  assert.equal(options[1].description, 'local-podman');
-  assert.ok(options.every(option => !option.disabled));
+  const field = vm.runInContext('pickerField("Where to run", "new-target", launchableTargets(snapshot.targets), "podman", () => {})', context);
+  assert.deepEqual(Array.from(field.choice.options, option => [option.value, option.description]), [['podman', 'local-podman']]);
 });
 
-test('resume shows the status beside the target and keeps it selectable', () => {
+test('the resume picker omits missing targets and still offers an unchecked one', () => {
   const context = rendering();
   context.session = { id: 's1', compatible_resume_targets: ['docker', 'macbook', 'podman'] };
   const items = vm.runInContext('resumeTargetItems(session)', context);
-  assert.deepEqual(items.map(item => [item.id, item.status]), [['macbook', 'did not answer its last check'], ['podman', '']]);
-  context.items = items;
-  const field = vm.runInContext('resumeChoiceField("Target", "resume-target-s1", items, "podman", () => {})', context);
-  const select = field.children.find(child => child.tag === 'select');
-  const options = select.children.filter(child => child.tag === 'option' && child.value);
-  assert.deepEqual(options.map(option => option.textContent), ['macbook (did not answer its last check)', 'podman']);
-  assert.ok(options.every(option => !option.disabled));
+  assert.deepEqual(Array.from(items, item => item.id), ['podman']);
+});
+
+test('a queue-locked retry keeps its retained target even when the last probe failed', () => {
+  const context = loaded();
+  context.session = {
+    id: 's1',
+    workspace_id: 'w1',
+    profile_id: 'codex',
+    target_id: 'podman',
+    compatible_resume_targets: ['macbook', 'podman'],
+    move_recovery: { destination_target_template_id: 'macbook', queue_admission_started: true },
+  };
+  const draft = vm.runInContext('freshMoveDraft(session)', context);
+  assert.equal(draft.queueLocked, true);
+  assert.equal(draft.targetId, 'macbook');
 });

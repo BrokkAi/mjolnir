@@ -130,6 +130,8 @@ impl RuntimeState {
             recent_launch: tokio::sync::watch::channel(None).0,
             recent_launch_update: Mutex::new(()),
             feed: Mutex::new(feed::RuntimeHistory::default()),
+            availability: Mutex::default(),
+            availability_requested: tokio::sync::Notify::new(),
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),
@@ -179,66 +181,38 @@ impl RuntimeState {
         &self.review_host
     }
 
-    /// Whether `child_id` can request review: an ordinary worker child that
-    /// launch offers the review tools, by the same rule launch uses.
-    pub(super) fn child_can_request_review(&self, child_id: &str) -> bool {
-        let owner = self.owner();
-        let controller = owner.controller();
-        let worker = controller
-            .state
-            .subagents
-            .get(child_id)
-            .is_some_and(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker);
-        let Some(session) = controller.state.sessions.get(child_id) else {
-            return false;
-        };
-        worker
-            && mj_core::worker_launch::offers_review_tools(
-                controller
-                    .state
-                    .effective_review_config(&controller.config.review, child_id)
-                    .trigger(),
-                session.harness_kind,
-            )
-    }
-
     /// Whether `child_id` is still waiting for its review's verdict, so its
-    /// ended turn or recorded handback is not final. Delegation completion and
-    /// parent report reconciliation both ask here. The review host owns the
-    /// answer: a review the child already started stays open even if review
-    /// has since been turned off, so the current configuration is not asked.
+    /// ended turn or recorded handback is not final. Delegation completion,
+    /// parent report reconciliation and the handback tool all ask here. The
+    /// review host owns the answer. A sub-agent no longer requests review, but
+    /// a child launched before that change can still have one open, and it
+    /// must survive a daemon handoff.
     ///
-    /// When the host cannot answer (its startup recovery failed and it did not
-    /// restore this session), the child counts as having no open review: a
-    /// review recovery did not restore cannot produce a verdict in this daemon
-    /// run, and waiting would only block the child forever. Restored reviews
-    /// still answer open.
-    pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
+    /// While the host is still restoring reviews, or the daemon is stopping,
+    /// a later answer will exist, so the answer is `Unknown` and each caller
+    /// decides how to wait. When the host's startup recovery failed, or its
+    /// task ended while the daemon keeps running, no verdict can arrive in
+    /// this daemon run, and waiting would block the child forever, so the
+    /// review counts as closed.
+    pub(crate) async fn child_review(&self, child_id: &str) -> ChildReview {
+        use crate::review_host::OpenReviewUnknown;
         match self.review_host().has_open_review(child_id).await {
-            Ok(open) => open,
-            Err(crate::review_host::OpenReviewUnknown::RecoveryFailed(error)) => {
-                if self.child_can_request_review(child_id) {
-                    tracing::warn!(child_session_id = child_id, %error,
-                        "cannot tell whether the child's review is open; settling it as having none");
-                }
-                false
+            Ok(true) => ChildReview::Open,
+            Ok(false) => ChildReview::Closed,
+            Err(OpenReviewUnknown::NotReady | OpenReviewUnknown::ShuttingDown) => {
+                ChildReview::Unknown
             }
-            // A host that is still restoring, or has stopped, says nothing
-            // about the review. A child that can request review waits, so its
-            // completion and its report retry later; any other child cannot
-            // have a review and is not held.
-            Err(
-                unknown @ (crate::review_host::OpenReviewUnknown::NotReady
-                | crate::review_host::OpenReviewUnknown::HostStopped),
-            ) => {
-                let held = self.child_can_request_review(child_id);
-                if held && unknown == crate::review_host::OpenReviewUnknown::HostStopped {
-                    tracing::warn!(
-                        child_session_id = child_id,
-                        "the review host stopped; holding the child's completion"
-                    );
-                }
-                held
+            Err(OpenReviewUnknown::RecoveryFailed(error)) => {
+                tracing::debug!(child_session_id = child_id, %error,
+                    "cannot tell whether the child's review is open; settling it as having none");
+                ChildReview::Closed
+            }
+            Err(OpenReviewUnknown::HostStopped) => {
+                tracing::warn!(
+                    child_session_id = child_id,
+                    "the review host stopped while the daemon runs; settling the child as having no open review"
+                );
+                ChildReview::Closed
             }
         }
     }
@@ -914,13 +888,14 @@ impl RuntimeState {
     pub async fn create_bundle_from_sources(
         &self,
         sources: Vec<String>,
+        discovered: bool,
     ) -> std::result::Result<
         mj_controller::controller::QuickBundleCreation,
         mj_controller::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
         mj_core::runtime::spawn_blocking(move || {
-            mj_controller::controller::create_bundle_from_sources(&sources)
+            mj_controller::controller::persist_project_sources(&sources, discovered)
         })
         .await
         .map_err(|error| {
@@ -2224,5 +2199,22 @@ impl RuntimeState {
             }
         }
         outcome
+    }
+}
+
+/// Whether a child's review is open, as the review host answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildReview {
+    Open,
+    Closed,
+    /// The host is restoring reviews or the daemon is stopping; ask again.
+    Unknown,
+}
+
+impl ChildReview {
+    /// Whether the child's finish must wait: an open review, or one the host
+    /// cannot rule out yet.
+    pub(crate) fn holds(self) -> bool {
+        self != Self::Closed
     }
 }

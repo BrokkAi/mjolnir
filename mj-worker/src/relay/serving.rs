@@ -243,12 +243,12 @@ mod tests {
     /// A worker serves only the current protocol. An older controller is
     /// refused even for a request every protocol has had.
     #[test]
-    fn a_request_below_the_current_protocol_is_refused() {
+    fn a_request_from_the_checkpoint_mailbox_protocol_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         let response = relay.handle(RelayRequestEnvelope {
             request_id: "status-old".into(),
-            protocol_version: RELAY_PROTOCOL_VERSION - 1,
+            protocol_version: RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
             request: RelayRequest::Status,
         });
         assert!(matches!(

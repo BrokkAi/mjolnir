@@ -9498,6 +9498,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
             .into_iter()
             .collect(),
         native_session_unused: true,
+        mailbox: None,
     };
     fs::write(
         mj_core::relay::restored_relay_seed_path(seed_root.path()),

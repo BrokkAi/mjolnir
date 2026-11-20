@@ -89,17 +89,26 @@ pub fn build_cache_config_roots(launch: &WorkerLaunchConfig) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Carries `[jev] enabled = false` to the worker, which reads it from its
-/// launch environment and then makes no classifier calls.
-pub fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
-    if enabled {
-        return;
-    }
+/// Carry the Jev settings to the worker's launch environment. The
+/// harness supervisor excludes the worker's Fastino key.
+pub fn apply_jev_settings(launch: &mut WorkerLaunchConfig, config: &mj_core::config::JevConfig) {
+    use mj_core::jev::{DISABLED_ENVIRONMENT, FASTINO_KEY_ENVIRONMENT};
+
     for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert(
-            mj_core::jev::DISABLED_ENVIRONMENT.to_owned(),
-            "1".to_owned(),
-        );
+        environment.remove(FASTINO_KEY_ENVIRONMENT);
+        if !config.enabled {
+            environment.insert(DISABLED_ENVIRONMENT.to_owned(), "1".to_owned());
+        }
+    }
+    match config.resolve_fastino_key() {
+        Ok(Some(key)) => {
+            // The worker takes the key from its target launch environment.
+            launch
+                .target_environment
+                .insert(FASTINO_KEY_ENVIRONMENT.to_owned(), key);
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "Jev will use the shared proxy key"),
     }
 }
 
@@ -431,6 +440,7 @@ pub fn worker_launch_config_with_checkout(
             serde_json::to_string(&roots)?,
         );
     }
+    let approval_choices = profile.approval_choices();
     Ok((
         WorkerLaunchConfig {
             cpu_accounting: backend.cpu_accounting(),
@@ -473,7 +483,8 @@ pub fn worker_launch_config_with_checkout(
             native_session_id: session.native_session_id.clone(),
             project_memory: project_memory.clone(),
             execution_policy,
-            claude_permission_mode: profile.approval_choices().claude_permission_mode,
+            claude_permission_mode: approval_choices.claude_permission_mode,
+            mjolnir_guardian: approval_choices.mjolnir_guardian,
             observe_policy: None,
         },
         project_memory,
