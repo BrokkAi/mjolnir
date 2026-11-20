@@ -431,31 +431,35 @@ fn offer(offer: mj_client::runtime_feed::SessionOffer) -> Availability {
     }
 }
 
+fn lifecycle_offer(
+    dashboard: &DashboardState,
+    published: impl FnOnce(
+        mj_client::runtime_feed::SessionVerdict,
+    ) -> mj_client::runtime_feed::SessionOffer,
+) -> Availability {
+    let Some(id) = dashboard.command_session_id() else {
+        return Availability::Hidden;
+    };
+    let availability = offer(published(dashboard.verdict(id)));
+    if availability == Availability::Ready
+        && dashboard.pending_local_session_operation(id).is_some()
+    {
+        Availability::Blocked("an operation is in progress")
+    } else {
+        availability
+    }
+}
+
 fn suspend_session_available(dashboard: &DashboardState) -> Availability {
-    offer(
-        dashboard
-            .command_session_id()
-            .map(|id| dashboard.verdict(id).stop)
-            .unwrap_or_default(),
-    )
+    lifecycle_offer(dashboard, |verdict| verdict.stop)
 }
 
 fn restart_session_available(dashboard: &DashboardState) -> Availability {
-    offer(
-        dashboard
-            .command_session_id()
-            .map(|id| dashboard.verdict(id).restart)
-            .unwrap_or_default(),
-    )
+    lifecycle_offer(dashboard, |verdict| verdict.restart)
 }
 
 pub(crate) fn move_session_available(dashboard: &DashboardState) -> Availability {
-    offer(
-        dashboard
-            .command_session_id()
-            .map(|id| dashboard.verdict(id).move_session)
-            .unwrap_or_default(),
-    )
+    lifecycle_offer(dashboard, |verdict| verdict.move_session)
 }
 
 /// A selected session whose target is running, which is what reading its
@@ -566,7 +570,7 @@ fn interrupt_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session_id() else {
         return Availability::Hidden;
     };
-    if dashboard.own_turn_is_running(session) {
+    if dashboard.verdict(session).interrupt {
         Availability::Ready
     } else {
         Availability::Blocked("no turn is running")
@@ -2036,7 +2040,7 @@ impl DashboardState {
                     // A suspend stops the sub-agents without a checkpoint.
                     // Only the ones still at their task lose anything.
                     let children_not_handed_back = self.subagents_not_handed_back(&session.id);
-                    let interrupting = self.own_turn_is_running(&session.id);
+                    let interrupting = self.has_active_work(&session.id);
                     let unverified_clone = session.publication_state().is_some();
                     if !interrupting && children_not_handed_back.is_empty() && !unverified_clone {
                         return DashboardAction::Suspend {
@@ -2086,7 +2090,7 @@ impl DashboardState {
                 }
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
-                if self.own_turn_is_running(&session_id) {
+                if self.has_active_work(&session_id) {
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::InterruptWork {
                             session_id,
@@ -2501,13 +2505,16 @@ mod tests {
             "session-1".into(),
             operation(SessionOperationKind::Launching, None),
         );
-        let mut verdict = dashboard.verdict("session-1");
-        verdict.stop = mj_client::runtime_feed::SessionOffer::Transitioning;
-        dashboard.set_session_verdict("session-1", verdict);
-        assert!(matches!(
-            (spec(CommandId::SuspendSession).available)(&dashboard),
-            Availability::Blocked(_)
-        ));
+        for command in [
+            CommandId::SuspendSession,
+            CommandId::RestartSession,
+            CommandId::MoveSession,
+        ] {
+            assert_eq!(
+                (spec(command).available)(&dashboard),
+                Availability::Blocked("an operation is in progress")
+            );
+        }
     }
 
     /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's

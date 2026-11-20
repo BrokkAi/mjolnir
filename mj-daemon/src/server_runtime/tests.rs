@@ -3091,6 +3091,12 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
         moves: [("moving".to_owned(), held)].into_iter().collect(),
         ..Default::default()
     };
+    let mut live = mj_core::relay::RelaySnapshot::new("moving".into()).operational_state();
+    live.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 10 });
+    let mut view =
+        mj_client::daemon::RuntimeSessionView::from_managed("moving".into(), Default::default());
+    view.operational = Some(live.into());
+    runtime.sessions.insert("moving".into(), view);
     runtime.metadata.workspaces = ["default", "other"]
         .into_iter()
         .map(|id| mj_core::workspace::WorkspaceRecord {
@@ -3116,6 +3122,9 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
     assert!(!failed.transitioning);
     let moving = &snapshot.sessions.0["moving"];
     assert_eq!(moving.verdict.move_session, SessionOffer::MoveQueueHeld);
+    assert!(moving.verdict.active_work);
+    assert!(!moving.capabilities.interrupt_turn);
+    assert!(!moving.capabilities.interrupt_all);
     assert!(!moving.capabilities.move_session);
     assert!(!moving.capabilities.change_workspace);
     let checkpoint = &snapshot.sessions.0["checkpoint"];

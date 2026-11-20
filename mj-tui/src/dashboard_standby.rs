@@ -91,14 +91,22 @@ impl DashboardState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn pending_local_session_operation(
+        &self,
+        session_id: &str,
+    ) -> Option<SessionOperationKind> {
+        self.session_operations
+            .get(session_id)
+            .filter(|operation| operation.operation_id.is_none())
+            .map(|operation| operation.kind)
+    }
+
     /// A terminal request may be awaiting acknowledgement. Its local progress
     /// presentation fills the gap until the daemon publishes operation ownership.
     pub fn transition_kind(&self, session_id: &str) -> Option<SessionTransitionKind> {
         self.verdict(session_id).transition.or_else(|| {
-            self.session_operations
-                .get(session_id)
-                .filter(|operation| !operation.operation_id.is_some())
-                .and_then(|operation| operation.kind.transition_kind())
+            self.pending_local_session_operation(session_id)
+                .and_then(SessionOperationKind::transition_kind)
         })
     }
 

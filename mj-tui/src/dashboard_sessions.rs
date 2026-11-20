@@ -806,11 +806,9 @@ impl DashboardState {
             .map(|relation| relation.kind)
     }
 
-    /// Whether the session's own turn is running. Turn controls ask this,
-    /// not [`Self::attention_level`], which reads as waiting while a child
-    /// waits on a person even though the parent's turn still runs.
-    pub(crate) fn own_turn_is_running(&self, session_id: &str) -> bool {
-        self.verdict(session_id).interrupt
+    /// Whether Stop or Restart would interrupt this session's own work.
+    pub(crate) fn has_active_work(&self, session_id: &str) -> bool {
+        self.verdict(session_id).active_work
     }
 
     /// Whether a live, reachable session is computing right now: the fact the

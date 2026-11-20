@@ -33,6 +33,7 @@ fn children(runtime: &RuntimeProjection) -> Children<'_> {
 
 fn interrupt_targets<'a>(
     root: &'a str,
+    runtime: &RuntimeProjection,
     children: &Children<'a>,
     verdict: impl Fn(&str) -> Option<SessionVerdict>,
 ) -> Vec<&'a str> {
@@ -41,6 +42,17 @@ fn interrupt_targets<'a>(
     let mut targets = Vec::new();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
+            continue;
+        }
+        if verdict(id).is_some_and(|v| v.move_queue_held)
+            || runtime
+                .native_agents
+                .get(id)
+                .and_then(|native| verdict(&native.agent.owner_session_id))
+                .is_some_and(|v| v.move_queue_held)
+        {
+            // A native child shares its owner's worker and must not provide
+            // a way to interrupt work already admitted by the Move.
             continue;
         }
         if verdict(id).is_some_and(|v| v.interrupt_member) {
@@ -195,8 +207,11 @@ fn own_verdict(
             && live.is_some_and(|live| {
                 mj_client::usage_format::SessionActivity::of(live).is_working(None, form)
             }),
+        active_work: state.has_live_worker()
+            && !form
+            && (running || activity.as_ref().is_some_and(|state| !state.is_idle())),
         unfinished,
-        interrupt: running && !form && state.has_live_worker(),
+        interrupt: !queue_held && running && !form && state.has_live_worker(),
         interrupt_member: unfinished,
         stop: if state.is_active() {
             if operation == TransitionFailed {
@@ -339,8 +354,17 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
         let before = previous.verdicts.get(id).copied();
         let rollup_changed = match (before, verdict) {
             (Some(old), Some(new)) => {
-                (old.working, old.unfinished, old.interrupt_member)
-                    != (new.working, new.unfinished, new.interrupt_member)
+                (
+                    old.working,
+                    old.unfinished,
+                    old.interrupt_member,
+                    old.move_queue_held,
+                ) != (
+                    new.working,
+                    new.unfinished,
+                    new.interrupt_member,
+                    new.move_queue_held,
+                )
             }
             (None, None) => false,
             _ => true,
@@ -368,6 +392,10 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
         }
         if !rollup_changed && !parent_changed {
             continue;
+        }
+        if before.is_some_and(|v| v.move_queue_held) != verdict.is_some_and(|v| v.move_queue_held) {
+            let prefix = mj_core::native_agent::owner_view_id_prefix(id);
+            families.extend(runtime.native_agents.keys_with_prefix(&prefix).cloned());
         }
         for runtime in [previous, &*runtime] {
             let mut visited = BTreeSet::new();
@@ -424,7 +452,7 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
         verdict.working_children += native_working.len();
         verdict.unfinished_children += native_working.len();
         verdict.interrupt_count =
-            interrupt_targets(&id, &children, |id| own.get(id).copied()).len();
+            interrupt_targets(&id, runtime, &children, |id| own.get(id).copied()).len();
         verdict.interrupt_all = verdict.interrupt_count != 0;
         if previous.verdicts.get(&id) == Some(&verdict) {
             verdicts.copy_entry(&previous.verdicts, &id, true);
@@ -494,30 +522,34 @@ impl RuntimeState {
         root: &str,
     ) -> Result<InterruptAllResult> {
         let children = children(runtime);
-        let targets = interrupt_targets(root, &children, |id| runtime.verdicts.get(id).copied());
-        let mut failures = Vec::new();
-        for id in &targets {
-            let result = async {
-                if let Some(native) = runtime.native_agents.get(*id) {
-                    let agent = &native.agent;
-                    self.session_manager
-                        .session(&agent.owner_session_id)
-                        .await?
-                        .stop_background_task(format!("native-agent:{}", agent.session_id))
-                        .await?;
-                } else {
-                    self.submit_turn_interrupt(runtime, id, true).await?;
+        let targets = interrupt_targets(root, runtime, &children, |id| {
+            runtime.verdicts.get(id).copied()
+        });
+        // Each worker owns its own cancellation. Dispatch all targets before
+        // waiting for acknowledgements so a leased or slow worker cannot
+        // delay cancellation on an unrelated worker.
+        let results = futures::future::join_all(targets.iter().map(|&id| async move {
+            let result = if let Some(native) = runtime.native_agents.get(id) {
+                let agent = &native.agent;
+                match self.session_manager.session(&agent.owner_session_id).await {
+                    Ok(worker) => {
+                        worker
+                            .stop_background_task(format!("native-agent:{}", agent.session_id))
+                            .await
+                    }
+                    Err(error) => Err(error),
                 }
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if let Err(error) = result {
-                failures.push(((*id).to_owned(), format!("{error:#}")));
-            }
-        }
+            } else {
+                self.submit_turn_interrupt(runtime, id, true).await
+            };
+            result
+                .err()
+                .map(|error| (id.to_owned(), format!("{error:#}")))
+        }))
+        .await;
         Ok(InterruptAllResult {
             requested: targets.len(),
-            failures,
+            failures: results.into_iter().flatten().collect(),
         })
     }
 }

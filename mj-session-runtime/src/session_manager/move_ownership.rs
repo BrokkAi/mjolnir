@@ -115,6 +115,8 @@ pub fn move_refuses_command(session_id: &str, command: &RelayCommand) -> bool {
                 | RelayCommand::RunUserShell { .. }
                 | RelayCommand::CancelUserShell { .. }
                 | RelayCommand::Cancel
+                | RelayCommand::CancelTurn
+                | RelayCommand::CancelTurnFor { .. }
                 | RelayCommand::RemoveQueuedPrompt { .. }
                 | RelayCommand::ClearQueuedPrompts
         )

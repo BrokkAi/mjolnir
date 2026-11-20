@@ -696,6 +696,7 @@ pub(crate) fn publish_fixture_verdicts(dashboard: &mut DashboardState) {
 pub(crate) fn set_working(dashboard: &mut DashboardState, session_id: &str) {
     let mut verdict = dashboard.verdict(session_id);
     verdict.interrupt = true;
+    verdict.active_work = true;
     verdict.interrupt_all = true;
     verdict.interrupt_count += 1;
     verdict.unfinished = true;

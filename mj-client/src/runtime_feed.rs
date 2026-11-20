@@ -55,6 +55,7 @@ pub struct SessionVerdict {
     pub move_queue_held: bool,
     pub idle: bool,
     pub working: bool,
+    pub active_work: bool,
     pub unfinished: bool,
     pub interrupt: bool,
     pub interrupt_member: bool,

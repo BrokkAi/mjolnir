@@ -1950,6 +1950,9 @@ fn a_failed_session_with_a_retained_target_offers_resume_without_an_archive() {
         worker_root: "/retained/session-1".into(),
     }));
     let mut dashboard = dashboard_with_session(session);
+    let mut verdict = dashboard.verdict("session-1");
+    verdict.resume = mj_client::runtime_feed::SessionOffer::Ready;
+    dashboard.set_session_verdict("session-1", verdict);
     dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(&dashboard.mode, Mode::Confirm(dialog)
         if matches!(dialog.confirmation, Confirmation::RecoverFailed { recoverable: true, .. })));

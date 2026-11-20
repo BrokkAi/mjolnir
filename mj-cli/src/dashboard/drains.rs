@@ -492,6 +492,7 @@ impl DashboardContext {
         self.dashboard.set_session_cpu(update.session_cpu);
         self.dashboard.set_move_snapshot(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
+        refresh_subagent_counts(&mut self.chats, &self.dashboard);
     }
 
     pub(crate) fn apply_runtime_lifecycles(

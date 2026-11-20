@@ -3532,6 +3532,7 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
     );
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
 
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     dashboard.begin_resume_for("session-1");
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::Resume(wizard) = &dashboard.mode else {
@@ -3557,6 +3558,7 @@ fn resume_keeps_a_legacy_allocation_below_the_new_session_minimum() {
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
 
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     dashboard.begin_resume_for("session-1");
     ready_key(&mut dashboard, key(KeyCode::Enter));
 

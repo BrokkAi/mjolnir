@@ -1379,10 +1379,15 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     let first = runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")));
     assert!(first.is_err(), "the first relay must crash after its ACK");
-    assert!(move_refuses_command(
-        MOVE_QUEUE_SESSION_ID,
-        &RelayCommand::Cancel
-    ));
+    for command in [
+        RelayCommand::Cancel,
+        RelayCommand::CancelTurn,
+        RelayCommand::CancelTurnFor {
+            active_prompt_id: "accepted-prompt".into(),
+        },
+    ] {
+        assert!(move_refuses_command(MOVE_QUEUE_SESSION_ID, &command));
+    }
     // The durable admission hold survives an attempt's transient owner.
     drop(MoveMutationGuard::reserve(MOVE_QUEUE_SESSION_ID).unwrap());
     assert!(move_owns_session(MOVE_QUEUE_SESSION_ID));
