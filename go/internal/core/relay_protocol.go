@@ -2217,6 +2217,18 @@ func (v ReviewerRequestCaptureDelta) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("action", "params", "capture_delta", plain(v))
 }
 
+// UnmarshalJSON applies serde's `#[serde(default)]` to a missing scope, which
+// older turn captures leave out.
+func (v *ReviewerRequestCaptureDelta) UnmarshalJSON(data []byte) error {
+	type plain ReviewerRequestCaptureDelta
+	decoded := plain{Scope: CaptureScopePushableCommits}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*v = ReviewerRequestCaptureDelta(decoded)
+	return nil
+}
+
 // Record Trees, the current_tree ids of a reviewed capture, as the new
 // review baselines, pinning each so a later git gc cannot collect it.
 type ReviewerRequestRecordReviewed struct {
