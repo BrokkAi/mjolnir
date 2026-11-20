@@ -70,13 +70,19 @@ pub fn ensure_image(
         if layout.image(&id).join("config.json").is_file() {
             let config = ImageConfig::read(layout, &id)?;
             let host = host_architecture()?;
+            if config.architecture == host {
+                return Ok((id, lock));
+            }
+            // A copy an older engine cached for another architecture is
+            // unusable; pull again in case the tag has been corrected.
             ensure!(
-                config.architecture == host,
+                policy != PullPolicy::Never,
                 "image {reference} is linux/{}, but this Nitro host runs linux/{host}; \
                  assign an image built for linux/{host}",
                 config.architecture
             );
-            return Ok((id, lock));
+            drop(lock);
+            return pull_reserved(layout, reference, platform);
         }
         // Pruned while we waited for the lock.
         layout.forget_image_lock(&id, &lock)?;
@@ -208,17 +214,27 @@ fn host_architecture() -> Result<&'static str> {
 /// Remove references outside the wanted set while serializing against image use and prune.
 pub fn reconcile_references(layout: &Layout, wanted: &[String]) -> Result<Vec<String>> {
     layout.ensure()?;
-    let wanted: std::collections::BTreeSet<_> =
-        wanted.iter().map(|r| normalize_reference(r)).collect();
     let _global = layout.lock_global()?;
     let mut refs = ImageRefs::read(layout)?;
+    // A selector can be a tag or a local image id (or unambiguous prefix);
+    // keep every reference to an image a selector names.
+    let mut wanted_ids = std::collections::BTreeSet::new();
+    for selector in wanted {
+        if let Some(id) = lookup(layout, selector)? {
+            wanted_ids.insert(id);
+        }
+    }
+    let wanted: std::collections::BTreeSet<_> =
+        wanted.iter().map(|r| normalize_reference(r)).collect();
+    let keep =
+        |reference: &String, id: &String| wanted.contains(reference) || wanted_ids.contains(id);
     let removed: Vec<_> = refs
         .refs
-        .keys()
-        .filter(|r| !wanted.contains(*r))
-        .cloned()
+        .iter()
+        .filter(|(reference, id)| !keep(reference, id))
+        .map(|(reference, _)| reference.clone())
         .collect();
-    refs.refs.retain(|r, _| wanted.contains(r));
+    refs.refs.retain(|reference, id| keep(reference, id));
     refs.write(layout)?;
     Ok(removed)
 }

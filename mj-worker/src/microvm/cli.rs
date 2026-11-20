@@ -532,6 +532,13 @@ fn image_command(layout: &Layout, command: ImageCommand) -> Result<i32> {
 
 fn maintain(layout: &Layout, args: MaintainArgs) -> Result<i32> {
     layout.ensure()?;
+    // Trim first: a full filesystem must not stop the trim that frees it,
+    // and rewriting the image references needs space for a temporary file.
+    {
+        let _global = layout.lock_global()?;
+        let freed = mbx_proxy::trim_cache(layout, args.mbx_cache_budget)?;
+        println!("Reclaimed {freed} bytes from the mbx cache");
+    }
     // An empty keep set would remove every reference; only a caller that
     // names the host's wanted images reconciles them.
     if !args.keep_image.is_empty() {
@@ -555,9 +562,6 @@ fn maintain(layout: &Layout, args: MaintainArgs) -> Result<i32> {
         }
         println!("bytes reclaimed: {bytes}");
     }
-    let _global = layout.lock_global()?;
-    let freed = mbx_proxy::trim_cache(layout, args.mbx_cache_budget)?;
-    println!("Reclaimed {freed} bytes from the mbx cache");
     Ok(0)
 }
 

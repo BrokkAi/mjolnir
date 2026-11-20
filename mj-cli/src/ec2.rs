@@ -794,24 +794,25 @@ fn aws_permission_denied(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The resource, and whether this call created it.
 fn get_or_create_iam(
     cloud: &Cloud,
     get: &str,
     create: &str,
     lookup: &Value,
     request: Value,
-) -> Result<Value> {
+) -> Result<(Value, bool)> {
     match cloud.call("iam", &[get], lookup.clone()) {
         Err(error) if aws_error_code(&error, "NoSuchEntity") => {
             match cloud.call("iam", &[create], request) {
                 // A create for another target can share this role.
                 Err(error) if aws_error_code(&error, "EntityAlreadyExists") => {
-                    cloud.call("iam", &[get], lookup.clone())
+                    Ok((cloud.call("iam", &[get], lookup.clone())?, false))
                 }
-                result => result,
+                result => Ok((result?, true)),
             }
         }
-        result => result,
+        result => Ok((result?, false)),
     }
 }
 
@@ -825,7 +826,7 @@ fn prepare_mbx_instance_profile(cloud: &Cloud, identity: &Value, remote: &str) -
     let digest = mj_core::hex::lower_hex(Sha256::digest(format!("{bucket}/{prefix}")));
     let name = format!("mjolnir-nitro-mbx-{}", &digest[..8]);
     let description = format!("Mjolnir Nitro build cache scope {digest}");
-    let role = get_or_create_iam(
+    let (role, created) = get_or_create_iam(
         cloud,
         "get-role",
         "create-role",
@@ -843,8 +844,10 @@ fn prepare_mbx_instance_profile(cloud: &Cloud, identity: &Value, remote: &str) -
             }).to_string(),
         }),
     )?;
+    // CreateRole's response omits the description, so only a role that
+    // already existed is checked against it.
     ensure!(
-        role["Role"]["Description"] == description,
+        created || role["Role"]["Description"] == description,
         "IAM role {name} already exists for a different purpose"
     );
     let bucket_arn = format!("arn:{partition}:s3:::{bucket}");
@@ -871,7 +874,7 @@ fn prepare_mbx_instance_profile(cloud: &Cloud, identity: &Value, remote: &str) -
         }),
     )?;
     let lookup = json!({"InstanceProfileName": name});
-    let profile = get_or_create_iam(
+    let (profile, _) = get_or_create_iam(
         cloud,
         "get-instance-profile",
         "create-instance-profile",
@@ -2022,7 +2025,8 @@ elif service == 'iam':
         assert trust['Statement'] == [{'Effect':'Allow', 'Principal':{'Service':'ec2.amazonaws.com'}, 'Action':'sts:AssumeRole'}]
         assert not role.exists()
         role.write_text(json.dumps({'RoleName':request['RoleName'], 'Description':request['Description']}))
-        response = {'Role':json.loads(role.read_text())}
+        # Like AWS, CreateRole does not echo the description.
+        response = {'Role':{'RoleName':request['RoleName']}}
     elif op == 'put-role-policy':
         assert request['RoleName'] == json.loads(role.read_text())['RoleName']
     elif op == 'create-instance-profile':
