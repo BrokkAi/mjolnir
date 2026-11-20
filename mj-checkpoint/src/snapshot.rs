@@ -3642,9 +3642,13 @@ pub fn restore_workspace_snapshot(
         .origin_url
         .as_ref()
         .context("snapshot has no origin")?;
+    // Capture saved origin with credentials redacted; the seed keeps its URL
+    // as configured. Compare both redacted, so an unchanged origin keeps the
+    // seed's credentialed URL and its push settings.
     let seeded = run_git(runner, destination, ["config", "--get", "remote.origin.url"], &[])?;
     let origin_changed = seeded.status != 0
-        || String::from_utf8_lossy(&seeded.stdout).trim_end() != origin.as_str();
+        || redact_snapshot_url(String::from_utf8_lossy(&seeded.stdout).trim_end())?
+            != origin.as_str();
     if origin_changed {
         // The seed's push URL and tracking refs describe the seed's remote.
         // Keep neither under the session's origin: a push must not reach the
@@ -3679,18 +3683,18 @@ pub fn restore_workspace_snapshot(
                 "remove the seed's origin tracking refs",
             )?;
         }
+        git_text(
+            runner,
+            destination,
+            [
+                "config",
+                "--local",
+                "--replace-all",
+                "remote.origin.url",
+                origin,
+            ],
+        )?;
     }
-    git_text(
-        runner,
-        destination,
-        [
-            "config",
-            "--local",
-            "--replace-all",
-            "remote.origin.url",
-            origin,
-        ],
-    )?;
     // Tracking refs for the restored origin arrive with the next fetch;
     // until then, upstreams show as gone rather than as the seed's commits.
     let mut notices = Vec::new();

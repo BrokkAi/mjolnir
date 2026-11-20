@@ -558,18 +558,7 @@ impl Controller {
                 | mj_core::state::Checkout::Borrowed { .. } => None,
             }
         };
-        // A clone eligible for origin-delta suspend never asks for publication
-        // consent (Milestone 2 decision), even when an older worker or a missing
-        // origin sends this suspend through the legacy capture: that archive
-        // keeps every unpushed commit as well. `publication_state` makes the
-        // same decision for every client, so the acknowledgement has one rule.
-        let consent_free = self
-            .state
-            .checkout(session_id)?
-            .managed_worktree()
-            .is_some_and(mj_core::state::ManagedWorktree::uses_origin_delta_suspend);
         if !acknowledge_unpublished_work
-            && !consent_free
             && publication
                 .as_ref()
                 .is_some_and(|result| result.state != mj_core::state::PublicationState::Published)

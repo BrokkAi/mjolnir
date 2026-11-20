@@ -118,7 +118,7 @@ def main():
         if args.case == "untracked":
             untracked = checkout / "untracked.txt"
             untracked.write_text("keep me\n")
-            result = run("suspend", "--session", session, check=False)
+            result = run("suspend", "--acknowledge-unpublished-work", "--session", session, check=False)
             assert result.returncode != 0 and "untracked.txt" in result.stderr, result
             assert record()["state"] == "running", record()
             assert pid_path.read_text() == worker_before
@@ -132,7 +132,7 @@ def main():
             saved = keep / "ignored.txt"
             saved.write_text("preserve ignored keep data\n")
             git(checkout, "check-ignore", saved.relative_to(checkout))
-            result = run("suspend", "--session", session, check=False)
+            result = run("suspend", "--acknowledge-unpublished-work", "--session", session, check=False)
             assert result.returncode != 0 and "ignored.txt" in result.stderr, result
             assert record()["state"] == "running", record()
             assert pid_path.read_text() == worker_before
@@ -171,7 +171,7 @@ while True:
                     release.touch()
                     wait_for(wrote.exists, "detached writer to write tracked data")
 
-            run("suspend", "--session", session)
+            run("suspend", "--acknowledge-unpublished-work", "--session", session)
             if checkpoint_hook is not None:
                 wait_for((lab.hooks / f"{lab.hook_name}.reached").exists, "completed suspend preflight")
                 if args.case == "late-file":
@@ -228,7 +228,7 @@ while True:
             git(checkout / "vendor/module", "rev-parse", "HEAD").stdout,
         ]
 
-        run("suspend", "--session", session)
+        run("suspend", "--acknowledge-unpublished-work", "--session", session)
         stopped = wait_for(lambda: row if (row := record())["state"] == "stopped" else None,
                            "session to stop")
         assert not checkout.exists(), str(checkout)
