@@ -2072,10 +2072,7 @@ mod tests {
             resolve(
                 &podman(Some(TargetBuildCache {
                     enabled: Some(true),
-                    directory: None,
-                    tools_directory: None,
-                    max_total_size: None,
-                    scheduler: Default::default(),
+                    ..Default::default()
                 })),
                 &executor,
             ),

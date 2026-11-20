@@ -33,7 +33,7 @@ To see it working:
 - [x] (2026-11-20 10:40Z) Claimed #1495 (assignee + `agent-in-progress`). Three read-only maps done; findings folded into Context and Surprises. Raw reports, not committed: `.mj/agents/86723bf780a4dd9d8b24056c7b6be9b8/findings.md` (mbx crates and protocol), `.mj/agents/f3f4746fa398e3dbff9133f5e48cee2e/findings.md` (engine, network, IAM, controller), `.mj/agents/8f2bc9dd138866074e59bf08f113d596/findings.md` (Nitro and mise images).
 - [x] (2026-11-20) Milestone 1: engine image alignment (platform check, `maintain` verb with image reconciliation, pull credential remediation).
 - [ ] Milestone 2: controller image alignment (warm effective images at host creation, reconcile images during refresh, `mj image status` without a builder, Doctor, docs).
-- [ ] Milestone 3: mbx in Nitro guests (pinned client, launchers, guest-local store).
+- [x] (2026-11-20) Milestone 3: mbx in Nitro guests (pinned v1.30.0 musl release per guest architecture, staged through the worker binary store, launchers, guest-local store at /var/lib/hel/mbx). Ten focused filters passed one each; clippy clean on six crates. Live guest execution unverified until Milestone 6.
 - [ ] Milestone 4: the host proxy (engine verb, per-VM unit, firewall, host cache, trimming, tests).
 - [x] (2026-11-20 16:05Z) Milestone 5: implemented configuration, controller wiring, EC2 instance-role provisioning, the Doctor probe caller, and documentation in `nitro-mbx-wiring`.
 - [x] (2026-11-20 16:08Z) Milestone 5: five focused test filters passed one test each, and all 11 touched Rust crates passed Clippy with all targets and warnings denied.
