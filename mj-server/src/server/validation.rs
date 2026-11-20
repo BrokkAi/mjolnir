@@ -1009,7 +1009,10 @@ pub(super) fn require_session_record<'a>(
 /// republished on a few daemon actions, so it can lag behind the store; a
 /// session that has just landed in `default` made the lag a refusal (#1334).
 /// Every check that a workspace exists therefore asks the store here.
-async fn require_listed_workspace(state: &ServerState, id: &str) -> Result<(), ApiError> {
+pub(super) async fn require_listed_workspace(
+    state: &ServerState,
+    id: &str,
+) -> Result<(), ApiError> {
     let backend = state
         .subagent
         .as_ref()

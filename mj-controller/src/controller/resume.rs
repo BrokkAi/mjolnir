@@ -1393,10 +1393,10 @@ fn fetch_source_commit(
             .github
             .as_deref()
             .context("repository source is missing")?;
-        let source = mj_core::remote_git::expand_github_source(source)?;
+        let expanded = mj_core::remote_git::expand_github_source(source)?;
         if let Some(github) = mj_core::remote_git::parse_github_remote(
-            &source,
-            mj_core::remote_git::Shorthand::Rejected,
+            source,
+            mj_core::remote_git::Shorthand::Allowed,
         )
         .filter(|github| github.is_default_endpoint())
         {
@@ -1407,11 +1407,13 @@ fn fetch_source_commit(
                     "https://github.com/{}/{}.git",
                     github.owner, github.repository
                 )
+            } else if github.spelling == mj_core::remote_git::GithubSpelling::Shorthand {
+                format!("git@github.com:{}/{}.git", github.owner, github.repository)
             } else {
-                source
+                expanded
             }
         } else {
-            source
+            expanded
         }
     };
     if accepted_source.is_some() && github_token.is_some() && is_github_https_url(&source) {

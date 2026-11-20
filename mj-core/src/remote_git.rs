@@ -255,6 +255,21 @@ pub(crate) fn validate_configured_project_source(source: &str) -> Result<()> {
     parsed.map(drop)
 }
 
+/// The SSH login in an accepted Git URL. An empty login uses SSH configuration.
+pub fn ssh_login(source: &str) -> Option<String> {
+    if source.contains("://") {
+        let url = Url::parse(source).ok()?;
+        return (url.scheme() == "ssh").then(|| url.username().to_owned());
+    }
+    let (authority, _) = source.split_once(':')?;
+    Some(
+        authority
+            .rsplit_once('@')
+            .map_or("", |(user, _)| user)
+            .to_owned(),
+    )
+}
+
 /// Label derived from the repository path, independent of HTTP query data.
 pub fn project_source_name(source: &str) -> Option<String> {
     let remote = parse_github_remote(source, Shorthand::Allowed);

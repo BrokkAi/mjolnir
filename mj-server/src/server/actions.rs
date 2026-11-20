@@ -407,9 +407,10 @@ pub struct BundleRequest {
 /// Safe failure classes for bundle creation. Detailed controller errors stay
 /// in daemon logs; a browser only needs to know whether to fix its source or
 /// report a server-side failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleFailure {
     InvalidSource,
+    Refused(Refusal),
     Controller,
 }
 

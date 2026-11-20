@@ -238,6 +238,12 @@ pub(super) async fn start_session(
         // them there; a controller-local bundle lookup cannot resolve SSH paths.
         (None, Some(_)) if bare => String::new(),
         (None, Some(directory)) => {
+            if request.create_managed_worktree == Some(true) {
+                return Err(ApiFailure::bad_request(
+                    "managed worktree creation requires a bare Git project",
+                ));
+            }
+            crate::server::require_listed_workspace(&state, &workspace_id).await?;
             let (source, removed) = discover_project(directory, &target_id).await?;
             stripped = removed;
             project_directory = None;

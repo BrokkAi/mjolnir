@@ -6711,6 +6711,14 @@ async fn isolated_directory_start_uses_the_discovered_project_and_reports_remove
         "target_id": "podman",
         "project_directory": repository.path(),
     });
+    let mut invalid = body.clone();
+    invalid["create_managed_worktree"] = true.into();
+    let refused = tokio::select! {
+        response = app.clone().oneshot(start_request(invalid.to_string())) => response.unwrap(),
+        _ = bundles.recv() => panic!("an invalid directory launch tried to save a project"),
+    };
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
     let response = mj_core::runtime::spawn(app.oneshot(start_request(body.to_string())));
     let request = bundles.recv().await.unwrap();
     assert!(request.discovered);

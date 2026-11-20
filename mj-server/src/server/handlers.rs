@@ -538,6 +538,7 @@ pub(super) async fn request_bundle(
             BundleFailure::InvalidSource => ApiError::bad_request(
                 "use a Git URL, GitHub owner/repository, or an existing Git checkout on the controller host",
             ),
+            BundleFailure::Refused(refusal) => ApiError::bad_request(refusal.message().to_owned()),
             BundleFailure::Controller => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the controller could not create the bundle",

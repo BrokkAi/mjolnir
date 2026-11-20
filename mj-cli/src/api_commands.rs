@@ -1331,6 +1331,21 @@ async fn infer_new_session_inputs(
         crate::refuse_unknown_workspace(name).await?;
         workspace_id = Some(crate::resolve_store_workspace(Some(name)).await?);
     }
+    if let Some(workspace_id) = &workspace_id
+        && args.target.is_some()
+        && (args.profile.is_some() || args.model.is_some())
+        && args
+            .project_directory
+            .as_ref()
+            .map_or(args.bundle.is_some(), |path| path.is_absolute())
+    {
+        return Ok((
+            ApiClient::connect().await?,
+            workspace_id.clone(),
+            args.target.clone(),
+            args.project_directory.clone(),
+        ));
+    }
     let mut listed = if workspace_id.is_none() {
         crate::listed_workspaces_without_starting().await
     } else {

@@ -151,8 +151,8 @@ and `api/generated` cannot coexist because one would contain the other.
 
 For an isolated `mj new --project-directory PATH` launch, Mjolnir reads the
 fetch URL from `origin` or the checkout's sole remote on the controller host.
-A project created this way uses that URL for both fetch and push. The launch
-preflight displays the push destination.
+A project created this way uses that URL for both fetch and push. The interactive
+launch preflight displays the push destination.
 
 See the [Configuration reference](/configuration/) for every accepted source
 form and validation rule.

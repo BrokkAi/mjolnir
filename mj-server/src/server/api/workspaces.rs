@@ -66,11 +66,14 @@ pub(super) async fn workspace_for_new_session(
     if let Some(requested) = requested {
         return Ok(requested);
     }
-    if backend.list_workspaces().await?.is_empty() {
-        return Err(ApiFailure::conflict(
-            "this instance has no workspace yet; create one with POST /api/v1/workspaces \
+    match backend.list_workspaces().await?.as_slice() {
+        [workspace] => Ok(workspace.id.clone()),
+        [] => Err(ApiFailure::conflict(
+            "this instance has no workspace yet. Create one with POST /api/v1/workspaces \
              or `mj workspaces create NAME`, then name it in workspace_id",
-        ));
+        )),
+        _ => Err(ApiFailure::conflict(
+            "this instance holds more than one workspace. Supply workspace_id",
+        )),
     }
-    Ok(String::new())
 }

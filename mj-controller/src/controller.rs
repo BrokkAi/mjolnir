@@ -321,10 +321,20 @@ pub fn persist_project_sources(
                 .find(|entry| entry.bundle_id == canonical)
                 .context("canonical project is missing")?
                 .project;
-            if discovered && let Some(configured) = config.bundles.get(&canonical) {
-                saved.bundle = configured.clone();
+            let configured = config.bundles.get(&canonical);
+            let preserve_saved = discovered && configured.is_some();
+            if let Some(configured) = configured {
+                check_bundle_ssh_logins(&canonical, configured, &project.bundle)?;
+                if discovered {
+                    saved.bundle = configured.clone();
+                }
             }
-            for repository in saved.bundle.repositories.iter_mut().filter(|_| !discovered) {
+            for repository in saved
+                .bundle
+                .repositories
+                .iter_mut()
+                .filter(|_| !preserve_saved)
+            {
                 let identity = saved
                     .identities
                     .get(&repository.id)
@@ -342,7 +352,7 @@ pub fn persist_project_sources(
                 .insert(canonical.clone(), saved.bundle.clone());
             config.bundles.remove(&id);
             config.images.consolidate_bundle(&id, &canonical);
-            if !discovered {
+            if !preserve_saved {
                 crate::database::store_catalog_project(&canonical, &saved, true)?;
             }
         }
@@ -555,6 +565,53 @@ fn interpret_network_source(
     })
 }
 
+fn check_bundle_ssh_logins(
+    id: &str,
+    saved: &ProjectBundle,
+    requested: &ProjectBundle,
+) -> Result<()> {
+    for source in &requested.repositories {
+        let Some(url) = source.github.as_deref() else {
+            continue;
+        };
+        if let Some(existing) = saved
+            .repositories
+            .iter()
+            .find(|repo| repo.destination == source.destination)
+        {
+            check_ssh_login(id, existing, url)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_ssh_login(id: &str, saved: &ProjectRepository, requested: &str) -> Result<()> {
+    if !matches!(
+        RepositoryIdentity::from_remote(requested),
+        Some(RepositoryIdentity::Network(_))
+    ) {
+        return Ok(());
+    }
+    let Some(requested_login) = mj_core::remote_git::ssh_login(requested) else {
+        return Ok(());
+    };
+    let source = mj_core::remote_git::resolve_repository(saved, &targets::ProcessExecutor)?;
+    let saved_login = mj_core::remote_git::ssh_login(&source.fetch_url);
+    if let Some(login) = saved_login
+        && login != requested_login
+    {
+        let login = if login.is_empty() {
+            "from SSH configuration".to_owned()
+        } else {
+            format!("{login:?}")
+        };
+        return Err(mj_core::refusal::Refusal::unusable(format!(
+            "Project {id:?} uses a different SSH login ({login}). Select project {id:?} to use that login, or configure a project with a different checkout folder for the other login."
+        )).into());
+    }
+    Ok(())
+}
+
 fn exact_configured_bundle(
     config: &Config,
     requested: &[InterpretedRepositorySource],
@@ -604,6 +661,13 @@ fn exact_configured_bundle(
             continue;
         };
         if layout == requested_layout && identities.get(primary_index) == Some(&primary) {
+            for (repo, identity) in bundle.repositories.iter().zip(&identities) {
+                if let Some(source) = requested.iter().find(|source| &source.identity == identity)
+                    && let RepositorySourceKind::Network(url) = &source.kind
+                {
+                    check_ssh_login(id, repo, url)?;
+                }
+            }
             return Ok(Some(id.clone()));
         }
     }

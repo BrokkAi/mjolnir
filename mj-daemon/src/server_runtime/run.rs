@@ -897,13 +897,13 @@ pub(crate) async fn run_server(
                                     detail,
                                 ) => {
                                     tracing::debug!(error = %detail, "phone bundle source was invalid");
-                                    crate::server::BundleFailure::InvalidSource
+                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::InvalidSource, crate::server::BundleFailure::Refused)
                                 }
                                 mj_controller::controller::QuickBundleFailure::Persistence(
                                     detail,
                                 ) => {
                                     tracing::warn!(error = %detail, "phone bundle creation failed");
-                                    crate::server::BundleFailure::Controller
+                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::Controller, crate::server::BundleFailure::Refused)
                                 }
                             };
                             if reply.send(Err(failure)).is_err() {
