@@ -97,8 +97,8 @@ keeps its own workspace metadata out of reach. Every deny stands: yours,
 and OpenCode's own (Plan mode cannot edit, its read-only agents stay
 read-only). Your own allow rules still go to the guardian. OpenCode's tools
 that never consult its permissions (`worktree_create`, `worktree_remove`,
-`session_move`, and the artifact and schedule tools that create, update,
-delete, pause, or resume) are turned off.
+`session_move`, the artifact and schedule tools that create, update, delete,
+pause, or resume, and OpenCode Console's event-watch tools) are turned off.
 Each of those requests goes to the Mjolnir guardian.
 
 Under configured approvals Mjolnir also pre-approves the GitHub CLI (`gh`),

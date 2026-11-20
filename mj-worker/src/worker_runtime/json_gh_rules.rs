@@ -69,7 +69,7 @@ type Rule = (&'static str, &'static str, &'static str);
 /// offer them. `worktree_remove` consults only `edit`, which an
 /// inside-the-workspace removal passes, so it goes too. Mjolnir sessions use
 /// none of them.
-const PERMISSIONLESS_TOOLS: [&str; 10] = [
+const PERMISSIONLESS_TOOLS: [&str; 12] = [
     "worktree_create",
     "worktree_remove",
     "session_move",
@@ -80,6 +80,8 @@ const PERMISSIONLESS_TOOLS: [&str; 10] = [
     "schedule_pause",
     "schedule_resume",
     "schedule_delete",
+    "console_watch_watch",
+    "console_watch_unwatch",
 ];
 
 /// The guardian's OpenCode plugin, one directory per mode. Only the session
@@ -359,7 +361,7 @@ mod tests {
             resources,
             [
                 "gh *", "*", "rm *", ".env", "gh", "gh *", "*", "*", "*", "*", "*", "*", "*", "*",
-                "*", "*", "*"
+                "*", "*", "*", "*", "*"
             ]
         );
         let actions = rules
@@ -369,7 +371,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            actions[actions.len() - 13..],
+            actions[actions.len() - 15..],
             [
                 "shell",
                 "shell",
@@ -383,6 +385,8 @@ mod tests {
                 "schedule_pause",
                 "schedule_resume",
                 "schedule_delete",
+                "console_watch_watch",
+                "console_watch_unwatch",
                 "execute"
             ]
         );
@@ -445,6 +449,8 @@ mod tests {
                         ("schedule_pause", "deny"),
                         ("schedule_resume", "deny"),
                         ("schedule_delete", "deny"),
+                        ("console_watch_watch", "deny"),
+                        ("console_watch_unwatch", "deny"),
                     ]);
                 }
                 expected.push(("execute", "deny"));
@@ -506,6 +512,8 @@ mod tests {
             (".env", "ask"),
             ("gh", "allow"),
             ("gh *", "allow"),
+            ("*", "deny"),
+            ("*", "deny"),
             ("*", "deny"),
             ("*", "deny"),
             ("*", "deny"),

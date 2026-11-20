@@ -76,7 +76,7 @@ export default {
         return;
       }
       if (event.effect !== "allow" || UNREVIEWED.has(event.action)) return;
-      if (event.action === "edit" && event.resources.every(workspaceEdit)) return;
+      if (event.action === "edit" && event.resources.length > 0 && event.resources.every(workspaceEdit)) return;
       event.effect = "ask";
     });
     return () => registration.dispose();

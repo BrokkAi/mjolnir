@@ -29,7 +29,10 @@ const REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_REVIEW_ATTEMPTS: usize = 3;
 /// How long a retiring reviewer bridge gets to reap its process group after
 /// its stdin closes, the grace `run_bridge` gives the session's own bridge.
+#[cfg(not(test))]
 const REVIEWER_EXIT_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const REVIEWER_EXIT_GRACE: Duration = Duration::from_millis(100);
 /// The reviewer's supervisor spec, beside the session's.
 #[cfg(unix)]
 const REVIEWER_SUPERVISOR_SPEC: &str = "acp-supervisor-guardian.json";
@@ -479,51 +482,61 @@ impl ReviewerHost {
         let (connection_tx, connection_rx) = oneshot::channel();
         let task = mj_core::runtime::spawn(async move {
             let stderr_tail = mj_core::runtime::spawn(read_stderr_tail(stderr));
-            let run = Client
-                .v1()
-                .on_receive_notification(
-                    async move |notification: RawSessionNotification, _cx| {
-                        notification_replies
-                            .observe(&notification.session_id.to_string(), &notification.update);
+            let (reaped, ended) = {
+                let run = Client
+                    .v1()
+                    .on_receive_notification(
+                        async move |notification: RawSessionNotification, _cx| {
+                            notification_replies.observe(
+                                &notification.session_id.to_string(),
+                                &notification.update,
+                            );
+                            Ok(())
+                        },
+                        agent_client_protocol::on_receive_notification!(),
+                    )
+                    .on_receive_request(
+                        async move |request: RequestPermissionRequest, responder, _cx| {
+                            tracing::debug!(
+                                target: "mj_guardian",
+                                tool_call_id = %request.tool_call.tool_call_id,
+                                "refused a guardian reviewer's tool request"
+                            );
+                            responder.respond(rejection_response(&request))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    // The reviewer gets no client terminal, file system, or
+                    // elicitation. Every request is answered, because the ACP
+                    // crate parks an unhandled one that carries a session id.
+                    .on_receive_request(
+                        async move |request: UntypedMessage, responder, _cx| {
+                            responder.respond_with_error(
+                                agent_client_protocol::Error::method_not_found()
+                                    .data(serde_json::Value::String(request.method().to_owned())),
+                            )
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .connect_with(transport, async move |connection: ConnectionTo<Agent>| {
+                        if connection_tx.send(connection).is_ok() {
+                            connection_stop.cancelled().await;
+                        }
                         Ok(())
-                    },
-                    agent_client_protocol::on_receive_notification!(),
-                )
-                .on_receive_request(
-                    async move |request: RequestPermissionRequest, responder, _cx| {
-                        tracing::debug!(
-                            target: "mj_guardian",
-                            tool_call_id = %request.tool_call.tool_call_id,
-                            "refused a guardian reviewer's tool request"
-                        );
-                        responder.respond(rejection_response(&request))
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                // The reviewer gets no client terminal, file system, or
-                // elicitation. Every request is answered, because the ACP
-                // crate parks an unhandled one that carries a session id.
-                .on_receive_request(
-                    async move |request: UntypedMessage, responder, _cx| {
-                        responder.respond_with_error(
-                            agent_client_protocol::Error::method_not_found()
-                                .data(serde_json::Value::String(request.method().to_owned())),
-                        )
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .connect_with(transport, async move |connection: ConnectionTo<Agent>| {
-                    if connection_tx.send(connection).is_ok() {
-                        connection_stop.cancelled().await;
-                    }
-                    Ok(())
-                });
-            let (reaped, ended) = tokio::select! {
-                result = run => (false, result.err().map(|error| error.to_string())),
-                status = child.wait() => (true, Some(match status {
-                    Ok(status) => format!("exited with {status}"),
-                    Err(error) => format!("could not be waited for: {error}"),
-                })),
+                    });
+                tokio::pin!(run);
+                // A start can be dropped before the bridge opens its ACP
+                // connection, when `connection_stop` does not exist yet.
+                // Observe the host's owner directly so a hung bridge is
+                // closed, killed if necessary, and reaped.
+                tokio::select! {
+                    result = &mut run => (false, result.err().map(|error| error.to_string())),
+                    status = child.wait() => (true, Some(match status {
+                        Ok(status) => format!("exited with {status}"),
+                        Err(error) => format!("could not be waited for: {error}"),
+                    })),
+                    () = task_stop.cancelled() => (false, Some("was stopped before its connection opened".into())),
+                }
             };
             task_gone.cancel();
             // The transport is gone, so the supervisor's stdin is closed: give
@@ -820,5 +833,72 @@ impl Drop for ReviewerSession {
                 }
             });
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::test_support::wait_for;
+
+    fn is_running(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks whether the recorded child still exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    // Hard-won: 747336f25: a reviewer that hung before opening ACP survived cancellation.
+    #[tokio::test]
+    async fn dropping_a_started_reviewer_before_connection_reaps_its_bridge() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("hung-reviewer.py");
+        let pid_file = temp.path().join("pid");
+        std::fs::write(
+            &script,
+            r#"
+import os, sys, time
+with open(sys.argv[1], "w") as out:
+    out.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+"#,
+        )
+        .unwrap();
+        let mut spec = crate::acp::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.command = "python3".into();
+        spec.args = vec![
+            script.to_string_lossy().into_owned(),
+            pid_file.to_string_lossy().into_owned(),
+        ];
+        spec.cwd = temp.path().to_owned();
+        spec.harness = HarnessKind::Kimi;
+
+        let mut start = Box::pin(ReviewerHost::start(&spec));
+        let pid = wait_for("the hung reviewer bridge to start", async {
+            loop {
+                tokio::select! {
+                    result = &mut start => {
+                        panic!("reviewer start returned before the bridge connected: {}", result.is_err())
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = pid.parse::<i32>()
+                {
+                    break pid;
+                }
+            }
+        })
+        .await;
+        drop(start);
+
+        wait_for("the cancelled reviewer bridge to be reaped", async {
+            while is_running(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
     }
 }

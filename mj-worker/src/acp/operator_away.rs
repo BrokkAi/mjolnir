@@ -49,6 +49,15 @@ impl Default for OperatorAwayState {
 
 impl OperatorAwayState {
     fn answer_away(&mut self, entry: PendingElicitation) {
+        // A turn withdrawal marks the turn before sending session/cancel and
+        // removes its forms after. AFK must not slip an answer through that
+        // gap. Leave the form for the withdrawal to remove.
+        if self.withdrawn_turns.contains(&entry.bridge)
+            && entry.question.id.starts_with(TOOL_PERMISSION_ID_PREFIX)
+        {
+            self.pending.push(entry);
+            return;
+        }
         match entry {
             PendingElicitation {
                 question,
