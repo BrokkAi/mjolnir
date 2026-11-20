@@ -91,25 +91,36 @@ impl DaemonConfig {
     }
 
     /// Write this placement as the file's `[daemon]` table, provided the file
-    /// still holds `expected`. The check and the write happen under one hold
-    /// of the config lock, so two launches that each decided from the same
-    /// file cannot both win: the second is refused instead of silently
+    /// still holds `expected`: `None` for no `[daemon]` table at all (an
+    /// explicit `runtime = "host"` is a table, though it loads as the default),
+    /// else the placement it loads as. The check and the write happen under
+    /// one hold of the config lock, so two launches that each decided from the
+    /// same file cannot both win: the second is refused instead of silently
     /// replacing the first. Every other table, comment and the order of the
     /// file stay as they are, and the rest of the file is not loaded: an SSH
     /// client's config belongs to the daemon machine and may hold tables this
     /// build must not reinterpret.
-    pub fn replace_placement(&self, path: &std::path::Path, expected: &Self) -> anyhow::Result<()> {
+    pub fn replace_placement(
+        &self,
+        path: &std::path::Path,
+        expected: Option<&Self>,
+    ) -> anyhow::Result<()> {
         use anyhow::Context;
         let _lock = super::ConfigLock::acquire(path)?;
         super::Config::ensure_writable(path)?;
-        let current = Self::load_placement(path)?;
+        let current = if Self::is_set_in(path)? {
+            Some(Self::load_placement(path)?)
+        } else {
+            None
+        };
         anyhow::ensure!(
-            current == *expected,
+            current.as_ref() == expected,
             "the daemon placement in {} changed while this was running: {}",
             path.display(),
-            match current.host.as_deref() {
-                Some(host) => format!("it now names {host}"),
-                None => "it is now the default".to_owned(),
+            match current.as_ref().map(|current| current.host.as_deref()) {
+                Some(Some(host)) => format!("it now names {host}"),
+                Some(None) => "it is now set".to_owned(),
+                None => "it is no longer set".to_owned(),
             }
         );
         let existing = match std::fs::read_to_string(path) {
@@ -253,13 +264,23 @@ ssh_args = ["-p", "2222"]
             host: Some("test-box".into()),
             ..super::DaemonConfig::default()
         };
-        ssh.replace_placement(&path, &super::DaemonConfig::default())
-            .unwrap();
+        ssh.replace_placement(&path, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.starts_with("version = "), "{written}");
         crate::config::Config::load_from(&path).unwrap();
         std::fs::write(&path, "version = 23\n[daemon]\nruntime = \"host\"\n").unwrap();
         assert!(super::DaemonConfig::is_set_in(&path).unwrap());
+        assert!(
+            super::DaemonConfig::load_placement(&path)
+                .unwrap()
+                .is_default()
+        );
+        // A launch that saw no table must not overwrite one added since.
+        let refused = ssh.replace_placement(&path, None).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("it is now set"),
+            "{refused:#}"
+        );
         assert!(
             super::DaemonConfig::load_placement(&path)
                 .unwrap()
@@ -281,22 +302,21 @@ ssh_args = ["-p", "2222"]
             host: Some("test-box".into()),
             ..super::DaemonConfig::default()
         };
-        ssh.replace_placement(&path, &super::DaemonConfig::default())
-            .unwrap();
+        ssh.replace_placement(&path, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.starts_with(others), "{written}");
         assert_eq!(super::DaemonConfig::load_placement(&path).unwrap(), ssh);
 
         // A launch that decided from an older file is refused, not applied.
         let stale = super::DaemonConfig::default()
-            .replace_placement(&path, &super::DaemonConfig::default())
+            .replace_placement(&path, None)
             .unwrap_err();
         assert!(
             format!("{stale:#}").contains("it now names test-box"),
             "{stale:#}"
         );
         super::DaemonConfig::default()
-            .replace_placement(&path, &ssh)
+            .replace_placement(&path, Some(&ssh))
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap().trim_end(),

@@ -52,6 +52,21 @@ class Terminal:
     def screen(self):
         return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", self.output.decode(errors="replace"))
 
+    def drain(self):
+        """Read what the exited child left in the pty; reads end with an error
+        once the buffered output is gone."""
+        while True:
+            ready, _, _ = select.select([self.fd], [], [], 0.2)
+            if not ready:
+                return
+            try:
+                data = os.read(self.fd, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            self.output += data
+
     def wait_exit(self, seconds=60):
         """Whether the process exited, reaping it when it did."""
         end = time.time() + seconds
@@ -59,6 +74,7 @@ class Terminal:
             done, _ = os.waitpid(self.pid, os.WNOHANG)
             if done:
                 self.pid = None
+                self.drain()
                 return True
             self.pump(0.2)
         return False
