@@ -775,28 +775,34 @@ def perl_open_operand(value):
 
 def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd):
     arguments = awk_arguments if program in AWK else sed_arguments if program == "sed" else perl_arguments
-    sources, paths, values = arguments(args)
-    for source in sources:
-        yield from filter_source_hits(source, own_workspace, commits, single_commit, cwd)
-    for value in values:
-        yield from source_literal_hits(value, own_workspace, cwd)
+    sources, values = args, ()
+    try:
+        sources, paths, values = arguments(args)
+        for path in paths:
+            if program == "perl":
+                _, path = perl_open_operand(path)
+            yield from path_hits(path, own_workspace, cwd)
         if program == "perl":
-            check_perl_interpolation(value, regex=True)
-    for path in paths:
-        if program == "perl":
-            _, path = perl_open_operand(path)
-        yield from path_hits(path, own_workspace, cwd)
-    if program == "perl":
-        check_perl_read("\n".join(sources))
-    elif program in AWK:
-        check_awk_read(sources[0])
-    else:
+            for value in values:
+                check_perl_interpolation(value, regex=True)
+            check_perl_read("\n".join(sources))
+        elif program in AWK:
+            check_awk_read(sources[0])
+        else:
+            for source in sources:
+                for kind, argument in sed_read_effects(source):
+                    if kind == "command":
+                        yield from subprocess_hits(argument, own_workspace, commits, single_commit, cwd)
+                    elif argument:
+                        yield from path_hits(argument, own_workspace, cwd)
+    except InspectionRequired:
+        # Literals in an accepted program are data. In an opaque program
+        # they may name resources the program accesses.
         for source in sources:
-            for kind, argument in sed_read_effects(source):
-                if kind == "command":
-                    yield from subprocess_hits(argument, own_workspace, commits, single_commit, cwd)
-                elif argument:
-                    yield from path_hits(argument, own_workspace, cwd)
+            yield from filter_source_hits(source, own_workspace, commits, single_commit, cwd)
+        for value in values:
+            yield from source_literal_hits(value, own_workspace, cwd)
+        raise
 
 
 PYTHON = {"python", "python2", "python3"}

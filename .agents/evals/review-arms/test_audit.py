@@ -291,3 +291,17 @@ def test_text_filter_review_findings_still_void(tmp_path, command, expected):
 def test_text_filter_read_subset_passes(tmp_path, command):
     report = audit_call(tmp_path, shell(command))
     assert report["passed"], report["hits"]
+
+
+# Hard-won: 3717f81: sed replacement text read as web access
+def test_read_only_sed_substitution_treats_quoted_url_as_data(tmp_path):
+    command = """sed 's|"https://example.invalid"|"local"|g' notes.txt"""
+    report = audit_call(tmp_path, shell(command))
+    assert report["passed"], report["hits"]
+
+
+def test_sed_write_still_flags_protected_path(tmp_path):
+    command = "sed 'w /run/hel/git-cache/config' notes.txt"
+    report = audit_call(tmp_path, shell(command))
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"git-history-escape", "needs-inspection"}
