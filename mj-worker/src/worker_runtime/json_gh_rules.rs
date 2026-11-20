@@ -63,6 +63,33 @@ pub(super) fn configure_opencode_plugin(
 /// One native permission rule, as OpenCode 2.2.7 lists them in `permissions`.
 type Rule = (&'static str, &'static str, &'static str);
 
+/// What OpenCode asks about under configured approvals, so the Mjolnir
+/// guardian (`HarnessKind::guardian`) reviews it. OpenCode 2.2.7's default
+/// agent allows every tool (`{"action": "*", "resource": "*", "effect":
+/// "allow"}` in `packages/schema/src/agent.ts`), so without these nothing
+/// would ever ask. Everything asks, as Codex's sandbox sends everything it
+/// does not contain to Codex's guardian, except what that sandbox lets run:
+/// reads and searches, planning tools, and edits inside the workspace.
+/// OpenCode checks any path outside the workspace separately, as
+/// `external_directory`, which still asks. OpenCode's own caution about
+/// reading `.env` files is restated, since the blanket rule replaces it.
+const GUARDIAN_RULES: [Rule; 13] = [
+    ("*", "*", "ask"),
+    ("read", "*", "allow"),
+    ("read", "*.env", "ask"),
+    ("read", "*.env.*", "ask"),
+    ("read", "*.env.example", "allow"),
+    ("glob", "*", "allow"),
+    ("grep", "*", "allow"),
+    ("edit", "*", "allow"),
+    ("todowrite", "*", "allow"),
+    ("question", "*", "allow"),
+    ("skill", "*", "allow"),
+    // A child's own tool calls ask and are reviewed like the parent's.
+    ("subagent", "*", "allow"),
+    ("external_directory", "*", "ask"),
+];
+
 /// The rules this launch appends after every rule a document already supplies,
 /// so they win: OpenCode takes the last rule that matches, and a project
 /// document or a profile's own `OPENCODE_CONFIG_CONTENT` follows the staged
@@ -71,7 +98,10 @@ type Rule = (&'static str, &'static str, &'static str);
 fn opencode_rules(policy: ExecutionPolicy, denials: OpenCodeDenials) -> Vec<Rule> {
     let mut rules = Vec::new();
     if policy == ExecutionPolicy::ConfiguredApprovals {
-        rules.extend(GH_COMMANDS.map(|command| ("bash", command, "allow")));
+        rules.extend(GUARDIAN_RULES);
+        // OpenCode 2.2.7 names its shell tool's action `shell`; only its
+        // legacy `permission` object still maps the old `bash` key onto it.
+        rules.extend(GH_COMMANDS.map(|command| ("shell", command, "allow")));
     }
     // With `execute` allowed, OpenCode 2.2.7 offers MCP tools only through a
     // JavaScript `execute` tool ("Code Mode"). Denying it lists the
@@ -197,17 +227,21 @@ mod tests {
                 string_value(node.as_object().unwrap().get("resource").unwrap().value()).unwrap()
             })
             .collect();
-        // The `gh` allows come last, after every rule this document supplies,
-        // so an earlier blanket deny cannot shadow them; the `execute` denial
-        // follows them and covers only its own tool.
-        assert_eq!(resources, ["gh *", "*", "rm *", ".env", "gh", "gh *", "*"]);
+        // The guardian's rules and then the `gh` allows come last, after
+        // every rule this document supplies, so an earlier blanket deny cannot
+        // shadow them; the `execute` denial follows them and covers only its
+        // own tool.
+        let mut expected = vec!["gh *", "*", "rm *", ".env"];
+        expected.extend(GUARDIAN_RULES.map(|(_, resource, _)| resource));
+        expected.extend(["gh", "gh *", "*"]);
+        assert_eq!(resources, expected);
         let actions = rules
             .iter()
             .map(|node| {
                 string_value(node.as_object().unwrap().get("action").unwrap().value()).unwrap()
             })
             .collect::<Vec<_>>();
-        assert_eq!(actions[actions.len() - 3..], ["bash", "bash", "execute"]);
+        assert_eq!(actions[actions.len() - 3..], ["shell", "shell", "execute"]);
         configure(
             ExecutionPolicy::ConfiguredApprovals,
             OpenCodeDenials {
@@ -254,7 +288,8 @@ mod tests {
                 let first = environment[OPENCODE_CONTENT].clone();
                 let mut expected = Vec::new();
                 if policy == ExecutionPolicy::ConfiguredApprovals {
-                    expected.extend([("bash", "allow"); 2]);
+                    expected.extend(GUARDIAN_RULES.map(|(action, _, effect)| (action, effect)));
+                    expected.extend([("shell", "allow"); 2]);
                 }
                 expected.push(("execute", "deny"));
                 if native_subagent {
@@ -310,16 +345,14 @@ mod tests {
                 (get("resource"), get("effect"))
             })
             .collect();
-        assert_eq!(
-            described,
-            [
-                ("*".to_owned(), "ask".to_owned()),
-                (".env".to_owned(), "ask".to_owned()),
-                ("gh".to_owned(), "allow".to_owned()),
-                ("gh *".to_owned(), "allow".to_owned()),
-                ("*".to_owned(), "deny".to_owned()),
-            ]
-        );
+        let mut expected = vec![("*", "ask"), (".env", "ask")];
+        expected.extend(GUARDIAN_RULES.map(|(_, resource, effect)| (resource, effect)));
+        expected.extend([("gh", "allow"), ("gh *", "allow"), ("*", "deny")]);
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(resource, effect)| (resource.to_owned(), effect.to_owned()))
+            .collect();
+        assert_eq!(described, expected);
     }
 
     /// Serve OpenCode's provider requests from this thread, recording the

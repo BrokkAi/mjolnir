@@ -204,7 +204,9 @@ where
     let kill_parent_router = native_agents.clone();
     let release_parent_router = native_agents.clone();
     let ext_parent_router = native_agents.clone();
-    Client
+    let guardian = guardian::Guardian::for_launch(&spec);
+    let permission_guardian = guardian.clone();
+    let connected = Client
         .v1()
         .on_receive_notification(
             async move |notification: RawSessionNotification, _cx| {
@@ -394,6 +396,7 @@ where
                 let permission_review_ids = permission_review_ids.clone();
                 let permission_id_prefix = permission_id_prefix.clone();
                 let permission_owned_mcp = permission_owned_mcp.clone();
+                let permission_guardian = permission_guardian.clone();
                 let permission_tool_content = permission_tool_content.clone();
                 cx.spawn(async move {
                     permission_activity.mark();
@@ -463,6 +466,49 @@ where
                             "automatically approved a gh invocation"
                         );
                         return responder.respond(response);
+                    }
+                    // A harness without its own guardian: the Mjolnir guardian
+                    // answers the request, or hands it to the person's form.
+                    let mut guardian_preface = None;
+                    if !plan_permission
+                        && !claude_plan_approval
+                        && let Some(guardian) = permission_guardian
+                    {
+                        let input = permission_tool_input(&request.tool_call, &permission_tool_content);
+                        let native_child = permission_native_agents.lock().expect("native agent router poisoned")
+                            .is_child(&request.session_id.to_string());
+                        let withdrawn = permission_elicitations.review_cancellation();
+                        let cancellation = responder.cancellation();
+                        let decision = tokio::select! {
+                            biased;
+                            () = withdrawn.cancelled() => None,
+                            () = cancellation.cancelled() => None,
+                            decision = guardian.review(&request, input.as_ref(), native_child) => Some(decision),
+                        };
+                        let title = request.tool_call.fields.title.as_deref().map(str::trim)
+                            .filter(|title| !title.is_empty()).unwrap_or("a tool call");
+                        let subject = permission_title_with_command(title, input.as_ref());
+                        match decision {
+                            None => {
+                                return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                            }
+                            Some(guardian::GuardianDecision::Allow) => match allow_permission_response(&request) {
+                                Some(response) => return responder.respond(response),
+                                None => guardian_preface = Some(guardian::ask_person_preface(
+                                    "the guardian allowed it, but the harness offered no way to allow it once",
+                                )),
+                            },
+                            Some(guardian::GuardianDecision::Deny { rationale }) => {
+                                permission_events
+                                    .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                                return responder.respond(guardian::rejection_response(&request));
+                            }
+                            Some(guardian::GuardianDecision::AskPerson { reason }) => {
+                                guardian_preface = Some(guardian::ask_person_preface(&reason));
+                            }
+                        }
                     }
                     // Preserve Muse's Guardian forms; YOLO plans use plan review.
                     let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
@@ -619,7 +665,8 @@ where
                     let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                         "mode": "form", "sessionId": request.session_id.to_string(),
                         "message": format!(
-                            "{} requests permission:\n{message}",
+                            "{}{} requests permission:\n{message}",
+                            guardian_preface.unwrap_or_default(),
                             permission_harness.display_name()
                         ),
                         "requestedSchema": {"type":"object", "required":["choice"], "properties":{
@@ -1105,8 +1152,11 @@ where
                 }
             }
         })
-        .await
-        .map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
+        .await;
+    if let Some(guardian) = &guardian {
+        guardian.shutdown().await;
+    }
+    connected.map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
     Ok(restart
         .lock()
         .expect("ACP restart slot lock poisoned")
@@ -1253,9 +1303,11 @@ pub(super) fn cancel_prompt_turn(
 
 /// Drops the answer channel of every pending tool permission request. Each
 /// request's task then answers the agent with `cancelled` and reports the
-/// elicitation resolved, which closes its form.
+/// elicitation resolved, which closes its form. A request the Mjolnir
+/// guardian is still reviewing is answered `cancelled` the same way.
 pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
     pending.retain(|id| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+    pending.withdraw_reviews();
 }
 
 /// The id prefix of a permission request shown as a form.
