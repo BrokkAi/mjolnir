@@ -70,7 +70,7 @@ func (s *SliceReader) ReadBufExact(cursor *BorrowedCursor) error {
 // ReadToEnd is Read::read_to_end.
 func (s *SliceReader) ReadToEnd(buf *[]byte) (int, error) {
 	length := len(*s.slice)
-	*buf = append(*buf, *s.slice...)
+	extendVec(buf, *s.slice)
 	*s.slice = (*s.slice)[length:]
 	return length, nil
 }
@@ -104,13 +104,13 @@ func Vec(vec *[]byte) *VecWriter { return &VecWriter{vec: vec} }
 
 // Write is Write::write.
 func (v *VecWriter) Write(buf []byte) (int, error) {
-	*v.vec = append(*v.vec, buf...)
+	extendVec(v.vec, buf)
 	return len(buf), nil
 }
 
 // WriteAll is Write::write_all.
 func (v *VecWriter) WriteAll(buf []byte) error {
-	*v.vec = append(*v.vec, buf...)
+	extendVec(v.vec, buf)
 	return nil
 }
 

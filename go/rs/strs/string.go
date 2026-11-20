@@ -315,38 +315,74 @@ func SplitOff(s *string, at int) string {
 	return other
 }
 
-// sliceRange is slice::range for `start..end` over a slice of the given
-// length: the message of its panic, or "" when the range is in bounds.
-func sliceRange(start, end, length int) string {
+// sliceIndexFail is slice_index_fail: the message of the panic for a range
+// start..end that a slice of the given length cannot be indexed with.
+func sliceIndexFail(start, end, length int) string {
+	if uint(start) > uint(length) {
+		return "range start index " + usizeText(start) + " out of range for slice of length " + usizeText(length)
+	}
+
 	if uint(end) > uint(length) {
 		return "range end index " + usizeText(end) + " out of range for slice of length " + usizeText(length)
 	}
+
 	if uint(start) > uint(end) {
-		// slice_index_fail(start, end, len), which checks the start against
-		// the length before the order.
-		if uint(start) > uint(length) {
-			return "range start index " + usizeText(start) + " out of range for slice of length " + usizeText(length)
-		}
 		return "slice index starts at " + usizeText(start) + " but ends at " + usizeText(end)
 	}
-	return ""
+
+	// Only reachable if the range was a `RangeInclusive` or a
+	// `RangeToInclusive`, with `end == len`.
+	return "range end index " + usizeText(end) + " out of range for slice of length " + usizeText(length)
+}
+
+// sliceRange is slice::range (into_slice_range) over a slice of the given
+// length, for the range `start..end`, or `start..=end` when inclusive: the
+// end of the same range written `start..end`, or the message of the panic
+// when the range does not fit.
+func sliceRange(start, end, length int, inclusive bool) (int, string) {
+	if inclusive {
+		if uint(end) >= uint(length) {
+			return 0, sliceIndexFail(0, end, length)
+		}
+		// Cannot overflow because `end < len` implies `end < usize::MAX`.
+		end++
+	} else if uint(end) > uint(length) {
+		return 0, sliceIndexFail(0, end, length)
+	}
+
+	if uint(start) > uint(end) {
+		return 0, sliceIndexFail(start, end, length)
+	}
+	return end, ""
 }
 
 // Drain is String::drain for the range `start..end`: it removes those bytes
 // from *s and returns them. (`s.drain(..n)` is Drain(&s, 0, n), `s.drain(n..)`
-// is Drain(&s, n, len(s)).) Rust returns an iterator over the removed chars
-// and removes them when it is dropped; here they are removed at once and
-// returned as a string. It panics when the range is out of bounds, backwards
-// or cuts a char.
+// is Drain(&s, n, len(s)), and `s.drain(a..=b)` is DrainInclusive.) Rust
+// returns an iterator over the removed chars and removes them when it is
+// dropped; here they are removed at once and returned as a string. It panics
+// when the range is out of bounds, backwards or cuts a char.
 func Drain(s *string, start, end int) string {
-	if message := sliceRange(start, end, len(*s)); message != "" {
-		rs.PanicAt(1, message)
+	return drain(s, start, end, false)
+}
+
+// DrainInclusive is String::drain for the range `start..=end`
+// (`s.drain(..=end)` is DrainInclusive(&s, 0, end)). It panics as Drain does;
+// here an end at or beyond the length is out of bounds.
+func DrainInclusive(s *string, start, end int) string {
+	return drain(s, start, end, true)
+}
+
+func drain(s *string, start, end int, inclusive bool) string {
+	end, message := sliceRange(start, end, len(*s), inclusive)
+	if message != "" {
+		rs.PanicAt(2, message)
 	}
 	if !IsCharBoundary(*s, start) {
-		rs.PanicAt(1, "assertion failed: self.is_char_boundary(start)")
+		rs.PanicAt(2, "assertion failed: self.is_char_boundary(start)")
 	}
 	if !IsCharBoundary(*s, end) {
-		rs.PanicAt(1, "assertion failed: self.is_char_boundary(end)")
+		rs.PanicAt(2, "assertion failed: self.is_char_boundary(end)")
 	}
 	drained := (*s)[start:end]
 	*s = (*s)[:start] + (*s)[end:]
@@ -355,17 +391,30 @@ func Drain(s *string, start, end int) string {
 
 // ReplaceRange is String::replace_range for the range `start..end`: it
 // replaces those bytes of *s with replaceWith, which may be of another
-// length. It panics when the range is out of bounds, backwards or cuts a
-// char.
+// length. (`..n` is 0, n, `n..` is n, len(s), and `a..=b` is
+// ReplaceRangeInclusive.) It panics when the range is out of bounds,
+// backwards or cuts a char.
 func ReplaceRange(s *string, start, end int, replaceWith string) {
-	if message := sliceRange(start, end, len(*s)); message != "" {
-		rs.PanicAt(1, message)
+	replaceRange(s, start, end, false, replaceWith)
+}
+
+// ReplaceRangeInclusive is String::replace_range for the range `start..=end`
+// (`..=end` is 0, end). It panics as ReplaceRange does; here an end at or
+// beyond the length is out of bounds.
+func ReplaceRangeInclusive(s *string, start, end int, replaceWith string) {
+	replaceRange(s, start, end, true, replaceWith)
+}
+
+func replaceRange(s *string, start, end int, inclusive bool, replaceWith string) {
+	end, message := sliceRange(start, end, len(*s), inclusive)
+	if message != "" {
+		rs.PanicAt(2, message)
 	}
 	if !IsCharBoundary(*s, start) {
-		rs.PanicAt(1, "start of range should be a character boundary")
+		rs.PanicAt(2, "start of range should be a character boundary")
 	}
 	if !IsCharBoundary(*s, end) {
-		rs.PanicAt(1, "end of range should be a character boundary")
+		rs.PanicAt(2, "end of range should be a character boundary")
 	}
 	*s = (*s)[:start] + replaceWith + (*s)[end:]
 }

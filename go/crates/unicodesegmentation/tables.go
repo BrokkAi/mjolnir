@@ -53,7 +53,7 @@ func tablesUtilIsAlphabetic(c rune) bool {
 	// The Rust toolchain Mjolnir is built with has the crate's Unicode
 	// version (17.0.0), so this takes the first branch, the standard
 	// library's table, as the Rust build does. The two tables hold the same
-	// characters (TestTables_std_and_crate_tables_agree).
+	// characters (TestStdAndCrateTablesAgree).
 	if tablesUnicodeVersionU8 == strs.CharUnicodeVersion {
 		return strs.IsAlphabetic(c)
 	} else {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/rspath"
 )
 
 // Url is url::Url: a parsed URL record.
@@ -291,6 +292,108 @@ type stringError string
 
 func (e stringError) Error() string { return string(e) }
 
+// The texts CheckInvariants reports are built from `{:?}` of a few types.
+// They are written out here, rather than left to rs.DebugString, because the
+// values are private to this package (HostInternal) or stand-ins
+// (netip.Addr for Ipv4Addr and Ipv6Addr).
+
+// debugStr is `{:?}` of a str. A serialization is printable ASCII, for which
+// the escapes are these two; anything else is left to the formatter.
+func debugStr(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return rs.DebugString(s)
+		}
+	}
+	var out strings.Builder
+	out.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' || s[i] == '\\' {
+			out.WriteByte('\\')
+		}
+		out.WriteByte(s[i])
+	}
+	out.WriteByte('"')
+	return out.String()
+}
+
+func debugU32(v uint32) string { return strconv.FormatUint(uint64(v), 10) }
+
+func debugOptionU16(o rs.Option[uint16]) string {
+	if v, ok := o.Get(); ok {
+		return "Some(" + strconv.Itoa(int(v)) + ")"
+	}
+	return "None"
+}
+
+func debugOptionU32(o rs.Option[uint32]) string {
+	if v, ok := o.Get(); ok {
+		return "Some(" + debugU32(v) + ")"
+	}
+	return "None"
+}
+
+// debugHostInternal is the derived Debug of HostInternal.
+func debugHostInternal(host hostHostInternal) string {
+	switch h := host.(type) {
+	case *hostHostInternal_None:
+		return "None"
+	case *hostHostInternal_Domain:
+		return "Domain"
+	case *hostHostInternal_Ipv4:
+		return "Ipv4(" + hostIpv4String(h.F0) + ")"
+	case *hostHostInternal_Ipv6:
+		return "Ipv6(" + stdIpv6AddrString(h.F0) + ")"
+	default:
+		panic(rs.Unreachable(host))
+	}
+}
+
+// stdIpv6AddrString is `impl Display for Ipv6Addr` of the standard library
+// (which is also its Debug), not the URL Standard's serializer in host.go.
+func stdIpv6AddrString(addr netip.Addr) string {
+	segments := hostIpv6Segments(addr)
+
+	// to_ipv4_mapped
+	if segments[0] == 0 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0xffff {
+		return "::ffff:" + strconv.Itoa(int(segments[6]>>8)) + "." + strconv.Itoa(int(segments[6]&0xff)) + "." +
+			strconv.Itoa(int(segments[7]>>8)) + "." + strconv.Itoa(int(segments[7]&0xff))
+	}
+
+	// Find the inner 0 span
+	longestStart, longestLen := 0, 0
+	currentStart, currentLen := 0, 0
+	for i, segment := range segments {
+		if segment == 0 {
+			if currentLen == 0 {
+				currentStart = i
+			}
+
+			currentLen++
+
+			if currentLen > longestLen {
+				longestStart, longestLen = currentStart, currentLen
+			}
+		} else {
+			currentStart, currentLen = 0, 0
+		}
+	}
+
+	// Writes a colon-separated part of the address.
+	fmtSubslice := func(chunk []uint16) string {
+		parts := make([]string, len(chunk))
+		for i, segment := range chunk {
+			parts[i] = strconv.FormatUint(uint64(segment), 16)
+		}
+		return strings.Join(parts, ":")
+	}
+
+	if longestLen > 1 {
+		return fmtSubslice(segments[:longestStart]) + "::" + fmtSubslice(segments[longestStart+longestLen:])
+	}
+	return fmtSubslice(segments[:])
+}
+
 // CheckInvariants is Url::check_invariants: for internal testing, not
 // stable.
 //
@@ -300,21 +403,25 @@ func (e stringError) Error() string { return string(e) }
 //
 // The error is the `String` of the Rust `Result<(), String>`.
 func (u *Url) CheckInvariants() error {
+	// fail is the function's own `assert!`: expr is what `stringify!` makes
+	// of the Rust condition.
 	fail := func(expr string) error {
-		return stringError("!( " + expr + " ) for URL " + rs.DebugString(u.serialization))
+		return stringError("!( " + expr + " ) for URL " + debugStr(u.serialization))
 	}
-	failEq := func(a any, b any, exprA string, exprB string) error {
-		return stringError(rs.DebugString(a) + " != " + rs.DebugString(b) + " (" + exprA + " != " + exprB + ") for URL " + rs.DebugString(u.serialization))
+	// failEq is the function's own `assert_eq!`, given `{:?}` of the two
+	// values.
+	failEq := func(a string, b string, exprA string, exprB string) error {
+		return stringError(a + " != " + b + " (" + exprA + " != " + exprB + ") for URL " + debugStr(u.serialization))
 	}
 	byteEq := func(index uint32, want byte, exprA string, exprB string) error {
 		if got := u.byteAt(index); got != want {
-			return failEq(got, want, exprA, exprB)
+			return failEq(strconv.Itoa(int(got)), strconv.Itoa(int(want)), exprA, exprB)
 		}
 		return nil
 	}
 	u32Eq := func(a uint32, b uint32, exprA string, exprB string) error {
 		if a != b {
-			return failEq(a, b, exprA, exprB)
+			return failEq(debugU32(a), debugU32(b), exprA, exprB)
 		}
 		return nil
 	}
@@ -327,7 +434,7 @@ func (u *Url) CheckInvariants() error {
 	}
 	for _, c := range []byte(u.sliceRange(1, u.schemeEnd)) {
 		if !(('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c == '+' || c == '-' || c == '.') {
-			return fail("self.slice(1..self.scheme_end).chars().all(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '+' | '-' | '.'))")
+			return fail("self.slice(1..self.scheme_end).chars().all(|c|\nmatches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '+' | '-' | '.'))")
 		}
 	}
 	if err := byteEq(u.schemeEnd, ':', "self.byte_at(self.scheme_end)", "b':'"); err != nil {
@@ -365,16 +472,16 @@ func (u *Url) CheckInvariants() error {
 		switch host := u.host.(type) {
 		case *hostHostInternal_None:
 			if hostStr != "" {
-				return failEq(hostStr, "", "host_str", "\"\"")
+				return failEq(debugStr(hostStr), debugStr(""), "host_str", "\"\"")
 			}
 		case *hostHostInternal_Ipv4:
 			if want := hostIpv4String(host.F0); hostStr != want {
-				return failEq(hostStr, want, "host_str", "address.to_string()")
+				return failEq(debugStr(hostStr), debugStr(want), "host_str", "address.to_string()")
 			}
 		case *hostHostInternal_Ipv6:
 			h := &Host_Ipv6{F0: host.F0}
 			if want := h.String(); hostStr != want {
-				return failEq(hostStr, want, "host_str", "h.to_string()")
+				return failEq(debugStr(hostStr), debugStr(want), "host_str", "h.to_string()")
 			}
 		case *hostHostInternal_Domain:
 			if parserSchemeTypeFrom(u.Scheme()).isSpecial() {
@@ -387,7 +494,7 @@ func (u *Url) CheckInvariants() error {
 		}
 		if u.pathStart == u.hostEnd {
 			if u.port.IsSome() {
-				return failEq(u.port, rs.None[uint16](), "self.port", "None")
+				return failEq(debugOptionU16(u.port), "None", "self.port", "None")
 			}
 		} else {
 			if err := byteEq(u.hostEnd, ':', "self.byte_at(self.host_end)", "b':'"); err != nil {
@@ -399,13 +506,12 @@ func (u *Url) CheckInvariants() error {
 				rs.PanicAt(0, "Couldn't parse port?: "+parseIntErrorDebug(portStr))
 			}
 			if want := rs.Some(parsed); u.port != want {
-				return failEq(u.port, want, "self.port", "Some(port_str.parse::<u16>().expect(\"Couldn't parse port?\"))")
+				return failEq(debugOptionU16(u.port), debugOptionU16(want), "self.port", "Some(port_str.parse::<u16>().expect(\"Couldn't parse port?\"))")
 			}
 		}
 		if !(int(u.pathStart) == len(u.serialization) ||
 			(u.byteAt(u.pathStart) == '/' || u.byteAt(u.pathStart) == '#' || u.byteAt(u.pathStart) == '?')) {
-			return fail("self.path_start as usize == self.serialization.len()\n" +
-				"                    || matches!(self.byte_at(self.path_start), b'/' | b'#' | b'?')")
+			return fail("self.path_start as usize == self.serialization.len() ||\nmatches!(self.byte_at(self.path_start), b'/' | b'#' | b'?')")
 		}
 	} else {
 		// Anarchist URL (no authority)
@@ -419,10 +525,10 @@ func (u *Url) CheckInvariants() error {
 			return err
 		}
 		if !rs.Is[*hostHostInternal_None](u.host) {
-			return failEq(u.host, &hostHostInternal_None{}, "self.host", "HostInternal::None")
+			return failEq(debugHostInternal(u.host), "None", "self.host", "HostInternal::None")
 		}
 		if u.port.IsSome() {
-			return failEq(u.port, rs.None[uint16](), "self.port", "None")
+			return failEq(debugOptionU16(u.port), "None", "self.port", "None")
 		}
 		if strings.HasPrefix(u.Path(), "//") {
 			// special case when first path segment is empty
@@ -470,7 +576,7 @@ func (u *Url) CheckInvariants() error {
 		rs.PanicAt(0, "Failed to parse myself?: "+err.(ParseError).rustName())
 	}
 	if u.serialization != other.serialization {
-		return failEq(u.serialization, other.serialization, "&self.serialization", "&other.serialization")
+		return failEq(debugStr(u.serialization), debugStr(other.serialization), "&self.serialization", "&other.serialization")
 	}
 	if err := u32Eq(u.schemeEnd, other.schemeEnd, "self.scheme_end", "other.scheme_end"); err != nil {
 		return err
@@ -488,22 +594,19 @@ func (u *Url) CheckInvariants() error {
 		// XXX No host round-trips to empty host.
 		// See https://github.com/whatwg/url/issues/79
 		(u.HostStr().IsNone() && other.HostStr() == rs.Some(""))) {
-		return fail("self.host == other.host ||\n" +
-			"                // XXX No host round-trips to empty host.\n" +
-			"                // See https://github.com/whatwg/url/issues/79\n" +
-			"                (self.host_str(), other.host_str()) == (None, Some(\"\"))")
+		return fail("self.host == other.host || (self.host_str(), other.host_str()) ==\n(None, Some(\"\"))")
 	}
 	if u.port != other.port {
-		return failEq(u.port, other.port, "self.port", "other.port")
+		return failEq(debugOptionU16(u.port), debugOptionU16(other.port), "self.port", "other.port")
 	}
 	if err := u32Eq(u.pathStart, other.pathStart, "self.path_start", "other.path_start"); err != nil {
 		return err
 	}
 	if u.queryStart != other.queryStart {
-		return failEq(u.queryStart, other.queryStart, "self.query_start", "other.query_start")
+		return failEq(debugOptionU32(u.queryStart), debugOptionU32(other.queryStart), "self.query_start", "other.query_start")
 	}
 	if u.fragmentStart != other.fragmentStart {
-		return failEq(u.fragmentStart, other.fragmentStart, "self.fragment_start", "other.fragment_start")
+		return failEq(debugOptionU32(u.fragmentStart), debugOptionU32(other.fragmentStart), "self.fragment_start", "other.fragment_start")
 	}
 	return nil
 }
@@ -1388,9 +1491,16 @@ func (u *Url) SetScheme(scheme string) error {
 // This returns `Err` if the given path is not absolute or, on Windows, if
 // the prefix is not a disk prefix (e.g. `C:`) or a UNC prefix (`\\`).
 func UrlFromFilePath(path string) (Url, error) {
+	return urlFromFilePath(path, rs.CfgWindows)
+}
+
+// urlFromFilePath is Url::from_file_path as built for Windows (windows is
+// true) or for Unix. The two builds read a path differently, and the tests
+// run both on every system.
+func urlFromFilePath(path string, windows bool) (Url, error) {
 	serialization := "file://"
 	hostStart := uint32(len(serialization))
-	hostEnd, host, err := pathToFileUrlSegments(path, &serialization)
+	hostEnd, host, err := pathToFileUrlSegments(path, &serialization, windows)
 	if err != nil {
 		return Url{}, err
 	}
@@ -1421,7 +1531,11 @@ func UrlFromFilePath(path string) (Url, error) {
 // Note that `std::path` does not consider trailing slashes significant
 // and usually does not include them (e.g. in `Path::parent()`).
 func UrlFromDirectoryPath(path string) (Url, error) {
-	url, err := UrlFromFilePath(path)
+	return urlFromDirectoryPath(path, rs.CfgWindows)
+}
+
+func urlFromDirectoryPath(path string, windows bool) (Url, error) {
+	url, err := urlFromFilePath(path, windows)
 	if err != nil {
 		return Url{}, err
 	}
@@ -1445,13 +1559,19 @@ func UrlFromDirectoryPath(path string) (Url, error) {
 //
 // The path is a Go string holding the bytes of the Rust PathBuf.
 func (u *Url) ToFilePath() (string, error) {
+	return u.toFilePath(rs.CfgWindows)
+}
+
+// toFilePath is Url::to_file_path as built for Windows (windows is true) or
+// for Unix.
+func (u *Url) toFilePath(windows bool) (string, error) {
 	if segments, ok := u.PathSegments().Get(); ok {
 		host := rs.None[string]()
 		h, hasHost := u.Host().Get()
 		domain, isDomain := h.(*Host_Domain)
 		switch {
 		case !hasHost || (isDomain && domain.F0 == "localhost"):
-		case rs.CfgWindows && u.Scheme() == "file":
+		case windows && u.Scheme() == "file":
 			host = rs.Some(u.serialization[u.hostStart:u.hostEnd])
 		default:
 			return "", errUnit
@@ -1459,14 +1579,14 @@ func (u *Url) ToFilePath() (string, error) {
 
 		strLen := len(u.AsStr())
 		var estimatedCapacity int
-		if rs.CfgWindows {
+		if windows {
 			// remove scheme: - has possible \\ for hostname
 			estimatedCapacity = max(strLen-(len(u.Scheme())+1), 0)
 		} else {
 			// remove scheme://
 			estimatedCapacity = max(strLen-(len(u.Scheme())+3), 0)
 		}
-		return fileUrlSegmentsToPathbuf(estimatedCapacity, host, segments)
+		return fileUrlSegmentsToPathbuf(estimatedCapacity, host, segments, windows)
 	}
 	return "", errUnit
 }
@@ -1590,8 +1710,9 @@ func UrlDeserializeStr(s string) (Url, error) {
 func pathToFileUrlSegments(
 	path string,
 	serialization *string,
+	windows bool,
 ) (uint32, hostHostInternal, error) {
-	if rs.CfgWindows {
+	if windows {
 		return pathToFileUrlSegmentsWindows(path, serialization)
 	}
 	return pathToFileUrlSegmentsUnix(path, serialization)
@@ -1603,17 +1724,19 @@ func pathToFileUrlSegmentsUnix(
 	path string,
 	serialization *string,
 ) (uint32, hostHostInternal, error) {
-	if !unixPathIsAbsolute(path) {
+	if !rspath.Unix.IsAbsolute(path) {
 		return 0, nil, errUnit
 	}
 	hostEnd := rs.Unwrap(parserToU32(len(*serialization)))
 	empty := true
 	// skip the root component
-	for _, component := range unixPathComponents(path)[1:] {
+	components := rspath.Unix.Components(path)
+	components.Next()
+	for component := range components.All() {
 		empty = false
 		*serialization += "/"
 		*serialization += percentEncodingPercentEncodeNew(
-			[]byte(component),
+			[]byte(rspath.Unix.ComponentAsOsStr(component)),
 			parserSpecialPathSegment,
 		).String()
 	}
@@ -1629,27 +1752,46 @@ func pathToFileUrlSegmentsWindows(
 	path string,
 	serialization *string,
 ) (uint32, hostHostInternal, error) {
-	prefix, components, absolute := windowsPathComponents(path)
-	if !absolute {
+	if !rspath.Windows.IsAbsolute(path) {
 		return 0, nil, errUnit
 	}
+	components := rspath.Windows.Components(path)
 
 	hostStart := len(*serialization) + 1
 	var hostEnd uint32
 	var hostInternal hostHostInternal
 
-	switch prefix.kind {
-	case windowsPrefixDisk, windowsPrefixVerbatimDisk:
+	first, ok := components.Next().Get()
+	prefixComponent, isPrefix := first.(*rspath.Component_Prefix)
+	if !ok || !isPrefix {
+		return 0, nil, errUnit
+	}
+	switch p := prefixComponent.F0.Kind().(type) {
+	case *rspath.Prefix_Disk, *rspath.Prefix_VerbatimDisk:
+		var letter uint8
+		if disk, isDisk := p.(*rspath.Prefix_Disk); isDisk {
+			letter = disk.F0
+		} else {
+			letter = p.(*rspath.Prefix_VerbatimDisk).F0
+		}
 		hostEnd = rs.Unwrap(parserToU32(len(*serialization)))
 		hostInternal = &hostHostInternal_None{}
 		*serialization += "/"
-		*serialization += string(prefix.letter)
+		*serialization += string(rune(letter))
 		*serialization += ":"
-	case windowsPrefixUnc, windowsPrefixVerbatimUnc:
-		if runUtf8Validation([]byte(prefix.server)) != nil {
+	case *rspath.Prefix_UNC, *rspath.Prefix_VerbatimUNC:
+		var server, share string
+		if unc, isUnc := p.(*rspath.Prefix_UNC); isUnc {
+			server, share = unc.F0, unc.F1
+		} else {
+			verbatim := p.(*rspath.Prefix_VerbatimUNC)
+			server, share = verbatim.F0, verbatim.F1
+		}
+		serverStr, ok := rspath.Windows.OsStrToStr(server).Get()
+		if !ok {
 			return 0, nil, errUnit
 		}
-		host, err := hostParseCow(prefix.server)
+		host, err := hostParseCow(serverStr)
 		if err != nil {
 			return 0, nil, errUnit
 		}
@@ -1657,26 +1799,30 @@ func pathToFileUrlSegmentsWindows(
 		hostEnd = rs.Unwrap(parserToU32(len(*serialization)))
 		hostInternal = hostHostInternalFromHost(host)
 		*serialization += "/"
-		if runUtf8Validation([]byte(prefix.share)) != nil {
+		shareStr, ok := rspath.Windows.OsStrToStr(share).Get()
+		if !ok {
 			return 0, nil, errUnit
 		}
-		*serialization += percentEncodingPercentEncodeNew([]byte(prefix.share), parserPathSegment).String()
+		*serialization += percentEncodingPercentEncodeNew([]byte(shareStr), parserPathSegment).String()
 	default:
 		return 0, nil, errUnit
 	}
 
 	pathOnlyHasPrefix := true
-	// components holds the components after the prefix, without the root
-	// directory the Rust loop skips.
-	for _, component := range components {
+	for component := range components.All() {
+		if rs.Is[*rspath.Component_RootDir](component) {
+			continue
+		}
+
 		pathOnlyHasPrefix = false
 		// FIXME: somehow work with non-unicode?
-		if runUtf8Validation([]byte(component)) != nil {
+		componentStr, ok := rspath.Windows.OsStrToStr(rspath.Windows.ComponentAsOsStr(component)).Get()
+		if !ok {
 			return 0, nil, errUnit
 		}
 
 		*serialization += "/"
-		*serialization += percentEncodingPercentEncodeNew([]byte(component), parserPathSegment).String()
+		*serialization += percentEncodingPercentEncodeNew([]byte(componentStr), parserPathSegment).String()
 	}
 
 	// A windows drive letter must end with a slash.
@@ -1693,8 +1839,9 @@ func fileUrlSegmentsToPathbuf(
 	estimatedCapacity int,
 	host rs.Option[string],
 	segments []string,
+	windows bool,
 ) (string, error) {
-	if rs.CfgWindows {
+	if windows {
 		return fileUrlSegmentsToPathbufWindows(estimatedCapacity, host, segments)
 	}
 	return fileUrlSegmentsToPathbufUnix(estimatedCapacity, host, segments)
@@ -1729,7 +1876,7 @@ func fileUrlSegmentsToPathbufUnix(
 	path := string(bytes)
 
 	debugAssertMessage(
-		unixPathIsAbsolute(path),
+		rspath.Unix.IsAbsolute(path),
 		"to_file_path() failed to produce an absolute Path",
 	)
 
@@ -1790,9 +1937,8 @@ func fileUrlSegmentsToPathbufWindows(
 		str += decoded
 	}
 	path := str
-	_, _, absolute := windowsPathComponents(path)
 	debugAssertMessage(
-		absolute,
+		rspath.Windows.IsAbsolute(path),
 		"to_file_path() failed to produce an absolute Path",
 	)
 	return path, nil

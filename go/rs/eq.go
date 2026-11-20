@@ -22,7 +22,8 @@ import (
 //   - An Option is equal to another when both are None or both hold equal
 //     values; a Result when both are Ok with equal values or both Err with
 //     equal errors.
-//   - A pointer is compared by what it points to, as Box<T> and Arc<T> are.
+//   - A pointer is compared by what it points to, as Box<T> and Arc<T> are,
+//     and so is an rs.Arc.
 //   - Two interface values are equal when they hold the same type and equal
 //     values: for a Rust enum, the same variant with equal fields.
 //   - Go maps, and collections whose iteration order is not their key order
@@ -141,6 +142,8 @@ func (s *shape) equalAt(a, b unsafe.Pointer) bool {
 		return s.equalReflectMap(a, b)
 	case kindReflectSeq:
 		return s.equalReflectSeq(a, b)
+	case kindArc:
+		return s.elem.equalPointees(s.arcPointee(a), s.arcPointee(b))
 	}
 	panic("rs.Eq: unhandled kind of " + s.typ.String())
 }
@@ -489,7 +492,7 @@ func (s *shape) checkReflexive(seen map[*shape]bool) bool {
 			}
 		}
 		return true
-	case kindPointer, kindSlice, kindArray, kindOption, kindReflectSeq:
+	case kindPointer, kindSlice, kindArray, kindOption, kindReflectSeq, kindArc:
 		return s.elem.checkReflexive(seen)
 	case kindGoMap, kindReflectMap:
 		return s.key.checkReflexive(seen) && s.elem.checkReflexive(seen)

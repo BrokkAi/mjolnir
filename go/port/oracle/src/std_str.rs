@@ -3,8 +3,9 @@
 //!
 //! Requests are objects with an `"op"` member. Strings travel as JSON strings,
 //! byte strings (which may hold invalid UTF-8) as lowercase hex, chars as code
-//! points, and 64-bit and wider integers as decimal strings. The Go test that
-//! mirrors each reply is `go/rs/strs/oracle_test.go`.
+//! points, and 64-bit and wider integers as decimal strings. The Go tests that
+//! mirror the replies are `go/rs/strs/oracle_test.go`, `oracle_more_test.go`
+//! and `oracle_fmt_test.go`.
 
 use std::fmt::{Debug, Display};
 
@@ -29,6 +30,7 @@ pub fn handle(request: &Value) -> Value {
         "pair" => pair(request),
         "bytes" => bytes_ops(request),
         "repeat" => json!(crate::text(request, "s").repeat(num(request, "n"))),
+        "fmt" => fmt(request),
         _ => crate::unknown(request),
     }
 }
@@ -100,11 +102,16 @@ fn from_utf8(request: &Value) -> Value {
     })
 }
 
-fn utf16(request: &Value) -> Value {
-    let units: Vec<u16> = request["u"]
+/// The UTF-16 code units in `"u"`.
+fn units_of(request: &Value) -> Vec<u16> {
+    request["u"]
         .as_array()
         .map(|items| items.iter().map(|item| item.as_u64().unwrap() as u16).collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn utf16(request: &Value) -> Value {
+    let units = units_of(request);
     json!({
         "from_utf16": result(String::from_utf16(&units)),
         "lossy": String::from_utf16_lossy(&units),
@@ -429,6 +436,7 @@ fn string_mut(request: &Value) -> Value {
             Value::Null
         }
         "drain" => json!(s.drain(a..b).collect::<String>()),
+        "drain_inclusive" => json!(s.drain(a..=b).collect::<String>()),
         "retain" => {
             let keep = predicate(crate::text(request, "keep"));
             s.retain(keep);
@@ -437,6 +445,10 @@ fn string_mut(request: &Value) -> Value {
         "split_off" => json!(s.split_off(a)),
         "replace_range" => {
             s.replace_range(a..b, with);
+            Value::Null
+        }
+        "replace_range_inclusive" => {
+            s.replace_range(a..=b, with);
             Value::Null
         }
         _ => return crate::unknown(request),
@@ -542,4 +554,36 @@ fn bytes_ops(request: &Value) -> Value {
         "lower": hex(&a.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>()),
         "upper": hex(&a.iter().map(u8::to_ascii_uppercase).collect::<Vec<_>>()),
     })
+}
+
+/// One error value, formatted with `{}` and `{:?}` under a few sets of flags:
+/// whether the `Display` impl pads (`f.pad`) or writes (`write!`), and how the
+/// derived `Debug` passes the flags on to the fields.
+fn formatted<E: Display + Debug>(error: E) -> Value {
+    json!({
+        "display": format!("{error}"),
+        "width": format!("{error:>60}"),
+        "fill": format!("{error:*^70}"),
+        "precision": format!("{error:.7}"),
+        "width_precision": format!("{error:<12.4}|"),
+        "debug": format!("{error:?}"),
+        "pretty": format!("{error:#?}"),
+        "debug_width": format!("{error:>4?}"),
+    })
+}
+
+/// The errors of this module's conversions and parsers, made from `"s"`, `"b"`
+/// or `"u"` as the request's `"kind"` says, then formatted.
+fn fmt(request: &Value) -> Value {
+    let s = crate::text(request, "s");
+    match crate::text(request, "kind") {
+        "utf8" => formatted(std::str::from_utf8(&bytes_of(request, "b")).unwrap_err()),
+        "from_utf8" => formatted(String::from_utf8(bytes_of(request, "b")).unwrap_err()),
+        "from_utf16" => formatted(String::from_utf16(&units_of(request)).unwrap_err()),
+        "int" => formatted(s.parse::<i8>().unwrap_err()),
+        "float" => formatted(s.parse::<f64>().unwrap_err()),
+        "bool" => formatted(s.parse::<bool>().unwrap_err()),
+        "char" => formatted(s.parse::<char>().unwrap_err()),
+        _ => crate::unknown(request),
+    }
 }

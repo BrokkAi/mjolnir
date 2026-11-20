@@ -226,6 +226,10 @@ func corpusBlock(r *corpusRand, depth int) string {
 		if r.chance(30) {
 			text += inline() + "\n"
 		}
+		if r.chance(15) {
+			// attributes on a line of their own
+			text += r.pick([]string{"{#id}", "{}", "{.c k=v}", " {#a}", "{#a} b", "a {#b}"}) + "\n"
+		}
 		return text + underline + "\n"
 	case 5:
 		return r.pick([]string{"***", "---", "___", "* * *", "- - -", " ***", "   ---", "    ---", "**  * ** * ** * **", "-     -      -      -", "- - - -    ", "_____________________________________", "--", "**", "*-*", "***a", "+++", " _ _ _ ", "*\t*\t*"}) + "\n"
@@ -766,6 +770,12 @@ func corpusEdges() []string {
 		"# a {#b}\n", "# a {.b}\n", "# a {b}\n", "# a {b=c}\n", "# {#b}\n", "# a {#b} #\n", "# a # {#b}\n", "#{#b}\n", "# a {#b\n", "# a {#b}}\n", "# a {{#b}\n", "# a \\{#b}\n", "# a {#b\\}\n", "# a {#b} \n",
 		"a {#b}\n===\n", "a\nb {#c}\n---\n", "a {#b}\nc\n---\n", "a {\n#b}\n===\n", "# a {#b .c .d e=f g}\n", "# a {#b #c}\n", "# a {.}\n", "# a {#}\n", "# a {=}\n", "# a {b=}\n", "# a {=c}\n", "# a { }\n",
 		"# a {#é}\n", "# a{#b}\n", "# a {#b}c\n", "# *a* {#b}\n", "# `a {#b}`\n", "# [a](b) {#c}\n", "# a {#b}\r\n", "# a\r{#b}\n", "# a {<b>}\n", "# a <b {#c}>\n",
+		// A setext heading with attributes inside a block quote: the crate
+		// truncates a text node to end before it starts, which breaks a debug
+		// assertion in tree.rs and makes a release build panic when it slices
+		// the text.
+		"> a\n> {}\n> =\n", "> [\n> {}\n> =\n", "> > a[\n> > {}\n> > =\n", "> H1\n> con[t\n> {|-|myid}\n> ==\n",
+		"> > H1\n> > con[t\n> > {|-|myid}\n> > ==\n", "- a[\n  {}\n  =\n", "> a {}\n> =\n", "> a\n> {#b}\n> ---\n",
 		// smart punctuation
 		"\"a\"", "'a'", "\"a", "a\"", "\"'a'\"", "'\"a\"'", "a's", "'a' 'b'", "\"a\" \"b\"", "\"a 'b' c\"", "--", "---", "----", "-----", "------", "-------", "--------", "---------", "...", "....", ". . .", "a...b",
 		"a--b", "a---b", "\\--", "\\...", "`--`", "<a b=\"--\">", "[--](...)", "\"*a*\"", "*\"a\"*", "'[a](b)'", "(\"a\")", "\"a\"'", "''", "\"\"", "'a\"", " ' ", " \" ", "a'b'c", "a\"b\"c", "1'2\"",

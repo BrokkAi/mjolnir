@@ -63,6 +63,9 @@ type Origin interface {
 	UnicodeSerialization() string
 	// Equal is the derived PartialEq.
 	Equal(other Origin) bool
+	// HashKey is the derived Hash: two origins have the same key exactly
+	// when they are equal, so every opaque origin has its own.
+	HashKey() string
 }
 
 // Origin_Opaque is Origin::Opaque: a globally unique identifier.
@@ -129,6 +132,15 @@ func (o *Origin_Opaque) Equal(other Origin) bool {
 func (o *Origin_Tuple) Equal(other Origin) bool {
 	x, ok := other.(*Origin_Tuple)
 	return ok && o.F0 == x.F0 && o.F1.Equal(x.F1) && o.F2 == x.F2
+}
+
+func (o *Origin_Opaque) HashKey() string {
+	return "Opaque:" + strconv.Itoa(int(o.F0))
+}
+
+func (o *Origin_Tuple) HashKey() string {
+	host := o.F1.HashKey()
+	return "Tuple:" + strconv.Itoa(len(o.F0)) + ":" + o.F0 + strconv.Itoa(len(host)) + ":" + host + strconv.Itoa(int(o.F2))
 }
 
 // OpaqueOrigin is url::OpaqueOrigin: opaque identifier for URLs that have

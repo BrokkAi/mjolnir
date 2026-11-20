@@ -35,6 +35,9 @@ func ColorDefault() Color {
 	return &Color_Default{}
 }
 
+// Color is held as an interface, whose zero value is not its Default.
+var _ = rs.RegisterDefault(ColorDefault)
+
 // color is a Color as the screen stores it. Color is Copy in Rust and every
 // cell holds two; storing the variant by value keeps a cell the 32 bytes it
 // is in Rust, lets cells and attributes be compared with ==, and means a

@@ -35,6 +35,7 @@ type oracleRequest struct {
 	P      string `json:"p"`
 	Q      string `json:"q,omitempty"`
 	Steps  string `json:"steps,omitempty"`
+	Pretty bool   `json:"pretty,omitempty"`
 	Fp     int    `json:"fp,omitempty"`
 	Bp     int    `json:"bp,omitempty"`
 	Fq     int    `json:"fq,omitempty"`
@@ -100,7 +101,7 @@ func prefixReply(f Flavor, p Prefix) map[string]any {
 		"b":        nil,
 		"d":        nil,
 		"verbatim": p.IsVerbatim(),
-		"dbg":      f.prefixDebugString(p),
+		"dbg":      agree(f.prefixDebugString(p), rs.DebugString(prefixDebug{flavor: f, prefix: p})),
 	}
 	switch p := p.(type) {
 	case *Prefix_Verbatim:
@@ -124,7 +125,7 @@ func componentReply(f Flavor, c Component) map[string]any {
 		"v":      nil,
 		"prefix": nil,
 		"as":     toHex(f.ComponentAsOsStr(c)),
-		"dbg":    f.componentDebugString(c),
+		"dbg":    agree(f.componentDebugString(c), rs.DebugString(componentDebug{flavor: f, component: c})),
 	}
 	switch c := c.(type) {
 	case *Component_Prefix:
@@ -143,6 +144,38 @@ func componentReply(f Flavor, c Component) map[string]any {
 	return reply
 }
 
+// agree returns the text when every way the Go code has of producing it
+// gives the same text, and otherwise all of them, so that the case differs
+// from Rust's answer and is reported.
+func agree(texts ...string) string {
+	for _, text := range texts[1:] {
+		if text != texts[0] {
+			return "the Go forms disagree: " + strings.Join(texts, " | ")
+		}
+	}
+	return texts[0]
+}
+
+// componentsListPretty is `format!("{:#?}", components.collect::<Vec<_>>())`.
+// Under the host's flavour the components print themselves (their FmtDebug
+// methods and registrations); under any flavour componentDebug prints them.
+// Both must give Rust's text.
+func componentsListPretty(f Flavor, path string) string {
+	var wrapped []componentDebug
+	for c := range f.Components(path).All() {
+		wrapped = append(wrapped, componentDebug{flavor: f, component: c})
+	}
+	text := rs.Format("{:#?}", wrapped)
+	if f.resolve() == Host {
+		components := f.Components(path).Collect()
+		if components == nil {
+			components = []Component{}
+		}
+		return agree(text, rs.Format("{:#?}", components))
+	}
+	return text
+}
+
 func optionalComponentReply(f Flavor, c rs.Option[Component]) any {
 	if value, ok := c.Get(); ok {
 		return componentReply(f, value)
@@ -150,7 +183,7 @@ func optionalComponentReply(f Flavor, c rs.Option[Component]) any {
 	return nil
 }
 
-func inspectReply(f Flavor, path string) any {
+func inspectReply(f Flavor, path string, pretty bool) any {
 	components := make([]any, 0)
 	for c := range f.Components(path).All() {
 		components = append(components, componentReply(f, c))
@@ -169,7 +202,7 @@ func inspectReply(f Flavor, path string) any {
 	if value, err := f.OsStringIntoString(path); err == nil {
 		intoString = value
 	}
-	return map[string]any{
+	reply := map[string]any{
 		"components":       components,
 		"components_rev":   componentsRev,
 		"iter":             hexList(f.Iter(path).Collect()),
@@ -188,14 +221,21 @@ func inspectReply(f Flavor, path string) any {
 		"to_str":           optionalText(f.ToStr(path)),
 		"lossy":            f.ToStringLossy(path),
 		"display":          f.Display(path),
-		"debug":            f.DebugString(path),
+		"debug":            agree(f.DebugString(path), rs.DebugString(f.Debug(path))),
 		"into_string":      intoString,
-		"components_debug": f.Components(path).DebugString(),
-		"iter_debug":       f.Iter(path).DebugString(),
+		"components_debug": agree(f.Components(path).DebugString(), rs.DebugString(f.Components(path))),
+		"iter_debug":       agree(f.Iter(path).DebugString(), rs.DebugString(f.Iter(path))),
 		"pop":              []any{toHex(popped), didPop},
 		"collected":        toHex(f.PathBufFromComponents(f.Components(path).Collect())),
 		"self_eq":          f.Eq(path, path),
 	}
+	if pretty {
+		// The pretty forms are the formatter's alone.
+		reply["components_pretty"] = rs.Format("{:#?}", f.Components(path))
+		reply["components_list_pretty"] = componentsListPretty(f, path)
+		reply["iter_pretty"] = rs.Format("{:#?}", f.Iter(path))
+	}
+	return reply
 }
 
 func pairReply(f Flavor, path, other string) any {
@@ -364,7 +404,7 @@ func answerPathRequest(t *testing.T) func(json.RawMessage) any {
 		q := fromHex(t, request.Q)
 		switch request.Op {
 		case "inspect":
-			return inspectReply(f, p)
+			return inspectReply(f, p, request.Pretty)
 		case "pair":
 			return pairReply(f, p, q)
 		case "walk":
@@ -549,7 +589,7 @@ func (g *pathGenerator) requests(yield func(any)) {
 	// Fixed cases first.
 	send(oracleRequest{Op: "debug_classes"})
 	for _, path := range edges {
-		send(oracleRequest{Op: "inspect", P: path})
+		send(oracleRequest{Op: "inspect", P: path, Pretty: true})
 	}
 	for index, path := range edges {
 		for _, step := range []int{1, 7, 13} {

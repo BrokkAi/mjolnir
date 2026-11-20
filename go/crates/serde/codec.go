@@ -20,65 +20,97 @@ type deFn func(p unsafe.Pointer, deserializer Deserializer) error
 // registration, its struct tags and its shape, and cached.
 type codec struct {
 	typ reflect.Type
-	ser serFn
-	de  deFn
+	// rust is the Rust type a field declared, when it changes what the Go
+	// type means (a `char` held as an int32, a `PathBuf` held as a string).
+	rust *rustType
+	ser  serFn
+	de   deFn
 	// serVariant serializes the enum value that is a pointer p to the variant
 	// struct variant. Only the codec of an enum held as a Go interface has
 	// it.
 	serVariant func(variant reflect.Type, p unsafe.Pointer, serializer Serializer) (any, error)
 }
 
+// codecKey names a codec: the Go type, and the Rust type's text when it
+// matters.
+type codecKey struct {
+	typ  reflect.Type
+	rust string
+}
+
 var (
-	// codecs holds the finished codecs by type.
-	codecs sync.Map // reflect.Type -> *codec
+	// codecs holds the finished codecs.
+	codecs sync.Map // codecKey -> *codec
 	// buildMu serializes codec construction. building holds the codecs under
 	// construction, which a recursive type refers to before they are
 	// finished.
 	buildMu  sync.Mutex
-	building map[reflect.Type]*codec
+	building map[codecKey]*codec
 )
 
 // codecOf returns the codec of typ, building it on first use.
-func codecOf(typ reflect.Type) *codec {
-	if found, ok := codecs.Load(typ); ok {
+func codecOf(typ reflect.Type) *codec { return codecFor(typ, nil) }
+
+// codecFor returns the codec of typ as a field declared with the Rust type
+// rust holds it. rust may be nil.
+func codecFor(typ reflect.Type, rust *rustType) *codec {
+	key := codecKey{typ: typ}
+	if rust != nil && rustTypeMatters(typ, rust) {
+		key.rust = rust.String()
+	} else {
+		rust = nil
+	}
+	if found, ok := codecs.Load(key); ok {
 		return found.(*codec)
 	}
 	buildMu.Lock()
 	defer buildMu.Unlock()
-	if found, ok := codecs.Load(typ); ok {
+	if found, ok := codecs.Load(key); ok {
 		return found.(*codec)
 	}
 	outermost := building == nil
 	if outermost {
-		building = map[reflect.Type]*codec{}
+		building = map[codecKey]*codec{}
 		defer func() { building = nil }()
 	}
-	c := codecLocked(typ)
+	c := codecLocked(key, rust)
 	if outermost {
 		// Publish only when the whole group is complete, so that no other
 		// goroutine sees a codec whose fields are still being filled in.
-		for builtType, built := range building {
-			codecs.Store(builtType, built)
+		for builtKey, built := range building {
+			codecs.Store(builtKey, built)
 		}
 	}
 	return c
 }
 
-// codecLocked returns the codec of typ while buildMu is held. The codec of a
+// childCodec is codecFor for use while a codec is being built (buildMu is
+// held).
+func childCodec(typ reflect.Type, rust *rustType) *codec {
+	key := codecKey{typ: typ}
+	if rust != nil && rustTypeMatters(typ, rust) {
+		key.rust = rust.String()
+	} else {
+		rust = nil
+	}
+	return codecLocked(key, rust)
+}
+
+// codecLocked returns the codec of key while buildMu is held. The codec of a
 // type that is being built is returned unfinished: its ser and de are set by
 // the time anything calls them.
-func codecLocked(typ reflect.Type) *codec {
-	if found, ok := codecs.Load(typ); ok {
+func codecLocked(key codecKey, rust *rustType) *codec {
+	if found, ok := codecs.Load(key); ok {
 		return found.(*codec)
 	}
-	if found, ok := building[typ]; ok {
+	if found, ok := building[key]; ok {
 		return found
 	}
-	c := &codec{typ: typ}
-	building[typ] = c
+	c := &codec{typ: key.typ, rust: rust}
+	building[key] = c
 	buildCodec(c)
 	if c.ser == nil || c.de == nil {
-		panic(rs.Panicf("serde: no codec was built for " + typ.String()))
+		panic(rs.Panicf("serde: no codec was built for " + key.typ.String()))
 	}
 	return c
 }

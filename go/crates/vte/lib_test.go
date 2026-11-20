@@ -163,7 +163,7 @@ func assert(t *testing.T, cond bool) {
 	}
 }
 
-func Test_parse_osc(t *testing.T) {
+func TestLib_parse_osc(t *testing.T) {
 	dispatcher := dispatcher{}
 	parser := ParserNew()
 
@@ -181,7 +181,7 @@ func Test_parse_osc(t *testing.T) {
 	}
 }
 
-func Test_parse_empty_osc(t *testing.T) {
+func TestLib_parse_empty_osc(t *testing.T) {
 	dispatcher := dispatcher{}
 	parser := ParserNew()
 
@@ -195,7 +195,7 @@ func Test_parse_empty_osc(t *testing.T) {
 	}
 }
 
-func Test_parse_osc_max_params(t *testing.T) {
+func TestLib_parse_osc_max_params(t *testing.T) {
 	params := strings.Repeat(";", paramsMaxParams+1)
 	input := []uint8("\x1b]" + params + "\x1b")
 	dispatcher := dispatcher{}
@@ -216,7 +216,7 @@ func Test_parse_osc_max_params(t *testing.T) {
 	}
 }
 
-func Test_osc_bell_terminated(t *testing.T) {
+func TestLib_osc_bell_terminated(t *testing.T) {
 	input := []uint8("\x1b]11;ff/00/ff\x07")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -234,7 +234,7 @@ func Test_osc_bell_terminated(t *testing.T) {
 	}
 }
 
-func Test_osc_c0_st_terminated(t *testing.T) {
+func TestLib_osc_c0_st_terminated(t *testing.T) {
 	input := []uint8("\x1b]11;ff/00/ff\x1b\\")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -252,7 +252,7 @@ func Test_osc_c0_st_terminated(t *testing.T) {
 	}
 }
 
-func Test_parse_osc_with_utf8_arguments(t *testing.T) {
+func TestLib_parse_osc_with_utf8_arguments(t *testing.T) {
 	input := []uint8{
 		0x0D, 0x1B, 0x5D, 0x32, 0x3B, 0x65, 0x63, 0x68, 0x6F, 0x20, 0x27, 0xC2, 0xAF, 0x5C,
 		0x5F, 0x28, 0xE3, 0x83, 0x84, 0x29, 0x5F, 0x2F, 0xC2, 0xAF, 0x27, 0x20, 0x26, 0x26,
@@ -269,7 +269,7 @@ func Test_parse_osc_with_utf8_arguments(t *testing.T) {
 	assertEq(t, len(dispatcher.dispatched), 2)
 }
 
-func Test_osc_containing_string_terminator(t *testing.T) {
+func TestLib_osc_containing_string_terminator(t *testing.T) {
 	input := []uint8("\x1b]2;\xe6\x9c\xab\x1b\\")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -286,7 +286,7 @@ func Test_osc_containing_string_terminator(t *testing.T) {
 	}
 }
 
-func Test_exceed_max_buffer_size(t *testing.T) {
+func TestLib_exceed_max_buffer_size(t *testing.T) {
 	const numBytes = maxOscRaw + 100
 	inputStart := []uint8("\x1b]52;s")
 	inputEnd := []uint8("\x07")
@@ -318,7 +318,7 @@ func Test_exceed_max_buffer_size(t *testing.T) {
 	}
 }
 
-func Test_parse_csi_max_params(t *testing.T) {
+func TestLib_parse_csi_max_params(t *testing.T) {
 	// This will build a list of repeating '1;'s
 	// The length is MAX_PARAMS - 1 because the last semicolon is interpreted
 	// as an implicit zero, making the total number of parameters MAX_PARAMS
@@ -341,7 +341,7 @@ func Test_parse_csi_max_params(t *testing.T) {
 	}
 }
 
-func Test_parse_csi_params_ignore_long_params(t *testing.T) {
+func TestLib_parse_csi_params_ignore_long_params(t *testing.T) {
 	// This will build a list of repeating '1;'s
 	// The length is MAX_PARAMS because the last semicolon is interpreted
 	// as an implicit zero, making the total number of parameters MAX_PARAMS + 1
@@ -364,7 +364,7 @@ func Test_parse_csi_params_ignore_long_params(t *testing.T) {
 	}
 }
 
-func Test_parse_csi_params_trailing_semicolon(t *testing.T) {
+func TestLib_parse_csi_params_trailing_semicolon(t *testing.T) {
 	dispatcher := dispatcher{}
 	parser := ParserNew()
 
@@ -379,7 +379,7 @@ func Test_parse_csi_params_trailing_semicolon(t *testing.T) {
 	}
 }
 
-func Test_parse_csi_params_leading_semicolon(t *testing.T) {
+func TestLib_parse_csi_params_leading_semicolon(t *testing.T) {
 	// Create dispatcher and check state
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -395,7 +395,7 @@ func Test_parse_csi_params_leading_semicolon(t *testing.T) {
 	}
 }
 
-func Test_parse_long_csi_param(t *testing.T) {
+func TestLib_parse_long_csi_param(t *testing.T) {
 	// The important part is the parameter, which is (i64::MAX + 1)
 	input := []uint8("\x1b[9223372036854775808m")
 	dispatcher := dispatcher{}
@@ -412,7 +412,7 @@ func Test_parse_long_csi_param(t *testing.T) {
 	}
 }
 
-func Test_csi_reset(t *testing.T) {
+func TestLib_csi_reset(t *testing.T) {
 	input := []uint8("\x1b[3;1\x1b[?1049h")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -431,7 +431,7 @@ func Test_csi_reset(t *testing.T) {
 	}
 }
 
-func Test_csi_subparameters(t *testing.T) {
+func TestLib_csi_subparameters(t *testing.T) {
 	input := []uint8("\x1b[38:2:255:0:255;1m")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -450,7 +450,7 @@ func Test_csi_subparameters(t *testing.T) {
 	}
 }
 
-func Test_parse_dcs_max_params(t *testing.T) {
+func TestLib_parse_dcs_max_params(t *testing.T) {
 	params := strings.Repeat("1;", paramsMaxParams+1)
 	input := []uint8("\x1bP" + params + "p")
 	dispatcher := dispatcher{}
@@ -472,7 +472,7 @@ func Test_parse_dcs_max_params(t *testing.T) {
 	}
 }
 
-func Test_dcs_reset(t *testing.T) {
+func TestLib_dcs_reset(t *testing.T) {
 	input := []uint8("\x1b[3;1\x1bP1$tx\x9c")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -493,7 +493,7 @@ func Test_dcs_reset(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[2], sequence(&sequence_DcsUnhook{}))
 }
 
-func Test_parse_dcs(t *testing.T) {
+func TestLib_parse_dcs(t *testing.T) {
 	input := []uint8("\x1bP0;1|17/ab\x9c")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -515,7 +515,7 @@ func Test_parse_dcs(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[6], sequence(&sequence_DcsUnhook{}))
 }
 
-func Test_intermediate_reset_on_dcs_exit(t *testing.T) {
+func TestLib_intermediate_reset_on_dcs_exit(t *testing.T) {
 	input := []uint8("\x1bP=1sZZZ\x1b+\x5c")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -531,7 +531,7 @@ func Test_intermediate_reset_on_dcs_exit(t *testing.T) {
 	}
 }
 
-func Test_esc_reset(t *testing.T) {
+func TestLib_esc_reset(t *testing.T) {
 	input := []uint8("\x1b[3;1\x1b(A")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -550,7 +550,7 @@ func Test_esc_reset(t *testing.T) {
 	}
 }
 
-func Test_esc_reset_intermediates(t *testing.T) {
+func TestLib_esc_reset_intermediates(t *testing.T) {
 	input := []uint8("\x1b[?2004l\x1b#8")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -562,7 +562,7 @@ func Test_esc_reset_intermediates(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[1], sequence(&sequence_Esc{F0: []uint8{35}, F1: false, F2: 56}))
 }
 
-func Test_params_buffer_filled_with_subparam(t *testing.T) {
+func TestLib_params_buffer_filled_with_subparam(t *testing.T) {
 	input := []uint8("\x1b[::::::::::::::::::::::::::::::::x\x1b")
 	dispatcher := dispatcher{}
 	parser := ParserNew()
@@ -582,7 +582,7 @@ func Test_params_buffer_filled_with_subparam(t *testing.T) {
 	}
 }
 
-func Test_unicode(t *testing.T) {
+func TestLib_unicode(t *testing.T) {
 	input := []uint8("\xF0\x9F\x8E\x89_\xF0\x9F\xA6\x80\xF0\x9F\xA6\x80_\xF0\x9F\x8E\x89")
 
 	dispatcher := dispatcher{}
@@ -599,7 +599,7 @@ func Test_unicode(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[5], sequence(&sequence_Print{F0: '🎉'}))
 }
 
-func Test_invalid_utf8(t *testing.T) {
+func TestLib_invalid_utf8(t *testing.T) {
 	input := []uint8("a\xEF\xBCb")
 
 	dispatcher := dispatcher{}
@@ -613,7 +613,7 @@ func Test_invalid_utf8(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[2], sequence(&sequence_Print{F0: 'b'}))
 }
 
-func Test_partial_utf8(t *testing.T) {
+func TestLib_partial_utf8(t *testing.T) {
 	input := []uint8("\xF0\x9F\x9A\x80")
 
 	dispatcher := dispatcher{}
@@ -628,7 +628,7 @@ func Test_partial_utf8(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[0], sequence(&sequence_Print{F0: '🚀'}))
 }
 
-func Test_partial_utf8_separating_utf8(t *testing.T) {
+func TestLib_partial_utf8_separating_utf8(t *testing.T) {
 	// This is different from the `partial_utf8` test since it has a multi-byte UTF8
 	// character after the partial UTF8 state, causing a partial byte to be present
 	// in the `partial_utf8` buffer after the 2-byte codepoint.
@@ -647,7 +647,7 @@ func Test_partial_utf8_separating_utf8(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[1], sequence(&sequence_Print{F0: '🎉'}))
 }
 
-func Test_partial_invalid_utf8(t *testing.T) {
+func TestLib_partial_invalid_utf8(t *testing.T) {
 	input := []uint8("a\xEF\xBCb")
 
 	dispatcher := dispatcher{}
@@ -664,7 +664,7 @@ func Test_partial_invalid_utf8(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[2], sequence(&sequence_Print{F0: 'b'}))
 }
 
-func Test_partial_invalid_utf8_split(t *testing.T) {
+func TestLib_partial_invalid_utf8_split(t *testing.T) {
 	input := []uint8("\xE4\xBF\x99\xB5")
 
 	dispatcher := dispatcher{}
@@ -677,7 +677,7 @@ func Test_partial_invalid_utf8_split(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[1], sequence(&sequence_Print{F0: '�'}))
 }
 
-func Test_partial_utf8_into_esc(t *testing.T) {
+func TestLib_partial_utf8_into_esc(t *testing.T) {
 	input := []uint8("\xD8\x1b012")
 
 	dispatcher := dispatcher{}
@@ -692,7 +692,7 @@ func Test_partial_utf8_into_esc(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[3], sequence(&sequence_Print{F0: '2'}))
 }
 
-func Test_c1s(t *testing.T) {
+func TestLib_c1s(t *testing.T) {
 	input := []uint8("\x00\x1f\x80\x90\x98\x9b\x9c\x9d\x9e\x9fa")
 
 	dispatcher := dispatcher{}
@@ -714,7 +714,7 @@ func Test_c1s(t *testing.T) {
 	assertEq(t, dispatcher.dispatched[10], sequence(&sequence_Print{F0: 'a'}))
 }
 
-func Test_execute_anywhere(t *testing.T) {
+func TestLib_execute_anywhere(t *testing.T) {
 	input := []uint8("\x18\x1a")
 
 	dispatcher := dispatcher{}

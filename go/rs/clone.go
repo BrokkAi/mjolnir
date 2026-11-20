@@ -110,6 +110,9 @@ const (
 	// themselves through ReflectMap and ReflectSeq.
 	kindReflectMap
 	kindReflectSeq
+	// kindArc is rs.Arc: cloned by its Clone method, which makes another
+	// handle, and compared by the value it holds, as a pointer is.
+	kindArc
 )
 
 // copyKind says how a plain copy of a type is made.
@@ -228,6 +231,7 @@ var (
 	noReflectClonerType  = reflect.TypeFor[noReflectCloner]()
 	reflectMapType       = reflect.TypeFor[ReflectMap]()
 	reflectSeqType       = reflect.TypeFor[ReflectSeq]()
+	arcValueType         = reflect.TypeFor[arcValue]()
 	rsContainerTypeNames = []string{"Option", "Result", "Tuple2", "Tuple3", "Tuple4", "Tuple5", "Cell", "RefCell", "Reverse"}
 )
 
@@ -332,6 +336,10 @@ func (b *shapeBuilder) buildStruct(s *shape) {
 	case pointer.Implements(reflectSeqType):
 		s.kind = kindReflectSeq
 		s.elem = b.build(reflect.New(t).Interface().(ReflectSeq).ReflectElemType())
+		return
+	case pointer.Implements(arcValueType):
+		s.kind = kindArc
+		s.elem = b.build(reflect.New(t).Interface().(arcValue).ReflectArcType())
 		return
 	default:
 		s.kind = kindStruct
@@ -464,7 +472,7 @@ func (b *shapeBuilder) resolveValueFlags(s *shape, done map[*shape]bool) {
 	case kindArray:
 		b.resolveValueFlags(s.elem, done)
 		s.pinned = s.elem.pinned
-	case kindStruct, kindOption, kindResult, kindReflectMap, kindReflectSeq:
+	case kindStruct, kindOption, kindResult, kindReflectMap, kindReflectSeq, kindArc:
 		stdlib := isStdlibPackage(t.PkgPath())
 		switch {
 		case t.PkgPath() == "sync" || t.PkgPath() == "sync/atomic":
@@ -824,6 +832,11 @@ func (s *shape) cloneBoxedPointee(pointer any, arc bool) any {
 	to := reflect.New(s.typ)
 	s.cloneAt(to.UnsafePointer(), from.UnsafePointer(), arc)
 	return to.Elem().Interface()
+}
+
+// arcPointee returns the address of the value that the rs.Arc at p holds.
+func (s *shape) arcPointee(p unsafe.Pointer) unsafe.Pointer {
+	return reflect.NewAt(s.typ, p).Interface().(arcValue).arcPointee()
 }
 
 // variantInfos caches the registry entry of each variant struct that has

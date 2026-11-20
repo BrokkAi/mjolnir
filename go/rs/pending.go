@@ -2,22 +2,11 @@ package rs
 
 import (
 	"cmp"
-	"fmt"
 )
 
 // The bodies below are placeholders so that packages built on rs compile
 // while the formatter and the structural operations are being written. Each
 // is replaced by its real implementation (fmt_*.go, clone.go, eq.go, cmp.go).
-
-func formatToString(format string, args []any) string {
-	if format == "{:?}" && len(args) == 1 {
-		return fmt.Sprintf("%#v", args[0])
-	}
-	if format == "{}" && len(args) == 1 {
-		return fmt.Sprint(args[0])
-	}
-	panic(Todo("core::fmt: Rust format strings (" + format + ")"))
-}
 
 // compareOrdered orders the built-in ordered types. It stays when the
 // structural comparison replaces the placeholders above: it is the fast path.

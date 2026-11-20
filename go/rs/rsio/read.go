@@ -143,11 +143,18 @@ func ReadToStringOwned(reader io.Reader) (string, error) {
 	return buf, nil
 }
 
-// appendToString is io::append_to_string: f appends bytes to a buffer, and
-// they are added to *buf only if they are UTF-8.
+// appendToString is io::append_to_string: f appends bytes to the string's
+// buffer, and they are added to *buf only if they are UTF-8.
+//
+// Rust hands f the String's own Vec, and read_to_end sizes its reads by that
+// Vec's length and capacity. A Go string has no capacity; f is given a
+// buffer of the string's length that is full, as the buffer of a String made
+// from a literal or by to_owned is.
 func appendToString(buf *string, f func(bytes *[]byte) (int, error)) (int, error) {
-	var appended []byte
-	n, err := f(&appended)
+	original := len(*buf)
+	vec := make([]byte, original)
+	n, err := f(&vec)
+	appended := vec[original:]
 	if !utf8.Valid(appended) {
 		if err != nil {
 			return 0, err
@@ -171,6 +178,15 @@ func reserveVec(buf *[]byte, additional int) {
 	grown := make([]byte, len(*buf), newCap)
 	copy(grown, *buf)
 	*buf = grown
+}
+
+// extendVec is Vec::extend_from_slice for a byte slice, growing it as a Vec
+// grows.
+func extendVec(buf *[]byte, data []byte) {
+	reserveVec(buf, len(data))
+	length := len(*buf)
+	*buf = (*buf)[:length+len(data)]
+	copy((*buf)[length:], data)
 }
 
 // DefaultReadToEnd is io::default_read_to_end, the body of read_to_end.
@@ -207,7 +223,7 @@ func DefaultReadToEnd(r io.Reader, buf *[]byte, sizeHint rs.Option[int]) (int, e
 			}
 			// there is no way to recover from allocation failure here
 			// because the data has already been read.
-			*buf = append(*buf, probe[:n]...)
+			extendVec(buf, probe[:n])
 			return n, err
 		}
 	}

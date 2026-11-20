@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/rsio"
 )
 
 // What this package promises Go code beyond the crate's own behaviour.
@@ -137,4 +138,32 @@ func TestRootCauseOfNoErrorPanicsAsUnwrapOnNone(t *testing.T) {
 		assertEq(t, rs.PanicInfoOf(recovered).Message, "called `Option::unwrap()` on a `None` value")
 	}()
 	RootCause(nil)
+}
+
+// The io errors product code holds are rsio's, which the oracle corpus stands
+// in for with ioError: an rsio.Error at the root reads as io::Error does, and
+// one carrying an error reports that error's source as io::Error::source
+// does.
+func TestAnRsioErrorAtTheRootReadsAsIoError(t *testing.T) {
+	notFound := rsio.ErrorFromRawOsError(2)
+	err := Context(Context(notFound, "read the configuration"), "start the daemon")
+	assertEq(t, DisplayString(err), "start the daemon")
+	assertEq(t, AlternateString(err), "start the daemon: read the configuration: No such file or directory (os error 2)")
+	assertEq(t, DebugString(err), "start the daemon\n\nCaused by:\n"+
+		"    0: read the configuration\n"+
+		"    1: No such file or directory (os error 2)")
+	found, ok := DowncastRef[*rsio.Error](err)
+	assert(t, ok && found == notFound)
+	assert(t, RootCause(err) == error(notFound))
+	assert(t, rsio.KindOf(RootCause(err)) == rsio.ErrorKind_NotFound)
+	var asIo *rsio.Error
+	assert(t, errors.As(err, &asIo) && asIo == notFound)
+
+	// io::Error::new(kind, error): Display is the payload's, and the chain
+	// goes on with the payload's own source, not the payload itself.
+	payload := newTyped([]string{"bad header", "truncated"})
+	custom := rsio.ErrorNew(rsio.ErrorKind_InvalidData, payload)
+	err = Context(custom, "parse the archive")
+	assertEq(t, AlternateString(err), "parse the archive: bad header: truncated")
+	assertEq(t, len(Chain(err)), 3)
 }

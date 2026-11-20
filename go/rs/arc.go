@@ -524,16 +524,18 @@ func WeakPtrEq[T any](a, b Weak[T]) bool {
 	return left == right
 }
 
-// Equal is Arc's PartialEq: the values are compared, not the handles.
-func (a Arc[T]) Equal(other Arc[T]) bool {
-	return shapeOf(reflect.TypeFor[T]()).equalPointees(unsafe.Pointer(a.Get()), unsafe.Pointer(other.Get()))
+// arcValue is implemented by *Arc[T]. Eq, Cmp and PartialCmp compare two
+// Arcs by the values they hold, as Arc's PartialEq and PartialOrd do, and
+// reach the value through it (kindArc in clone.go). An Arc has no Equal or
+// Compare method of its own: Compare's int could not say that two values
+// cannot be ordered, as `partial_cmp` of an Arc<f64> holding NaN does.
+type arcValue interface {
+	ReflectArc
+	arcPointee() unsafe.Pointer
 }
 
-// Compare is Arc's Ord: the order of the values.
-func (a Arc[T]) Compare(other Arc[T]) int {
-	order, _ := shapeOf(reflect.TypeFor[T]()).comparePointees(unsafe.Pointer(a.Get()), unsafe.Pointer(other.Get()))
-	return order
-}
+// arcPointee returns the address of the value, as Get does.
+func (a *Arc[T]) arcPointee() unsafe.Pointer { return unsafe.Pointer(a.Get()) }
 
 // FmtDisplay is Arc's Display: that of the value.
 func (a Arc[T]) FmtDisplay(f *Formatter) error {

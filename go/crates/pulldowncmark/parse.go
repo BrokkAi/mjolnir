@@ -1979,7 +1979,7 @@ func parseItemToEvent(item parseItem, text string, allocs *parseAllocations) Eve
 	var tag Tag
 	switch item.body.kind {
 	case parseItemBody_Text:
-		return &Event_Text{F0: text[item.start:item.end]}
+		return &Event_Text{F0: strSlice(text, item.start, item.end)}
 	case parseItemBody_Code:
 		return &Event_Code{F0: allocs.takeCow(parseCowIndex(item.body.n))}
 	case parseItemBody_SynthesizeText:
@@ -1989,9 +1989,9 @@ func parseItemToEvent(item parseItem, text string, allocs *parseAllocations) Eve
 	case parseItemBody_HtmlBlock:
 		tag = &Tag_HtmlBlock{}
 	case parseItemBody_Html:
-		return &Event_Html{F0: text[item.start:item.end]}
+		return &Event_Html{F0: strSlice(text, item.start, item.end)}
 	case parseItemBody_InlineHtml:
-		return &Event_InlineHtml{F0: text[item.start:item.end]}
+		return &Event_InlineHtml{F0: strSlice(text, item.start, item.end)}
 	case parseItemBody_OwnedHtml:
 		return &Event_Html{F0: allocs.takeCow(parseCowIndex(item.body.n))}
 	case parseItemBody_SoftBreak:

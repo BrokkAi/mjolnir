@@ -15,6 +15,7 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/rs"
 	"github.com/BrokkAi/mjolnir/go/rs/rstest/oracle"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // The differential tests hold the port against pulldown-cmark 0.10.3 itself,
@@ -34,6 +35,18 @@ import (
 //
 // MJ_PULLDOWN_CMARK_FUZZ=<count>[:<seed>] adds that many more generated
 // documents to a live run.
+
+// withoutDebugAssertions switches the crate's debug assertions off for the
+// rest of the test. The oracle is a release build of the Rust crate, in which
+// they are off; the ported tests of the crate run with them on, as `cargo
+// test` does. Where pulldown-cmark breaks one of its own debug assertions, a
+// release build goes on and fails later (or not at all), and the comparison
+// must see what the release build does.
+func withoutDebugAssertions(t *testing.T) {
+	saved := debugAssertions
+	debugAssertions = false
+	t.Cleanup(func() { debugAssertions = saved })
+}
 
 // Option sets.
 const (
@@ -82,7 +95,7 @@ func metadataBlockMayNotReturn(text string) bool {
 			continue
 		}
 		j := i + 3
-		for j < len(text) && text[j] != '\n' && u8IsAsciiWhitespace(text[j]) {
+		for j < len(text) && text[j] != '\n' && strs.IsAsciiWhitespace(text[j]) {
 			j++
 		}
 		if j == len(text) || text[j] == '\n' {
@@ -543,6 +556,31 @@ func digestOf(text string, options Options) (digest string) {
 	return string(out[:])
 }
 
+// digestLine is the digests of one document, one for each option set,
+// separated by spaces.
+func digestLine(text string, sets []uint32) string {
+	digests := make([]string, len(sets))
+	for j, bits := range sets {
+		digests[j] = digestOf(text, OptionsFromBitsTruncate(bits))
+	}
+	return strings.Join(digests, " ")
+}
+
+// codepointsDocument is the document of a `codepoints` request: template
+// once for each character from from up to to, with `{c}` replaced by the
+// character. Surrogates are not characters and are skipped, as
+// char::from_u32 skips them in the oracle.
+func codepointsDocument(template string, from int, to int) string {
+	var out strings.Builder
+	for code := from; code < to; code++ {
+		if (0xD800 <= code && code <= 0xDFFF) || code > unicode.MaxRune {
+			continue
+		}
+		out.WriteString(strings.ReplaceAll(template, "{c}", string(rune(code))))
+	}
+	return out.String()
+}
+
 // oracleRequest is a request to the oracle module.
 type oracleRequest struct {
 	Op       string   `json:"op"`
@@ -550,6 +588,12 @@ type oracleRequest struct {
 	Texts    []string `json:"texts,omitempty"`
 	Options  any      `json:"options"`
 	Callback bool     `json:"callback,omitempty"`
+	// Template, From and To are the `codepoints` operation's document.
+	Template string `json:"template,omitempty"`
+	From     int    `json:"from,omitempty"`
+	To       int    `json:"to,omitempty"`
+	// Bits are the option bits of the `options_debug` operation.
+	Bits []uint32 `json:"bits,omitempty"`
 }
 
 // eventsRequest asks for the events of one document under one option set.
@@ -565,6 +609,10 @@ func answer(request json.RawMessage) any {
 		Texts    []string        `json:"texts"`
 		Options  json.RawMessage `json:"options"`
 		Callback bool            `json:"callback"`
+		Template string          `json:"template"`
+		From     int             `json:"from"`
+		To       int             `json:"to"`
+		Bits     []uint32        `json:"bits"`
 	}
 	if err := json.Unmarshal(request, &decoded); err != nil {
 		panic(err)
@@ -589,13 +637,42 @@ func answer(request json.RawMessage) any {
 		}
 		replies := make([]string, len(decoded.Texts))
 		for i, text := range decoded.Texts {
-			digests := make([]string, len(sets))
-			for j, bits := range sets {
-				digests[j] = digestOf(text, OptionsFromBitsTruncate(bits))
-			}
-			replies[i] = strings.Join(digests, " ")
+			replies[i] = digestLine(text, sets)
 		}
 		return map[string]any{"d": replies}
+	case "codepoints":
+		var sets []uint32
+		if err := json.Unmarshal(decoded.Options, &sets); err != nil {
+			panic(err)
+		}
+		return map[string]any{"d": digestLine(codepointsDocument(decoded.Template, decoded.From, decoded.To), sets)}
+	case "debug":
+		var bits uint32
+		if err := json.Unmarshal(decoded.Options, &bits); err != nil {
+			panic(err)
+		}
+		options := OptionsFromBitsTruncate(bits)
+		return oracle.Catch(func() any {
+			events := []string{}
+			for event, span := range ParserNewExt(decoded.Text, options).IntoOffsetIter().All() {
+				if !eventHoldsString(event) {
+					events = append(events, rs.DebugString(rs.T2(event, span)))
+				}
+			}
+			return map[string]any{
+				"events":         events,
+				"options":        rs.DebugString(options),
+				"options_pretty": rs.PrettyDebugString(options),
+			}
+		})
+	case "options_debug":
+		debug := make([]string, len(decoded.Bits))
+		pretty := make([]string, len(decoded.Bits))
+		for i, bits := range decoded.Bits {
+			debug[i] = rs.DebugString(OptionsFromBitsRetain(bits))
+			pretty[i] = rs.PrettyDebugString(OptionsFromBitsRetain(bits))
+		}
+		return map[string]any{"debug": debug, "pretty": pretty}
 	default:
 		panic("unknown op " + decoded.Op)
 	}
@@ -698,6 +775,7 @@ func suiteOptions(smartPunct bool, metadataBlocks bool, oldFootnotes bool) Optio
 // CommonMark and extension specifications: with the options Mjolnir uses,
 // and with the options the crate's own test gives the example.
 func TestDiffSpecAgainstRust(t *testing.T) {
+	withoutDebugAssertions(t)
 	inputs := suiteInputs(t)
 	oracle.Check(t, "pulldown_cmark", "spec", func(yield func(any)) {
 		for _, input := range inputs {
@@ -710,6 +788,7 @@ func TestDiffSpecAgainstRust(t *testing.T) {
 // TestDiffGeneratedAgainstRust compares the generated corpus (corpus_test.go)
 // under every option set in digestOptionSets.
 func TestDiffGeneratedAgainstRust(t *testing.T) {
+	withoutDebugAssertions(t)
 	inputs := suiteInputs(t)
 	live := os.Getenv("MJ_ORACLE") == "live"
 	oracle.Check(t, "pulldown_cmark", "generated", func(yield func(any)) {
@@ -766,6 +845,7 @@ func yieldDigests(yield func(any), documents []string) {
 // callback: which references the callback is asked about, with which span
 // and link type, and the links its answers become.
 func TestDiffCallbackAgainstRust(t *testing.T) {
+	withoutDebugAssertions(t)
 	oracle.Check(t, "pulldown_cmark", "callback", func(yield func(any)) {
 		for _, text := range corpusReferenceDocuments() {
 			for _, options := range []Options{OptionsEmpty(), optionsMjolnir, optionsAllGfmFootnotes, optionsAll} {
@@ -780,12 +860,105 @@ func TestDiffCallbackAgainstRust(t *testing.T) {
 	}, answer)
 }
 
+// codepointsTemplates are the documents TestDiffCodepointsAgainstRust writes
+// out for every character: next to emphasis, strong emphasis and
+// strikethrough delimiters on either side, where whether the character is
+// whitespace or punctuation decides if the delimiter opens or closes; as a
+// quote's neighbour for smart punctuation; escaped, as an entity name, as a
+// link label, in a code span and in a table cell; and starting a line, where
+// it may indent or start a block.
+var codepointsTemplates = []string{
+	"{c}_a_ a*{c}b* a_{c}_ *a{c}*{c} {c}~a~ a~~{c}~~b {c}**a**{c} a__{c}__\n\n",
+	"'{c}' \"a{c}\" {c}'a' a\"{c}\" ({c}'a') [{c}]\"a\" \\{c} &{c}; &#{c}; [{c}] `{c}` <{c}> |{c}|\n\n",
+	"{c}- a\n{c}# b\n{c}> c\n{c}1. d\n{c}```\n{c}\n",
+}
+
+// codepointsRanges are the characters TestDiffCodepointsAgainstRust covers:
+// all of them up to the end of the crate's punctuation table (U+1FBCA) and of
+// the plane it is in, and samples of the planes above, where every character
+// is neither whitespace nor punctuation and four bytes long.
+var codepointsRanges = [][2]int{{0, 0x20000}, {0x2F800, 0x30000}, {0xE0000, 0xE1000}, {0x10F000, 0x110000}}
+
+// TestDiffCodepointsAgainstRust runs every character in codepointsRanges
+// through each of codepointsTemplates, in documents of 4096 characters, and
+// compares the digests with the crate's.
+func TestDiffCodepointsAgainstRust(t *testing.T) {
+	withoutDebugAssertions(t)
+	const chunk = 0x1000
+	sets := []uint32{OptionsEmpty().Bits(), (optionsAllGfmFootnotes &^ optionsMetadataBlocks).Bits()}
+	oracle.Check(t, "pulldown_cmark", "codepoints", func(yield func(any)) {
+		for _, template := range codepointsTemplates {
+			for _, span := range codepointsRanges {
+				for from := span[0]; from < span[1]; from += chunk {
+					yield(oracleRequest{Op: "codepoints", Template: template, From: from, To: min(from+chunk, span[1]), Options: sets})
+				}
+			}
+		}
+	}, answer)
+}
+
+// eventHoldsString reports whether the Debug text of an event shows a
+// string. Rust's shows the representation of its CowStr there
+// (`Text(Borrowed("a"))`), which the port, holding a Go string, does not
+// have, so the oracle leaves those events out of `debug`.
+func eventHoldsString(event Event) bool {
+	switch event := event.(type) {
+	case *Event_Text, *Event_Code, *Event_Html, *Event_InlineHtml, *Event_FootnoteReference:
+		return true
+	case *Event_Start:
+		switch tag := event.F0.(type) {
+		case *Tag_Heading:
+			return tag.Id.IsSome() || len(tag.Classes) != 0 || len(tag.Attrs) != 0
+		case *Tag_CodeBlock:
+			return tag.F0.IsFenced()
+		case *Tag_FootnoteDefinition, *Tag_Link, *Tag_Image:
+			return true
+		}
+	}
+	return false
+}
+
+// formatterReady reports whether go/rs's formatter has been ported; until
+// then the comparison of Debug text skips.
+func formatterReady() (ready bool) {
+	defer func() {
+		if recover() != nil {
+			ready = false
+		}
+	}()
+	return rs.Format("{:>3}|{:?}", 1, "a") == `  1|"a"`
+}
+
+// TestDiffDebugAgainstRust compares the `{:?}` text of every event that
+// holds no string, paired with its range, for each specification example
+// under the options its test gives it, and the `{:?}` and `{:#?}` text of
+// Options for every combination of the defined bits and some undefined ones.
+func TestDiffDebugAgainstRust(t *testing.T) {
+	withoutDebugAssertions(t)
+	if !formatterReady() {
+		t.Skip("the formatter (rs.Format) is not ported yet")
+	}
+	inputs := suiteInputs(t)
+	oracle.Check(t, "pulldown_cmark", "debug", func(yield func(any)) {
+		for _, input := range inputs {
+			yield(oracleRequest{Op: "debug", Text: input.text, Options: input.options.Bits()})
+		}
+		var bits []uint32
+		for b := uint32(0); b < 1<<10; b++ {
+			bits = append(bits, b)
+		}
+		bits = append(bits, 1<<10, 1<<31, 0xfffffc00, 0xffffffff)
+		yield(oracleRequest{Op: "options_debug", Bits: bits})
+	}, answer)
+}
+
 // TestDiffUnicaseAgainstRust checks the case folding table against the
 // crate's through the one place it shows: which reference labels match a
 // definition. Every character that folds to something else defines a label,
 // and the document then refers to it by its fold, by itself, and by its
 // simple lower and upper case.
 func TestDiffUnicaseAgainstRust(t *testing.T) {
+	withoutDebugAssertions(t)
 	oracle.Check(t, "pulldown_cmark", "unicase", func(yield func(any)) {
 		const perDocument = 48
 		for start := 0; start < len(unicaseFoldTable); start += perDocument {

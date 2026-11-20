@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // The first pass resolves all block structure, generating an AST. Within a block, items
@@ -1976,7 +1977,7 @@ func firstpassGetHtmlEndTag(textBytes string) (string, bool) {
 			break
 		}
 
-		if !sliceEqIgnoreAsciiCase(textBytes[:tagLen], begTag) {
+		if !strs.EqIgnoreAsciiCase(textBytes[:tagLen], begTag) {
 			continue
 		}
 
@@ -1999,7 +2000,7 @@ func firstpassGetHtmlEndTag(textBytes string) (string, bool) {
 		}
 	}
 
-	if len(textBytes) > 1 && textBytes[0] == '!' && u8IsAsciiAlphabetic(textBytes[1]) {
+	if len(textBytes) > 1 && textBytes[0] == '!' && strs.IsAsciiAlphabetic(textBytes[1]) {
 		return ">", true
 	} else {
 		return "", false
@@ -2073,7 +2074,7 @@ func firstpassDelimRunCanOpen(
 	if !ok {
 		return false
 	}
-	if charIsWhitespace(nextChar) {
+	if strs.IsWhitespace(nextChar) {
 		return false
 	}
 	if ix == 0 {
@@ -2103,7 +2104,7 @@ func firstpassDelimRunCanOpen(
 		return true
 	}
 
-	return charIsWhitespace(prevChar) ||
+	return strs.IsWhitespace(prevChar) ||
 		puncttableIsPunctuation(prevChar) && (delim != '\'' || !(prevChar == ']' || prevChar == ')'))
 }
 
@@ -2124,7 +2125,7 @@ func firstpassDelimRunCanClose(
 	if !ok {
 		rs.PanicAt(0, optionUnwrapNone)
 	}
-	if charIsWhitespace(prevChar) {
+	if strs.IsWhitespace(prevChar) {
 		return false
 	}
 	nextChar, ok := strCharsNth(suffix, runLen)
@@ -2148,7 +2149,7 @@ func firstpassDelimRunCanClose(
 		return true
 	}
 
-	return charIsWhitespace(nextChar) || puncttableIsPunctuation(nextChar)
+	return strs.IsWhitespace(nextChar) || puncttableIsPunctuation(nextChar)
 }
 
 func firstpassCreateLut(options *Options) firstpassLookupTable {
@@ -2334,7 +2335,7 @@ func firstpassParseInsideAttributeBlock(insideAttrBlock string) rs.Option[parseH
 	classes := []string{}
 	attrs := []rs.Tuple2[string, rs.Option[string]]{}
 
-	for _, attr := range strSplitAsciiWhitespace(insideAttrBlock) {
+	for _, attr := range strs.SplitAsciiWhitespace(insideAttrBlock) {
 		// iterator returned by `str::split_ascii_whitespace` never emits empty
 		// strings, so taking first byte won't panic.
 		if len(attr) > 1 {

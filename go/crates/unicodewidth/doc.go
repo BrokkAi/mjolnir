@@ -47,11 +47,16 @@
 //
 // # Tests
 //
-// it_tests_test.go is the crate's tests/tests.rs and tables_test.go the test
-// module of src/tables.rs; their data files are in testdata. oracle_test.go
-// compares with the crate itself through go/port/oracle: every scalar value
-// for the two character widths, and a generated corpus of strings for the two
-// string widths.
+// it_tests_test.go is the crate's tests/tests.rs, tables_test.go the test
+// module of src/tables.rs and lib_test.go the documentation examples of
+// src/lib.rs; their data files are in testdata. utf8_test.go checks the
+// measuring of runes and strings Rust cannot hold, described above.
+// oracle_test.go compares with the crate itself through go/port/oracle
+// (module `unicode`): the two character widths of every scalar value and the
+// two string widths of the string holding only it; and the two string widths
+// of the corpus of corpus_test.go (fixed cases, 20,000 generated strings
+// biased to the sequences the rules single out, and long inputs), with
+// 180,000 more strings under MJ_ORACLE=live.
 //
 // # The rules, from the crate's documentation
 //

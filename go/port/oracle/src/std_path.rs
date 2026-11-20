@@ -10,7 +10,8 @@
 //!
 //! Operations:
 //!
-//! - `inspect {p}`: everything `Path` says about one path.
+//! - `inspect {p, pretty}`: everything `Path` says about one path; with
+//!   `pretty`, also the `{:#?}` forms of its iterators.
 //! - `pair {p, q}`: everything that takes two paths, or a path and a name.
 //! - `walk {p, steps}`: `Components` driven from both ends, one letter a step.
 //! - `cmp_components {p, q, fp, bp, fq, bq}`: `Components` compared after
@@ -42,7 +43,10 @@ pub fn handle(request: &Value) -> Value {
     QUIET.call_once(|| std::panic::set_hook(Box::new(|_| {})));
 
     match crate::text(request, "op") {
-        "inspect" => inspect(&path(request, "p")),
+        "inspect" => inspect(
+            &path(request, "p"),
+            request.get("pretty").and_then(Value::as_bool).unwrap_or(false),
+        ),
         "pair" => pair(&path(request, "p"), &os(request, "q")),
         "walk" => walk(&path(request, "p"), crate::text(request, "steps")),
         "cmp_components" => cmp_components(request),
@@ -244,10 +248,10 @@ fn hash_of(path: &Path) -> u64 {
 
 // --- std::path -----------------------------------------------------------
 
-fn inspect(path: &Path) -> Value {
+fn inspect(path: &Path, pretty: bool) -> Value {
     let mut popped = path.to_path_buf();
     let did_pop = popped.pop();
-    json!({
+    let mut reply = json!({
         "components": path.components().map(component).collect::<Vec<_>>(),
         "components_rev": path
             .components()
@@ -277,7 +281,14 @@ fn inspect(path: &Path) -> Value {
         "pop": [hex(popped.as_os_str()), Value::Bool(did_pop)],
         "collected": hex(path.components().collect::<PathBuf>().as_os_str()),
         "self_eq": path == path,
-    })
+    });
+    if pretty {
+        reply["components_pretty"] = json!(format!("{:#?}", path.components()));
+        reply["components_list_pretty"] =
+            json!(format!("{:#?}", path.components().collect::<Vec<_>>()));
+        reply["iter_pretty"] = json!(format!("{:#?}", path.iter()));
+    }
+    reply
 }
 
 fn pair(path: &Path, other: &OsStr) -> Value {

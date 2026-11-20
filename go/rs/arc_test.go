@@ -77,6 +77,21 @@ func TestArc_float_nan_ne(t *testing.T) {
 	}
 }
 
+// Hard-won: e641657c7: Arc's own int Compare made partial_cmp of an Arc holding NaN Some(Equal).
+func TestArcPartialCmpLooksAtTheValue(t *testing.T) {
+	nan := ArcNew(math.NaN())
+	defer nan.Drop()
+	one := ArcNew(1.0)
+	defer one.Drop()
+	if PartialCmp(nan, one).IsSome() || PartialCmp(nan, nan).IsSome() || Cmp(nan, one) != 0 {
+		t.Fatal("an Arc<f64> holding NaN cannot be ordered, as its value cannot")
+	}
+	type held struct{ value Arc[float64] }
+	if PartialCmp(held{one}, held{nan}).IsSome() || PartialCmp(held{one}, held{one}) != Some(Ordering_Equal) {
+		t.Fatal("a struct holding an Arc is ordered as the Arc's value")
+	}
+}
+
 // probeCountedEq is TestPEq of alloctests arc.rs: its eq counts its calls on
 // both operands.
 type probeCountedEq struct{ calls Cell[int] }

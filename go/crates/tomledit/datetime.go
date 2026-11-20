@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/BrokkAi/mjolnir/go/crates/serde"
 	"github.com/BrokkAi/mjolnir/go/rs"
 )
 
@@ -549,6 +550,103 @@ func (c *charsIter) digit() (uint8, bool) {
 		return uint8(r - '0'), true
 	}
 	return 0, false
+}
+
+// SerializeSerde is `impl Serialize for Datetime`: a struct of the private
+// name with the one private field holding the text, which the TOML
+// serializer recognises.
+func (d *Datetime) SerializeSerde(serializer serde.Serializer) (any, error) {
+	s, err := serializer.SerializeStruct(DatetimeName, 1)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.SerializeField(DatetimeField, d.String()); err != nil {
+		return nil, err
+	}
+	return s.End()
+}
+
+// DeserializeSerde is `impl Deserialize for Datetime`.
+func (d *Datetime) DeserializeSerde(deserializer serde.Deserializer) error {
+	fields := []string{DatetimeField}
+	value, err := deserializer.DeserializeStruct(DatetimeName, fields, datetimeVisitor{})
+	if err != nil {
+		return err
+	}
+	*d = value.(Datetime)
+	return nil
+}
+
+// datetimeVisitor is the DatetimeVisitor of `impl Deserialize for Datetime`.
+type datetimeVisitor struct{}
+
+func (datetimeVisitor) Expecting() string { return "a TOML datetime" }
+
+func (datetimeVisitor) VisitMap(visitor serde.DeMapAccess) (any, error) {
+	value, err := serde.DeMapAccessNextKey[datetimeKey](visitor)
+	if err != nil {
+		return nil, err
+	}
+	if value.IsNone() {
+		return nil, serde.DeErrorCustom("datetime key not found")
+	}
+	v, err := serde.DeMapAccessNextValue[DatetimeFromString](visitor)
+	if err != nil {
+		return nil, err
+	}
+	return v.Value, nil
+}
+
+// datetimeKey is DatetimeKey: the private field name, and nothing else.
+type datetimeKey struct{}
+
+// DeserializeSerde is `impl Deserialize for DatetimeKey`.
+func (*datetimeKey) DeserializeSerde(deserializer serde.Deserializer) error {
+	_, err := deserializer.DeserializeIdentifier(datetimeFieldVisitor{})
+	return err
+}
+
+// datetimeFieldVisitor is the FieldVisitor of `impl Deserialize for
+// DatetimeKey`.
+type datetimeFieldVisitor struct{}
+
+func (datetimeFieldVisitor) Expecting() string { return "a valid datetime field" }
+
+func (datetimeFieldVisitor) VisitStr(s string) (any, error) {
+	if s == DatetimeField {
+		return rs.Unit{}, nil
+	}
+	return nil, serde.DeErrorCustom("expected field with custom name")
+}
+
+// DatetimeFromString is toml_datetime::__unstable::DatetimeFromString: a
+// datetime read from its text.
+type DatetimeFromString struct {
+	Value Datetime `rs:"value"`
+}
+
+// DeserializeSerde is `impl Deserialize for DatetimeFromString`.
+func (d *DatetimeFromString) DeserializeSerde(deserializer serde.Deserializer) error {
+	value, err := deserializer.DeserializeStr(datetimeFromStringVisitor{})
+	if err != nil {
+		return err
+	}
+	*d = value.(DatetimeFromString)
+	return nil
+}
+
+// datetimeFromStringVisitor is the Visitor of `impl Deserialize for
+// DatetimeFromString`.
+type datetimeFromStringVisitor struct{}
+
+func (datetimeFromStringVisitor) Expecting() string { return "string containing a datetime" }
+
+func (datetimeFromStringVisitor) VisitStr(s string) (any, error) {
+	date, err := DatetimeFromStr(s)
+	if err != nil {
+		return nil, serde.DeErrorCustom(err)
+	}
+	return DatetimeFromString{Value: date}, nil
 }
 
 // Error is `impl Display for DatetimeParseError`.

@@ -1,4 +1,8 @@
 // Port of coretests 1.99.1 tests/str_lossy.rs
+//
+// Not ported: debug, which tests the unstable Utf8Chunks::debug (the escaped
+// form `{:?}` gives a Path or OsStr that is not UTF-8, which go/rs/rspath
+// writes).
 
 package strs
 

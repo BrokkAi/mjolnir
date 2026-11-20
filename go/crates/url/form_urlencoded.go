@@ -7,6 +7,7 @@ import (
 	"iter"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // Parser and serializer for the `application/x-www-form-urlencoded` syntax
@@ -457,7 +458,7 @@ func formUrlencodedEncode(encodingOverride FormUrlencodedEncodingOverride, input
 
 func formUrlencodedDecodeUtf8Lossy(input []byte) string {
 	// Note: This function is duplicated in `percent_encoding/lib.rs`.
-	return stringFromUtf8Lossy(input)
+	return strs.FromUtf8Lossy(input)
 }
 
 // FormUrlencodedEncodingOverride is form_urlencoded::EncodingOverride, which

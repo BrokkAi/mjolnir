@@ -545,7 +545,11 @@ type componentsDebugHelper struct {
 }
 
 func (h componentsDebugHelper) FmtDebug(f *rs.Formatter) error {
-	return f.DebugList().Entries(h.flavor.Components(h.path).Collect()).Finish()
+	var entries []componentDebug
+	for component := range h.flavor.Components(h.path).All() {
+		entries = append(entries, componentDebug{flavor: h.flavor, component: component})
+	}
+	return f.DebugList().Entries(entries).Finish()
 }
 
 // FmtDebug is `impl Debug for Components`.
@@ -2049,5 +2053,105 @@ func utoa(value uint8) string {
 		if value == 0 {
 			return string(digits[i:])
 		}
+	}
+}
+
+// The derived Debug of Component, PrefixComponent and Prefix prints each
+// OsStr they hold with the OsStr's own Debug. The formatter would print the
+// Go string that holds one as a str, which differs where the OsStr is not
+// Unicode: a Windows OsStr writes an unpaired surrogate as `\u{d800}`. So the
+// variants that hold an OsStr write themselves, as derive(Debug) would, with
+// the OsStr written by the host's flavour; the variants without one are
+// printed from their registration.
+
+// FmtDebug is the derived Debug of Component::Normal.
+func (c *Component_Normal) FmtDebug(f *rs.Formatter) error {
+	return componentDebug{flavor: Host, component: c}.FmtDebug(f)
+}
+
+// FmtDebug is the derived Debug of PrefixComponent.
+func (p PrefixComponent) FmtDebug(f *rs.Formatter) error {
+	return prefixComponentDebug{flavor: Host, prefix: p}.FmtDebug(f)
+}
+
+// FmtDebug is the derived Debug of Prefix::Verbatim.
+func (p *Prefix_Verbatim) FmtDebug(f *rs.Formatter) error {
+	return prefixDebug{flavor: Host, prefix: p}.FmtDebug(f)
+}
+
+// FmtDebug is the derived Debug of Prefix::VerbatimUNC.
+func (p *Prefix_VerbatimUNC) FmtDebug(f *rs.Formatter) error {
+	return prefixDebug{flavor: Host, prefix: p}.FmtDebug(f)
+}
+
+// FmtDebug is the derived Debug of Prefix::DeviceNS.
+func (p *Prefix_DeviceNS) FmtDebug(f *rs.Formatter) error {
+	return prefixDebug{flavor: Host, prefix: p}.FmtDebug(f)
+}
+
+// FmtDebug is the derived Debug of Prefix::UNC.
+func (p *Prefix_UNC) FmtDebug(f *rs.Formatter) error {
+	return prefixDebug{flavor: Host, prefix: p}.FmtDebug(f)
+}
+
+// componentDebug is a Component as the argument of `{:?}` under a flavour.
+type componentDebug struct {
+	flavor    Flavor
+	component Component
+}
+
+func (d componentDebug) FmtDebug(f *rs.Formatter) error {
+	switch c := d.component.(type) {
+	case *Component_Prefix:
+		return f.DebugTuple("Prefix").Field(prefixComponentDebug{flavor: d.flavor, prefix: c.F0}).Finish()
+	case *Component_RootDir:
+		return f.WriteStr("RootDir")
+	case *Component_CurDir:
+		return f.WriteStr("CurDir")
+	case *Component_ParentDir:
+		return f.WriteStr("ParentDir")
+	case *Component_Normal:
+		return f.DebugTuple("Normal").Field(d.flavor.Debug(c.F0)).Finish()
+	default:
+		panic(rs.Unreachable(c))
+	}
+}
+
+// prefixComponentDebug is a PrefixComponent as the argument of `{:?}` under
+// a flavour.
+type prefixComponentDebug struct {
+	flavor Flavor
+	prefix PrefixComponent
+}
+
+func (d prefixComponentDebug) FmtDebug(f *rs.Formatter) error {
+	return f.DebugStruct("PrefixComponent").
+		Field("raw", d.flavor.Debug(d.prefix.raw)).
+		Field("parsed", prefixDebug{flavor: d.flavor, prefix: d.prefix.parsed}).
+		Finish()
+}
+
+// prefixDebug is a Prefix as the argument of `{:?}` under a flavour.
+type prefixDebug struct {
+	flavor Flavor
+	prefix Prefix
+}
+
+func (d prefixDebug) FmtDebug(f *rs.Formatter) error {
+	switch p := d.prefix.(type) {
+	case *Prefix_Verbatim:
+		return f.DebugTuple("Verbatim").Field(d.flavor.Debug(p.F0)).Finish()
+	case *Prefix_VerbatimUNC:
+		return f.DebugTuple("VerbatimUNC").Field(d.flavor.Debug(p.F0)).Field(d.flavor.Debug(p.F1)).Finish()
+	case *Prefix_VerbatimDisk:
+		return f.DebugTuple("VerbatimDisk").Field(p.F0).Finish()
+	case *Prefix_DeviceNS:
+		return f.DebugTuple("DeviceNS").Field(d.flavor.Debug(p.F0)).Finish()
+	case *Prefix_UNC:
+		return f.DebugTuple("UNC").Field(d.flavor.Debug(p.F0)).Field(d.flavor.Debug(p.F1)).Finish()
+	case *Prefix_Disk:
+		return f.DebugTuple("Disk").Field(p.F0).Finish()
+	default:
+		panic(rs.Unreachable(p))
 	}
 }

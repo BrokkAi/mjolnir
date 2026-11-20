@@ -14,6 +14,21 @@
 //! corpus does not make the recorded file large. A mismatch is investigated
 //! by sending the same text to `events`.
 //!
+//! `codepoints` builds one document from `"template"`, written out once for
+//! each character from `"from"` up to `"to"` (surrogates skipped) with every
+//! `{c}` in it replaced by that character, and replies with its digests as
+//! `digest` does for one document. It lets a test run every Unicode
+//! character through the delimiter, escape and entity rules without the
+//! request carrying the megabytes of text.
+//!
+//! `debug` parses `"text"` and replies with the `{:?}` text of every
+//! `(event, range)` pair of the offset iterator whose event holds no string,
+//! and the `{:?}` and `{:#?}` text of the options. An event that holds a
+//! string is left out: its Debug text names the representation of the
+//! crate's CowStr (`Text(Borrowed("a"))`), which the Go port, holding a Go
+//! string, does not have. `options_debug` replies with the `{:?}` and `{:#?}`
+//! text of `Options::from_bits_retain` for each number in `"bits"`.
+//!
 //! An event is an array: start, end, the event's name, then its fields. Tags
 //! are flattened into the array the same way, and no objects are used, so
 //! the text is the same whatever order a JSON library keeps keys in.
@@ -35,6 +50,9 @@ pub fn handle(request: &Value) -> Value {
     match crate::text(request, "op") {
         "events" => events(request),
         "digest" => digest(request),
+        "codepoints" => codepoints(request),
+        "debug" => debug(request),
+        "options_debug" => options_debug(request),
         _ => crate::unknown(request),
     }
 }
@@ -107,20 +125,88 @@ fn digest(request: &Value) -> Value {
     let sets = request["options"].as_array().unwrap_or(&empty);
     let mut replies = Vec::with_capacity(texts.len());
     for text in texts {
-        let text = text.as_str().unwrap_or_default();
-        let mut digests = Vec::with_capacity(sets.len());
-        for bits in sets {
-            let options = options(bits);
-            // One option set panicking must not hide what the others do.
-            let digest = match catch_unwind(AssertUnwindSafe(|| parse(text, options))) {
-                Ok(reply) => format!("{:08x}", fnv1a_32(reply.to_string().as_bytes())),
-                Err(payload) => format!("panic: {}", panic_message(payload)),
-            };
-            digests.push(digest);
-        }
-        replies.push(digests.join(" "));
+        replies.push(digest_line(text.as_str().unwrap_or_default(), sets));
     }
     json!({ "d": replies })
+}
+
+fn codepoints(request: &Value) -> Value {
+    let empty = Vec::new();
+    let sets = request["options"].as_array().unwrap_or(&empty);
+    let template = crate::text(request, "template");
+    let from = request["from"].as_u64().unwrap_or(0);
+    let to = request["to"].as_u64().unwrap_or(0);
+    let mut text = String::new();
+    let mut buffer = [0u8; 4];
+    for code in from..to {
+        if let Some(c) = u32::try_from(code).ok().and_then(char::from_u32) {
+            text.push_str(&template.replace("{c}", c.encode_utf8(&mut buffer)));
+        }
+    }
+    json!({ "d": digest_line(&text, sets) })
+}
+
+fn debug(request: &Value) -> Value {
+    let text = crate::text(request, "text");
+    let options = options(&request["options"]);
+    let events: Vec<String> = Parser::new_ext(text, options)
+        .into_offset_iter()
+        .filter(|(event, _)| !holds_string(event))
+        .map(|pair| format!("{pair:?}"))
+        .collect();
+    json!({
+        "events": events,
+        "options": format!("{options:?}"),
+        "options_pretty": format!("{options:#?}"),
+    })
+}
+
+/// Whether the Debug text of the event shows a CowStr.
+fn holds_string(event: &Event<'_>) -> bool {
+    match event {
+        Event::Text(_)
+        | Event::Code(_)
+        | Event::Html(_)
+        | Event::InlineHtml(_)
+        | Event::FootnoteReference(_) => true,
+        Event::Start(Tag::Heading { id, classes, attrs, .. }) => {
+            id.is_some() || !classes.is_empty() || !attrs.is_empty()
+        }
+        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+        | Event::Start(Tag::FootnoteDefinition(_))
+        | Event::Start(Tag::Link { .. })
+        | Event::Start(Tag::Image { .. }) => true,
+        _ => false,
+    }
+}
+
+fn options_debug(request: &Value) -> Value {
+    let empty = Vec::new();
+    let bits = request["bits"].as_array().unwrap_or(&empty);
+    let mut debug = Vec::with_capacity(bits.len());
+    let mut pretty = Vec::with_capacity(bits.len());
+    for value in bits {
+        let options = Options::from_bits_retain(value.as_u64().unwrap_or(0) as u32);
+        debug.push(format!("{options:?}"));
+        pretty.push(format!("{options:#?}"));
+    }
+    json!({ "debug": debug, "pretty": pretty })
+}
+
+/// The digests of one document, one for each option set, separated by
+/// spaces.
+fn digest_line(text: &str, sets: &[Value]) -> String {
+    let mut digests = Vec::with_capacity(sets.len());
+    for bits in sets {
+        let options = options(bits);
+        // One option set panicking must not hide what the others do.
+        let digest = match catch_unwind(AssertUnwindSafe(|| parse(text, options))) {
+            Ok(reply) => format!("{:08x}", fnv1a_32(reply.to_string().as_bytes())),
+            Err(payload) => format!("panic: {}", panic_message(payload)),
+        };
+        digests.push(digest);
+    }
+    digests.join(" ")
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {

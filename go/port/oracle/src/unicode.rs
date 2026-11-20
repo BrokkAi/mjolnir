@@ -450,11 +450,13 @@ fn incomplete(error: &GraphemeIncomplete) -> Value {
 /// neighbouring chunk when asked, and provides the context asked for.
 ///
 /// The operations are `next`, `prev` and `is` (the three queries, on the
-/// chunk the driver is at), `seek` (go to the chunk holding the cursor),
-/// `set:N` (`set_cursor`), `chunk:K` (go to chunk K, whether or not it holds
-/// the cursor) and `ctx:K` (`provide_context` with chunk K, asked for or not).
-/// The reply is everything the cursor answered, in order; a panic ends the
-/// script and is recorded as the last entry.
+/// chunk the driver is at), `next1`, `prev1` and `is1` (the same queries asked
+/// once, leaving any request for another chunk or for context unanswered),
+/// `seek` (go to the chunk holding the cursor), `set:N` (`set_cursor`),
+/// `chunk:K` (go to chunk K, whether or not it holds the cursor) and `ctx:K`
+/// (`provide_context` with chunk K, asked for or not). The reply is everything
+/// the cursor answered, in order; a panic ends the script and is recorded as
+/// the last entry.
 fn cursor(request: &Value) -> Value {
     let s = crate::text(request, "s");
     let extended = request.get("extended").and_then(Value::as_bool).unwrap_or(true);
@@ -509,12 +511,16 @@ fn cursor(request: &Value) -> Value {
                 at = chunk_at(cursor.cur_cursor());
                 continue;
             }
-            // A query is repeated until it is answered. Each round either
-            // moves to another chunk or provides context, and both are
-            // bounded by the number of chunks.
+            // A query is repeated until it is answered, unless it is asked
+            // once. Each round either moves to another chunk or provides
+            // context, and both are bounded by the number of chunks.
+            let (query, once) = match op.strip_suffix('1') {
+                Some(query) => (query, true),
+                None => (op, false),
+            };
             for _ in 0..(4 * chunks.len() + 8) {
                 let (start, chunk) = chunks[at];
-                let answer: Result<Value, GraphemeIncomplete> = match op {
+                let answer: Result<Value, GraphemeIncomplete> = match query {
                     "next" => cursor.next_boundary(chunk, start).map(|found| json!(found)),
                     "prev" => cursor.prev_boundary(chunk, start).map(|found| json!(found)),
                     "is" => cursor.is_boundary(chunk, start).map(|found| json!(found)),
@@ -527,6 +533,9 @@ fn cursor(request: &Value) -> Value {
                     }
                     Err(error) => {
                         trace.push(json!([op, at, incomplete(&error), cursor.cur_cursor()]));
+                        if once {
+                            break;
+                        }
                         match error {
                             GraphemeIncomplete::NextChunk if at + 1 < chunks.len() => at += 1,
                             GraphemeIncomplete::PrevChunk if at > 0 => at -= 1,

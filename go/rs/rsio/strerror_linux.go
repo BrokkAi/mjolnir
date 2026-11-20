@@ -9,12 +9,17 @@ package rsio
 // and `mj-worker` uses musl.
 //
 // Both tables were produced on Linux x86_64 by this program, built once with
-// gcc against glibc 2.44 and once with `musl-gcc -static` against musl 1.2.6,
-// and run over -3..=140:
+// gcc against glibc 2.44, and once linked statically against the musl that
+// Rust 1.99.1 bundles for the x86_64-unknown-linux-musl target (the
+// self-contained libc.a beside the target's standard library, which is what
+// a Rust `mj-worker` is linked with). That musl is 1.2.5: it has statx and
+// preadv2 but not 1.2.6's posix_getdents and renameat2, and it has no text
+// for errors 117 and 119, which a system musl 1.2.6 words "Data consistency
+// error" and "Resource not available". The program ran over -3..=200:
 //
 //	extern int __xpg_strerror_r(int errnum, char *buf, size_t buflen);
 //	int main(void) {
-//		for (int e = -3; e <= 140; e++) {
+//		for (int e = -3; e <= 200; e++) {
 //			char buf[128] = {0};
 //			int rc = __xpg_strerror_r(e, buf, sizeof buf);
 //			printf("%d\t%d\t%s\n", e, rc, buf);
@@ -249,8 +254,6 @@ var strerrorMusl = [...]string{
 	114: "Operation already in progress",
 	115: "Operation in progress",
 	116: "Stale file handle",
-	117: "Data consistency error",
-	119: "Resource not available",
 	121: "Remote I/O error",
 	122: "Quota exceeded",
 	123: "No medium found",

@@ -173,7 +173,7 @@ func (b *BufReader[R]) ReadBufExact(cursor *BorrowedCursor) error {
 // delegate to the inner implementation.
 func (b *BufReader[R]) ReadToEnd(buf *[]byte) (int, error) {
 	innerBuf := b.Buffer()
-	*buf = append(*buf, innerBuf...)
+	extendVec(buf, innerBuf)
 
 	nread := len(innerBuf)
 	b.DiscardBuffer()

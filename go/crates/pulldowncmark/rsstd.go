@@ -4,98 +4,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
-// The functions in this file stand in for methods of Rust's standard library
-// whose results depend on Rust's exact rules. They belong in go/rs/strs,
-// which did not exist when this package was written; each names the Rust
-// method it reproduces.
-
-// charIsWhitespace is char::is_whitespace: the Unicode White_Space property
-// as the pinned toolchain's table (core::unicode::unicode_data::white_space)
-// has it.
-func charIsWhitespace(c rune) bool {
-	switch {
-	case c == ' ' || ('\x09' <= c && c <= '\x0d'):
-		return true
-	case c <= 0x84:
-		return false
-	}
-	switch c {
-	case 0x85, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
-		return true
-	}
-	return 0x2000 <= c && c <= 0x200A
-}
-
-// u8IsAsciiWhitespace is u8::is_ascii_whitespace: space, tab, line feed, form
-// feed and carriage return. Unlike the crate's own is_ascii_whitespace it
-// does not include the vertical tab.
-func u8IsAsciiWhitespace(c byte) bool {
-	return c == '\t' || c == '\n' || c == '\x0C' || c == '\r' || c == ' '
-}
-
-// u8IsAsciiAlphabetic is u8::is_ascii_alphabetic.
-func u8IsAsciiAlphabetic(c byte) bool {
-	return ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z')
-}
-
-// u8IsAsciiDigit is u8::is_ascii_digit.
-func u8IsAsciiDigit(c byte) bool {
-	return '0' <= c && c <= '9'
-}
-
-// u8ToAsciiLowercase is u8::to_ascii_lowercase.
-func u8ToAsciiLowercase(c byte) byte {
-	if 'A' <= c && c <= 'Z' {
-		return c | 0x20
-	}
-	return c
-}
-
-// sliceEqIgnoreAsciiCase is <[u8]>::eq_ignore_ascii_case.
-func sliceEqIgnoreAsciiCase(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		if u8ToAsciiLowercase(a[i]) != u8ToAsciiLowercase(b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// strIsAscii is str::is_ascii.
-func strIsAscii(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// strSplitAsciiWhitespace is str::split_ascii_whitespace: the pieces between
-// runs of u8::is_ascii_whitespace bytes, never an empty piece.
-func strSplitAsciiWhitespace(s string) []string {
-	var pieces []string
-	start := -1
-	for i := 0; i < len(s); i++ {
-		if u8IsAsciiWhitespace(s[i]) {
-			if start >= 0 {
-				pieces = append(pieces, s[start:i])
-				start = -1
-			}
-		} else if start < 0 {
-			start = i
-		}
-	}
-	if start >= 0 {
-		pieces = append(pieces, s[start:])
-	}
-	return pieces
-}
+// The functions in this file stand in for pieces of Rust's core library that
+// go/rs has no function for; each names the Rust method it reproduces. The
+// rest of `str`, `char` and `u8` comes from go/rs/strs.
 
 // strCharsNth is `s.chars().nth(n)` for a string whose first n characters are
 // known to be single bytes: the character that starts at byte n.
@@ -116,15 +30,56 @@ func strCharsLast(s string) (rune, bool) {
 	return c, true
 }
 
+// strSlice is `&s[start..end]` on a `str`: it panics, with Rust's message
+// (strs.Slice), when the range is out of bounds or backwards or when an end
+// falls inside a char.
+//
+// A Rust string is always UTF-8 and a Go string need not be. A byte that is
+// not part of a valid encoding counts here as a char of its own, so text that
+// is not UTF-8 is cut between any two of its bytes the parser chooses, as it
+// was before the parser sliced through this function, and never panics for
+// it.
+func strSlice(s string, start, end int) string {
+	if uint(start) > uint(end) || uint(end) > uint(len(s)) ||
+		!strIsCharBoundaryLenient(s, start) || !strIsCharBoundaryLenient(s, end) {
+		return strs.Slice(s, start, end)
+	}
+	return s[start:end]
+}
+
+// strIsCharBoundaryLenient is str::is_char_boundary for an index within s,
+// where a byte that is not part of a valid encoding is a char of its own:
+// only the inside of a validly encoded char is not a boundary.
+func strIsCharBoundaryLenient(s string, i int) bool {
+	if i == 0 || i >= len(s) || utf8.RuneStart(s[i]) {
+		return true
+	}
+	// s[i] is a continuation byte: it is inside a char when a valid
+	// encoding that starts at most three bytes earlier covers it.
+	for k := 1; k <= 3 && k <= i; k++ {
+		if !utf8.RuneStart(s[i-k]) {
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(s[i-k:])
+		return size <= k
+	}
+	return true
+}
+
 // optionUnwrapNone panics as `Option::unwrap()` does on None.
 const optionUnwrapNone = "called `Option::unwrap()` on a `None` value"
+
+// debugAssertions is `cfg!(debug_assertions)` for this package. It is a
+// variable only so that the comparison with the Rust oracle, which is a
+// release build, can switch the assertions off.
+var debugAssertions = rs.DebugAssertions
 
 // debugAssert is `debug_assert!(cond)`. message is the panic text Rust
 // produces, "assertion failed: " followed by the condition as it is written
 // in the Rust source; rs.DebugAssert cannot be given it until the formatter
 // is ported.
 func debugAssert(cond bool, message string) {
-	if rs.DebugAssertions && !cond {
+	if debugAssertions && !cond {
 		rs.PanicAt(1, message)
 	}
 }

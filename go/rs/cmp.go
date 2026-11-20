@@ -23,7 +23,7 @@ import (
 //   - Tuples and structs compare field by field in declaration order,
 //     unexported fields included.
 //   - None is less than Some, and Ok less than Err.
-//   - A pointer is ordered by what it points to.
+//   - A pointer, and an rs.Arc, is ordered by what it points to.
 //   - Two variants of one enum are ordered by their position in the
 //     RegisterEnum call; two values of the same variant by their fields.
 //   - Ordered collections (BTreeMap, BTreeSet, VecDeque) compare entry by
@@ -296,6 +296,8 @@ func (s *shape) compareAt(a, b unsafe.Pointer) (int, bool) {
 		return s.compareReflectMap(a, b)
 	case kindReflectSeq:
 		return s.compareReflectSeq(a, b)
+	case kindArc:
+		return s.elem.comparePointees(s.arcPointee(a), s.arcPointee(b))
 	}
 	panic("rs.Cmp: unhandled kind of " + s.typ.String())
 }

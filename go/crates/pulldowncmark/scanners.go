@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // Scanners for fragments of CommonMark syntax
@@ -257,14 +258,14 @@ func (lineStart *scannersLineStart) scanListMarker() (byte, uint64, int, bool) {
 			if lineStart.scanSpace(1) || lineStart.isAtEol() {
 				return lineStart.finishListMarker(c, 0, indent+2)
 			}
-		} else if u8IsAsciiDigit(c) {
+		} else if strs.IsAsciiDigit(c) {
 			startIx := lineStart.ix
 			ix := lineStart.ix + 1
 			val := uint64(c - '0')
 			for ix < len(lineStart.bytes) && ix-startIx < 10 {
 				c := lineStart.bytes[ix]
 				ix += 1
-				if u8IsAsciiDigit(c) {
+				if strs.IsAsciiDigit(c) {
 					val = val*10 + uint64(c-'0')
 				} else if c == ')' || c == '.' {
 					lineStart.ix = ix
@@ -357,7 +358,7 @@ func scannersIsAsciiWhitespaceNoNl(c byte) bool {
 }
 
 func scannersIsAsciiAlpha(c byte) bool {
-	return u8IsAsciiAlphabetic(c)
+	return strs.IsAsciiAlphabetic(c)
 }
 
 func scannersIsAsciiAlphanumeric(c byte) bool {
@@ -369,7 +370,7 @@ func scannersIsAsciiLetterdigitdash(c byte) bool {
 }
 
 func scannersIsDigit(c byte) bool {
-	return u8IsAsciiDigit(c)
+	return strs.IsAsciiDigit(c)
 }
 
 func scannersIsValidUnquotedAttrValueChar(c byte) bool {
@@ -739,7 +740,7 @@ func scannersScanMetadataBlock(
 		// Only trailing spaces after the delimiters in the line
 		nextLine := scannersScanNextline(data[i:])
 		for k := i; k < i+nextLine; k++ {
-			if !u8IsAsciiWhitespace(data[k]) {
+			if !strs.IsAsciiWhitespace(data[k]) {
 				return 0, 0, false
 			}
 		}
@@ -863,7 +864,7 @@ func scannersParseHex(bytes string, limit int) (int, int) {
 	for i := 0; i < len(bytes) && i < limit; i++ {
 		c := bytes[i]
 		var digit int
-		if u8IsAsciiDigit(c) {
+		if strs.IsAsciiDigit(c) {
 			digit = int(c - '0')
 		} else {
 			// make lower case
@@ -1333,7 +1334,7 @@ func scannersScanHtmlBlockInner(
 
 					dataLen := len(data) - i
 
-					if rs.DebugAssertions && !(skippedBytes <= dataLen) {
+					if debugAssertions && !(skippedBytes <= dataLen) {
 						// debug_assert! with its own message
 						rs.PanicAt(0, "Handler tried to skip too many bytes, fed "+strconv.Itoa(dataLen)+", skipped "+strconv.Itoa(skippedBytes))
 					}
@@ -1554,7 +1555,7 @@ func scannersScanInlineHtmlComment(
 		}
 	// A declaration consists of the string `<!`, an ASCII letter, zero or more characters not
 	// including the character >, and the character >.
-	case u8IsAsciiAlphabetic(c) && ix > scanGuard.declaration:
+	case strs.IsAsciiAlphabetic(c) && ix > scanGuard.declaration:
 		if x := strings.IndexByte(bytes[ix:], '>'); x >= 0 {
 			ix = ix + x
 		} else {

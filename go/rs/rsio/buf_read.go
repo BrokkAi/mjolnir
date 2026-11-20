@@ -92,7 +92,7 @@ func DefaultReadUntil(r BufRead, delim byte, buf *[]byte) (int, error) {
 			done = true
 			available = available[:i+1]
 		}
-		*buf = append(*buf, available...)
+		extendVec(buf, available)
 		used := len(available)
 		r.Consume(used)
 		read += used

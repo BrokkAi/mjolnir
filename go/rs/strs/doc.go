@@ -41,6 +41,11 @@
 //     CharsCount, CharsRev, CharsNext, CharsNextBack, CharIndicesRev.
 //   - `&s[a..b]` is Slice (SliceFrom, SliceTo, SliceInclusive,
 //     SliceToInclusive) and `s.get(a..b)` is Get (GetFrom, ..).
+//   - A method that takes a range takes its two ends: `s.drain(a..b)` is
+//     Drain(&s, a, b), `s.drain(..n)` is Drain(&s, 0, n), `s.drain(n..)` is
+//     Drain(&s, n, len(s)), and `s.drain(a..=b)` is DrainInclusive(&s, a, b);
+//     ReplaceRange and ReplaceRangeInclusive likewise. A range with an
+//     excluded start (`(Bound::Excluded(a), ..)`) has no spelling here.
 //   - `String::from_utf8` is StringFromUtf8 and `str::from_utf8` is
 //     FromUtf8: they fail with different error types.
 //   - A method that changes a String in place takes a pointer to it:
@@ -51,9 +56,14 @@
 // An `Option` is an rs.Option, a `Result` is a value and an error, and a pair
 // inside either is an rs.Tuple2. Where Rust returns an iterator the function
 // returns a slice of everything the iterator yields; see iter.go for what
-// that costs. An index or a count is a `usize` held in an int: a negative
-// int stands for the huge usize that wraps to it, and is treated and printed
-// as that.
+// that costs. `.rev()` on such an iterator is the slice reversed, which is
+// the same parts, except that a predicate that keeps state is called front
+// to back here (the R functions, Rsplit, Rmatches and so on, do search from
+// the back). An index or a count is a `usize` held in an int: a negative int
+// stands for the huge usize that wraps to it, and is treated and printed as
+// that. `usize::MAX` is written rs.UsizeMax, the largest int, as everywhere
+// in the port; a panic message that shows it reads 9223372036854775807 where
+// Rust's reads 18446744073709551615.
 //
 // Strings must be valid UTF-8, as every Rust string is. On other input
 // nothing here panics, and what is returned is unspecified (an invalid byte
@@ -68,7 +78,10 @@
 //     case folding, `trim_prefix`, `strip_circumfix`, `remove_matches`,
 //     `replace_first`, `from_utf16le`, `is_ascii_octdigit`, `substr_range`.
 //   - `{}` and `{:?}` of strings and chars, which the formatter in go/rs
-//     prints. Debug's escaping rule is charEscapeDebugExt here.
+//     prints. Debug's escaping rule is charEscapeDebugExt here. The error
+//     types do have FmtDisplay and FmtDebug; like Rust, Utf8Error (and so
+//     FromUtf8Error) writes its text without padding, where the other errors
+//     pad it.
 //   - The iterators as objects (`remainder`, `as_str`, stopping early).
 //   - `u128` and `i128` as types: ParseU128Parts and ParseI128Parts return
 //     the two halves, because rs.U128 did not exist when this was written.
@@ -87,9 +100,13 @@
 // # Tests
 //
 // The standard library's own tests are ported in str_test.go,
-// string_test.go, char_test.go, str_lossy_test.go, pattern_test.go and
-// dec2flt_test.go. oracle_test.go and oracle_more_test.go compare the package
-// with Rust itself (go/port/oracle/src/std_str.rs): every code point for the
-// classes, the escapes and the case mappings, and fixed and random inputs for
-// the rest, recorded under testdata/oracle.
+// string_test.go, char_test.go, str_lossy_test.go, pattern_test.go,
+// num_parse_test.go and dec2flt_test.go; each file's header names the Rust
+// tests it leaves out and why. oracle_test.go, oracle_more_test.go and
+// oracle_fmt_test.go compare the package with Rust itself
+// (go/port/oracle/src/std_str.rs): every code point for the classes, the
+// escapes and the case mappings, fixed and random inputs for the rest, and
+// the errors' `{}` and `{:?}` under width, fill and precision, recorded
+// under testdata/oracle. The last of these skips itself while rs.Format is
+// still the placeholder that panics.
 package strs

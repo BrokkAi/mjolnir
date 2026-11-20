@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sync"
 )
 
@@ -160,18 +161,71 @@ func TakePanicHook() func(*PanicInfo) {
 	return hook
 }
 
+// panicBacktrace is std::panic::BacktraceStyle.
+type panicBacktrace uint8
+
+const (
+	panicBacktraceShort panicBacktrace = iota
+	panicBacktraceFull
+	panicBacktraceOff
+)
+
+// panicBacktraceStyle is panic::get_backtrace_style: RUST_BACKTRACE, read
+// at the first panic and kept, as Rust keeps it.
+var panicBacktraceStyle = sync.OnceValue(func() panicBacktrace {
+	value, set := os.LookupEnv("RUST_BACKTRACE")
+	switch {
+	case set && value == "0":
+		return panicBacktraceOff
+	case set && value == "full":
+		return panicBacktraceFull
+	case set:
+		return panicBacktraceShort
+	default:
+		return panicBacktraceOff
+	}
+})
+
+// hookOutputMu is backtrace::lock(), which the default hook holds while it
+// writes, so that the reports of two panics do not interleave.
+var hookOutputMu sync.Mutex
+
+// defaultPanicHook is std::panicking::default_hook.
+//
+// Rust prints a full backtrace for a panic that happens while another is
+// unwinding the same thread (a double panic); this port does not count the
+// panics in progress, so the style is always the one RUST_BACKTRACE asks for.
+// Where Rust prints the frames of the panicking thread, the port prints the
+// panicking goroutine's Go stack, and the location is the Go file and line
+// (Go keeps no column).
 func defaultPanicHook(info *PanicInfo) {
+	backtrace := panicBacktraceStyle()
+
 	thread := info.Thread
 	if thread == "" {
 		thread = "<unnamed>"
 	}
-	fmt.Fprintf(os.Stderr, "\nthread '%s' panicked at %s:%d:\n%s\n", thread, info.File, info.Line, info.Message)
-	hookMu.Lock()
-	first := firstPanic
-	firstPanic = false
-	hookMu.Unlock()
-	if first {
-		fmt.Fprintln(os.Stderr, "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace")
+
+	hookOutputMu.Lock()
+	defer hookOutputMu.Unlock()
+
+	// We add a newline to ensure the panic message appears at the start of a line.
+	fmt.Fprintf(os.Stderr, "\nthread '%s' (%d) panicked at %s:%d:\n%s\n", thread, currentOSThreadID(), info.File, info.Line, info.Message)
+
+	switch backtrace {
+	case panicBacktraceShort, panicBacktraceFull:
+		os.Stderr.Write(append([]byte("stack backtrace:\n"), debug.Stack()...))
+		if backtrace == panicBacktraceShort {
+			fmt.Fprintln(os.Stderr, "note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.")
+		}
+	default:
+		hookMu.Lock()
+		first := firstPanic
+		firstPanic = false
+		hookMu.Unlock()
+		if first {
+			fmt.Fprintln(os.Stderr, "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace")
+		}
 	}
 }
 

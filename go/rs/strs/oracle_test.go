@@ -55,7 +55,7 @@ func decodeRequest(t *testing.T, raw json.RawMessage) (oracleRequest, map[string
 	}
 	var op string
 	_ = json.Unmarshal(members["op"], &op)
-	if op == "bytes" || op == "from_utf8" || op == "pair" {
+	if op == "bytes" || op == "from_utf8" || op == "pair" || op == "fmt" {
 		request.Op = op
 		return request, members
 	}

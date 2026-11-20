@@ -6,6 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 	"golang.org/x/net/idna"
 	"golang.org/x/text/unicode/bidi"
 	"golang.org/x/text/unicode/norm"
@@ -82,7 +83,7 @@ func idnaAdapterIsValid(c rune) bool {
 // removed, disallowed ones (and bytes that are not UTF-8) turned to U+FFFD,
 // and the result normalized to NFC.
 func idnaAdapterMapNormalize(nonAscii []byte) []rune {
-	input := stringFromUtf8Lossy(nonAscii)
+	input := strs.FromUtf8Lossy(nonAscii)
 	mapped := make([]byte, 0, len(input))
 	for _, c := range input {
 		for _, m := range idnaAdapterMapChar(c) {

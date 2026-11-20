@@ -370,12 +370,16 @@ func answerString(t *testing.T, raw json.RawMessage) any {
 			InsertStr(&s, a, request.With)
 		case "drain":
 			ret = Drain(&s, a, b)
+		case "drain_inclusive":
+			ret = DrainInclusive(&s, a, b)
 		case "retain":
 			Retain(&s, predicate(t, request.Keep))
 		case "split_off":
 			ret = SplitOff(&s, a)
 		case "replace_range":
 			ReplaceRange(&s, a, b, request.With)
+		case "replace_range_inclusive":
+			ReplaceRangeInclusive(&s, a, b, request.With)
 		default:
 			t.Fatalf("unknown string request %s", raw)
 		}
@@ -385,7 +389,7 @@ func answerString(t *testing.T, raw json.RawMessage) any {
 
 func TestDiffAgainstRust_string(t *testing.T) {
 	oracle.Check(t, "std_str", "string", func(yield func(any)) {
-		huge := []uint64{1<<64 - 1, 1 << 63}
+		huge := []uint64{1<<64 - 1, 1 << 63, 1<<63 - 1}
 		for _, s := range []string{"", "a", "aé", "éa", "日本", "a😀b", "e\u0301x", "ab"} {
 			var offsets []uint64
 			for i := 0; i <= len(s)+2; i++ {
@@ -408,8 +412,10 @@ func TestDiffAgainstRust_string(t *testing.T) {
 				}
 				for _, b := range offsets {
 					yield(map[string]any{"op": "string", "f": "drain", "s": s, "a": a, "b": b})
+					yield(map[string]any{"op": "string", "f": "drain_inclusive", "s": s, "a": a, "b": b})
 					yield(map[string]any{"op": "string", "f": "replace_range", "s": s, "a": a, "b": b, "with": "é"})
 					yield(map[string]any{"op": "string", "f": "replace_range", "s": s, "a": a, "b": b, "with": ""})
+					yield(map[string]any{"op": "string", "f": "replace_range_inclusive", "s": s, "a": a, "b": b, "with": "é"})
 				}
 			}
 		}

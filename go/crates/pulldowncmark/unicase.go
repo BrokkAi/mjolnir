@@ -5,6 +5,8 @@ package pulldowncmark
 import (
 	"strings"
 	"unicode/utf8"
+
+	"github.com/BrokkAi/mjolnir/go/rs/strs"
 )
 
 // The crate keys its reference and footnote definitions by
@@ -49,7 +51,7 @@ func unicaseLookup(c rune) (string, bool) {
 // unicaseToFoldedCase is `UniCase::new(s).to_folded_case()`: the key under
 // which s is stored and looked up.
 func unicaseToFoldedCase(s string) string {
-	if strIsAscii(s) {
+	if strs.IsAscii(s) {
 		// Encoding::Ascii: `s.to_ascii_lowercase()`.
 		for i := 0; i < len(s); i++ {
 			if 'A' <= s[i] && s[i] <= 'Z' {

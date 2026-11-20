@@ -40,8 +40,10 @@ func (e Utf8Error) String() string {
 // Error makes a Utf8Error a Go error.
 func (e Utf8Error) Error() string { return e.String() }
 
-// FmtDisplay is `impl Display for Utf8Error`.
-func (e Utf8Error) FmtDisplay(f *rs.Formatter) error { return f.Pad(e.String()) }
+// FmtDisplay is `impl Display for Utf8Error`. Rust writes the text with
+// `write!`, which ignores the width, fill and precision of the `{}` being
+// filled, so this writes it as it is rather than padding it.
+func (e Utf8Error) FmtDisplay(f *rs.Formatter) error { return f.WriteStr(e.String()) }
 
 // FmtDebug is the derived `Debug`:
 // `Utf8Error { valid_up_to: 1, error_len: Some(1) }`.

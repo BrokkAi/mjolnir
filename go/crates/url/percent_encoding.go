@@ -2,6 +2,8 @@
 
 package url
 
+import "github.com/BrokkAi/mjolnir/go/rs/strs"
+
 // The percent-encoding crate is a dependency of url and is not used by
 // Mjolnir on its own, so its items stay unexported here. They carry the
 // prefix percentEncoding, the crate's name.
@@ -278,14 +280,11 @@ func (p percentEncodingPercentDecode) collect() ([]byte, bool) {
 // or the error std::str::from_utf8 gives.
 func (p percentEncodingPercentDecode) decodeUtf8() (string, error) {
 	bytes, _ := p.collect()
-	if err := runUtf8Validation(bytes); err != nil {
-		return "", err
-	}
-	return string(bytes), nil
+	return strs.FromUtf8(bytes)
 }
 
 // decodeUtf8Lossy is PercentDecode::decode_utf8_lossy.
 func (p percentEncodingPercentDecode) decodeUtf8Lossy() string {
 	bytes, _ := p.collect()
-	return stringFromUtf8Lossy(bytes)
+	return strs.FromUtf8Lossy(bytes)
 }

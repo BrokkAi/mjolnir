@@ -1,9 +1,23 @@
 // Port of alloctests 1.99.1 tests/string.rs (the tests of what this package
 // covers; see doc.go for what is left out)
+//
+// Not ported: what Go spells with its own operators and conversions
+// (test_from_str, test_from_cow_str, test_unsized_to_string, test_push_bytes,
+// test_push_str, test_add_assign, test_push, test_str_clear, test_str_add,
+// test_extend_ref, test_into_boxed_str, test_from_char, test_str_concat);
+// formatting, which go/rs does (test_simple_types, test_vectors); capacity,
+// which a Go string does not have (test_reserve_exact, test_try_with_capacity,
+// test_try_reserve, test_try_reserve_exact); ranges with an excluded start
+// bound, which have no Go form here (test_drain_start_overflow,
+// test_replace_range_start_overflow); RangeBounds impls that answer
+// differently each time they are asked, where the Go functions take two ints
+// (test_replace_range_evil_start_bound, test_replace_range_evil_end_bound);
+// and the unstable remove_matches, replace_first and replace_last.
 
 package strs
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
@@ -274,6 +288,34 @@ func TestString_insert_bad2(t *testing.T) {
 	shouldPanic(t, "", func() { Insert(&s, 1, 't') })
 }
 
+func TestString_test_slicing(t *testing.T) {
+	s := "foobar"
+	eq(t, "foobar", s) // &s[..]
+	eq(t, "foo", SliceTo(s, 3))
+	eq(t, "bar", SliceFrom(s, 3))
+	eq(t, "oob", Slice(s, 1, 4))
+}
+
+func TestString_test_from_iterator(t *testing.T) {
+	s := "ศไทย中华Việt Nam"
+	t_ := "ศไทย中华"
+	u := "Việt Nam"
+
+	a := string(Chars(s))
+	eq(t, s, a)
+
+	b := t_
+	b += string(Chars(u)) // b.extend(u.chars())
+	eq(t, s, b)
+
+	c := strings.Join([]string{t_, u}, "") // [t, u].into_iter().collect()
+	eq(t, s, c)
+
+	d := t_
+	d += strings.Join([]string{u}, "") // d.extend(vec![u])
+	eq(t, s, d)
+}
+
 func TestString_test_drain(t *testing.T) {
 	s := "αβγ"
 	eq(t, Drain(&s, 2, 4), "β")
@@ -288,6 +330,11 @@ func TestString_test_drain(t *testing.T) {
 	eq(t, u, "bcd")
 	Drain(&u, 0, len(u))
 	eq(t, u, "")
+}
+
+func TestString_test_drain_end_overflow(t *testing.T) {
+	s := "abc"
+	shouldPanic(t, "", func() { DrainInclusive(&s, 0, rs.UsizeMax) })
 }
 
 func TestString_test_replace_range(t *testing.T) {
@@ -307,17 +354,28 @@ func TestString_test_replace_range_end_char_boundary(t *testing.T) {
 }
 
 func TestString_test_replace_range_inclusive_range(t *testing.T) {
-	// `2..=3` is the exclusive range 2..4.
 	v := "12345"
-	ReplaceRange(&v, 2, 4, "789")
+	ReplaceRangeInclusive(&v, 2, 3, "789")
 	eq(t, v, "127895")
-	ReplaceRange(&v, 1, 3, "A")
+	ReplaceRangeInclusive(&v, 1, 2, "A")
 	eq(t, v, "1A895")
 }
 
 func TestString_test_replace_range_out_of_bounds(t *testing.T) {
 	s := "12345"
 	shouldPanic(t, "range end index 6 out of range for slice of length 5", func() { ReplaceRange(&s, 5, 6, "789") })
+}
+
+func TestString_test_replace_range_inclusive_out_of_bounds(t *testing.T) {
+	s := "12345"
+	shouldPanic(t, "range end index 5 out of range for slice of length 5", func() { ReplaceRangeInclusive(&s, 5, 5, "789") })
+}
+
+// The overflowed index value is target-dependent,
+// so we don't check for its exact value in the panic message
+func TestString_test_replace_range_end_overflow(t *testing.T) {
+	s := "456"
+	shouldPanic(t, "out of range for slice of length 3", func() { ReplaceRangeInclusive(&s, 0, rs.UsizeMax, "") })
 }
 
 func TestString_test_replace_range_empty(t *testing.T) {

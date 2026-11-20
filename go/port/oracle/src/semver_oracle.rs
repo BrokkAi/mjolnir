@@ -8,10 +8,15 @@
 //! - `cmp`: two versions compared every way the crate offers.
 //! - `cmp_pre`, `cmp_build`: two identifiers compared.
 //! - `sort`: versions sorted by `Ord` and, stably, by `cmp_precedence`.
-//! - `debug`: the `{:?}` and `{:#?}` text of a version.
-//! - `format`: a version through one of a fixed list of format specs.
+//! - `debug`: the `{:?}` and `{:#?}` text of a version, alone and as a field
+//!   of a struct whose Debug is derived (as Mjolnir's `BuildIdentity` holds
+//!   one).
+//! - `format`: a value through one of a fixed list of format specs. `what`
+//!   says which value: `version` (the default), `pre`, `build`, or `error`
+//!   (the error `Version::parse(text)` returns).
 
 use std::cmp::Ordering;
+use std::fmt::{Debug, Display};
 
 use semver::{BuildMetadata, Prerelease, Version};
 use serde_json::{Value, json};
@@ -169,41 +174,92 @@ fn sort(request: &Value) -> Value {
     })
 }
 
+/// A struct whose Debug is derived, holding a version the way Mjolnir's
+/// `BuildIdentity` and `UpdateInfo` do.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct Wrapper<'a> {
+    version: &'a Version,
+    revision: Option<&'a str>,
+}
+
 fn debug(request: &Value) -> Value {
     match Version::parse(crate::text(request, "text")) {
-        Ok(version) => json!({
-            "debug": format!("{:?}", version),
-            "pretty": format!("{:#?}", version),
-            "option": format!("{:?}", Some(&version)),
-        }),
+        Ok(version) => {
+            let wrapper = Wrapper {
+                version: &version,
+                revision: Some("abc"),
+            };
+            json!({
+                "debug": format!("{:?}", version),
+                "pretty": format!("{:#?}", version),
+                "option": format!("{:?}", Some(&version)),
+                "list": format!("{:?}", [&version, &version]),
+                "nested": format!("{:?}", wrapper),
+                "nested_pretty": format!("{:#?}", wrapper),
+            })
+        }
         Err(e) => error(&e),
     }
 }
 
+/// The format specs the `format` operation knows. A spec reaches the value's
+/// Display or Debug impl with its width, fill, alignment, precision and
+/// flags.
+fn format_with<T: Display + Debug>(spec: &str, value: &T) -> Option<String> {
+    Some(match spec {
+        "{}" => format!("{}", value),
+        "{:20}" => format!("{:20}", value),
+        "{:<20}" => format!("{:<20}", value),
+        "{:>20}" => format!("{:>20}", value),
+        "{:^20}" => format!("{:^20}", value),
+        "{:*^20}" => format!("{:*^20}", value),
+        "{:*^21}" => format!("{:*^21}", value),
+        "{:-<9}" => format!("{:-<9}", value),
+        "{:0>12}" => format!("{:0>12}", value),
+        "{:012}" => format!("{:012}", value),
+        "{:5}" => format!("{:5}", value),
+        "{:.3}" => format!("{:.3}", value),
+        "{:10.3}" => format!("{:10.3}", value),
+        "{:é^11}" => format!("{:é^11}", value),
+        "{:🦀<12}" => format!("{:🦀<12}", value),
+        "{:>1}" => format!("{:>1}", value),
+        "{:^9}" => format!("{:^9}", value),
+        "{:+}" => format!("{:+}", value),
+        "{:#}" => format!("{:#}", value),
+        "{:+>14}" => format!("{:+>14}", value),
+        "{:#?}" => format!("{:#?}", value),
+        "{:?}" => format!("{:?}", value),
+        "{:8?}" => format!("{:8?}", value),
+        "{:>40?}" => format!("{:>40?}", value),
+        _ => return None,
+    })
+}
+
 fn format(request: &Value) -> Value {
-    let version = match Version::parse(crate::text(request, "text")) {
-        Ok(version) => version,
-        Err(e) => return error(&e),
+    let text = crate::text(request, "text");
+    let spec = crate::text(request, "spec");
+    let formatted = match crate::text(request, "what") {
+        "" | "version" => match Version::parse(text) {
+            Ok(version) => format_with(spec, &version),
+            Err(e) => return error(&e),
+        },
+        "pre" => match Prerelease::new(text) {
+            Ok(pre) => format_with(spec, &pre),
+            Err(e) => return error(&e),
+        },
+        "build" => match BuildMetadata::new(text) {
+            Ok(build) => format_with(spec, &build),
+            Err(e) => return error(&e),
+        },
+        "error" => match Version::parse(text) {
+            Ok(_) => return json!({"invalid": true}),
+            Err(e) => format_with(spec, &e),
+        },
+        _ => None,
     };
-    let formatted = match crate::text(request, "spec") {
-        "{}" => format!("{}", version),
-        "{:20}" => format!("{:20}", version),
-        "{:<20}" => format!("{:<20}", version),
-        "{:>20}" => format!("{:>20}", version),
-        "{:^20}" => format!("{:^20}", version),
-        "{:*^20}" => format!("{:*^20}", version),
-        "{:*^21}" => format!("{:*^21}", version),
-        "{:-<9}" => format!("{:-<9}", version),
-        "{:0>12}" => format!("{:0>12}", version),
-        "{:012}" => format!("{:012}", version),
-        "{:5}" => format!("{:5}", version),
-        "{:.3}" => format!("{:.3}", version),
-        "{:10.3}" => format!("{:10.3}", version),
-        "{:é^11}" => format!("{:é^11}", version),
-        "{:#?}" => format!("{:#?}", version),
-        "{:?}" => format!("{:?}", version),
-        "{:8?}" => format!("{:8?}", version),
-        _ => return crate::unknown(request),
-    };
-    json!({"text": formatted})
+    match formatted {
+        Some(text) => json!({"text": text}),
+        None => crate::unknown(request),
+    }
 }

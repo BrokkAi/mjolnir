@@ -104,7 +104,7 @@ var _ = rs.RegisterStruct[GraphemeGraphemes]("Graphemes")
 //	iter.Next()
 //	iter.AsStr() // ""
 func (s *GraphemeGraphemes) AsStr() string {
-	return strs.Slice(s.string_, s.cursor.CurCursor(), s.cursorBack.CurCursor())
+	return strSlice(s.string_, s.cursor.CurCursor(), s.cursorBack.CurCursor())
 }
 
 // Clone is the derived `Clone`.
@@ -125,7 +125,7 @@ func (s *GraphemeGraphemes) Next() rs.Option[string] {
 		return rs.None[string]()
 	}
 	next := rs.Unwrap(s.cursor.NextBoundary(s.string_, 0)).Unwrap()
-	return rs.Some(strs.Slice(s.string_, start, next))
+	return rs.Some(strSlice(s.string_, start, next))
 }
 
 // NextBack is `DoubleEndedIterator::next_back`: the next cluster from the
@@ -136,7 +136,7 @@ func (s *GraphemeGraphemes) NextBack() rs.Option[string] {
 		return rs.None[string]()
 	}
 	prev := rs.Unwrap(s.cursorBack.PrevBoundary(s.string_, 0)).Unwrap()
-	return rs.Some(strs.Slice(s.string_, prev, end))
+	return rs.Some(strSlice(s.string_, prev, end))
 }
 
 func graphemeNewGraphemes(s string, isExtended bool) *GraphemeGraphemes {
@@ -510,7 +510,7 @@ func (s *GraphemeCursor) CurCursor() int {
 //	// That's enough to decide (it always is when context goes to the start of the string)
 //	cursor.IsBoundary(flags[8:], 8) // true, nil
 func (s *GraphemeCursor) ProvideContext(chunk string, chunkStart int) {
-	if !(saturatingAdd(chunkStart, len(chunk)) == s.preContextOffset.Unwrap()) {
+	if !(rs.UsizeSaturatingAdd(chunkStart, len(chunk)) == s.preContextOffset.Unwrap()) {
 		rs.PanicAt(0, "assertion failed: chunk_start.saturating_add(chunk.len()) == self.pre_context_offset.unwrap()")
 	}
 	s.preContextOffset = rs.None[int]()
@@ -703,16 +703,16 @@ func (s *GraphemeCursor) IsBoundary(chunk string, chunkStart int) (bool, error) 
 	if s.state == graphemeGraphemeState_NotBreak {
 		return false, nil
 	}
-	if (s.offset < chunkStart || s.offset >= saturatingAdd(chunkStart, len(chunk))) &&
-		(s.offset > saturatingAdd(chunkStart, len(chunk)) || s.catAfter.IsNone()) {
+	if (s.offset < chunkStart || s.offset >= rs.UsizeSaturatingAdd(chunkStart, len(chunk))) &&
+		(s.offset > rs.UsizeSaturatingAdd(chunkStart, len(chunk)) || s.catAfter.IsNone()) {
 		return false, &GraphemeIncomplete_InvalidOffset{}
 	}
 	if preContextOffset, ok := s.preContextOffset.Get(); ok {
 		return false, &GraphemeIncomplete_PreContext{F0: preContextOffset}
 	}
-	offsetInChunk := saturatingSub(s.offset, chunkStart)
+	offsetInChunk := rs.UsizeSaturatingSub(s.offset, chunkStart)
 	if s.catAfter.IsNone() {
-		ch, _, ok := strNextChar(strs.SliceFrom(chunk, offsetInChunk))
+		ch, _, ok := strNextChar(strSliceFrom(chunk, offsetInChunk))
 		if !ok {
 			optionUnwrapNone()
 		}
@@ -736,7 +736,7 @@ func (s *GraphemeCursor) IsBoundary(chunk string, chunkStart int) (bool, error) 
 		}
 	}
 	if s.catBefore.IsNone() {
-		ch, _, ok := strNextBackChar(strs.SliceTo(chunk, offsetInChunk))
+		ch, _, ok := strNextBackChar(strSliceTo(chunk, offsetInChunk))
 		if !ok {
 			optionUnwrapNone()
 		}
@@ -751,16 +751,16 @@ func (s *GraphemeCursor) IsBoundary(chunk string, chunkStart int) (bool, error) 
 		isExtended := s.isExtended
 		return s.decision(!isExtended)
 	case graphemePairResult_InCbConsonant:
-		s.handleIncbConsonant(strs.SliceTo(chunk, offsetInChunk), chunkStart)
+		s.handleIncbConsonant(strSliceTo(chunk, offsetInChunk), chunkStart)
 		return s.isBoundaryResult()
 	case graphemePairResult_Regional:
 		if risCount, ok := s.risCount.Get(); ok {
 			return s.decision((risCount % 2) == 0)
 		}
-		s.handleRegional(strs.SliceTo(chunk, offsetInChunk), chunkStart)
+		s.handleRegional(strSliceTo(chunk, offsetInChunk), chunkStart)
 		return s.isBoundaryResult()
 	case graphemePairResult_Emoji:
-		s.handleEmoji(strs.SliceTo(chunk, offsetInChunk), chunkStart, false)
+		s.handleEmoji(strSliceTo(chunk, offsetInChunk), chunkStart, false)
 		return s.isBoundaryResult()
 	default:
 		panic(rs.Unreachable())
@@ -800,7 +800,7 @@ func (s *GraphemeCursor) NextBoundary(chunk string, chunkStart int) (rs.Option[i
 	if s.offset == s.len {
 		return rs.None[int](), nil
 	}
-	iter := strs.SliceFrom(chunk, saturatingSub(s.offset, chunkStart)) // .chars()
+	iter := strSliceFrom(chunk, rs.UsizeSaturatingSub(s.offset, chunkStart)) // .chars()
 	ch, size, ok := strNextChar(iter)
 	if !ok {
 		return rs.None[int](), &GraphemeIncomplete_NextChunk{}
@@ -812,7 +812,7 @@ func (s *GraphemeCursor) NextBoundary(chunk string, chunkStart int) (rs.Option[i
 				s.catAfter = rs.Some(s.graphemeCategory(ch))
 			}
 		} else {
-			s.offset = saturatingAdd(s.offset, size) // ch.len_utf8()
+			s.offset = rs.UsizeSaturatingAdd(s.offset, size) // ch.len_utf8()
 			s.state = graphemeGraphemeState_Unknown
 			s.catBefore = s.catAfter.Take()
 			if s.catBefore.IsNone() {
@@ -897,7 +897,7 @@ func (s *GraphemeCursor) PrevBoundary(chunk string, chunkStart int) (rs.Option[i
 	if s.offset == chunkStart {
 		return rs.None[int](), &GraphemeIncomplete_PrevChunk{}
 	}
-	iter := strs.SliceTo(chunk, saturatingSub(s.offset, chunkStart)) // .chars().rev()
+	iter := strSliceTo(chunk, rs.UsizeSaturatingSub(s.offset, chunkStart)) // .chars().rev()
 	ch, size, ok := strNextBackChar(iter)
 	if !ok {
 		optionUnwrapNone()
@@ -955,23 +955,62 @@ func (s *GraphemeCursor) PrevBoundary(chunk string, chunkStart int) (rs.Option[i
 	}
 }
 
-// The helpers below stand in for parts of Rust's standard library that the
-// crate's code uses and that go/rs does not provide yet.
+// Slicing a string at a char boundary.
+//
+// A Rust `str` is valid UTF-8, and `&s[a..b]` panics unless a and b are char
+// boundaries, offsets not inside the encoding of a char. A Go string need not
+// be valid UTF-8, and this package reads a byte that is not part of a valid
+// encoding as a char of its own (U+FFFD, one byte long, as a Go range loop
+// reads it). The offset after such a byte is therefore a char boundary here
+// even when the byte at it is a UTF-8 continuation byte, which the standard
+// library's rule (strs.IsCharBoundary: not a continuation byte) refuses. On
+// valid UTF-8 the two rules are the same, and so are the panics, which are
+// strs's, in Rust's words.
 
-// saturatingAdd is `usize::saturating_add` for two offsets.
-func saturatingAdd(a, b int) int {
-	if sum := a + b; sum >= a {
-		return sum
+// strIsCharBoundary reports whether index is a char boundary of s read as a
+// Go range loop reads it.
+func strIsCharBoundary(s string, index int) bool {
+	if strs.IsCharBoundary(s, index) {
+		return true
 	}
-	return rs.UsizeMax
+	if index <= 0 || index >= len(s) {
+		return false
+	}
+	// s[index] is a continuation byte. It is inside a char only if the
+	// nearest byte before it that starts one, at most three bytes back,
+	// starts a valid encoding that reaches past it.
+	for start := index - 1; start >= 0 && start >= index-(utf8.UTFMax-1); start-- {
+		if utf8.RuneStart(s[start]) {
+			c, size := utf8.DecodeRuneInString(s[start:])
+			valid := c != utf8.RuneError || size > 1
+			return !valid || start+size <= index
+		}
+	}
+	return true
 }
 
-// saturatingSub is `usize::saturating_sub` for two offsets.
-func saturatingSub(a, b int) int {
-	if a > b {
-		return a - b
+// strSlice is `&s[start..end]`.
+func strSlice(s string, start, end int) string {
+	if start <= end && strIsCharBoundary(s, start) && strIsCharBoundary(s, end) {
+		return s[start:end]
 	}
-	return 0
+	return strs.Slice(s, start, end)
+}
+
+// strSliceFrom is `&s[start..]`.
+func strSliceFrom(s string, start int) string {
+	if strIsCharBoundary(s, start) {
+		return s[start:]
+	}
+	return strs.SliceFrom(s, start)
+}
+
+// strSliceTo is `&s[..end]`.
+func strSliceTo(s string, end int) string {
+	if strIsCharBoundary(s, end) {
+		return s[:end]
+	}
+	return strs.SliceTo(s, end)
 }
 
 // optionUnwrapNone panics as `Option::unwrap` does on `None`, where the Go

@@ -2,7 +2,10 @@
 
 package vt100
 
-import "github.com/BrokkAi/mjolnir/go/crates/vte"
+import (
+	"github.com/BrokkAi/mjolnir/go/crates/vte"
+	"github.com/BrokkAi/mjolnir/go/rs"
+)
 
 // A parser for terminal output which produces an in-memory representation of
 // the terminal contents.
@@ -90,6 +93,8 @@ func (self *Parser[CB]) CallbacksMut() CB {
 func ParserDefault() Parser[CallbacksUnit] {
 	return ParserNew(24, 80, 0)
 }
+
+var _ = rs.RegisterDefault(ParserDefault)
 
 // Write is `impl std::io::Write for Parser`: it processes buf and reports
 // all of it written. Rust has it only for the parser without callbacks.

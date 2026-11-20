@@ -1,12 +1,16 @@
 package url
 
 import (
+	"strconv"
+
 	"github.com/BrokkAi/mjolnir/go/rs"
 )
 
 // This file holds the few pieces of Rust's core library the port needs that
 // go/rs did not have when it was written: string slicing and indexing with
 // Rust's panic messages, the String editing methods, and the unit error.
+
+func itoa(i int) string { return strconv.Itoa(i) }
 
 // debugAssertions is `cfg!(debug_assertions)` for this package. It is a
 // variable only so that the comparison with the Rust oracle, which is a

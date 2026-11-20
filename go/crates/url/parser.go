@@ -555,8 +555,8 @@ func (p *parserParser) parseNonSpecial(
 	schemeEnd uint32,
 ) (Url, error) {
 	// path or authority state (
-	if input, ok := input.splitPrefixStr("//"); ok {
-		return p.afterDoubleSlash(input, schemeType, schemeEnd)
+	if afterSlashes, ok := input.splitPrefixStr("//"); ok {
+		return p.afterDoubleSlash(afterSlashes, schemeType, schemeEnd)
 	}
 	// Anarchist URL (no authority)
 	pathStart, err := parserToU32(len(p.serialization))
@@ -569,10 +569,10 @@ func (p *parserParser) parseNonSpecial(
 	var host hostHostInternal = &hostHostInternal_None{}
 	port := rs.None[uint16]()
 	var remaining parserInput
-	if input, ok := input.splitPrefixChar('/'); ok {
+	if afterSlash, ok := input.splitPrefixChar('/'); ok {
 		p.serialization = append(p.serialization, '/')
 		hasHost := false
-		remaining = p.parsePath(schemeType, &hasHost, int(pathStart), input)
+		remaining = p.parsePath(schemeType, &hasHost, int(pathStart), afterSlash)
 	} else {
 		remaining = p.parseCannotBeABasePath(input)
 	}

@@ -82,6 +82,9 @@ type Host interface {
 	Equal(other Host) bool
 	// Compare is the derived Ord: by variant, then by value.
 	Compare(other Host) int
+	// HashKey is the derived Hash: two hosts have the same key exactly
+	// when they are equal.
+	HashKey() string
 }
 
 // Host_Domain is Host::Domain: a DNS domain name, as '.' dot-separated
@@ -111,6 +114,10 @@ var _ = rs.RegisterEnum[Host]("Host",
 func (*Host_Domain) isHost() {}
 func (*Host_Ipv4) isHost()   {}
 func (*Host_Ipv6) isHost()   {}
+
+func (h *Host_Domain) HashKey() string { return "Domain:" + h.F0 }
+func (h *Host_Ipv4) HashKey() string   { return "Ipv4:" + h.F0.String() }
+func (h *Host_Ipv6) HashKey() string   { return "Ipv6:" + h.F0.String() }
 
 func (h *Host_Domain) ToOwned() Host { return &Host_Domain{F0: h.F0} }
 func (h *Host_Ipv4) ToOwned() Host   { return &Host_Ipv4{F0: h.F0} }
@@ -216,6 +223,27 @@ func (h *Host_Ipv6) FmtDisplay(f *rs.Formatter) error {
 		return err
 	}
 	return f.WriteStr("]")
+}
+
+// FmtDebug is the derived Debug of Host::Ipv4: `Ipv4(127.0.0.1)`. It is
+// written by hand because the Go field is a netip.Addr, whose reflected form
+// is not Rust's: the address prints as `impl Debug for Ipv4Addr` does, which
+// is its Display through `Formatter::pad`.
+func (h *Host_Ipv4) FmtDebug(f *rs.Formatter) error {
+	address := h.F0
+	return f.DebugTuple("Ipv4").Field(rs.FmtFromFnOf(func(f *rs.Formatter) error {
+		return f.Pad(hostIpv4String(address))
+	})).Finish()
+}
+
+// FmtDebug is the derived Debug of Host::Ipv6: `Ipv6(::1)`, with the
+// address as the standard library writes it (stdIpv6AddrString), not as the
+// URL Standard serializes it.
+func (h *Host_Ipv6) FmtDebug(f *rs.Formatter) error {
+	address := h.F0
+	return f.DebugTuple("Ipv6").Field(rs.FmtFromFnOf(func(f *rs.Formatter) error {
+		return f.Pad(stdIpv6AddrString(address))
+	})).Finish()
 }
 
 func (h *Host_Domain) Equal(other Host) bool {

@@ -127,7 +127,7 @@ func (c *Cursor) ReadExact(buf []byte) error {
 func (c *Cursor) ReadToEnd(buf *[]byte) (int, error) {
 	content := c.remaining()
 	length := len(content)
-	*buf = append(*buf, content...)
+	extendVec(buf, content)
 	c.pos += uint64(length)
 
 	return length, nil

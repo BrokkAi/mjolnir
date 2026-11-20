@@ -1,9 +1,28 @@
 // Port of alloctests 1.99.1 tests/str.rs (the tests of what this package
 // covers; see doc.go for what is left out)
+//
+// Not ported, because what they test is Go's own spelling or has no form in
+// Go: comparison, emptiness, bytes, pointers and owned forms (test_le,
+// test_total_ord, test_is_empty, test_into_bytes, test_as_bytes,
+// test_as_bytes_fail, test_as_ptr, test_bytesator, test_bytes_revator,
+// test_bytesator_nth, test_bytesator_count, test_bytesator_last,
+// test_str_default, test_str_container, test_into_string,
+// test_box_slice_clone, test_cow_from, const_str_ptr, utf8); concat and join
+// (test_concat_*, test_join_*); literal syntax (test_str_multiline,
+// test_str_escapes); unsafe and mutable slicing (test_unsafe_slice,
+// test_str_slicemut_rangetoinclusive_*, index_mut_fail, test_split_at_mut,
+// test_copy_from_str*); const evaluation (test_const_is_utf8,
+// const_from_utf8_mostly_ascii, and the const half of from_utf8_error); the
+// iterators as objects (test_iterator_advance, test_iterator_clone,
+// test_chars_debug, test_utf16_size_hint, rangeinclusive_exhausted); the
+// Pattern impls of references and lifetimes (test_pattern_deref_forward,
+// different_str_pattern_forwarding_lifetimes); and the unstable
+// word_to_titlecase and to_casefold_unnormalized.
 
 package strs
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -54,6 +73,9 @@ func pair(a, b string) rs.Option[rs.Tuple2[string, string]] { return rs.Some(rs.
 
 const thaiChineseViet = "ประเทศไทย中华Việt Nam"
 
+// thaiChineseVietShort is the string most of the iterator tests walk.
+const thaiChineseVietShort = "ศไทย中华Việt Nam"
+
 // charIs is the closure `|c: char| c == want`.
 func charIs(want rune) func(rune) bool { return func(c rune) bool { return c == want } }
 
@@ -73,6 +95,15 @@ func TestStr_test_rfind(t *testing.T) {
 	isTrue(t, RfindFn("hello", charIs('x')).IsNone())
 	eq(t, RfindChar(thaiChineseViet, '华'), rs.Some(30))
 	eq(t, RfindFn(thaiChineseViet, charIs('华')), rs.Some(30))
+}
+
+func TestStr_test_collect(t *testing.T) {
+	empty := ""
+	s := string(Chars(empty))
+	eq(t, empty, s)
+	data := "\u0e1b\u0e23\u0e30\u0e40\u0e17\u0e28\u0e44\u0e17\u0e22\u4e2d"
+	s = string(Chars(data))
+	eq(t, data, s)
 }
 
 func TestStr_test_find_str(t *testing.T) {
@@ -210,47 +241,224 @@ func TestStr_test_replace_pattern(t *testing.T) {
 	eq(t, ReplaceFn(data, charIs('γ'), "😺😺😺"), "abcdαβ😺😺😺δabcdαβ😺😺😺δ")
 }
 
-// The tests of `mod slice_index`: each range form, where it is good and where
-// it panics, with the panic's message.
+// The tests of `mod slice_index`. The current implementation of SliceIndex
+// fails to handle methods orthogonally from range types; therefore, it is
+// worth testing all of the indexing operations on each input.
+
+// strRange is a range expression a Rust string is indexed with: `..`,
+// `a..b`, `a..=b`, `..b`, `..=b` or `a..`.
+type strRange struct {
+	form       string
+	start, end int
+}
+
+func rangeFull() strRange                    { return strRange{"..", 0, 0} }
+func rangeAB(start, end int) strRange        { return strRange{"a..b", start, end} }
+func rangeInclusive(start, end int) strRange { return strRange{"a..=b", start, end} }
+func rangeTo(end int) strRange               { return strRange{"..b", 0, end} }
+func rangeToInclusive(end int) strRange      { return strRange{"..=b", 0, end} }
+func rangeFrom(start int) strRange           { return strRange{"a..", start, 0} }
+
+// index is `&s[r]`.
+func (r strRange) index(s string) string {
+	switch r.form {
+	case "..":
+		return s
+	case "a..b":
+		return Slice(s, r.start, r.end)
+	case "a..=b":
+		return SliceInclusive(s, r.start, r.end)
+	case "..b":
+		return SliceTo(s, r.end)
+	case "..=b":
+		return SliceToInclusive(s, r.end)
+	default:
+		return SliceFrom(s, r.start)
+	}
+}
+
+// get is `s.get(r)`.
+func (r strRange) get(s string) rs.Option[string] {
+	switch r.form {
+	case "..":
+		return rs.Some(s)
+	case "a..b":
+		return Get(s, r.start, r.end)
+	case "a..=b":
+		return GetInclusive(s, r.start, r.end)
+	case "..b":
+		return GetTo(s, r.end)
+	case "..=b":
+		return GetToInclusive(s, r.end)
+	default:
+		return GetFrom(s, r.start)
+	}
+}
+
+// assertRangeEq is the assert_range_eq! macro: it tests a slicing operation
+// **that should succeed,** on all of the indexing methods (`&s[r]` and
+// `s.get(r)`; the unchecked and `mut` forms have no Go counterpart). It is
+// not suitable for testing failure on invalid inputs.
+func assertRangeEq(t testing.TB, s string, r strRange, expected string) {
+	t.Helper()
+	if got := r.index(s); got != expected {
+		t.Errorf("assertion `left == right` failed: (in assertion for: index)\n  left: %q\n right: %q", got, expected)
+	}
+	if got := r.get(s); got != rs.Some(expected) {
+		t.Errorf("assertion `left == right` failed: (in assertion for: get)\n  left: %v\n right: Some(%q)", got, expected)
+	}
+}
+
+// failureRecorder is a testing.TB that keeps the first failure reported to
+// it instead of failing the test, so that a test can watch assertRangeEq
+// fail.
+type failureRecorder struct {
+	testing.TB
+	failure string
+}
+
+func (r *failureRecorder) Helper() {}
+
+func (r *failureRecorder) Errorf(format string, args ...any) {
+	if r.failure == "" {
+		r.failure = fmt.Sprintf(format, args...)
+	}
+}
+
+// Make sure the macro can actually detect bugs,
+// because if it can't, then what are we even doing here?
+//
+// (Be aware this only demonstrates the ability to detect bugs
+// in the FIRST method that panics, as the macro is not designed
+// to be used in `should_panic`)
+func TestStr_slice_index_assert_range_eq_can_fail_by_panic(t *testing.T) {
+	shouldPanic(t, "out of bounds", func() { assertRangeEq(t, "abc", rangeAB(0, 5), "abc") })
+}
+
+// (Be aware this only demonstrates the ability to detect bugs
+// in the FIRST method it calls, as the macro is not designed
+// to be used in `should_panic`)
+func TestStr_slice_index_assert_range_eq_can_fail_by_inequality(t *testing.T) {
+	recorder := &failureRecorder{TB: t}
+	assertRangeEq(recorder, "abc", rangeAB(0, 2), "abc")
+	if !strings.Contains(recorder.failure, "==") {
+		t.Errorf("assertRangeEq did not fail with \"==\": %q", recorder.failure)
+	}
+}
+
+// panicCase is one case of the panic_cases! macro: indexing data with bad
+// panics with a message containing message (index_fail; index_mut_fail is
+// the same in Go), while get gives None and each good range gives its output
+// (pass).
+type panicCase struct {
+	name    string
+	data    string
+	good    []goodRange
+	bad     strRange
+	message string
+}
+
+// goodRange is a similar input for which `data[r]` succeeds, and the
+// corresponding output str. This helps validate "critical points" where an
+// input range straddles the boundary between valid and invalid (such as the
+// input `len..len`, which is just barely valid).
+type goodRange struct {
+	r      strRange
+	output string
+}
+
+func runPanicCases(t *testing.T, cases []panicCase) {
+	t.Helper()
+	for _, c := range cases {
+		t.Run(c.name+"/pass", func(t *testing.T) {
+			for _, good := range c.good {
+				assertRangeEq(t, c.data, good.r, good.output)
+			}
+			eq(t, c.bad.get(c.data), rs.None[string]())
+		})
+		t.Run(c.name+"/index_fail", func(t *testing.T) {
+			shouldPanic(t, c.message, func() { c.bad.index(c.data) })
+		})
+	}
+}
 
 func TestStr_slice_index_simple_ascii(t *testing.T) {
-	eq(t, Slice("abc", 0, 2), "ab")
-	eq(t, SliceInclusive("abc", 0, 1), "ab")
-	eq(t, SliceTo("abc", 2), "ab")
-	eq(t, SliceToInclusive("abc", 1), "ab")
-	eq(t, Slice("abc", 1, 3), "bc")
-	eq(t, SliceInclusive("abc", 1, 2), "bc")
-	eq(t, Slice("abc", 1, 1), "")
-	eq(t, SliceInclusive("abc", 1, 0), "")
+	assertRangeEq(t, "abc", rangeFull(), "abc")
+
+	assertRangeEq(t, "abc", rangeAB(0, 2), "ab")
+	assertRangeEq(t, "abc", rangeInclusive(0, 1), "ab")
+	assertRangeEq(t, "abc", rangeTo(2), "ab")
+	assertRangeEq(t, "abc", rangeToInclusive(1), "ab")
+
+	assertRangeEq(t, "abc", rangeAB(1, 3), "bc")
+	assertRangeEq(t, "abc", rangeInclusive(1, 2), "bc")
+	assertRangeEq(t, "abc", rangeAB(1, 1), "")
+	assertRangeEq(t, "abc", rangeInclusive(1, 0), "")
 }
 
 func TestStr_slice_index_simple_unicode(t *testing.T) {
 	// 日本
-	eq(t, Slice("\u65e5\u672c", 0, 3), "\u65e5")
-	eq(t, SliceInclusive("\u65e5\u672c", 0, 2), "\u65e5")
-	eq(t, SliceTo("\u65e5\u672c", 3), "\u65e5")
-	eq(t, SliceToInclusive("\u65e5\u672c", 2), "\u65e5")
-	eq(t, Slice("\u65e5\u672c", 3, 6), "\u672c")
-	eq(t, SliceInclusive("\u65e5\u672c", 3, 5), "\u672c")
-	eq(t, SliceFrom("\u65e5\u672c", 3), "\u672c")
+	assertRangeEq(t, "\u65e5\u672c", rangeFull(), "\u65e5\u672c")
+
+	assertRangeEq(t, "\u65e5\u672c", rangeAB(0, 3), "\u65e5")
+	assertRangeEq(t, "\u65e5\u672c", rangeInclusive(0, 2), "\u65e5")
+	assertRangeEq(t, "\u65e5\u672c", rangeTo(3), "\u65e5")
+	assertRangeEq(t, "\u65e5\u672c", rangeToInclusive(2), "\u65e5")
+
+	assertRangeEq(t, "\u65e5\u672c", rangeAB(3, 6), "\u672c")
+	assertRangeEq(t, "\u65e5\u672c", rangeInclusive(3, 5), "\u672c")
+	assertRangeEq(t, "\u65e5\u672c", rangeFrom(3), "\u672c")
 
 	data := "ประเทศไทย中华"
-	eq(t, Slice(data, 0, 3), "ป")
-	eq(t, Slice(data, 3, 6), "ร")
-	eq(t, Slice(data, 3, 3), "")
-	eq(t, Slice(data, 30, 33), "华")
+	assertRangeEq(t, data, rangeAB(0, 3), "ป")
+	assertRangeEq(t, data, rangeAB(3, 6), "ร")
+	assertRangeEq(t, data, rangeAB(3, 3), "")
+	assertRangeEq(t, data, rangeAB(30, 33), "华")
 
+	/*0: 中
+	 3: 华
+	 6: V
+	 7: i
+	 8: ệ
+	11: t
+	12:
+	13: N
+	14: a
+	15: m */
 	ss := "中华Việt Nam"
-	eq(t, Slice(ss, 3, 6), "华")
-	eq(t, Slice(ss, 6, 16), "Việt Nam")
-	eq(t, SliceInclusive(ss, 6, 15), "Việt Nam")
-	eq(t, SliceFrom(ss, 6), "Việt Nam")
+	assertRangeEq(t, ss, rangeAB(3, 6), "华")
+	assertRangeEq(t, ss, rangeAB(6, 16), "Việt Nam")
+	assertRangeEq(t, ss, rangeInclusive(6, 15), "Việt Nam")
+	assertRangeEq(t, ss, rangeFrom(6), "Việt Nam")
 
-	eq(t, Slice(ss, 0, 3), "中")
-	eq(t, Slice(ss, 3, 7), "华V")
-	eq(t, SliceInclusive(ss, 3, 6), "华V")
-	eq(t, Slice(ss, 3, 3), "")
-	eq(t, SliceInclusive(ss, 3, 2), "")
+	assertRangeEq(t, ss, rangeAB(0, 3), "中")
+	assertRangeEq(t, ss, rangeAB(3, 7), "华V")
+	assertRangeEq(t, ss, rangeInclusive(3, 6), "华V")
+	assertRangeEq(t, ss, rangeAB(3, 3), "")
+	assertRangeEq(t, ss, rangeInclusive(3, 2), "")
+}
+
+func TestStr_slice_index_simple_big(t *testing.T) {
+	aMillionLetterX := func() string {
+		i := 0
+		var rs_ strings.Builder
+		for i < 100000 {
+			rs_.WriteString("\u534e\u534e\u534e\u534e\u534e\u534e\u534e\u534e\u534e\u534e")
+			i++
+		}
+		return rs_.String()
+	}
+	halfAMillionLetterX := func() string {
+		i := 0
+		var rs_ strings.Builder
+		for i < 100000 {
+			rs_.WriteString("\u534e\u534e\u534e\u534e\u534e")
+			i++
+		}
+		return rs_.String()
+	}
+	letters := aMillionLetterX()
+	assertRangeEq(t, letters, rangeAB(0, 3*500000), halfAMillionLetterX())
 }
 
 func TestStr_slice_index_test_slice_fail(t *testing.T) {
@@ -258,79 +466,65 @@ func TestStr_slice_index_test_slice_fail(t *testing.T) {
 }
 
 func TestStr_slice_index_panic_cases(t *testing.T) {
-	const data = "abcdef"
-	type slicing struct {
-		name    string
-		good    func() string
-		want    string
-		bad     func() string
-		get     func() rs.Option[string]
-		message string
-	}
-	for _, c := range []slicing{
-		{"rangefrom_len", func() string { return SliceFrom(data, 6) }, "",
-			func() string { return SliceFrom(data, 7) }, func() rs.Option[string] { return GetFrom(data, 7) }, "out of bounds"},
-		{"rangeto_len", func() string { return SliceTo(data, 6) }, "abcdef",
-			func() string { return SliceTo(data, 7) }, func() rs.Option[string] { return GetTo(data, 7) }, "out of bounds"},
-		{"rangetoinclusive_len", func() string { return SliceToInclusive(data, 5) }, "abcdef",
-			func() string { return SliceToInclusive(data, 6) }, func() rs.Option[string] { return GetToInclusive(data, 6) }, "out of bounds"},
-		{"rangeinclusive_len", func() string { return SliceInclusive(data, 0, 5) }, "abcdef",
-			func() string { return SliceInclusive(data, 0, 6) }, func() rs.Option[string] { return GetInclusive(data, 0, 6) }, "out of bounds"},
-		{"range_len_len", func() string { return Slice(data, 6, 6) }, "",
-			func() string { return Slice(data, 7, 7) }, func() rs.Option[string] { return Get(data, 7, 7) }, "out of bounds"},
-		{"rangeinclusive_len_len", func() string { return SliceInclusive(data, 6, 5) }, "",
-			func() string { return SliceInclusive(data, 7, 6) }, func() rs.Option[string] { return GetInclusive(data, 7, 6) }, "out of bounds"},
-		{"range_neg_width", func() string { return Slice(data, 4, 4) }, "",
-			func() string { return Slice(data, 4, 3) }, func() rs.Option[string] { return Get(data, 4, 3) }, "byte range starts at 4 but ends at 3"},
-		{"rangeinclusive_neg_width", func() string { return SliceInclusive(data, 4, 3) }, "",
-			func() string { return SliceInclusive(data, 4, 2) }, func() rs.Option[string] { return GetInclusive(data, 4, 2) }, "byte range starts at 4 but ends at 3"},
-	} {
-		eq(t, c.good(), c.want)
-		eq(t, c.get(), rs.None[string]())
-		shouldPanic(t, c.message, func() { c.bad() })
-	}
+	runPanicCases(t, []panicCase{
+		{"rangefrom_len", "abcdef", []goodRange{{rangeFrom(6), ""}}, rangeFrom(7), "out of bounds"},
+		{"rangeto_len", "abcdef", []goodRange{{rangeTo(6), "abcdef"}}, rangeTo(7), "out of bounds"},
+		{"rangetoinclusive_len", "abcdef", []goodRange{{rangeToInclusive(5), "abcdef"}}, rangeToInclusive(6), "out of bounds"},
+		{"rangeinclusive_len", "abcdef", []goodRange{{rangeInclusive(0, 5), "abcdef"}}, rangeInclusive(0, 6), "out of bounds"},
+		{"range_len_len", "abcdef", []goodRange{{rangeAB(6, 6), ""}}, rangeAB(7, 7), "out of bounds"},
+		{"rangeinclusive_len_len", "abcdef", []goodRange{{rangeInclusive(6, 5), ""}}, rangeInclusive(7, 6), "out of bounds"},
+	})
+
+	// rangeinclusive_exhausted indexes with a `RangeInclusive` whose
+	// iterator has been run to its end, which has no Go form.
+
+	runPanicCases(t, []panicCase{
+		{"range_neg_width", "abcdef", []goodRange{{rangeAB(4, 4), ""}}, rangeAB(4, 3), "byte range starts at 4 but ends at 3"},
+		{"rangeinclusive_neg_width", "abcdef", []goodRange{{rangeInclusive(4, 3), ""}}, rangeInclusive(4, 2), "byte range starts at 4 but ends at 3"},
+	})
 }
 
 func TestStr_slice_index_overflow(t *testing.T) {
-	// `usize::MAX` is the Go int -1.
-	eq(t, GetInclusive("hello", 0, -1), rs.None[string]())
-	shouldPanic(t, "out of bounds", func() { SliceInclusive("hello", 0, -1) })
-	eq(t, GetToInclusive("hello", -1), rs.None[string]())
-	shouldPanic(t, "out of bounds", func() { SliceToInclusive("hello", -1) })
+	// `usize::MAX` is rs.UsizeMax. The usize that, as in Rust, wraps to 0
+	// when one is added is the Go int -1, which this package also reads as
+	// a usize; both are tested.
+	runPanicCases(t, []panicCase{
+		// note: using 0 specifically ensures that the result of overflowing is 0..0,
+		//       so that `get` doesn't simply return None for the wrong reason.
+		{"rangeinclusive", "hello", nil, rangeInclusive(0, rs.UsizeMax), "out of bounds"},
+		{"rangetoinclusive", "hello", nil, rangeToInclusive(rs.UsizeMax), "out of bounds"},
+		{"rangeinclusive_wrapping", "hello", nil, rangeInclusive(0, -1), "out of bounds"},
+		{"rangetoinclusive_wrapping", "hello", nil, rangeToInclusive(-1), "out of bounds"},
+	})
 }
 
 func TestStr_slice_index_boundary(t *testing.T) {
 	const (
-		data = "abcαβγ"
+		data = "abc\u03b1\u03b2\u03b3"
 
-		badStart      = 4
-		goodStart     = 3
-		badEnd        = 6
-		goodEnd       = 7
-		badEndIncl    = badEnd - 1
-		goodEndIncl   = goodEnd - 1
-		startMessage  = "start byte index 4 is not a char boundary; it is inside 'α' (bytes 3..5 of string)"
-		endMessage    = "end byte index 6 is not a char boundary; it is inside 'β' (bytes 5..7 of string)"
-		wholeGoodPart = "αβ"
+		badStart    = 4
+		goodStart   = 3
+		badEnd      = 6
+		goodEnd     = 7
+		badEndIncl  = badEnd - 1
+		goodEndIncl = goodEnd - 1
+
+		startMessage = "start byte index 4 is not a char boundary; it is inside 'α' (bytes 3..5 of string)"
+		endMessage   = "end byte index 6 is not a char boundary; it is inside 'β' (bytes 5..7 of string)"
 	)
+
 	// it is especially important to test all of the different range types here
 	// because some of the logic may be duplicated as part of micro-optimizations
 	// to dodge unicode boundary checks on half-ranges.
-	eq(t, Slice(data, goodStart, goodEnd), wholeGoodPart)
-	eq(t, Get(data, badStart, goodEnd), rs.None[string]())
-	shouldPanic(t, startMessage, func() { Slice(data, badStart, goodEnd) })
-	eq(t, Get(data, goodStart, badEnd), rs.None[string]())
-	shouldPanic(t, endMessage, func() { Slice(data, goodStart, badEnd) })
-	eq(t, GetFrom(data, badStart), rs.None[string]())
-	shouldPanic(t, startMessage, func() { SliceFrom(data, badStart) })
-	eq(t, GetTo(data, badEnd), rs.None[string]())
-	shouldPanic(t, endMessage, func() { SliceTo(data, badEnd) })
-	eq(t, GetInclusive(data, badStart, goodEndIncl), rs.None[string]())
-	shouldPanic(t, startMessage, func() { SliceInclusive(data, badStart, goodEndIncl) })
-	eq(t, GetInclusive(data, goodStart, badEndIncl), rs.None[string]())
-	shouldPanic(t, endMessage, func() { SliceInclusive(data, goodStart, badEndIncl) })
-	eq(t, GetToInclusive(data, badEndIncl), rs.None[string]())
-	shouldPanic(t, endMessage, func() { SliceToInclusive(data, badEndIncl) })
+	runPanicCases(t, []panicCase{
+		{"range_1", data, nil, rangeAB(badStart, goodEnd), startMessage},
+		{"range_2", data, nil, rangeAB(goodStart, badEnd), endMessage},
+		{"rangefrom", data, nil, rangeFrom(badStart), startMessage},
+		{"rangeto", data, nil, rangeTo(badEnd), endMessage},
+		{"rangeinclusive_1", data, nil, rangeInclusive(badStart, goodEndIncl), startMessage},
+		{"rangeinclusive_2", data, nil, rangeInclusive(goodStart, badEndIncl), endMessage},
+		{"rangetoinclusive", data, nil, rangeToInclusive(badEndIncl), endMessage},
+	})
 }
 
 func TestStr_slice_index_test_slice_fail_truncated_1(t *testing.T) {
@@ -525,6 +719,23 @@ func TestStr_from_utf8_error(t *testing.T) {
 	test("A\xC3\xA9 \xF1\x80\x80 ", 4, rs.Some(3))
 }
 
+func TestStr_vec_str_conversions(t *testing.T) {
+	s1 := "All mimsy were the borogoves"
+
+	v := []byte(s1)
+	s2 := rs.Unwrap(FromUtf8(v))
+	i := 0
+	n1 := len(s1)
+	n2 := len(v)
+	eq(t, n1, n2)
+	for i < n1 {
+		a := s1[i]
+		b := s2[i]
+		eq(t, a, b)
+		i++
+	}
+}
+
 func TestStr_test_contains(t *testing.T) {
 	isTrue(t, Contains("abcde", "bcd"))
 	isTrue(t, Contains("abcde", "abcd"))
@@ -623,6 +834,70 @@ func TestStr_test_rev_iterator(t *testing.T) {
 	eqSlice(t, CharsRev(s), v)
 }
 
+// flatMapRev is `s.chars().flat_map(f).rev()`.
+func flatMapRev(s string, f func(rune) []rune) []rune {
+	var it []rune
+	for _, c := range Chars(s) {
+		it = append(it, f(c)...)
+	}
+	slices.Reverse(it)
+	return it
+}
+
+func TestStr_test_to_lowercase_rev_iterator(t *testing.T) {
+	s := "A\u00d6\u00df\u00dc\U0001f4a9\u03a3\u03a4\u0399\u0393\u039c\u0391\u03a3\u01c5\ufb01\u0130"
+	v := []rune{'\u0307', 'i', '\ufb01', '\u01c6', '\u03c3', '\u03b1', '\u03bc', '\u03b3', '\u03b9', '\u03c4', '\u03c3', '\U0001f4a9', '\u00fc', '\u00df', '\u00f6', 'a'}
+
+	pos := 0
+	it := flatMapRev(s, CharToLowercase)
+
+	for _, c := range it {
+		eq(t, c, v[pos])
+		pos++
+	}
+	eq(t, pos, len(v))
+}
+
+func TestStr_test_to_uppercase_rev_iterator(t *testing.T) {
+	s := "a\u00f6\u00df\u00fc\U0001f4a9\u03c3\u03c4\u03b9\u03b3\u03bc\u03b1\u03c2\u01c5\ufb01\u1f80"
+	v := []rune{'\u0399', '\u1f08', 'I', 'F', '\u01c4', '\u03a3', '\u0391', '\u039c', '\u0393', '\u0399', '\u03a4', '\u03a3', '\U0001f4a9', '\u00dc', 'S', 'S', '\u00d6', 'A'}
+
+	pos := 0
+	it := flatMapRev(s, CharToUppercase)
+
+	for _, c := range it {
+		eq(t, c, v[pos])
+		pos++
+	}
+	eq(t, pos, len(v))
+}
+
+func TestStr_test_chars_decoding(t *testing.T) {
+	for code := uint32(0); code < 0x110000; code++ {
+		c, ok := CharFromU32(code).Get()
+		if !ok {
+			continue
+		}
+		s := CharEncodeUtf8(c)
+		if CharsNext(s) != rs.Some(c) {
+			t.Fatalf("character %x=%c does not decode correctly", c, c)
+		}
+	}
+}
+
+func TestStr_test_chars_rev_decoding(t *testing.T) {
+	for code := uint32(0); code < 0x110000; code++ {
+		c, ok := CharFromU32(code).Get()
+		if !ok {
+			continue
+		}
+		s := CharEncodeUtf8(c)
+		if CharsNextBack(s) != rs.Some(c) {
+			t.Fatalf("character %x=%c does not decode correctly", c, c)
+		}
+	}
+}
+
 func TestStr_test_iterator_last(t *testing.T) {
 	s := "ศไทย中华Việt Nam"
 	eq(t, CharsNextBack(s), rs.Some('m'))
@@ -648,6 +923,13 @@ func TestStr_test_char_indices_revator(t *testing.T) {
 		want = append(want, rs.T2(p[i], v[i]))
 	}
 	eqSlice(t, CharIndicesRev(s), want)
+}
+
+func TestStr_test_char_indices_last(t *testing.T) {
+	s := thaiChineseVietShort
+	it := CharIndices(s)
+	it = it[1:] // it.next()
+	eq(t, it[len(it)-1], rs.T2(27, 'm'))
 }
 
 const maryLamb = "\nMäry häd ä little lämb\nLittle lämb\n"
@@ -689,6 +971,18 @@ func TestStr_test_split_char_iterator_inclusive(t *testing.T) {
 		return split
 	})
 	eqSlice(t, split, []string{"SheeP", "SharK", "TurtlE", "CaT"})
+}
+
+func TestStr_test_split_char_iterator_inclusive_rev(t *testing.T) {
+	data := maryLamb
+
+	split := reversed(SplitInclusiveChar(data, '\n'))
+	eqSlice(t, split, []string{"Little l\u00e4mb\n", "M\u00e4ry h\u00e4d \u00e4 little l\u00e4mb\n", "\n"})
+
+	// The rest of the Rust test runs a predicate that keeps state, from the
+	// back of the string (`split_inclusive(..).rev()`). The parts are a slice
+	// here, which SplitInclusiveFn builds from the front, calling the
+	// predicate front to back; there is no Go form for the other order.
 }
 
 func TestStr_test_rsplit(t *testing.T) {
@@ -771,6 +1065,18 @@ func TestStr_test_splitator(t *testing.T) {
 	check("ok", "z", []string{"ok"})
 	check("zzz", "zz", []string{"", "z"})
 	check("zzzzz", "zz", []string{"", "", "z"})
+}
+
+func TestStr_test_str_from_utf8(t *testing.T) {
+	xs := []byte("hello")
+	eq(t, rs.Unwrap(FromUtf8(xs)), "hello")
+
+	xs = []byte(thaiChineseVietShort)
+	eq(t, rs.Unwrap(FromUtf8(xs)), thaiChineseVietShort)
+
+	xs = []byte("hello\xFF")
+	_, err := FromUtf8(xs)
+	isTrue(t, err != nil)
 }
 
 func TestStr_test_empty_match_indices(t *testing.T) {
@@ -873,6 +1179,20 @@ func TestStr_test_rev_split_char_iterator_no_trailing(t *testing.T) {
 
 func TestStr_test_utf16_code_units(t *testing.T) {
 	eqSlice(t, EncodeUtf16("é\U0001F4A9"), []uint16{0xE9, 0xD83D, 0xDCA9})
+}
+
+func TestStr_test_utf16_count(t *testing.T) {
+	eq(t, len(EncodeUtf16("")), 0)
+	eq(t, len(EncodeUtf16("a")), 1)
+	eq(t, len(EncodeUtf16("\u00e9")), 1)
+	eq(t, len(EncodeUtf16("\u5b57")), 1)
+	eq(t, len(EncodeUtf16("\U0001F4A9")), 2)
+	iter := EncodeUtf16("\U0001F4A9\u5b57\u00e9a")
+	eq(t, len(iter), 5)
+	iter = iter[1:]
+	eq(t, len(iter), 4) // counting half of the surrogate pair
+	iter = iter[1:]
+	eq(t, len(iter), 3)
 }
 
 func TestStr_starts_with_in_unicode(t *testing.T) {
@@ -1151,5 +1471,50 @@ func TestStr_utf8_chars(t *testing.T) {
 	} {
 		_, err := FromUtf8(b)
 		isTrue(t, err != nil)
+	}
+}
+
+func TestStr_utf8_char_counts(t *testing.T) {
+	strs := []struct {
+		tmplStr       string
+		tmplCharCount int
+	}{{"e", 1}, {"\u00e9", 1}, {"\u20ac", 1}, {"\U00010000", 1}, {"e\u00e9\u20ac\U00010000", 4}}
+	spread := 8
+	var reps []int
+	for _, n := range []int{8, 64, 256, 512, 1024, 1 << 16} {
+		for rep := n - spread; rep <= n+spread; rep++ {
+			reps = append(reps, rep)
+		}
+	}
+	var padding []string
+	for length := 0; length < 8; length++ {
+		padding = append(padding, Repeat(" ", length))
+	}
+
+	for _, repeat := range reps {
+		for _, tmpl := range strs {
+			// Rust repeats the template once for each padding; the string
+			// is the same each time.
+			repeated := Repeat(tmpl.tmplStr, repeat)
+			for _, padStart := range padding {
+				for _, padEnd := range padding {
+					// Create a string with padding...
+					withPadding := padStart + repeated + padEnd
+					// ...and then skip past that padding. This should ensure
+					// that we test several different alignments for both head
+					// and tail.
+					si := len(padStart)
+					ei := len(withPadding) - len(padEnd)
+					target := withPadding[si:ei]
+
+					isTrue(t, !StartsWith(target, " ") && !EndsWith(target, " "))
+					expectedCount := tmpl.tmplCharCount * repeat
+					if got := CharsCount(target); got != expectedCount {
+						t.Fatalf("wrong count for `%q.repeat(%d)` (padding: `(%d, %d)`): %d, want %d",
+							tmpl.tmplStr, repeat, len(padStart), len(padEnd), got, expectedCount)
+					}
+				}
+			}
+		}
 	}
 }

@@ -1,5 +1,14 @@
 // Port of coretests 1.99.1 tests/char.rs (the tests of what this package
 // covers; see doc.go for what is left out)
+//
+// Not ported: test_convert_const (Go's own conversions); test_char_case,
+// test_to_casefold_unnormalized and test_as_ascii_invalid, which test the
+// unstable char::case, to_casefold_unnormalized and as_ascii;
+// test_decode_utf16_size_hint (an iterator's size hint); and
+// test_encode_utf8_raw_buffer_too_small and
+// test_encode_utf16_raw_buffer_too_small, which test the unstable
+// encode_utf8_raw and encode_utf16_raw (CharEncodeUtf8 and CharEncodeUtf16
+// return a new value rather than fill a buffer).
 
 package strs
 
@@ -47,6 +56,16 @@ func TestChar_test_is_lowercase(t *testing.T) {
 	isTrue(t, IsLowercase('ß'))
 	isTrue(t, !IsLowercase('Ü'))
 	isTrue(t, !IsLowercase('P'))
+}
+
+func TestChar_test_is_titlecase(t *testing.T) {
+	isTrue(t, charIsTitlecase('ǅ'))
+	isTrue(t, charIsTitlecase('ᾨ'))
+	isTrue(t, !charIsTitlecase('h'))
+	isTrue(t, !charIsTitlecase('ä'))
+	isTrue(t, !charIsTitlecase('ß'))
+	isTrue(t, !charIsTitlecase('Ö'))
+	isTrue(t, !charIsTitlecase('T'))
 }
 
 func TestChar_test_is_uppercase(t *testing.T) {
@@ -309,6 +328,41 @@ func TestChar_ed_iterator_specializations(t *testing.T) {
 	eqSlice(t, chars(' '), []rune{' '})
 	eqSlice(t, chars('\\'), []rune{'\\', '\\'})
 	eqSlice(t, chars('\''), []rune{'\\', '\''})
+}
+
+func TestChar_eu_iterator_specializations(t *testing.T) {
+	// The escape is returned whole; its chars are checked as chars, the
+	// iterator's methods as the slice's.
+	check := func(c rune) {
+		t.Helper()
+		chars := Chars(CharEscapeUnicode(c))
+		length := len(chars)
+
+		// For all possible in-bound offsets
+		iter := chars
+		for offset := 0; offset < length; offset++ {
+			// Check last
+			eq(t, iter[len(iter)-1], '}')
+
+			// Check len
+			eq(t, len(iter), length-offset)
+
+			// Check nth
+			eq(t, chars[offset], iter[0])
+			iter = iter[1:]
+		}
+
+		// Check post-last
+		eq(t, len(iter), 0)
+	}
+
+	check(0x0)
+	check(0x1)
+	check(0x12)
+	check(0x123)
+	check(0x1234)
+	check(0x12340)
+	check(0x10FFFF)
 }
 
 func TestChar_test_from_digit_radix_too_high(t *testing.T) {

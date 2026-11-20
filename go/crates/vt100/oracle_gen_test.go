@@ -3,6 +3,7 @@ package vt100
 import (
 	"math/rand/v2"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -586,12 +587,99 @@ func batch(cases []vt100Case) vt100Request {
 	return vt100Request{Op: "vt100", Cases: cases}
 }
 
+// --- recorded sessions ------------------------------------------------------
+
+// recordedStreamRequests runs the byte streams of the crate's test data
+// (testdata/vt100-rust) through both implementations: each fixture's inputs
+// one after the other, as the fixture tests feed them; the frames of the
+// crawl recording, a full-screen game, one step each; and the weechat
+// typescript in chunks. The crawl also runs with a scrollback and resizes
+// between frames. The recorded corpus holds the first 500 frames, which the
+// crate's own diff_crawl_short reads; live runs all 7625.
+func recordedStreamRequests(live bool) []vt100Request {
+	must := func(err error) {
+		if err != nil {
+			panic(err)
+		}
+	}
+	fixtures, err := TestdataFixtures()
+	must(err)
+	names := []string{}
+	for path := range fixtures {
+		if name, ok := strings.CutSuffix(path, "/1.typescript"); ok {
+			names = append(names, strings.TrimPrefix(name, "tests/data/fixtures/"))
+		}
+	}
+	slices.Sort(names)
+	fixtureCases := []vt100Case{}
+	for _, name := range names {
+		c := vt100Case{Rows: 24, Cols: 80}
+		for i := 1; ; i++ {
+			input, ok := fixtures["tests/data/fixtures/"+name+"/"+strconv.Itoa(i)+".typescript"]
+			if !ok {
+				break
+			}
+			c.Steps = append(c.Steps, processStep(input))
+		}
+		fixtureCases = append(fixtureCases, c)
+	}
+
+	frames, err := TestdataCrawlFrames()
+	must(err)
+	if !live {
+		frames = frames[:500]
+	}
+	plain := vt100Case{Rows: 24, Cols: 80}
+	resized := vt100Case{Rows: 24, Cols: 80, Scrollback: 30}
+	for i, frame := range frames {
+		plain.Steps = append(plain.Steps, processStep(frame))
+		resized.Steps = append(resized.Steps, processStep(frame))
+		switch (i + 1) % 500 {
+		case 100:
+			resized.Steps = append(resized.Steps, sizeStep(30, 100))
+		case 200:
+			resized.Steps = append(resized.Steps, scrollbackStep(20))
+		case 250:
+			resized.Steps = append(resized.Steps, scrollbackStep(0))
+		case 300:
+			resized.Steps = append(resized.Steps, sizeStep(20, 70))
+		case 400:
+			resized.Steps = append(resized.Steps, sizeStep(24, 80))
+		}
+	}
+
+	weechat, err := TestdataWeechat()
+	must(err)
+	whole := vt100Case{Rows: 37, Cols: 193, Steps: steps(string(weechat))}
+	chunked := vt100Case{Rows: 37, Cols: 193, Scrollback: 10}
+	chunk := 997
+	if live {
+		chunk = 89
+	}
+	for start := 0; start < len(weechat); start += chunk {
+		chunked.Steps = append(chunked.Steps, processStep(weechat[start:min(start+chunk, len(weechat))]))
+		if start/chunk == 5 {
+			chunked.Steps = append(chunked.Steps, sizeStep(30, 120))
+		}
+	}
+
+	return []vt100Request{
+		batch(fixtureCases),
+		batch([]vt100Case{plain}),
+		batch([]vt100Case{resized}),
+		batch([]vt100Case{whole, chunked}),
+	}
+}
+
 func generateVt100(yield func(any)) {
 	live := os.Getenv("MJ_ORACLE") == "live"
 
 	yield(vt100Request{Op: "vt100", Cases: shownCases(), Full: true})
 	yield(batch(fixedCases()))
 	for _, request := range matrixRequests(live) {
+		yield(request)
+	}
+	for _, request := range recordedStreamRequests(live) {
 		yield(request)
 	}
 
