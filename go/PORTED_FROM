@@ -7,3 +7,4 @@ mj-transcript 8dfd3756a4e0532186bba9adf38054d6eba3190a
 mj-checkpoint 8dfd3756a4e0532186bba9adf38054d6eba3190a
 mj-review 8dfd3756a4e0532186bba9adf38054d6eba3190a
 mj-build-id 8dfd3756a4e0532186bba9adf38054d6eba3190a
+# mj-client and mj-worker declarations only (bodies pending), from 4273087e6's Rust
