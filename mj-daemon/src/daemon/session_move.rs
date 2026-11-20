@@ -201,6 +201,9 @@ impl RuntimeState {
             ))?
         })
         .await?;
+        if preparation.container_upgrade.is_some() {
+            return Ok(preparation);
+        }
         preparation.source_unavailable = source_active
             && snapshot
                 .as_ref()

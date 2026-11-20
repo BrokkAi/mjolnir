@@ -1994,6 +1994,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 legacy_muse_auto_review: None,
                 load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
+                mjolnir_guardian: true,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
@@ -2092,6 +2093,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 legacy_muse_auto_review: None,
                 load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
+                mjolnir_guardian: true,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },

@@ -2263,9 +2263,12 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
                     title: None,
                     description: None,
                     fields: vec![],
-                    tool_permission: id
-                        .starts_with("tool-permission-")
-                        .then_some(mj_core::elicitation::ToolPermissionForm { skip: true }),
+                    tool_permission: id.starts_with("tool-permission-").then_some(
+                        mj_core::elicitation::ToolPermissionForm {
+                            skip: true,
+                            tool_call_id: None,
+                        },
+                    ),
                 },
             })
             .unwrap();

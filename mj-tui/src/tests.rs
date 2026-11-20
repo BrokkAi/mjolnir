@@ -4368,7 +4368,10 @@ fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
     let child_form = || {
         let mut request = question("child-session");
-        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip: true,
+            tool_call_id: None,
+        });
         request
     };
     dashboard

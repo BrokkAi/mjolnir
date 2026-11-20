@@ -49,37 +49,19 @@ mj daemon restart
 - `stop` gracefully stops the controller daemon. Detached workers keep running.
 - `restart` gracefully replaces the daemon with the installed Mjolnir build and reconnects to existing workers. It refuses when the running daemon's build is newer than its own; to go back to an older build, run `mj daemon stop` first.
 
-## Setup
-
-```text
-mj setup
-mj setup instructions --platform linux
-mj setup instructions --platform macos
-```
-
-`mj setup` reruns the same automatic agent and repository discovery used on
-first interactive startup. It detects installed harnesses and home-directory
-overrides, adds profiles and a bundle for the current GitHub origin, and
-preserves existing entries and preferences. Matching entries are reused;
-identifier collisions get separate names. It also probes every SSH or EC2
-machine and adds each runtime kind it newly runs; a runtime switched off with
-`enabled = false` is never added back. It saves
-additions without questions and reports actionable doctor errors. Container
-downloads remain background
-daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
-use `mj doctor --smoke` for explicit container smoke tests.
-
-`setup instructions` prints coding-agent-friendly preparation steps for a Linux or macOS host.
-
 ## Diagnose the installation
 
 ```text
 mj doctor
 mj doctor --json
 mj doctor --smoke
+mj doctor instructions --platform linux
+mj doctor instructions --platform macos
 ```
 
 Doctor checks configuration compatibility, harness authentication, worker binaries, container runtimes, SSH targets, AWS prerequisites, and Apple Container support. Results are classified as ready, warning, fixable, or unsupported.
+
+`doctor instructions` prints preparation steps for a Linux or macOS host. Existing agent skills can still use `mj setup instructions`.
 
 `--json` emits a machine-readable array. `--smoke` adds real disposable pull/run probes where a target supports them; run it after resolving ordinary fixable checks because it can download an image and provision short-lived resources.
 
@@ -734,7 +716,7 @@ default role selection or the repeated `--role` selection before paging, and
 returns `next_after_seq` and `latest_seq` with the response. `--finished-only`
 filters agent messages and uses the finished-prefix cursor described above.
 `mj events` always prints JSON lines.
-`mj login`, `mj go`, `mj setup`, and the
+`mj login`, `mj go`, and the
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these

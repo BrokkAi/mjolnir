@@ -1,0 +1,9 @@
+# The Rust commit each crate's Go port was translated from. Rust changes to
+# a crate after its commit still have to be ported: see
+# go/scripts/rust-changes.sh and "Keeping up with Rust" in
+# .agents/plans/go-port.md. Update a line only after porting the changes.
+mj-core 8d8e2db10a8602307d2cbabff3adfcfa258f0939
+mj-transcript 8dfd3756a4e0532186bba9adf38054d6eba3190a
+mj-checkpoint 8dfd3756a4e0532186bba9adf38054d6eba3190a
+mj-review 8dfd3756a4e0532186bba9adf38054d6eba3190a
+mj-build-id 8dfd3756a4e0532186bba9adf38054d6eba3190a

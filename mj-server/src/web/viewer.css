@@ -39,6 +39,7 @@
   --agent: #e2b34d;
   --thinking: #9aa39a;
   --running: #e2b34d;
+  --approval: #ffdc60;
   --done: #91df62;
   --failed: #ff786f;
   --plan: #d985ff;
@@ -1749,6 +1750,13 @@ article > h3 {
 }
 .entry.tone-running {
   --role: var(--running);
+}
+.entry.tone-approval {
+  --role: var(--approval);
+  background: color-mix(in srgb, var(--approval) 12%, transparent);
+}
+.entry.tone-approval > strong {
+  font-weight: 700;
 }
 .entry.tone-done {
   --role: var(--thinking);

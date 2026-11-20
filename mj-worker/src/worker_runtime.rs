@@ -145,6 +145,7 @@ pub struct AcpSupervisorSpec {
 impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
     fn from(config: &WorkerLaunchConfig) -> Self {
         let mut excluded_environment = config.excluded_environment.clone();
+        excluded_environment.push(mj_core::jev::FASTINO_KEY_ENVIRONMENT.into());
         if config.no_github_credentials {
             for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
                 if !excluded_environment.iter().any(|excluded| excluded == name) {

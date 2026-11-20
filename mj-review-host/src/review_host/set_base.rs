@@ -41,7 +41,7 @@ async fn run_set_base(
             .unwrap_or(0);
         if protocol < mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL {
             return Err(StartRefusal(
-                "this session's worker is older than set_review_baseline; restart the session, then call it again"
+                "this session's worker is older than set_baseline; restart the session, then call it again"
                     .into(),
             ));
         }

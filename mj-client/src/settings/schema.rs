@@ -28,7 +28,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             let watch = mj_core::config::GithubWatchConfig::default();
             json!({"enabled":watch.enabled,"use_gpu":watch.use_gpu,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
         }
-        "jev" => json!({"enabled":true}),
+        "jev" if path.len() == 1 => json!({"enabled":true,"fastino_key":null}),
         "quota" => json!({}),
         "daemon" => json!({"runtime":"host","image":null,"mounts":[]}),
         "sessionwiki" => {
@@ -110,6 +110,11 @@ fn profile_defaults(kind: &str) -> Value {
             object.insert("third_party_models".to_owned(), Value::Bool(true));
         }
         _ => {}
+    }
+    if serde_json::from_value::<mj_core::config::HarnessKind>(Value::String(kind.to_owned()))
+        .is_ok_and(|kind| kind.guardian() == mj_core::config::GuardianReviewer::Mjolnir)
+    {
+        object.insert("mjolnir_guardian".to_owned(), Value::Bool(true));
     }
     object.insert("models".to_owned(), json!([]));
     fields
@@ -295,6 +300,7 @@ pub fn label(key: &str) -> String {
         "watch" => "Watcher",
         "use_gpu" => "Use GPU for GitHub relevance",
         "jev" => "Jev (hosted service)",
+        "fastino_key" => "Fastino key",
         "quota" => "Quota checks",
         "daemon" => "Daemon",
         "mounts" => "Extra host directories",
@@ -327,6 +333,7 @@ pub fn label(key: &str) -> String {
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
         "claude_permission_mode" => "Claude permission mode",
+        "mjolnir_guardian" => "Mjolnir guardian",
         "load_balancing_may_consume_credits" => "Load balancing may consume credits",
         "third_party_models" => "Offer Claude and GPT models",
         "models" => "Offered models",
@@ -356,7 +363,7 @@ pub fn label(key: &str) -> String {
         "primary_repo" => "Main repository",
         "repositories" => "Repositories",
         "id" => "Name",
-        "github" => "GitHub owner/repository",
+        "github" => "Git URL or GitHub owner/repository",
         "local" => "Local repository directory",
         "destination" => "Checkout folder",
         "tools_directory" => "Native tool cache directory",
@@ -441,6 +448,7 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
         ["machines", _, "build_cache", "scheduler", "memory"] => "85% of host memory".to_owned(),
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        ["jev", "fastino_key"] => "Shared proxy key".to_owned(),
         // A cleared number takes the setting's own default.
         ["notify", "delay_seconds"] => format!(
             "{} (default)",
@@ -1037,7 +1045,10 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."
         }
         "jev" => {
-            "Turn text and quota recovery go to Jev, a hosted classifier; off stops both. Sessions follow on resume or restart."
+            "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart."
+        }
+        "fastino_key" if path.first().is_some_and(|key| key == "jev") => {
+            "Optional. Use your own Fastino quota instead of the shared Jev limits. Enter a key, { from_secret = \"NAME\" }, or { from_env = \"NAME\" }. Sessions use it when started or resumed after saving."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
@@ -1089,6 +1100,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "third_party_models" => {
             "Antigravity only: offer the Claude and GPT models of the account's third-party quota pool. Off: the profile offers only Gemini models, refuses switching to the others, and hides that pool's quota. A session already on one keeps it until you switch."
+        }
+        "mjolnir_guardian" => {
+            "On runtimes that ask for approvals, Mjolnir reviews each action this agent asks permission for and allows or denies it, asking you only when it cannot decide. Off: every action that needs permission asks you. Applies to new sessions."
         }
         "claude_permission_mode" => {
             "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."

@@ -211,7 +211,7 @@ impl DashboardContext {
             && let Some(result) = login.accept(update)
         {
             self.dashboard
-                .setup_login_finished(login.generation, &login.profile, result);
+                .setup_login_finished(login.generation, &login.profile, result.into());
         }
     }
     pub(super) fn login_event(&mut self, event: Event) {
@@ -229,7 +229,7 @@ impl DashboardContext {
             self.dashboard.setup_login_finished(
                 login.generation,
                 &login.profile,
-                Err("Login cancelled.".into()),
+                mj_tui::SetupLoginOutcome::Cancelled,
             );
         }
         if matches!(action, PaneAction::Quit) {
