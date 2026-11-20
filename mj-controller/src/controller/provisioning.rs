@@ -934,7 +934,7 @@ impl Controller {
             let prepared_cache = bundle
                 .as_mut()
                 .filter(|_| !moving_workspace)
-                .and_then(|bundle| {
+                .map(|bundle| {
                     git_cache::prepare(
                         &target,
                         session_id,
@@ -943,7 +943,9 @@ impl Controller {
                         github_token,
                         executor,
                     )
-                });
+                })
+                .transpose()?
+                .flatten();
             // Mounts are fixed when the container is created, so the build
             // cache is decided here, before the provisioning plan is built.
             let build_cache = super::mbx::prepare(

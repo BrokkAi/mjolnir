@@ -191,6 +191,7 @@ pub fn clone_commands(
         .purpose("create bundle workspace")
         .stage(ProvisionStage::Cloning),
     ];
+    let mut restore_origins = Vec::new();
     for repository in &bundle.repositories {
         let destination = format!("{workspace}/{}", repository.destination);
         let url = repository
@@ -199,6 +200,7 @@ pub fn clone_commands(
             .expect("validated network repository");
         let wrap_fetch = |args: Vec<String>| {
             if let Some(token) = github_token
+                && repository.reference.is_none()
                 && mj_core::remote_git::is_github_https_url(url)
                 && fetches_repository(&args)
             {
@@ -220,18 +222,38 @@ pub fn clone_commands(
             );
             continue;
         }
-        let mut args = vec!["git".to_owned(), "clone".to_owned()];
+        let mut args = vec!["git".to_owned()];
+        if let Some(snapshot) = &repository.reference {
+            // A mounted cache can have a different owner from the container
+            // user. Git needs to trust this particular read-only repository.
+            args.extend(["-c".into(), format!("safe.directory={snapshot}")]);
+        }
+        args.push("clone".into());
+        if let Some(snapshot) = &repository.reference {
+            args.extend(["--no-local".into(), "--reference".into(), snapshot.clone()]);
+            restore_origins.push(
+                wrap(vec![
+                    "git".into(),
+                    "-C".into(),
+                    destination.clone(),
+                    "remote".into(),
+                    "set-url".into(),
+                    "origin".into(),
+                    url.clone(),
+                ])
+                .purpose(format!("configure origin for {}", repository.destination))
+                .stage(ProvisionStage::Cloning)
+                .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP + 1),
+            );
+        }
         for push_url in &repository.push_urls {
             args.extend([
                 "--config".into(),
                 format!("remote.origin.pushurl={push_url}"),
             ]);
         }
-        if let Some(reference) = &repository.reference {
-            args.extend(["--reference-if-able".to_owned(), reference.clone()]);
-        }
         args.push("--".to_owned());
-        args.push(url.clone());
+        args.push(repository.reference.as_ref().unwrap_or(url).clone());
         args.push(destination);
         commands.push(
             wrap_fetch(args)
@@ -240,6 +262,7 @@ pub fn clone_commands(
                 .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP),
         );
     }
+    commands.extend(restore_origins);
     commands
 }
 

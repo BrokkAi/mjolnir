@@ -2862,10 +2862,9 @@ pub struct RepositorySpec {
     pub push_urls: Vec<String>,
     pub destination: String,
     pub git_ref: Option<String>,
-    /// Read-only bare repository mounted into the target for Git object reuse.
-    /// A missing or unusable reference is only an optimization miss. With
-    /// `history_cutoff`, it is instead a Git bundle in the target that holds
-    /// only the cutoff history, and the checkout fetches from it.
+    /// Read-only checkout source mounted from the container host. With
+    /// `history_cutoff`, this is a Git bundle containing only cutoff history.
+    /// Otherwise it is a bare snapshot of the remote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     /// Start the checkout with these commits and their ancestors only. It is

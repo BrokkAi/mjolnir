@@ -1,6 +1,8 @@
-//! Best-effort host-side Git object caches for container-backed sessions.
+//! Host-side Git checkout sources for container-backed sessions.
 
 use mj_core::hex::lower_hex;
+use mj_core::refusal::Refusal;
+use mj_core::remote_git::{display_url, is_github_https_url};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -78,13 +80,8 @@ impl PreparedCloneCache {
     }
 }
 
-/// Populate immutable, session-scoped reference repositories and attach them
-/// to a container bundle. Every failure is an optimization miss: the original
-/// network clone remains authoritative and receives a user-visible notice.
-///
-/// A repository with a history cutoff gets a Git bundle of the cutoff commits
-/// and their ancestors instead of a copy of the mirror, so nothing later is
-/// mounted into its container.
+/// Prepare the source snapshots a container will clone or fetch from.
+/// A history cutoff mounts only the selected commits and their ancestors.
 pub fn prepare(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -92,49 +89,44 @@ pub fn prepare(
     mounts: &mut Vec<AdditionalMount>,
     github_token: Option<&str>,
     executor: &(impl CommandExecutor + Sync),
-) -> Option<PreparedCloneCache> {
-    let host = CacheHost::for_target(target)?;
-    let engine = target.container_engine()?;
+) -> Result<Option<PreparedCloneCache>> {
+    let Some((host, engine)) = CacheHost::for_target(target).zip(target.container_engine()) else {
+        return Ok(None);
+    };
+    bundle.validate()?;
     let repositories = bundle
         .repositories
         .iter()
-        .filter_map(|repository| {
-            let source = repository.url.as_deref()?;
-            repository_cache_key(source)
-                .map(|key| (key, (source.to_owned(), repository.history_cutoff.clone())))
-                .map_err(|error| {
-                    executor.notify_notice(&format!(
-                        "Clone cache skipped for {}: {error:#}",
-                        repository.destination
-                    ));
-                })
-                .ok()
+        .map(|repository| {
+            let source = repository
+                .url
+                .as_deref()
+                .expect("validated network repository");
+            (
+                repository_cache_key(source),
+                (source, repository.history_cutoff.as_ref()),
+            )
         })
         .collect::<BTreeMap<_, _>>();
-    if repositories.is_empty() {
-        return None;
-    }
+    let sources = repositories
+        .values()
+        .map(|(source, _)| display_url(source))
+        .collect::<Vec<_>>()
+        .join(", ");
     let cache_destination = Path::new(CACHE_CONTAINER_ROOT);
     if mounts.iter().any(|mount| {
         mount.destination.starts_with(cache_destination)
             || cache_destination.starts_with(&mount.destination)
     }) {
-        executor.notify_notice(
-            "Clone cache disabled because an attached directory overlaps /run/hel/git-cache.",
-        );
-        return None;
+        return Err(Refusal::precondition(format!(
+            "Cannot mount the Git checkout sources {sources}. Move the attached directory that overlaps {CACHE_CONTAINER_ROOT}."
+        )).into());
     }
 
     let _stage = ProvisionStageGuard::new(executor, ProvisionStage::Cloning);
-    let home = match cache_home(&host, executor) {
-        Ok(home) => home,
-        Err(error) => {
-            executor.notify_notice(&format!(
-                "Clone cache unavailable on the container host: {error:#}; using direct clones."
-            ));
-            return None;
-        }
-    };
+    let home = cache_home(&host, executor).with_context(|| Refusal::precondition(format!(
+        "Cannot prepare Git checkout sources {sources} on the container host. Make sure Git is available and the host has an absolute home directory."
+    )))?;
     let cache_root = home.join(CACHE_RELATIVE_ROOT);
     let session_root = cache_root.join("sessions").join(session_id);
 
@@ -142,62 +134,71 @@ pub fn prepare(
         let handles = repositories
             .iter()
             .map(|(key, (source, cutoff))| {
-                let snapshot = session_root.join(snapshot_name(key, cutoff.as_ref()));
-                let key = key.clone();
+                let name = snapshot_name(key, *cutoff);
+                let snapshot = session_root.join(&name);
                 let host = &host;
                 let cache_root = &cache_root;
-                scope.spawn(move || {
+                let handle = scope.spawn(move || {
                     prepare_repository(
                         host,
                         cache_root,
-                        &key,
+                        key,
                         source,
                         &snapshot,
-                        cutoff.as_ref(),
+                        *cutoff,
                         github_token,
                         executor,
                     )
-                    .map(|()| key)
-                })
+                    .map(|()| format!("{CACHE_CONTAINER_ROOT}/{name}"))
+                });
+                (key, source, handle)
             })
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|panic| {
+            .map(|(key, source, handle)| {
+                let result = handle.join().unwrap_or_else(|panic| {
                     Err(anyhow::anyhow!(
                         "clone-cache preparation thread panicked: {}",
                         targets::command_thread_panic_message(panic.as_ref())
                     ))
-                })
+                }).with_context(|| Refusal::precondition(format!(
+                    "Cannot prepare {} on the container host. Verify that the host can fetch the source with Git and write its cache. For a pinned checkout, verify that the requested commits are available from the source.",
+                    display_url(source)
+                )));
+                (key.clone(), result)
             })
             .collect::<Vec<_>>()
     });
 
     let mut references = BTreeMap::new();
-    for result in prepared {
+    let mut failures = Vec::new();
+    for (key, result) in prepared {
         match result {
-            Ok(key) => {
-                let name = snapshot_name(&key, repositories[&key].1.as_ref());
-                references.insert(key, format!("{CACHE_CONTAINER_ROOT}/{name}"));
+            Ok(reference) => {
+                references.insert(key, reference);
             }
-            Err(error) => executor.notify_notice(&format!(
-                "Clone cache preparation failed: {error:#}; using a direct clone for that repository."
-            )),
+            Err(error) => failures.push(error),
         }
     }
-    if references.is_empty() {
-        let _ = cleanup_session_root(&host, &session_root, executor);
-        return None;
+    let mut failures = failures.into_iter();
+    if let Some(error) = failures.next() {
+        for additional in failures {
+            executor.notify_notice(&format!("{additional:#}"));
+        }
+        if let Err(cleanup) = cleanup_session_root(&host, &session_root, executor) {
+            executor.notify_notice(&format!(
+                "Could not remove the failed Git checkout snapshot: {cleanup:#}"
+            ));
+        }
+        return Err(error);
     }
     for repository in &mut bundle.repositories {
-        let Some(source) = repository.url.as_deref() else {
-            continue;
-        };
-        let Ok(key) = repository_cache_key(source) else {
-            continue;
-        };
-        repository.reference = references.get(&key).cloned();
+        let source = repository
+            .url
+            .as_deref()
+            .expect("validated network repository");
+        repository.reference = Some(references[&repository_cache_key(source)].clone());
     }
     mounts.push(AdditionalMount {
         source: session_root.clone(),
@@ -220,7 +221,7 @@ pub fn prepare(
     if let Err(error) = collect_garbage(&host, &cache_root, &live_sessions, executor) {
         executor.notify_notice(&format!("Clone-cache cleanup was skipped: {error:#}"));
     }
-    Some(PreparedCloneCache { host, session_root })
+    Ok(Some(PreparedCloneCache { host, session_root }))
 }
 
 /// A session snapshot's file name: a bare repository, or for a cutoff the
@@ -248,15 +249,20 @@ fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathB
     Ok(home)
 }
 
-fn repository_cache_key(source: &str) -> Result<String> {
-    let repository = crate::import::github_repository_from_origin(source)
-        .context("repository is not a recognized GitHub URL")?;
-    let identity = format!(
-        "github.com/{}/{}",
-        repository.owner.to_ascii_lowercase(),
-        repository.repository.to_ascii_lowercase()
-    );
-    Ok(lower_hex(Sha256::digest(identity.as_bytes())))
+fn repository_cache_key(source: &str) -> String {
+    let identity = match crate::import::github_repository_from_origin(source) {
+        Some(repository) => format!(
+            "github.com/{}/{}",
+            repository.owner.to_ascii_lowercase(),
+            repository.repository.to_ascii_lowercase()
+        ),
+        // Resolution has already expanded shorthands and Git's configured URL
+        // rewrites. Preserve user, port, and the entire transport path here:
+        // two accounts or paths on one server can serve different objects.
+        // RepositoryIdentity::Network drops userinfo and the .git suffix.
+        None => format!("git:{source}"),
+    };
+    lower_hex(Sha256::digest(identity.as_bytes()))
 }
 
 const PREPARE_REPOSITORY_SCRIPT: &str = r#"
@@ -335,6 +341,15 @@ if [ ! -d "$mirror" ]; then
     mv -- "$partial" "$entry"
 elif [ -z "$generation" ] || [ "$generation" = "$observed_generation" ]; then
     git_remote -C "$mirror" remote update --prune
+    # Fetch updates branches but leaves the mirror's symbolic HEAD alone.
+    advertised_head=$(git_remote -C "$mirror" ls-remote --symref origin HEAD)
+    default_ref=$(printf '%s\n' "$advertised_head" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
+    if [ -n "$default_ref" ]; then
+        git -C "$mirror" symbolic-ref HEAD "$default_ref"
+    elif [ -n "$advertised_head" ]; then
+        detached_head=$(printf '%s\n' "$advertised_head" | awk '$2 == "HEAD" { print $1 }')
+        git -C "$mirror" update-ref --no-deref HEAD "$detached_head"
+    fi
     printf '%s\n' "${preparation##*/}" > "$entry/generation"
 fi
 : > "$entry/last-used"
@@ -361,6 +376,9 @@ else
         case $commit in
             ''|*[!0-9a-f]*) echo "invalid history cutoff commit" >&2; exit 2 ;;
         esac
+        if ! git -C "$pinned" cat-file -e "$commit^{commit}" 2>/dev/null; then
+            git_remote -C "$pinned" fetch --quiet --no-tags -- "$source" "$commit"
+        fi
         refspecs="$refspecs $commit:refs/mj/$name"
         refs="$refs refs/mj/$name"
         name=base
@@ -393,6 +411,7 @@ fn prepare_repository(
     github_token: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
+    let github_token = github_token.filter(|_| is_github_https_url(source));
     let token = github_token.is_some();
     let mut arguments = vec![
         cache_root.to_string_lossy().into_owned(),
@@ -414,7 +433,7 @@ fn prepare_repository(
     let mut command = host.git_shell_command(
         PREPARE_REPOSITORY_SCRIPT,
         arguments,
-        format!("prepare cached Git objects for {source}"),
+        format!("prepare cached Git objects for {}", display_url(source)),
     );
     if let Some(token) = github_token {
         let mut input = token.as_bytes().to_vec();
@@ -422,7 +441,9 @@ fn prepare_repository(
         command = command.with_sensitive_stdin(input);
     }
     let output = executor.execute(&command)?;
-    checked(output, &command).map(|_| ())
+    checked(output, &command)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!(error.to_string().replace(source, &display_url(source))))
 }
 
 const CACHE_GC_SCRIPT: &str = r#"
@@ -594,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_host_git_falls_back_without_mutating_the_bundle() {
+    fn unavailable_host_git_reports_the_source_without_mutating_the_bundle() {
         let executor = RecordingExecutor {
             status: 127,
             ..Default::default()
@@ -619,20 +640,23 @@ mod tests {
         };
         let mut mounts = Vec::new();
 
+        let error = prepare(
+            &target,
+            "session-12345678",
+            &mut bundle,
+            &mut mounts,
+            None,
+            &executor,
+        )
+        .unwrap_err();
         assert!(
-            prepare(
-                &target,
-                "session-12345678",
-                &mut bundle,
-                &mut mounts,
-                None,
-                &executor
-            )
-            .is_none()
+            Refusal::of(&error)
+                .unwrap()
+                .message()
+                .contains("https://github.com/example/app.git")
         );
         assert_eq!(bundle.repositories[0].reference, None);
         assert!(mounts.is_empty());
-        assert!(executor.notices.lock().unwrap()[0].contains("using direct clones"));
     }
 
     #[test]
@@ -913,8 +937,7 @@ mod tests {
         assert_eq!(present, reachable);
         assert!(!present.contains(&later));
 
-        // A cutoff the mirror cannot serve fails, so the session falls back
-        // to the network instead of mounting anything.
+        // A cutoff the host cannot fetch fails before anything is mounted.
         let missing = HistoryCutoff {
             head: "1".repeat(40),
             base: None,
