@@ -568,9 +568,21 @@ fn pool_bar(
     let use_glyphs =
         ascii || theme::current() == theme::UiTheme::Mono || !matches!(accent, Color::Rgb(..));
     let refill = tint(accent, 0.24);
+    // Text or a glyph on a segment colour. `readable_on` can only contrast
+    // with an RGB colour; for a theme colour (and in monochrome) it returns
+    // the theme text colour, which may be the segment colour itself, so draw
+    // in the segment colour on the pane instead.
+    let mono = theme::current() == theme::UiTheme::Mono;
+    let on = move |colour: Color| {
+        if matches!(colour, Color::Rgb(..)) && !mono {
+            Style::default().fg(readable_on(colour)).bg(colour)
+        } else {
+            Style::default().fg(colour).bg(pane)
+        }
+    };
     let divider = |colour| {
         if ascii {
-            Span::styled("|", Style::default().fg(readable_on(colour)).bg(colour))
+            Span::styled("|", on(colour))
         } else {
             // The segment keeps this cell; its right eighth exposes the pane.
             Span::styled("▉", Style::default().fg(colour).bg(pane))
@@ -586,11 +598,10 @@ fn pool_bar(
     // A full block draws in the foreground colour, so in Unicode glyph mode
     // the fill is the block itself; reversing it would paint the background
     // over the whole cell. ASCII `#` keeps reverse video to stay solid.
+    // ASCII fills in reverse video so a percentage printed over the whole
+    // fill keeps the fill's look; `on` keeps its two colours distinct.
     let fill_style = if ascii {
-        Style::default()
-            .fg(readable_on(accent))
-            .bg(accent)
-            .add_modifier(Modifier::REVERSED)
+        on(accent).add_modifier(Modifier::REVERSED)
     } else if use_glyphs {
         Style::default().fg(accent).bg(pane)
     } else {
@@ -606,8 +617,10 @@ fn pool_bar(
                     .fg(readable_on(pane))
                     .bg(pane)
                     .add_modifier(Modifier::REVERSED)
+            } else if ascii {
+                fill_style
             } else {
-                Style::default().fg(readable_on(accent)).bg(accent)
+                on(accent)
             };
             spans.push(Span::styled(percentage, label_style));
             cells -= percentage_width;
@@ -686,7 +699,7 @@ fn pool_bar(
             let glyph = if use_glyphs { "=" } else { " " };
             spans.push(Span::styled(
                 format!("{}{label}", glyph.repeat(body - label_width(&label))),
-                Style::default().fg(readable_on(refill)).bg(refill),
+                on(refill),
             ));
         }
         if split {
@@ -1262,7 +1275,10 @@ mod tests {
                     .iter()
                     .find(|span| span.content.contains('='))
                     .unwrap();
-                assert_ne!(available.style.bg, refill.style.bg);
+                // Filled and spent cells must look different: glyph or colour.
+                let look =
+                    |span: &Span<'_>| (span.content.chars().next(), span.style.fg, span.style.bg);
+                assert_ne!(look(available), look(refill));
             })
         });
     }
