@@ -542,8 +542,14 @@ pub fn install_mbx_shims(
     let bin = format!("{worker_root}/bin");
     let (engine, container_id, ssh) = mbx_container(locator)?;
     let quoted_binary = targets::posix_quote(&mbx_binary.to_string_lossy());
+    // mbx refuses a mise shim as the real Cargo, and a mise project image
+    // (mj-dev and every `mj image build` image) has Cargo only behind mise's
+    // shims. Under mise, take mise's environment for the build's own
+    // directory first: it puts the real toolchain on PATH and pins
+    // RUSTUP_TOOLCHAIN the way the shim would, per repository, including
+    // tools that finished installing after the session started.
     let cargo_body = format!(
-        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nexec {quoted_binary} \"$@\""
+        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nif command -v mise >/dev/null 2>&1; then\n    eval \"$(mise env -s bash 2>/dev/null)\" || true\nfi\nexec {quoted_binary} \"$@\""
     );
     let mbx_body = format!("exec {quoted_binary} \"$@\"");
     let args = vec![
