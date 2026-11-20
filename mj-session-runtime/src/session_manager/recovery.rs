@@ -273,7 +273,16 @@ pub fn recover_worker_admitted(
                 Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
             }
             "dead" => {
-                if let Some(failure) = dead_worker_startup_failure(&plan, session_id, executor)? {
+                // Reading the exit record tells the storage owner about a
+                // full disk. Check that first: a harness that failed to open
+                // for lack of space waits and restarts once space returns, as
+                // any other no-space exit does. A marked failure on a target
+                // with space ends recovery.
+                let startup_failure = dead_worker_startup_failure(&plan, session_id, executor)?;
+                if let Some(full) = storage_forbids_restart(&plan, session_id) {
+                    return Ok(full);
+                }
+                if let Some(failure) = startup_failure {
                     if let (Some(id), Some((state, revision))) =
                         (session_id, observed_state.as_ref())
                     {
@@ -295,9 +304,6 @@ pub fn recover_worker_admitted(
                         tracing::warn!(session_id = id, %failure, "worker failed before configuring its harness");
                     }
                     return Ok(WorkerRecoveryOutcome::HarnessStartupFailed);
-                }
-                if let Some(full) = storage_forbids_restart(&plan, session_id) {
-                    return Ok(full);
                 }
                 if let Some(workspace) = plan.workspace.as_ref()
                     && !crate::targets::path_exists_on_managed_target(

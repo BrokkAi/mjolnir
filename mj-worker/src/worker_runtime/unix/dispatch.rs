@@ -836,6 +836,14 @@ fn record_runtime_event_with_startup(
     };
     let stopped = record_runtime_event_with_facts(relay, in_flight, event, work_facts)?;
     if let Some(failure) = failure {
+        // The worker exits before the runtime's Stopped is recorded. Clear
+        // any question the bridge asked while opening, as Stopped would, so
+        // no invisible question outlives this harness. In-flight commands
+        // are left for the next boot's recovery.
+        relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .record_observation(RelayObservation::ElicitationsCleared)?;
         return Err(failure);
     }
     if configured {
