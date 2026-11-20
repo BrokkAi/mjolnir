@@ -44,6 +44,12 @@ impl ReviewSlot {
         }
         RuntimeReviewView {
             session_id: session_id.to_owned(),
+            review_id: self.driver.snapshot().review_id,
+            roots: self
+                .roots()
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect(),
             questions: Vec::new(),
             child_session_id: None,
             phase: self.driver.phase().clone(),

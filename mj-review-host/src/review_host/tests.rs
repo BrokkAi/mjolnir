@@ -6283,7 +6283,13 @@ async fn reviews_of_disjoint_roots_run_together_and_each_delivers_its_own_verdic
     open_scoped_review(&mut manager, &host, &session, "/workspace/a", "tree-a").await;
     open_scoped_review(&mut manager, &host, &session, "/workspace/c", "tree-c").await;
     assert_eq!(environment.state().open_reviews.len(), 2);
-    assert_eq!(host.views_of(&session).len(), 2);
+    let views = host.views_of(&session);
+    assert_eq!(views.len(), 2);
+    let mut roots: Vec<_> = views.iter().map(|view| view.roots.clone()).collect();
+    roots.sort();
+    assert_eq!(roots, [["/workspace/a"], ["/workspace/c"]]);
+    assert!(views.iter().all(|view| !view.review_id.is_empty()));
+    assert_ne!(views[0].review_id, views[1].review_id);
 
     // A request that names a root an open review owns is refused, and the
     // refusal offers the roots that are free.

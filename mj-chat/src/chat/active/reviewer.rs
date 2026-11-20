@@ -11,7 +11,7 @@ impl ActiveChat {
     ) {
         let child = match role.as_ref() {
             Some(child) => {
-                let owns_question = self.state.turn_review().is_some_and(|review| {
+                let owns_question = self.state.turn_reviews().iter().any(|review| {
                     review.view.owns_reviewer(child)
                         && review.view.questions.iter().any(|question| {
                             question.role == *child && question.request.id == elicitation_id
@@ -55,15 +55,15 @@ impl ActiveChat {
     pub(crate) fn surface_reviewer_elicitations(&mut self) {
         let pending: Vec<(Option<String>, mj_core::elicitation::ElicitationRequest)> = self
             .state
-            .turn_review()
-            .map(|review| {
+            .turn_reviews()
+            .iter()
+            .flat_map(|review| {
                 review
                     .pending_elicitations()
                     .into_iter()
                     .map(|(role, request)| (Some(role), request))
-                    .collect()
             })
-            .unwrap_or_default();
+            .collect();
         self.state.reconcile_reviewer_elicitation(&pending);
         for (role, request) in pending {
             if self

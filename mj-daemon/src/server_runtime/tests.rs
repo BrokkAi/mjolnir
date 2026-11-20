@@ -2846,6 +2846,8 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
     let reviews = BTreeMap::from([(
         "parent".to_owned(),
         RuntimeReviewView {
+            review_id: String::new(),
+            roots: Vec::new(),
             child_session_id: None,
             session_id: "parent".into(),
             questions: vec![mj_client::review::ReviewerQuestion {

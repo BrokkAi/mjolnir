@@ -4264,6 +4264,8 @@ fn golden_conversation_title() {
 
     draw("idle", &mut chat);
     let mut view = RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "session".to_owned(),
         questions: Vec::new(),
@@ -4272,15 +4274,41 @@ fn golden_conversation_title() {
         status: "starting the reviewer".to_owned(),
         verdict: None,
     };
-    chat.set_turn_review(Some(view.clone()));
+    let view_template = view.clone();
+    chat.set_turn_reviews(vec![view.clone()]);
     draw("reviewing", &mut chat);
     view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
         synthesis: "[P2] src/lib.rs:1 -- weak test".to_owned(),
         evidence: Default::default(),
     });
-    chat.set_turn_review(Some(view));
+    chat.set_turn_reviews(vec![view]);
     draw("findings", &mut chat);
-    chat.set_turn_review(None);
+    // Two reviews of different worktrees: the one still working stands for
+    // the session, though the other has findings.
+    let review = |review_id: &str, root: &str, phase: TurnReviewPhase| RuntimeReviewView {
+        review_id: review_id.to_owned(),
+        roots: vec![root.to_owned()],
+        phase,
+        status: "reviewing".to_owned(),
+        ..view_template.clone()
+    };
+    chat.set_turn_reviews(vec![
+        review(
+            "review-a",
+            "/workspace/a",
+            TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+                synthesis: "[P2] a.rs:1 -- weak test".to_owned(),
+                evidence: Default::default(),
+            }),
+        ),
+        review(
+            "review-c",
+            "/workspace/c",
+            TurnReviewPhase::Running { roles: Vec::new() },
+        ),
+    ]);
+    draw("two reviews, one working", &mut chat);
+    chat.set_turn_reviews(Vec::new());
     draw("idle restored", &mut chat);
 
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "conversation-title", &output);

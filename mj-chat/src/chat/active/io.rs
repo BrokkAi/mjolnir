@@ -98,12 +98,12 @@ impl ActiveChat {
         }
     }
 
-    /// Shows the review the daemon is running for this session.
+    /// Shows the reviews the daemon is running for this session.
     ///
     /// The terminal projects the daemon's status above the ordinary composer.
     /// A review therefore survives this view closing.
-    pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
-        self.state.set_turn_review(view);
+    pub fn apply_review_views(&mut self, views: Vec<mj_client::review::RuntimeReviewView>) {
+        self.state.set_turn_reviews(views);
         self.surface_reviewer_elicitations();
     }
 

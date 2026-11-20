@@ -479,7 +479,7 @@ pub(crate) struct DashboardContext {
     ui_request_actions: Vec<DashboardAction>,
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
-    runtime_review_views: BTreeMap<String, mj_daemon::review_host::RuntimeReviewView>,
+    runtime_review_views: BTreeMap<String, Vec<mj_daemon::review_host::RuntimeReviewView>>,
     runtime_config: Feed<watch::Receiver<mj_daemon::pollers::RuntimeLaunchConfig>>,
     pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
     remote_lifecycle_operations: BTreeMap<String, drains::RemoteLifecycleObservation>,
@@ -1943,14 +1943,17 @@ impl DashboardContext {
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
         dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
         let runtime_reviews_rx = remote_worker.reviews;
-        let runtime_review_views: BTreeMap<String, mj_daemon::review_host::RuntimeReviewView> =
-            runtime_reviews_rx
-                .borrow()
-                .iter()
-                .cloned()
-                .map(|review| (review.session_id.clone(), review))
-                .collect();
-        dashboard.set_session_reviews(runtime_review_views.values().cloned());
+        let mut runtime_review_views: BTreeMap<
+            String,
+            Vec<mj_daemon::review_host::RuntimeReviewView>,
+        > = BTreeMap::new();
+        for review in runtime_reviews_rx.borrow().iter().cloned() {
+            runtime_review_views
+                .entry(review.session_id.clone())
+                .or_default()
+                .push(review);
+        }
+        dashboard.set_session_reviews(runtime_review_views.values().flatten().cloned());
         let runtime_notices_rx = remote_worker.notices;
         // Notices already queued when this surface attaches belong to whatever
         // was on screen before it, so start after them rather than replaying

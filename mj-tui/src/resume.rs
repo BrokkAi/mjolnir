@@ -1257,7 +1257,7 @@ impl DashboardState {
                     || self
                         .session_reviews
                         .get(&session.id)
-                        .is_some_and(|review| review.is_working())
+                        .is_some_and(|reviews| mj_client::review::any_working(reviews.iter()))
             })
     }
 

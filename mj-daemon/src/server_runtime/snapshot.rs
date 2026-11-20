@@ -24,6 +24,29 @@ pub(super) struct PhoneSessionViews<'a> {
         &'a std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView>,
 }
 
+/// The review the phone shows for each session that has any: the most
+/// notable of its open reviews, since the phone shows one per session.
+pub(super) fn viewer_reviews(
+    reviews: &[crate::review_host::RuntimeReviewView],
+) -> std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView> {
+    let mut by_session: std::collections::BTreeMap<&str, Vec<_>> =
+        std::collections::BTreeMap::new();
+    for review in reviews {
+        by_session
+            .entry(&review.session_id)
+            .or_default()
+            .push(review);
+    }
+    by_session
+        .into_iter()
+        .filter_map(|(session, reviews)| {
+            mj_client::review::most_notable(reviews.iter().copied())
+                .or_else(|| reviews.first().copied())
+                .map(|review| (session.to_owned(), review.clone()))
+        })
+        .collect()
+}
+
 /// Project the capacity service's readings and refresh status for the phone.
 pub(super) fn viewer_capacity(
     metadata: &mj_client::runtime_feed::RuntimeMetadata,

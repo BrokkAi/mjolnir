@@ -768,7 +768,9 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         }
     })).unwrap();
     chat.state
-        .set_turn_review(Some(mj_client::review::RuntimeReviewView {
+        .set_turn_reviews(vec![mj_client::review::RuntimeReviewView {
+            review_id: String::new(),
+            roots: Vec::new(),
             child_session_id: None,
             session_id: "session-deferred-review".into(),
             phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
@@ -784,7 +786,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
                 role: "reviewer-a".into(),
                 request: request.clone(),
             }],
-        }));
+        }]);
     chat.state
         .show_review_role_elicitation(Some("reviewer-a".into()), request);
     let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
@@ -802,7 +804,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         "accepted answer retains its result owner after the form closes"
     );
     // Hard-won: f69edee: a failure for A lost its draft while reviewer B owned the dialog.
-    let review_a = chat.state.turn_review().unwrap().view.clone();
+    let review_a = chat.state.turn_reviews().first().unwrap().view.clone();
     let mut review_b = review_a.clone();
     let mut question_b = draft.request().clone();
     question_b.id = "reviewer-b-question".into();
@@ -816,7 +818,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
             role: "reviewer-b".into(),
             request: question_b.clone(),
         });
-    chat.apply_review_view(Some(review_b.clone()));
+    chat.apply_review_views(vec![review_b.clone()]);
     assert_eq!(
         chat.state.elicitation.as_ref().unwrap().request(),
         &question_b
@@ -835,7 +837,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     let mut upgraded = clipboard_test_chat();
     // Hard-won: 57e492d: ChatOpened restores snapshots before installing the review projection.
     upgraded.restore_elicitation_drafts(serde_json::from_value(saved).unwrap());
-    upgraded.apply_review_view(Some(review_b));
+    upgraded.apply_review_views(vec![review_b]);
     terminal
         .draw(|frame| {
             upgraded.draw_elicitation_in(frame, frame.area(), true);
@@ -851,7 +853,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     assert!(recovered.contains("kept reviewer answer"));
     assert!(recovered.contains("reviewer lookup failed"));
     // B is resolved elsewhere; the authoritative refresh reveals A again.
-    chat.apply_review_view(Some(review_a.clone()));
+    chat.apply_review_views(vec![review_a.clone()]);
     assert!(chat.state.deferred_form_results.is_empty());
 
     terminal
@@ -897,7 +899,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         1,
         "the review projection is not known yet"
     );
-    replacement.apply_review_view(Some(review_a));
+    replacement.apply_review_views(vec![review_a]);
     assert!(replacement.state.deferred_form_results.is_empty());
     terminal
         .draw(|frame| {
@@ -915,7 +917,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     assert!(text.contains("kept reviewer answer"));
     let mut chat = replacement;
     // Hard-won: 56747ef: a failed answer resurrected a question removed by the latest review projection.
-    chat.apply_review_view(None);
+    chat.apply_review_views(Vec::new());
     chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
         draft: Some(Box::new(draft.clone())),
         result: Err("reviewer lookup failed".into()),
@@ -998,7 +1000,7 @@ async fn an_external_review_removal_closes_its_visible_question() {
 
     // A missing runtime review is authoritative even when the journal
     // poll that used to carry the form has no more events.
-    chat.apply_review_view(None);
+    chat.apply_review_views(Vec::new());
     assert!(!chat.state.reviewer_elicitation_open());
     assert!(chat.elicitation_draft().is_none());
 }
@@ -2881,7 +2883,9 @@ async fn golden_active_chat_render() {
     append_active_golden_state(&mut output, "running conversation follow-up", &buffer, &[]);
 
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_turn_review(Some(mj_client::review::RuntimeReviewView {
+    chat.set_turn_reviews(vec![mj_client::review::RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "session-review".into(),
         phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
@@ -2889,12 +2893,43 @@ async fn golden_active_chat_render() {
         status: "Review running · 2 reviewers".into(),
         verdict: None,
         questions: Vec::new(),
-    }));
+    }]);
     chat.set_input("Can you inspect the changes?".into());
     let buffer = active_golden_buffer(&mut chat, 100, 24);
     append_active_golden_state(
         &mut output,
         "review running with editable composer",
+        &buffer,
+        &[active_golden_rect(&chat, SurfaceId::PromptInput)],
+    );
+
+    // Several reviews at once: the footer names each by its repository.
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_turn_reviews(
+        [
+            ("review-a", "/workspace/a", "2 reviewers running"),
+            ("review-c", "/workspace/c", "preparing the reviewer"),
+        ]
+        .map(
+            |(review_id, root, status)| mj_client::review::RuntimeReviewView {
+                review_id: review_id.into(),
+                roots: vec![root.into()],
+                child_session_id: None,
+                session_id: "session-review".into(),
+                phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
+                roles: Vec::new(),
+                status: status.into(),
+                verdict: None,
+                questions: Vec::new(),
+            },
+        )
+        .into(),
+    );
+    chat.set_input("Anything else to review?".into());
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "two reviews running",
         &buffer,
         &[active_golden_rect(&chat, SurfaceId::PromptInput)],
     );

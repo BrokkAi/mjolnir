@@ -112,6 +112,8 @@ impl HostState {
         let placeholder = |status: &str| RuntimeReviewView {
             child_session_id: None,
             session_id: session_id.into(),
+            review_id: String::new(),
+            roots: Vec::new(),
             questions: Vec::new(),
             phase: TurnReviewPhase::LaunchingReviewer,
             roles: Vec::new(),

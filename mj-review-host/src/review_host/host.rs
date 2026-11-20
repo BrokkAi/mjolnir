@@ -328,21 +328,16 @@ impl TurnReviewHost {
             .clone()
     }
 
-    /// One review per session, for a snapshot a surface renders: the session's
-    /// first, so a placeholder never hides a real review. A surface that shows
-    /// every review reads [`Self::views_of`].
+    /// Every open review, for a snapshot a surface renders: a session's
+    /// reviews together, each with a placeholder for one still being prepared.
     #[must_use]
     pub fn views(&self) -> Vec<RuntimeReviewView> {
-        let views = self
-            .shared
+        self.shared
             .views
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut sessions = BTreeSet::new();
-        views
-            .iter()
-            .filter(|((session, _), _)| sessions.insert(session.clone()))
-            .map(|(_, view)| view.clone())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
             .collect()
     }
 

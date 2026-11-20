@@ -8,7 +8,6 @@
 
 pub(crate) use mj_core::clock::epoch_seconds;
 
-use mj_client::review::RuntimeReviewView;
 
 use crate::render::{checkpoint_age, refresh_age, reset_duration, session_display_clock};
 use crate::{DashboardState, Mode, SupportPane};
@@ -200,7 +199,7 @@ impl DashboardState {
                 self,
                 session,
                 detail,
-                self.session_review(&session.id),
+                self.session_reviews(&session.id),
                 self.unreachable_sessions.contains(&session.id),
                 operation,
                 now,
@@ -360,12 +359,12 @@ impl DashboardState {
                 if !self.session_row_is_visible_at(index) {
                     return false;
                 }
-                let review = self.session_review(&session.id);
+                let reviews = self.session_reviews(&session.id);
                 let primary = self.session_is_working(&session.id);
                 let transition = self
                     .transition_kind(&session.id)
                     .is_some_and(|_| session.last_error.is_none());
-                primary || transition || review.is_some_and(RuntimeReviewView::is_working)
+                primary || transition || mj_client::review::any_working(reviews)
             });
         let opening = self
             .opening_session()
