@@ -229,7 +229,9 @@ class FrozenInputTests(unittest.TestCase):
                     if altered:
                         self.assertTrue(response["isError"])
                         self.assertEqual(body["status"], "engine_error")
-                        self.assertIn("inputs differ", body["message"])
+                        self.assertEqual(body["message"], "The engine could not produce a valid answer.")
+                        delivery = json.loads(log.read_text().splitlines()[-1])
+                        self.assertIn("inputs differ", delivery["engine_diagnostic"])
                     else:
                         self.assertEqual(body["rows"], ROWS)
 
@@ -383,6 +385,7 @@ class EngineTests(unittest.TestCase):
                 windows[:] = [{"remaining_percent": percent, "duration_seconds": 604800, "model_scope": scope}
                               for percent, scope in ((general, None), (fable, "fable")) if percent is not None]
                 windows.append({"remaining_percent": 0, "duration_seconds": 604800, "model_scope": "sonnet"})
+                windows.append({"remaining_percent": 80, "duration_seconds": 18000})
                 if (general, fable) == (80, 80):
                     self.assertEqual(engine.session(COMMIT, {"orphan": COMMIT}, record), (runner, SESSION))
                 else:
@@ -518,7 +521,7 @@ class FakeAcpRunner(SealedRunner):
 
     def clean_checkout(self, sid):
         self.artifact = None
-        return ".fixture"
+        return f".rql-engine-{sid}"
 
     def audit_turn(self, sid, turn, directory):
         return True
@@ -531,7 +534,7 @@ class FakeAcpRunner(SealedRunner):
         if operation == "put-file":
             session_flag, sid, path_flag, path, source = args
             assert (session_flag, sid, path_flag, source) == ("--session", "test-session", "--path", "-"), args
-            assert path.startswith(".fixture/"), args
+            assert path.startswith(f".rql-engine-{sid}/"), args
             self.artifact = data
             return b""
         if operation == "fetch":
@@ -557,6 +560,8 @@ class FakeAcpRunner(SealedRunner):
                     "items": [item for item in self.boundaries if item["seq"] > cursor]}
         if operation == "wait":
             command, text = self.messages[-1]
+            if refusal := getattr(self, "turn_refusal", None):
+                return {"turn_id": len(self.messages), **refusal}
             if text == CONTEXT_RECALL:
                 response = json.dumps(self.conversation[-2] if len(self.conversation) > 1 else "")
             elif "synthetic query" in text:

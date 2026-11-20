@@ -11,7 +11,8 @@ import subprocess
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
 from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, PROMPT, REPAIR, semantics_only
-from .runner import EFFORT, MODEL, RUN_ERRORS, SESSION_ID, IsolationFailure, LaunchHeld, SealedRunner, TurnFailure
+from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, IsolationFailure, LaunchHeld,
+                     QuotaTurnFailure, SealedRunner, TurnFailure)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
 from .validation import canonical, ordered_rows, validate
 
@@ -225,6 +226,7 @@ class Engine:
                                 sid, query, self.catalogue, self.menu, errors, active)
                         except IsolationFailure as error:
                             add_turn(error.record)
+                            save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
                             retired, session_record = move_to_retired(directory)
                             provenance["retired_sessions"].append({"session": sid, "context_probe": probe})
                             runner.retire(retired, session_record)
@@ -253,7 +255,7 @@ class Engine:
                         if provenance["validation_retries"]:
                             return response("engine_error", message="; ".join(errors))
                         provenance["validation_retries"] += 1
-        except LaunchHeld as error:
+        except (LaunchHeld, QuotaTurnFailure) as error:
             return response("quota_hold", message=str(error))
         except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
             return response("engine_error", message=str(error))

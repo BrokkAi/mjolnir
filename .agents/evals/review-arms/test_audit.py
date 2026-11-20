@@ -131,3 +131,113 @@ def test_interpreter_screen_blocks_protected_access_and_opaque_source(tmp_path, 
     result = audit_call(tmp_path, {"title": command, "kind": "execute"}, single_commit=True)
     assert not result["passed"]
     assert kind in {hit["kind"] for hit in result["hits"]}
+
+
+# Hard-won: 8c9d945: live engine query voided for a locally assigned shell variable
+def test_live_engine_shell_resolves_same_command_assignment(tmp_path):
+    command = r'''C=.rql-engine/catalogue.md; grep -n "callable\|contract" $C | cut -c1-600'''
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert report["passed"], report["hits"]
+
+
+# Hard-won: 8c9d945: live engine query voided for a heredoc following shell reads
+@pytest.mark.parametrize("separator", [";", "&&", "||"])
+def test_live_engine_screens_heredoc_after_reads(tmp_path, separator):
+    command = f"sed -n 12,16p src/api.rs {separator} python3 - <<'EOF'\nprint(open('src/api.rs').read())\nEOF"
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert report["passed"], report["hits"]
+    assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"}
+
+
+# Hard-won: 8c9d945: live engine query voided for an isolated Python stdin heredoc
+@pytest.mark.parametrize("interpreter", ["python3 -I -", "node -"])
+def test_live_engine_recognizes_visible_stdin_programs(tmp_path, interpreter):
+    command = f"{interpreter} <<'EOF'\nvalue = 1\nEOF"
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert report["passed"], report["hits"]
+    assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"}
+
+
+@pytest.mark.parametrize(("command", "kind"), [
+    ('X=.mj/store.db; cat "${X}"', "memory-or-sessions"),
+    ('X=/run/hel/git-cache; cat < "$X/config"', "git-history-escape"),
+    ('cat "$UNKNOWN_AUDIT_PATH"', "needs-inspection"),
+    ('X=notes; true && X=.mj/store.db; cat "$X"', "needs-inspection"),
+    ("sed -n 1p README.md && python3 -I - <<'EOF'\nopen('.mj/store.db')\nEOF", "memory-or-sessions"),
+    ("python3 -I - <<'EOF'\nprint('safe')\nEOF\ncat /run/hel/git-cache/config", "git-history-escape"),
+    ("python3 -I - <<'EOF' < local.py\nprint('safe')\nEOF", "needs-inspection"),
+    ("python3 - <<EOF\n$(cat .mj/store.db)\nEOF", "needs-inspection"),
+])
+def test_live_shell_forms_preserve_audit_controls(tmp_path, command, kind):
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert not report["passed"]
+    assert kind in {hit["kind"] for hit in report["hits"]}
+
+
+def audit_calls(tmp_path, calls, **metadata):
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(json.dumps([{**metadata, "items": [
+        {"seq": seq, "role": "tool", "body": {"call": call}}
+        for seq, call in enumerate(calls, 1)
+    ]}]))
+    return audit_pilot(transcript, OWN, commits=[PIN], single_commit=True)
+
+
+def shell(command):
+    return {"kind": "execute", "rawInput": {"command": command}}
+
+
+# Hard-won: 8c9d945: live engine query voided for running a visibly written script
+@pytest.mark.parametrize(("write", "run"), [
+    ("mkdir -p /tmp/audit && cat > /tmp/audit/f.py <<'EOF'\nprint('sqlite')\nEOF",
+     f'cd /workspace/{OWN}/repo && python3 -I /tmp/audit/f.py "$PWD"'),
+    ("printf '%s\\n' '#!/bin/sh' 'cat README.md' > f", "chmod +x f && ./f"),
+    ("tee f <<'EOF'\ncat README.md\nEOF", 'sh "$PWD/f"'),
+])
+def test_audit_screens_scripts_written_visibly_in_an_earlier_call(tmp_path, write, run):
+    report = audit_calls(tmp_path, [shell(write), shell(run)], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "interpreter-screened")]
+
+
+@pytest.mark.parametrize("mutation", [
+    shell("printf 'changed' >> f.py"),
+    shell("cp other.py f.py"),
+    shell("mv other.py f.py"),
+    {"kind": "edit", "rawInput": {"file_path": "f.py", "new_string": "changed"}},
+])
+def test_script_changed_after_visible_write_is_opaque(tmp_path, mutation):
+    report = audit_calls(tmp_path, [
+        shell("cat > f.py <<'EOF'\nprint('safe')\nEOF"),
+        mutation,
+        shell("python3 f.py"),
+    ])
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(3, "needs-inspection")]
+
+
+def test_audit_checks_protected_effects_in_recorded_script_and_resolved_home(tmp_path):
+    report = audit_calls(tmp_path, [
+        shell("printf '%s\\n' \"open('.mj/store.db')\" > f.py; python3 f.py"),
+        shell('cat "$HOME/.local/share/mjolnir/store"'),
+    ], home="/home/hel")
+    assert not report["passed"]
+    assert {(hit["seq"], hit["kind"]) for hit in report["hits"]} >= {
+        (1, "memory-or-sessions"), (2, "memory-or-sessions"),
+    }
+
+
+def test_pwd_uses_recorded_placement_and_does_not_guess_after_failed_cd(tmp_path):
+    (tmp_path / "placement.json").write_text(json.dumps({"cwd": f"/workspace/{OWN}/repo"}))
+    report = audit_calls(tmp_path, [shell('cat "$PWD/README.md"'), shell('cd missing; cat "$PWD/README.md"')])
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "needs-inspection")]
+
+
+def test_recursively_invoked_script_requires_inspection(tmp_path):
+    report = audit_calls(tmp_path, [
+        shell("printf '%s\\n' \"bash -c 'sh f'\" > f"),
+        shell("sh f"),
+    ])
+    assert not report["passed"]
+    assert "needs-inspection" in {hit["kind"] for hit in report["hits"]}

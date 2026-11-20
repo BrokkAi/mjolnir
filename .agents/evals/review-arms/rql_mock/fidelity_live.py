@@ -277,6 +277,12 @@ def main(argv=None):
     directory = args.run_root / "fidelity"
     run = checkpoint_directory(directory, engine)
     with locked(directory / ".lock"):
+        gate = directory / "gate-report.json"
+        if args.live and gate.exists():
+            previous = json.loads(gate.read_bytes())
+            if previous["prescience_pooled"]["pass"] is not True:
+                raise ValueError(f"pooled prescience failed for engine {previous['engine_inputs_sha256']}; "
+                                 f"the pilot remains blocked by {gate}")
         pool = {diff["key"]: sorted(touched_symbols(Path(config["repos"][diff["repo"]]), diff["base"],
                                                    diff["intro"], args.rust_grammar, args.js_grammar))
                 for diff in manifest["diffs"]}
@@ -329,8 +335,9 @@ def main(argv=None):
         report.update(engine.identity)
         report["sample"] = str(blueprint.relative_to(directory))
         report["sample_sha256"] = sha(blueprint.read_bytes())
-        driver.save(directory / "gate-report.json", report)
-        return int(not all(step["pass"] for step in report["steps"].values()))
+        driver.save(gate, report)
+        return int(not report["prescience_pooled"]["pass"]
+                   or not all(step["pass"] for step in report["steps"].values()))
 
 
 if __name__ == "__main__":

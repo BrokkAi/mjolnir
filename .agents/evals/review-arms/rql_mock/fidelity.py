@@ -410,10 +410,6 @@ def gate_report(manifest_hash, served, queries, records, seed):
     pooled = pooled_prescience([row for step in served for row in decisive[step]], f"{seed}/prescience")
     steps = {step: step_result(groups[step, "random"], decisive[step], f"{seed}/{step}")
              for step in served}
-    if not pooled["pass"]:
-        for result in steps.values():
-            result["pass"] = False
-            result["reasons"].append("pooled prescience")
     return {"manifest_sha256": manifest_hash, "served_steps": served,
             "steps": steps, "prescience_pooled": pooled,
             "documented": {"reported_only": True, "random_n": len(documented), "metrics": docs,
@@ -428,7 +424,7 @@ def gate_report(manifest_hash, served, queries, records, seed):
                                  "restricted to rows the engine or Terra enumerated. "
                                  "Pool counts across added steps and report a percentile 95% bootstrap interval "
                                  "over queries, omitting replicates with an undefined gap. "
-                                 "A point estimate above +0.10 blocks all served steps. "
+                                 "A point estimate above +0.10 blocks the pilot. "
                                  "Report census-only misses separately.",
             "accuracy_method": "Pool row counts within each stratum and bootstrap queries with replacement. "
                                "The lower bound is the 2.5th percentile of 10,000 seeded replicates. "

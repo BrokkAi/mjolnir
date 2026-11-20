@@ -81,29 +81,62 @@ class PilotTest(unittest.TestCase):
 
     # Hard-won: 49e16b8: reused engines could spend below quota and the writer could still finish.
     def test_reused_engine_quota_hold_interrupts_writer_and_supersedes_attempt(self):
+        self.assert_writer_interrupted_on_engine_quota()
+
+    # Hard-won: 8c9d945: engine rate limit scored as engine_error.
+    def test_provider_refusal_interrupts_writer_instead_of_scoring_it(self):
+        for refusal in ({"outcome": "error", "stop_reason": "QuotaLimit"},
+                        {"outcome": "error", "diagnostic": {"http_status": 429}},
+                        {"outcome": "error", "diagnostic": {"message": '{"type":"rate_limit_error"}'}}):
+            with self.subTest(refusal=refusal), TemporaryDirectory() as directory:
+                self.assert_writer_interrupted_on_engine_quota(refusal, Path(directory))
+        with self.subTest(remaining_5h=20), TemporaryDirectory() as directory:
+            self.assert_writer_interrupted_on_engine_quota(root=Path(directory), short_window=True)
+
+    def assert_writer_interrupted_on_engine_quota(self, refusal=None, root=None, short_window=False):
+        from rql_mock import engine as endpoint
         from rql_mock.engine.test_engine import CATALOGUE, COMMIT, MENU, QUERY, SOURCE, VERSION, Engine, FakeAcpRunner
 
+        root = root or self.root
         reused = FakeAcpRunner()
-        engine = Engine(self.root / "cache", (CATALOGUE, MENU),
+        engine = Engine(root / "cache", (CATALOGUE, MENU),
                         lambda commit: (SOURCE.get, {"tree": "frozen", "orphan": COMMIT}),
                         lambda: reused, VERSION)
+        short = {"duration_seconds": 18000, "remaining_percent": 21}
+        if short_window:
+            def quota(operation, *args):
+                self.assertEqual((operation, *args), ("quota", "--profile", "claude-test"))
+                windows = [{"remaining_percent": 80, "duration_seconds": 604800, "model_scope": scope}
+                           for scope in (None, "fable")]
+                return {"profiles": [{"report": {"windows": [*windows, short]}}]}
+
+            self.addCleanup(setattr, pilot.driver, "mj", pilot.driver.mj)
+            pilot.driver.mj = quota
+            reused.pilot_weekly_hold = pilot.driver.pilot_weekly_hold
         self.assertEqual(engine.answer(COMMIT, QUERY)["status"], "ok")
-        reused.quota_hold = "weekly quota below floor"
+        reused.turn_refusal = refusal
+        reused.quota_hold = None if refusal or short_window else "weekly quota below floor"
+        short["remaining_percent"] = 20
         turns = len(reused.turns)
         query = '(function :name "different")'
 
         runner = pilot.Pilot.__new__(pilot.Pilot)
-        runner.args = SimpleNamespace(run_root=self.root)
+        runner.args = SimpleNamespace(run_root=root)
+        runner.engine_identity = engine.identity
+        self.addCleanup(setattr, endpoint, "load_engine", endpoint.load_engine)
+        endpoint.load_engine = lambda: SimpleNamespace(identity=engine.identity, config={"profile": "claude-test"})
         runner.diffs = {"mjolnir/first": {}}
         runner.writer_model = ("gpt-6.1-sol", "high")
         runner.gate, runner.attested = None, set()
         job = {"job": "mjolnir/first/R/r1/writer", "diff": "mjolnir/first",
                "arm": "R", "replicate": 1, "kind": "writer"}
-        path = pilot.job_path(self.root, job)
+        path = pilot.job_path(root, job)
         runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {"rql_tools": ["rql_query"]}}
+        answers = []
 
         def write(bug_id, gate, *, pilot):
             answer = engine.answer(COMMIT, query)
+            answers.append(answer)
             sid = f"{pilot['tag'].split('/')[-1]:0>32}"
             output = b"Writer brief.\n"
             (path / "brief-candidate.md").write_bytes(output)
@@ -121,16 +154,120 @@ class PilotTest(unittest.TestCase):
         brief_driver.run = write
         brief_driver.driver.destroy_captured_pilot = lambda *args, **kwargs: "done"
         state = runner.execute(job)
-        self.assertIn("interrupted: RQL engine weekly quota", state)
+        self.assertIn("interrupted: RQL engine quota", state)
+        self.assertEqual(answers[0]["status"], "quota_hold")
+        if short_window:
+            self.assertIn("20% 5-hour remaining", answers[0]["message"])
+        if refusal:
+            self.assertEqual(answers[0]["provenance"]["turns"][-1]["outcome"], refusal["outcome"])
         self.assertEqual(len(reused.turns), turns)
         self.assertIsNone(runner.complete(job))
         self.assertFalse((path / "done.json").exists())
         self.assertTrue((path / "failed.json").is_file())
-        reused.quota_hold = None
-        self.assertEqual(runner.execute(job), "done")
+        if short_window:
+            self.assertIn("20% 5-hour remaining", runner.execute(job))
+            short["remaining_percent"] = None
+            self.assertIn("no usable 5-hour quota report", runner.execute(job))
+            self.assertEqual(len(answers), 1)
+            self.assertFalse(list(path.parent.glob(f"{path.name}.superseded-*")))
+        reused.quota_hold = reused.turn_refusal = None
+        short["remaining_percent"] = 21
+        with unittest.mock.patch.object(pilot.driver, "pilot_weekly_hold", reused.pilot_weekly_hold):
+            self.assertEqual(runner.execute(job), "done")
+        self.assertEqual(answers[1]["status"], "ok")
         self.assertEqual(len(reused.turns), turns + 1)
         self.assertTrue((path / "done.json").is_file())
         self.assertEqual(len(list(path.parent.glob(f"{path.name}.superseded-*"))), 1)
+
+    # Hard-won: 8c9d945: provisioning was treated as a missing container by the assignment hook.
+    def test_tool_assignment_waits_for_the_writer_and_reviewer_startup_gate(self):
+        import threading
+
+        class StopBeforePrompt(RuntimeError):
+            pass
+
+        state = {"lifecycle": "live", "is_idle": True, "no_later_history": True,
+                 "at": "intro", "base": "base", "profile_id": "profile"}
+        events = []
+
+        def wait(operation, *args, **kwargs):
+            self.assertEqual(operation, "wait")
+            events.append("ready")
+            return {"outcome": "finished", "session": state}
+
+        def place(sid):
+            self.assertEqual(events[-1], "ready")
+            return {"image": "test-image"}
+
+        def publish(sid):
+            self.assertTrue((path / "settings.json").is_file())
+            events.append("hook")
+
+        def before_prompt(*args):
+            self.assertEqual(events, ["launch", "ready", "hook"])
+            raise StopBeforePrompt
+
+        with (unittest.mock.patch.object(brief_driver.driver, "MJ_INSTANCE_ARGS", ("--instance", "fixture")),
+              unittest.mock.patch.object(brief_driver, "sealed_launch", lambda *a, **k: (events.append("launch"), "sid")[1]),
+              unittest.mock.patch.object(brief_driver, "mj", wait),
+              unittest.mock.patch.object(brief_driver, "configure_pilot_model_ready", lambda *a: {}),
+              unittest.mock.patch.object(brief_driver.driver, "container", place),
+              unittest.mock.patch.object(brief_driver.driver, "inventory", lambda *a: {
+                  "remotes": [], "alternates": False, "status": ""}),
+              unittest.mock.patch.object(brief_driver, "check_pilot_tool", before_prompt)):
+            for kind in ("writer", "reviewer"):
+                events.clear()
+                path = self.root / kind
+                params = {"path": path, "tag": kind, "profile": "profile", "model": ("model", "high"),
+                          "bug": {"intro_commit": "intro", "base_commit": "base"},
+                          "inputs": {"image_digest": "sha256:test-image"}, "attest_cache": False,
+                          "publish_tool_assignment": publish}
+                with self.subTest(kind=kind), self.assertRaises(StopBeforePrompt):
+                    if kind == "writer":
+                        brief_driver.run("bug", threading.Semaphore(), pilot=params)
+                    else:
+                        pilot_review.run(params)
+
+    # Hard-won: 8c9d945: a lost prompt acknowledgement launched and charged a replacement.
+    def test_prompt_timeout_reconciles_same_launch_without_resending(self):
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root)
+        runner.writer_model, runner.gate, runner.attested = ("sol", "high"), None, set()
+        job = {"job": "mjolnir/first/G/r1/writer", "diff": "mjolnir/first",
+               "arm": "G", "replicate": 1, "kind": "writer"}
+        path = pilot.job_path(self.root, job)
+        runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {}}
+        launches, sent = [], []
+
+        def fake_message(operation, *args, **kwargs):
+            self.assertEqual(operation, "message")
+            sent.append(args[args.index("--command-id") + 1])
+            raise subprocess.TimeoutExpired("mj message", 300)
+
+        def write(bug_id, gate, *, pilot):
+            launch = path / "launch.json"
+            if not launch.exists():
+                launches.append("original")
+                brief_driver.save(launch, {"session_id": "original"})
+            brief_driver.send(path, "original", "prompt", "writer-command", "Write the brief.")
+            brief_driver.save(path / "done.json", {})
+            return "done"
+
+        def observe(sid):
+            self.assertEqual(sid, "original")
+            return {"lifecycle": "live", "is_idle": True,
+                    "last_turn_outcome": {"command_id": "writer-command", "outcome": {"kind": "completed"}}}
+
+        with (unittest.mock.patch.object(brief_driver, "run", write),
+              unittest.mock.patch.object(brief_driver, "mj", fake_message),
+              unittest.mock.patch.object(brief_driver, "session", observe)):
+            self.assertIn("interrupted", runner.execute(job))
+            self.assertTrue((path / "prompt-intent.json").is_file())
+            self.assertFalse((path / "failed.json").exists())
+            self.assertEqual(runner.execute(job), "done")
+        self.assertEqual(launches, ["original"])
+        self.assertEqual(sent, ["writer-command"])
+        self.assertFalse(list(path.parent.glob(f"{path.name}.superseded-*")))
 
     # Hard-won: 49e16b8: startup refusal retained a session and charged a replacement.
     def test_config_startup_refusal_retries_same_session(self):
@@ -351,7 +488,8 @@ class PilotTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "require a passing fidelity gate"):
             pilot.require_fidelity(self.root, raw, manifest, rql)
         outcomes = {"contract-cases": {"pass": True}, "value-transfers": {"pass": False}}
-        report = {**engine.identity, "served_steps": manifest["served_steps"], "steps": outcomes}
+        report = {**engine.identity, "served_steps": manifest["served_steps"], "steps": outcomes,
+                  "prescience_pooled": {"pass": True}}
         pilot.driver.save(gate, report)
         with self.assertRaisesRegex(ValueError, "no passing result for value-transfers"):
             pilot.require_fidelity(self.root, raw, manifest, rql)
@@ -366,6 +504,20 @@ class PilotTest(unittest.TestCase):
         pilot.driver.save(gate, {**report, "engine_inputs_sha256": "0" * 64})
         with self.assertRaisesRegex(ValueError, "engine identity"):
             pilot.require_fidelity(self.root, raw, manifest, rql)
+
+    # Hard-won: 8c9d945: pooled prescience failure did not stop G writers after a re-freeze.
+    def test_g_writer_admission_sees_pooled_failure_from_the_previous_freeze(self):
+        manifest = self.manifest
+        raw = json.dumps(manifest).encode()
+        groups = pilot.select_jobs(manifest, arms=["G"])
+        self.assertIsNone(pilot.require_fidelity(self.root, raw, manifest, groups))
+        pilot.driver.save(self.root / "fidelity/gate-report.json",
+                          {"manifest_sha256": "1" * 64, "engine_inputs_sha256": "2" * 64,
+                           "served_steps": ["contract-cases"], "steps": {"contract-cases": {"pass": True}},
+                           "prescience_pooled": {"pass": False}})
+        reduced = {**manifest, "served_steps": []}
+        with self.assertRaisesRegex(ValueError, "pooled prescience failed"):
+            pilot.require_fidelity(self.root, json.dumps(reduced).encode(), reduced, groups)
 
     def pilot_engine_fixture(self, steps):
         from rql_mock import engine

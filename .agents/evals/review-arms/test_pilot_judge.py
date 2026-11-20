@@ -253,6 +253,21 @@ class PilotFixture(unittest.TestCase):
         for directory, values in (("judge", judged), ("hand-check", checked)):
             for oid, value in values.items():
                 j.save(self.root / directory / f"{oid}.json", value)
+        writer = next(entry for entry in key["outputs"].values() if entry["kind"] == "writer")
+        writer_path = (self.root / writer["artifact"]).parent.with_name("writer.superseded-1")
+        reviewer = next(entry for entry in key["outputs"].values() if entry["kind"] == "reviewer")
+        reviewer_path = (self.root / reviewer["artifact"]).parent
+        engine = self.root / "engine-cache" / "commit" / "retired" / "engine"
+        judge = self.root / j.KEY_PATH.parent / "retired" / "batch" / j.HAND_PATH / "sessions" / "batch" / "void-judge"
+        screened = {"kind": "interpreter-screened", "seq": 5}
+        for kind, path, launch in (("writer", writer_path, "launch.json"),
+                                   ("reviewer", reviewer_path, "launch.json"),
+                                   ("engine", engine, "session.json"), ("judge", judge, "launch.json")):
+            j.save(path / launch, {"session_id": kind})
+            j.save(path / "audit.json", {"passed": kind == "reviewer", "hits": [screened]})
+        j.save(engine / "turn-3-audit.json", {"passed": False, "hits": [screened]})
+        egress = {"time": "fixture", "container": "engine", "reachable": {"github.com": True}, "enforced": False}
+        (self.root / "egress.jsonl").write_text(json.dumps(egress) + "\n")
         # The isolated study directory contains only the committed-style snapshot.
         self.assertFalse((self.root / "labels" / "development-primary.jsonl").exists())
         manifest_path = self.root / "pilot/manifest.json"
@@ -265,6 +280,11 @@ class PilotFixture(unittest.TestCase):
             r.main()
         self.assertEqual(first, readout_path.read_bytes())
         result = j.load(readout_path)
+        isolation = result["isolation"]
+        self.assertEqual(isolation["egress_measurements"], [egress])
+        self.assertEqual(isolation["void_sessions"], {"writer": 1, "reviewer": 0, "engine": 1, "judge": 1})
+        self.assertEqual(isolation["interpreter_screened"], {"writer": 1, "reviewer": 1, "engine": 1, "judge": 1})
+        self.assertIn("does not restrict", isolation["enforcement_gap"])
         self.assertEqual(result["unfinished_diffs"], ["repo/d2"])
         self.assertEqual(result["as_judged"]["arms"]["R"]["catch_rate"], 0.25)
         query = result["as_judged"]["arms"]["R"]["querying"]

@@ -186,7 +186,8 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
         raise ValueError("pilot teardown requires the recorded launch in a named instance")
     names = ("transcript.json", "usage.json", output, "cache-attestation.json", "mcp-reconnect-result.json",
              "pre-inventory.json", "settings.json", "launch.json", "prompt-completion.json",
-             *(p.name for p in sorted(d.glob("fix-*-completion.json"))), *(("queries.jsonl",) if allow_rql else ()))
+             *(p.name for p in sorted(d.glob("fix-*-completion.json"))),
+             *((f"queries-{sid}.jsonl",) if allow_rql else ()))
     paths = [d / name for name in names]
     record = {"session_id": sid, "instance": MJ_INSTANCE_ARGS[-1], "profile": profile, "model": model,
               "effort": effort, "output": output,
@@ -241,14 +242,15 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
     return "done"
 
 
-def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
+def quota_hold(scope=None, *, floor=None, weekly=False, strict=False, short_floor=None):
     """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
     shared profiles whose least window must keep that many percent (a coordinator's limit,
     2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
     daemon's stored report; a missing or unreadable report holds the job, since unknown is
     not "enough". A caller can supply its own floor, restrict it to weekly windows, and
     require the remaining percentage to strictly exceed the floor. A weekly Fable
-    check requires both the general and the Fable-specific weekly windows."""
+    check requires both the general and the Fable-specific weekly windows.
+    An optional short floor also requires a usable five-hour window."""
     if floor is None:
         floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
     if not floor:
@@ -268,6 +270,7 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
         # windows apply to every model; an absent matching pool stays unknown.
         if scope:
             windows = [w for w, models in pools if models == [""] or scope in models]
+        short = [w for w in windows if w.get("duration_seconds") == 18_000] if short_floor is not None else None
         if weekly:
             windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
         left = [w.get("remaining_percent") for w in windows]
@@ -285,6 +288,12 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
                         f"(resets {least.get('resets', 'unknown')}, "
                         f"epoch {least.get('resets_at_epoch_seconds')})")
             return f"{profile}: {remaining}% left, below the floor of {percent}%"
+        if short is not None:
+            left = [w.get("remaining_percent") for w in short]
+            if not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left):
+                return f"{profile}: no usable 5-hour quota report ({json.dumps(report)[:300]})"
+            if min(left) <= short_floor:
+                return f"{profile}: {min(left)}% 5-hour remaining, requires above {short_floor}%"
     return None
 
 
@@ -292,7 +301,7 @@ PILOT_TERRA_QUOTA_COST = 20
 
 
 def pilot_weekly_hold(profile, *, scope=None, cost=0, quota=None):
-    """Check the study's weekly floor plus the estimated cost in hundredths of a point."""
+    """Check the pilot's weekly and applicable short-window floors from one report."""
     # PLAN-rql-census.md sets the floor at 25%. There is no measured Fable
     # per-session weekly cost in the pilot, so its launches use the floor itself.
     threshold = 2500 + cost
@@ -300,6 +309,10 @@ def pilot_weekly_hold(profile, *, scope=None, cost=0, quota=None):
     quota = quota_hold if quota is None else quota
     if scope is None:
         return quota(floor=floor, weekly=True, strict=True)
+    if scope == "fable":
+        # Coordinator ruling, 2026-11-20: the Claude5 smoke measured 5–6 points
+        # per Fable/high answer. A 20% reserve leaves room for other sessions.
+        return quota(scope, floor=floor, weekly=True, strict=True, short_floor=20)
     return quota(scope, floor=floor, weekly=True, strict=True)
 
 

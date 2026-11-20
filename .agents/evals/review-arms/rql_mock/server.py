@@ -29,6 +29,7 @@ TOOL = {
         "additionalProperties": False,
     },
 }
+ENGINE_ERROR = "The engine could not produce a valid answer."
 
 
 def source_site(site):
@@ -58,7 +59,9 @@ class Server:
 
     def page_answer(self, result, page):
         status = result["status"]
-        if status in {"parse_error", "engine_error", "quota_hold"}:
+        if status == "engine_error":
+            return error(status, ENGINE_ERROR)
+        if status in {"parse_error", "quota_hold"}:
             message = result.get("message")
             if not isinstance(message, str):
                 raise ValueError("missing engine error message")
@@ -97,7 +100,7 @@ class Server:
         if isinstance(arguments, dict):
             query = arguments.get("query")
             page = arguments.get("page", 1)
-        provenance = None
+        provenance, diagnostic = None, None
         if (
             params.get("name") != TOOL["name"]
             or not isinstance(query, str)
@@ -113,12 +116,16 @@ class Server:
                 result = self.answer(self.assignment["intro"], query, expected_inputs=expected_inputs)
                 payload = self.page_answer(result, page)
                 provenance = result.get("provenance")
+                if result["status"] == "engine_error":
+                    diagnostic = result.get("message")
                 encode(provenance)
+                encode(diagnostic)
                 encode(payload)
-            except Exception:
+            except Exception as exc:
                 # SSH stderr reaches the writer. Keep Python exception details off that stream.
-                payload = error("engine_error", "The engine failed to produce a valid answer.")
+                payload = error("engine_error", ENGINE_ERROR)
                 provenance = None
+                diagnostic = str(exc)
         delivered = encode(payload)
         record = {
             "time": started_at,
@@ -137,6 +144,8 @@ class Server:
             "provenance": provenance,
             "delivered": False,
         }
+        if diagnostic is not None:
+            record["engine_diagnostic"] = diagnostic
         def log_delivery(delivered):
             record["delivered"] = delivered
             # Reconnects can run in parallel. Keep a large audit record together.

@@ -111,7 +111,8 @@ R and R-loc get that same checklist plus `writer-rql.md`, the pinned
 catalogue and only the frozen semantics for the manifest's `served_steps`.
 Those writers require `fidelity/gate-report.json` in the run root to match
 the manifest and pass each served added step. N and G can run independently
-before that report exists. The private gold cases and pilot bug IDs are
+before that report exists. A failed pooled prescience verdict stops all pilot
+launches, including G, and a re-freeze cannot clear it. The private gold cases and pilot bug IDs are
 excluded from every prompt.
 
 ## Evidence and recovery

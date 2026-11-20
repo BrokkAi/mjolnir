@@ -107,6 +107,10 @@ class IsolationFailure(TurnFailure):
     """The evidence on disk belongs to a session that must be retired."""
 
 
+class QuotaTurnFailure(TurnFailure):
+    """The provider refused an accepted engine turn for quota or rate limits."""
+
+
 class LaunchHeld(RuntimeError):
     """Quota admission refused before a session launch or paid turn was attempted."""
 
@@ -274,6 +278,9 @@ class SealedRunner:
             key = "recall" if result["context_id"] else "primer"
             result[key] = error.record
             result["message"] = str(error)
+            if isinstance(error, QuotaTurnFailure):
+                self.driver.save(path, result)
+                raise
         except RUN_ERRORS as error:
             result["message"] = str(error)
         self.driver.save(path, result)
@@ -303,10 +310,29 @@ class SealedRunner:
         try:
             waited = self.driver.mj("wait", "--session", sid, "--turn", turn,
                                     "--return-on-input", "--timeout", 1800, timeout=1830)
-            if waited.get("turn_id") != turn or waited["outcome"] != "finished":
+            if waited.get("turn_id") != turn:
+                raise RuntimeError(f"engine turn {turn} ended with {waited['outcome']}")
+            if waited["outcome"] != "finished":
+                record["outcome"] = waited["outcome"]
+                record["stop_reason"] = waited.get("stop_reason")
+                diagnostic = waited.get("diagnostic") or {}
+                record["diagnostic"] = diagnostic
+                code = diagnostic.get("code")
+                if (waited["outcome"] == "quota_limit" or record["stop_reason"] == "QuotaLimit"
+                        or diagnostic.get("http_status") == 429
+                        or code in {"rate_limit_error", "provider.rate_limit_error", "usage_limit", "quota_exceeded",
+                                    "provider.quota_exceeded", "usageLimitExceeded", "usage_limit_exceeded"}
+                        # Older bridges can carry the Claude API's documented error body as text.
+                        # https://platform.claude.com/docs/en/api/errors
+                        or (not code or code == "limit" or str(code).lstrip("-").isdigit())
+                        and re.search(r'"type"\s*:\s*"rate_limit_error"',
+                                      diagnostic.get("message") or waited.get("message") or "")):
+                    raise QuotaTurnFailure("The engine provider temporarily refused the turn for quota.", record)
                 raise RuntimeError(f"engine turn {turn} ended with {waited['outcome']}")
             after = self.driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
             record["tokens"] = usage_delta(before, after, command, turn, self.config["model_version"])
+        except QuotaTurnFailure:
+            raise
         except RUN_ERRORS as error:
             raise TurnFailure(str(error), record) from error
         return (waited.get("final_message") or "").strip(), record

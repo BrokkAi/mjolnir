@@ -173,16 +173,21 @@ def select_jobs(manifest, diff=None, arms=None, replicate=None):
 
 
 def require_fidelity(root, raw, manifest, groups):
-    if not any(tool_arm(job) != "none" for jobs in groups.values() for job in jobs):
-        return
-    steps = manifest.get("served_steps")
-    if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
-        raise ValueError("R and R-loc require a manifest with served_steps")
+    uses_rql = any(tool_arm(job) != "none" for jobs in groups.values() for job in jobs)
     path = root / "fidelity/gate-report.json"
+    if not uses_rql and not path.exists():
+        return
     try:
+        report = read_json(path)
+        if report["prescience_pooled"]["pass"] is not True:
+            raise ValueError("pooled prescience failed and blocks the pilot")
+        if not uses_rql:
+            return
+        steps = manifest.get("served_steps")
+        if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
+            raise ValueError("R and R-loc require a manifest with served_steps")
         from rql_mock.engine import load_engine
         identity = load_engine().identity
-        report = read_json(path)
         if (report["manifest_sha256"] != digest(raw)
                 or report["manifest_sha256"] != identity["manifest_sha256"]
                 or report["engine_inputs_sha256"] != identity["engine_inputs_sha256"]
@@ -196,7 +201,8 @@ def require_fidelity(root, raw, manifest, groups):
             raise ValueError(f"no passing result for {', '.join(failed)}")
         return identity
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-        raise ValueError(f"R and R-loc require a passing fidelity gate at {path}: {error}") from error
+        reason = "R and R-loc require a passing fidelity gate" if uses_rql else "pilot fidelity gate blocked launch"
+        raise ValueError(f"{reason} at {path}: {error}") from error
 
 
 def repository(config, row, args):
@@ -370,7 +376,35 @@ class Pilot:
         if params is None:
             raise RuntimeError(f"{job['job']} requires an accepted brief")
         path = params["path"]
-        if (path / "done.json").exists() or (path / "failed.json").exists():
+
+        def revoke_assignment(sid):
+            assignment = path / "tool-assignment.json"
+            if not assignment.exists():
+                return
+            record = read_json(assignment)
+            if record["session_id"] != sid:
+                raise ValueError("the assignment does not belong to the recorded launch")
+            if record["arm"] != "none":
+                subprocess.run([str(self.args.rql_hook), "--revoke", str(assignment)],
+                               check=True, stdout=subprocess.PIPE)
+
+        failure = path / "failed.json"
+        if failure.exists() and read_json(failure).get("status") == "quota_hold":
+            from rql_mock.engine import load_engine
+            try:
+                engine = load_engine()
+                if engine.identity != self.engine_identity:
+                    raise ValueError("the RQL engine differs from the admitted identity")
+                if hold := driver.pilot_weekly_hold(engine.config["profile"], scope="fable"):
+                    return f"interrupted: {hold}"
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                return f"needs-recovery: cannot check the interrupted writer's engine quota ({error})"
+        if (path / "done.json").exists() or failure.exists():
+            if (path / "launch.json").exists():
+                try:
+                    revoke_assignment(read_json(path / "launch.json")["session_id"])
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                    return f"needs-recovery: could not revoke the superseded RQL assignment ({error})"
             archive(path)
         receipt = path / "inputs.json"
         if receipt.exists() and read_json(receipt) != params["inputs"] and (path / "launch-intent.json").exists():
@@ -384,9 +418,7 @@ class Pilot:
         params["attest_cache"] = True
         params["publish_tool_assignment"] = lambda sid: publish_tool_assignment(
             path, self.args, job, self.diffs[job["diff"]], sid, engine_identity=self.engine_identity)
-        params["revoke_tool_assignment"] = lambda sid: subprocess.run(
-            [str(self.args.rql_hook), "--revoke", str(path / "tool-assignment.json")],
-            check=True, stdout=subprocess.PIPE)
+        params["revoke_tool_assignment"] = revoke_assignment
         try:
             if job["kind"] == "writer":
                 params["model"] = self.writer_model
@@ -397,13 +429,15 @@ class Pilot:
                                 delivery = json.loads(line)
                                 if (delivery.get("session") == sid and delivery.get("delivered") is True
                                         and delivery.get("status") == "quota_hold"):
-                                    return "RQL engine weekly quota held a writer query"
+                                    return "RQL engine quota held a writer query"
 
                     params["writer_interruption"] = writer_interruption
                 state = brief_driver.run(params["bug"]["id"], self.gate, pilot=params)
             else:
                 params["model"] = self.reviewer_model
                 state = pilot_review.run(params)
+        except (brief_driver.PromptUncertain, TimeoutError, subprocess.TimeoutExpired) as error:
+            return f"interrupted: {error}"
         except (OSError, KeyError, TypeError, ValueError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
             launch = path / "launch.json"
             if not launch.exists():

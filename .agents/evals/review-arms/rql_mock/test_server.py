@@ -320,7 +320,23 @@ os.execve(command[0], command, {**os.environ, "SSH_ORIGINAL_COMMAND": sid})
         self.assertEqual(records[0]["page"], 1)
         self.assertEqual([r["result"]["isError"] for r in responses], [False, True, True, True])
         self.assertEqual(payload(responses[1])["message"], "Stub parser rejected the query.")
-        self.assertEqual(payload(responses[2])["message"], "Stub engine could not answer.")
+        self.assertEqual(payload(responses[2])["message"], "The engine could not produce a valid answer.")
+        self.assertEqual(records[2]["engine_diagnostic"], "Stub engine could not answer.")
+
+    # Hard-won: 8c9d945: an R-loc engine error disclosed row diagnostics.
+    def test_location_arm_engine_error_keeps_diagnostics_host_side(self):
+        from server import Server
+
+        details = "rows[3].fields.binding: src/private.rs does not contain the claimed expression"
+        # Use a real file because the writer delivery audit takes an flock.
+        with self.logs[SESSION_LOC].open("w") as output:
+            server = Server(SESSION_LOC, {"intro": COMMIT, "diff": DIFF, "arm": "R-loc"}, 50,
+                            lambda *args, **kwargs: {"status": "engine_error", "message": details}, output)
+            response = server.call({"name": "rql_query", "arguments": {"query": "demo"}})
+            response.pop("_after_write")(True)
+            self.assertEqual(payload({"result": response}),
+                             {"status": "engine_error", "message": "The engine could not produce a valid answer."})
+        self.assertEqual(json.loads(self.logs[SESSION_LOC].read_text())["engine_diagnostic"], details)
 
     def test_large_jsonrpc_answer_streams_without_truncating_or_blocking_requests(self):
         # Both input and output exceed a pipe buffer before the final ping. subprocess.run

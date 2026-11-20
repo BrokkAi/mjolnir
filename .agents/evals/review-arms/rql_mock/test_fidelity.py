@@ -60,7 +60,7 @@ class Sampling(unittest.TestCase):
         self.assertTrue(result["documented"]["reasons"])
         self.assertEqual(len(fresh), 20)
 
-    def test_pooled_failure_blocks_all_served_steps_with_passing_accuracy(self):
+    def test_pooled_failure_keeps_the_independent_step_accuracy_verdicts(self):
         queries, _ = sample(self.manifest, self.served, self.documents, self.eligible,
                             lambda _: [("src/lib.rs", "definition", "s")])
         records = {q.key: GOOD for q in queries}
@@ -83,8 +83,8 @@ class Sampling(unittest.TestCase):
         self.assertLess(pooled["interval"][0], pooled["gap"])
         self.assertGreater(pooled["interval"][1], pooled["gap"])
         for step in failed["steps"].values():
-            self.assertFalse(step["pass"])
-            self.assertEqual(step["reasons"], ["pooled prescience"])
+            self.assertTrue(step["pass"])
+            self.assertEqual(step["reasons"], [])
             self.assertEqual(step["prescience"], "not_estimable")
 
     def test_symbol_ranges_include_body_edits_and_both_hunk_sides(self):

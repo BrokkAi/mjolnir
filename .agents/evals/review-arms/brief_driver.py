@@ -101,7 +101,11 @@ class WriterBriefMissing(RuntimeError):
     """The completed writer left no brief.md in its checkout."""
 
 
-def wait_command(sid, command, limit=1800):
+class PromptUncertain(RuntimeError):
+    """Keep the recorded session and reconcile this command before sending another."""
+
+
+def wait_command(sid, command, limit=1800, *, awaiting_receipt=False):
     """limit=None waits for the session's own outcome, with no observer deadline."""
     end = None if limit is None else time.monotonic() + limit
     while end is None or time.monotonic() < end:
@@ -113,8 +117,10 @@ def wait_command(sid, command, limit=1800):
             if outcome["outcome"]["kind"] != "completed":
                 raise WriterTurnFailed(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
             return outcome
-        if s.get("lifecycle") == "failed" or s.get("has_error"):
-            raise RuntimeError(f"writer session {sid} failed: {json.dumps(s)[:600]}")
+        if s.get("lifecycle") == "failed":
+            raise WriterTurnFailed(f"session {sid} failed: {json.dumps(s)[:600]}")
+        if awaiting_receipt and s.get("is_idle") and s.get("lifecycle") == "live":
+            raise PromptUncertain(f"{sid}: no recorded outcome for {command}; submission remains uncertain")
         time.sleep(5)
     raise TimeoutError(f"writer turn {command} did not finish")
 
@@ -132,12 +138,57 @@ def fetch_brief(sid):
 
 
 def send(d, sid, name, command, text, limit=1800):
-    (d / f"{name}.txt").write_text(text)
-    if not (d / f"{name}-request.json").exists():
-        save(d / f"{name}-request.json", mj("message", "--session", sid, "--command-id", command,
-                                            "--prompt-file", d / f"{name}.txt"))
-    if not (d / f"{name}-completion.json").exists():
-        save(d / f"{name}-completion.json", wait_command(sid, command, limit))
+    prompt = d / f"{name}.txt"
+    intent = d / f"{name}-intent.json"
+    request = d / f"{name}-request.json"
+    completion = d / f"{name}-completion.json"
+    if completion.exists():
+        return
+    identity = {"session_id": sid, "command_id": command, "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()}
+    try:
+        if intent.exists() and json.loads(intent.read_text()) != identity:
+            raise PromptUncertain(f"{sid}: inputs changed for pending command {command}")
+        if not (request.exists() or intent.exists()):
+            if prompt.exists():
+                # Older attempts recorded the prompt before submission but had no intent receipt.
+                if prompt.read_text() != text:
+                    raise PromptUncertain(f"{sid}: inputs changed for pending command {command}")
+                save(intent, identity)
+            else:
+                prompt.write_text(text)
+                save(intent, identity)
+                try:
+                    receipt = mj("message", "--session", sid, "--command-id", command, "--prompt-file", prompt)
+                except RuntimeError as error:
+                    if "session initialization is still running" in str(error):
+                        # The daemon rejected the command before handing it to the worker.
+                        prompt.unlink()
+                        intent.unlink()
+                    raise
+                if (not isinstance(receipt, dict) or receipt.get("session_id") != sid or receipt.get("via") != "turn"
+                        or type(receipt.get("turn_id")) is not int):
+                    raise PromptUncertain(f"{sid}: missing acceptance receipt for {command}")
+                save(request, receipt)
+        save(completion, wait_command(sid, command, limit, awaiting_receipt=not request.exists()))
+    except (WriterTurnFailed, PromptUncertain):
+        raise
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        raise PromptUncertain(f"{sid}: could not confirm {command}: {error}") from error
+
+
+def wait_pilot_ready(sid):
+    """Use the daemon's settled wait, which includes its startup gate."""
+    try:
+        result = mj("wait", "--session", sid, "--timeout", 1200, timeout=1230)
+        state = result["session"]
+        outcome = result["outcome"]
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        raise PromptUncertain(f"{sid}: could not confirm startup: {error}") from error
+    if outcome == "timeout":
+        raise TimeoutError(f"session {sid} did not finish startup")
+    if outcome != "finished" or state["lifecycle"] != "live" or not state["is_idle"]:
+        raise RuntimeError(f"session {sid} is not ready: {result.get('message') or outcome}")
+    return state
 
 
 def sealed_launch(bundle, commit, profile, title, *, base=None, effort=None):
@@ -277,10 +328,8 @@ def run(bug_id, gate, *, pilot=None):
             sid = launch["session_id"]
             if not pilot:
                 driver.wait_idle(sid)
-    if pilot:
-        pilot["publish_tool_assignment"](sid)
     if not (d / "settings.json").exists():
-        s = driver.wait_idle(sid) if pilot else session(sid)
+        s = wait_pilot_ready(sid) if pilot else session(sid)
         assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
         settings = configure_pilot_model_ready(sid, model, effort)
         if profile:
@@ -300,6 +349,8 @@ def run(bug_id, gate, *, pilot=None):
         if pilot:
             save(d / "settings.json", settings)
 
+    if pilot:
+        pilot["publish_tool_assignment"](sid)
     if pilot and not check_pilot_tool(pilot, sid):
         return "retained-failure"
     prompt = pilot["prompt"] if pilot else ((SCRIPTS / "brief/WRITER.md").read_text()
@@ -403,7 +454,7 @@ def finish_pilot_writer(pilot, sid, bug_id, profile):
     if callable(interruption):
         reason = interruption(d, sid)
         if reason:
-            save(d / "failed.json", {"session_id": sid, "reason": reason})
+            save(d / "failed.json", {"session_id": sid, "status": "quota_hold", "reason": reason})
             return f"interrupted: {reason}"
     save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,
                                profile=profile, inputs=inputs, finished_ns=time.time_ns(),

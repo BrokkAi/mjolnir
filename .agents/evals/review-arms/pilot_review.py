@@ -106,9 +106,8 @@ def run(params):
     if not cached.exists():
         if (d / "failed.json").exists():
             return "retained-failure"
-        params["publish_tool_assignment"](sid)
         if not (d / "settings.json").exists():
-            state = driver.wait_idle(sid)
+            state = brief_driver.wait_pilot_ready(sid)
             assert state["no_later_history"] and state["at"] == bug["intro_commit"] and state["base"] == bug["base_commit"]
             assert state["profile_id"] == profile, state["profile_id"]
             place = driver.container(sid)
@@ -122,6 +121,7 @@ def run(params):
             driver.save(d / "placement.json", place)
             driver.save(d / "pre-inventory.json", before)
             driver.save(d / "settings.json", settings)
+        params["publish_tool_assignment"](sid)
         if not brief_driver.check_pilot_tool(params, sid):
             return "retained-failure"
         error = None
