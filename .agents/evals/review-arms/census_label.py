@@ -795,6 +795,33 @@ def fetch_output(sid, path):
     raise RuntimeError(problem)
 
 
+def suspend_session(sid):
+    delay = 1
+    while True:
+        driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+        # Keep the old confirmation window for each accepted suspension.
+        deadline = time.monotonic() + 900
+        while True:
+            session = driver.session(sid)
+            error = session.get("error")
+            if error is not None:
+                if not (error.startswith("the suspension did not finish:") and ". Retry suspension" in error):
+                    raise RuntimeError(error)
+                # Retry only when mj itself tells us to retry suspension.
+                time.sleep(delay)
+                delay = min(2 * delay, 30)
+                break
+            if session["lifecycle"] == "suspended":
+                return
+            # An accepted retry clears the old error before cleanup finishes.
+            # Its lifecycle can still read failed during that interval.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"suspension did not complete: lifecycle is {session['lifecycle']}")
+            time.sleep(min(delay, remaining))
+            delay = min(2 * delay, 30)
+
+
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     _, model, _ = ROLES[role]
     profile = role_profile(args, role)
@@ -917,12 +944,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         if not recover_output:
             # The host unit retains the input and output evidence after suspension.
             try:
-                driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
-                waited = driver.mj("wait", "--session", sid, "--timeout", 900, timeout=930)
-                session = waited["session"]
-                if (waited["outcome"] != "stopped" or session["lifecycle"] != "suspended"
-                        or session.get("error") is not None):
-                    raise RuntimeError(f"{title}: suspension did not complete: {waited}")
+                suspend_session(sid)
             except Exception as error:
                 log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
                 raise
