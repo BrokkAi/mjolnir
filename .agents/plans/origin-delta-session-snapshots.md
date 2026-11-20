@@ -235,7 +235,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
   Date/Author: 2026-11-18, plan author.
 
 - Decision: suspend no longer asks for publication consent; `--acknowledge-unpublished-work` and `acknowledge_unpublished_work` are removed from suspend.
-  Rationale: the snapshot now carries every unpushed commit, so suspend no longer risks unpublished work. The publication marker still gates automatic archival of old sessions. Its assessor (`mj-controller/src/controller/publication.rs`) reads only the legacy archive collector today. Under cut 2 (Decision Log, 2026-11-19), a new-format snapshot records only origin's configured URL, with no push URLs or push evidence. So when the assessor gains a new-format reader, it compares that recorded origin URL with the live configured `remote.origin.url` and queries origin alone. That is sufficient, not a weaker guess: restore fetches only from origin, so a saved tip that origin advertises is recoverable whatever a separate push URL or `pushInsteadOf` destination holds, and recoverability is what archival needs before it deletes a checkpoint. The legacy assessor, with its push-destination distinction and test, stays for legacy archives. The earlier per-destination push-evidence design is superseded.
+  Rationale: the snapshot now carries every unpushed commit, so suspend no longer risks unpublished work. The publication marker still gates automatic archival of old sessions. Its assessor (`mj-controller/src/controller/publication.rs`) reads only the legacy archive collector today. Under cut 2 (Decision Log, 2026-11-19), a new-format snapshot records only origin's configured URL, with no push URLs or push evidence. So when the assessor gains a new-format reader, it compares that recorded origin URL with the live configured `remote.origin.url` and queries origin alone. A snapshot counts as published only under the legacy assessor's rules (`mj-controller/src/controller/publication.rs`), applied to the snapshot's saved state: every checkout's working state is clean (`has_uncommitted_state` false, no working-state commit), its stash list is empty, no recorded index gitlink differs from HEAD's, and every initialized submodule's saved HEAD equals its parent's pin; every saved tag and notes ref has a ref of the same name at the same object on origin, so a local lightweight tag on a pushed commit stays unpublished; and every other saved ref and HEAD commit is contained in a head origin advertises. Staged or unstaged edits, stash entries, changed submodule positions and local ref names exist only in the checkpoint, so they keep the session unpublished, as they do for legacy archives. That is sufficient, not a weaker guess: restore fetches only from origin, so a saved tip that origin advertises is recoverable whatever a separate push URL or `pushInsteadOf` destination holds, and recoverability is what archival needs before it deletes a checkpoint. The legacy assessor, with its push-destination distinction and test, stays for legacy archives. The earlier per-destination push-evidence design is superseded.
   Date/Author: 2026-11-18, plan author.
 
 - Decision: `mj destroy --delete-branch` and the "Destroy and delete branch" buttons are removed.
@@ -435,7 +435,11 @@ without a transferable pack, and in-place resume uses the checkout itself.
    `restore_workspace_snapshot` before publication. Restore uses the saved origin URL, retaining
    same-origin provisioner settings. When the URL differs or is absent it installs the saved URL,
    removes the old push URL and tracking refs, and fetches tracking refs. A shallow clone is
-   unshallowed. Install and index the optional pack.
+   unshallowed. Install and index the optional pack. A history-cutoff workspace (`--no-later-history`)
+   is captured with `ExclusionSource::Commits` against its cutoff base and records no origin, even if
+   the agent added an origin remote, so the pack holds everything after the base. Restore onto the
+   cutoff-provisioned clone therefore installs no origin, fetches nothing, and fails visibly on a
+   missing prerequisite rather than exposing later history.
 2. Batch-check prerequisites with `git cat-file --batch-check` and send missing SHAs in one
    objects-only fetch from origin. Recheck and name any still missing. Also verify connectivity
    from all saved tips and fetch any remaining partial-clone objects in a separate batch.
@@ -509,7 +513,7 @@ At the end of this milestone, suspending and resuming a managed-clone session, a
 
 **Plain directories.** Sessions opened in a directory without Git (`PlainDirectory` in `session_export_layout`, `RepositoryMetadata::plain_directory`) keep their existing metadata-only treatment. Suspend never runs the Git inventory, consent check or capture on them, and their transcript is saved as today.
 
-**Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. An older daemon's archive reader rejects unknown schema versions. Once a suspend writes the new format and removes the checkout, an older daemon could open the session but never resume it. So the store migration that ships with this milestone is **breaking**: advance the migration revision and raise the minimum compatible read and write revision in the same transaction, with that reason beside it, and test it with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. Milestone 5's `MoveOperation` change raises the floor again, under its own revision. The same schema bump carries the worker-owned, versioned native-use evidence (identity, opening ordinal, used/unused/unknown) in the archive's canonical session. That replaces the transcript-based `current_native_session_received_prompt()` predicate, so the checkpoint asks the evidence's owner instead of recomputing the fact, and lets Milestone 4's conservative adoption marker be removed. Archives in older formats carry no evidence. For those only, restore keeps reading the old predicate as their legacy reader, so an old archive made before the first prompt, or just after `/clear`, can still replace an absent native session. The shipped 2.71.0 reader has `deny_unknown_fields` on `CanonicalSessionSnapshot` (`mj-core/src/archive.rs`, around lines 224–226), so the field can only arrive with this breaking revision. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
+**Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. An older daemon's archive reader rejects unknown schema versions. Once a suspend writes the new format and removes the checkout, an older daemon could open the session but never resume it. So the store migration that ships with this milestone is **breaking**: advance the migration revision and raise the minimum compatible read and write revision in the same transaction, with that reason beside it, and test it with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. Milestone 5's `MoveOperation` change raises the floor again, under its own revision. The next slice's schema bump (see Pending mailbox events below), not this first OriginDelta one, carries the worker-owned, versioned native-use evidence (identity, opening ordinal, used/unused/unknown) in the archive's canonical session. That replaces the transcript-based `current_native_session_received_prompt()` predicate, so the checkpoint asks the evidence's owner instead of recomputing the fact, and lets Milestone 4's conservative adoption marker be removed. Archives in older formats, including OriginDelta archives written before that slice, carry no evidence. For those only, restore keeps reading the old predicate as their legacy reader, so an old archive made before the first prompt, or just after `/clear`, can still replace an absent native session. The shipped 2.71.0 reader has `deny_unknown_fields` on `CanonicalSessionSnapshot` (`mj-core/src/archive.rs`, around lines 224–226), so the field can only arrive with a breaking revision, which that slice provides. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
 
 **Pending mailbox events (#1616).** A mailbox message the worker accepted before the checkpoint barrier, but had not yet delivered to a harness turn, is lost on suspend today. The daemon has already marked its outbox row accepted, so it never sends the message again, yet the canonical state and the restore seed carry no payload for it (`pending_mailbox_events` in `mj-core/src/relay/snapshot/apply.rs`; the canonical and seed queue shapes in `mj-core/src/archive.rs` and `mj-core/src/relay.rs`). The canonical session therefore carries the worker's pending mailbox events verbatim, payloads included, and restore reinstates them into the resumed worker's queue, so they are delivered in their original order. There is no separate preservation path: the worker is the owner of accepted mail, and the checkpoint copies its state. Like the native-use evidence, this needs the breaking archive schema, because the shipped reader denies unknown fields.
 
@@ -888,74 +892,31 @@ The Git commands at the heart of capture and restore, shown for one managed chec
 
 No new external dependencies. Git 2.30 or newer (Debian 11's version) is the minimum on targets. Every command in this plan must work there: no `rev-list --disk-usage` (2.31), and no reliance on `rev-list --missing=print` reporting missing starting tips (2.45). The existing harness images ship newer Git.
 
-In `mj-checkpoint/src/snapshot.rs`, define the following. Note that the 2026-11-19 restructure (Decision Log) supersedes parts of this sketch. The snapshot no longer carries rewrite rules, push URLs, push evidence, worktree-scoped remotes or module URL rules, only origin's URL and the upstreams that name origin. Restore takes the path of a clone the provisioner made, positions are literal, and the pack's prerequisites are recorded. The module's own interface documentation is the current contract:
+`mj-checkpoint/src/snapshot.rs` exposes the following (Milestone 1 as built; Milestone 1's Plan of Work describes the behavior):
 
-    pub struct WorkspaceSnapshot {
-        pub origin_urls: Vec<String>,              // configured remote.origin.url entries, redacted; relative local paths with no matching rule made absolute; empty only for a raw checkout without origin
-        pub local_url_rules: Vec<(String, String)>, // the shared repository-local url.* rewrite entries (key, value); worktree-scoped rules live in each SnapshotWorktree (and the primary checkout's own list) with their scope
-        pub object_format: String,                 // "sha1" or "sha256", from `git rev-parse --show-object-format`; restore runs `git init --object-format`
-        pub push_urls: Vec<String>,                // configured remote.origin.pushurl entries as written, redacted; empty when the source pushed through the fetch URL
-        pub has_uncommitted_state: bool,           // working-state commit, skipped working state, index gitlink != HEAD gitlink, or an initialized submodule checked out at a commit != its index gitlink; per checkout (also in SnapshotWorktree)
-        pub head: SnapshotHead,                    // Branch { name, commit } | Detached(commit); every checkout's HEAD carries its commit
-        pub refs: BTreeMap<String, String>,        // full ref name -> object id
-        pub stash: Vec<SnapshotStashEntry>,        // newest first: commit, message
-        pub working_state: Option<String>,         // `git stash create` commit
-        pub working_state_skipped: bool,           // raw checkout with an operation in progress
-        pub worktrees: Vec<SnapshotWorktree>,      // relative path, head, working_state, initialized submodules
-        pub submodules: Vec<SnapshotSubmodule>,    // every initialized submodule at any depth: path, index gitlink, checked-out commit
-        pub remote_refs_stale: bool,
-        pub pack: Option<PathBuf>,                  // non-thin pack of what origin lacks
-    }
-
+    pub struct WorkspaceSnapshot { pub metadata: WorkspaceSnapshotMetadata, pub pack: Option<PathBuf> }
+        // metadata: object format, origin URL (redacted) and upstreams naming origin, saved refs,
+        // HEADs, stash list, working-state commits, index gitlinks, initialized submodules,
+        // nested worktrees and locks, pack prerequisites, state flags and notices
     pub enum CheckoutOwnership { Managed, Raw { launch: Option<LaunchRecord> } }
-
-    // The caller loads the raw launch record (versioned JSON in
-    // <git common dir>/mj/sessions/<session-id>/launch) and passes it in.
-    impl LaunchRecord {
-        pub fn read(runner: &dyn GitCommandRunner, checkout: &Path, session_id: &str) -> Result<Option<LaunchRecord>>;
-    }
-
-    pub enum UntrackedItem { Path { repository: String, path: PathBuf, identity: FileIdentity }, Stash { repository: String, commit: String, message: String } }  // path relative to the repository; stash = its -u/-a payload
+    pub struct GitOperation { pub checkout: CheckoutKey, pub kind: GitOperationKind }   // = ShownOperation
     pub enum UntrackedConsent { None, Any, Shown(Vec<UntrackedItem>) }
-    pub struct ShownOperation { pub repository: String, pub path: PathBuf, pub kind: GitOperationKind, pub identity: String }  // path "" = primary checkout; identity = digest of HEAD and the operation's state files
     pub enum OperationConsent { None, Any, Shown(Vec<ShownOperation>) }
     pub struct CaptureConsent { pub untracked: UntrackedConsent, pub operations: OperationConsent }
+    pub enum ExclusionSource { Origin, Commits(Vec<String>) }   // Commits = a history cutoff's base
+    pub struct RepositoryInput { pub id, pub checkout, pub ownership, pub origin_override, pub pack_path, pub exclusions, pub keep_dir, .. }
 
-    pub enum ExclusionSource { Origin, Commits(Vec<String>) }   // Commits = a history cutoff's base, what a Provisioned restore base contains
-    pub struct RepositoryInput { pub id: String, pub checkout: PathBuf, pub ownership: CheckoutOwnership, pub origin_override: Option<String>, pub exclusions: ExclusionSource, pub pack_path: PathBuf }
+    pub fn capture_session_snapshot(runner, repositories: &[RepositoryInput], consent: &SessionCaptureConsent) -> Result<SessionSnapshot>;
+        // precondition: the caller has stopped every writer to managed checkouts (Milestone 2)
+    pub fn capture_workspace_snapshot(runner, checkout, ownership, pack_path, consent: &CaptureConsent, origin_override) -> Result<WorkspaceSnapshot>;
+    pub fn session_inventory(runner, repositories) -> Result<BTreeMap<String, WorkspaceInventory>>;
+    pub fn workspace_inventory(runner, checkout, ownership) -> Result<WorkspaceInventory>;   // typed SnapshotRefused blockers with remedies
+    pub fn require_managed_snapshot_without_consent(runner, repository) -> Result<()>;      // read-only preflight
+    pub fn restore_workspace_snapshot(runner, snapshot, staging_clone: &Path) -> Result<Vec<String>>;   // notices the caller must surface
+    pub fn repair_workspace_snapshot(runner, snapshot, published_clone: &Path) -> Result<()>;   // worktree repair after the staging rename
+    pub fn record_launch(runner, checkout, session_id) -> Result<()>;
 
-    pub fn capture_session_snapshot(
-        runner: &dyn GitCommandRunner,
-        repositories: &[RepositoryInput],
-        consent: CaptureConsent,
-    ) -> Result<SessionSnapshot>;   // precondition: the caller has stopped every writer to managed checkouts (Milestone 2), so the consent check and any abort run with exclusive ownership   // one WorkspaceSnapshot per repository; SnapshotRefused::{Untracked, OperationInProgress, DirtySubmodule, HiddenTrackedEdits}, keyed by repository and path
-
-    pub enum RestoreBase { Clone { origin: String, seed: Option<PathBuf> }, Provisioned { allow_origin_fetch: bool } }
-
-    pub fn restore_workspace_snapshot(
-        runner: &dyn GitCommandRunner,
-        snapshot: &WorkspaceSnapshot,
-        destination: &Path,
-        base: RestoreBase,
-    ) -> Result<()>;
-
-    pub struct UntrackedPath { pub path: PathBuf, pub bytes: u64 }
-
-    pub struct WorkspaceInventory {
-        pub untracked: Vec<UntrackedPath>,
-        pub untracked_stashes: Vec<SnapshotStashEntry>,   // entries whose -u/-a payload will not be kept
-        pub operation: Option<GitOperationKind>,   // Merge | Rebase | CherryPick | Revert | Am | Bisect
-        pub raw: bool,
-        pub worktrees: Vec<(PathBuf, WorkspaceInventory)>,
-    }
-
-    pub fn workspace_inventory(
-        runner: &dyn GitCommandRunner,
-        checkout: &Path,
-        ownership: &CheckoutOwnership,
-    ) -> Result<WorkspaceInventory>;
-
-    pub fn record_launch(runner: &dyn GitCommandRunner, checkout: &Path, session_id: &str) -> Result<()>;
+There is no `RestoreBase`: restore always applies to the clone the provisioner (`create_managed_clone`) made during this resume attempt.
 
 In `mj-checkpoint/src/checkpoint.rs`, add `CheckpointRepositoryCapture::OriginDelta { ownership: CheckoutOwnership }` and raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that use it.
 
