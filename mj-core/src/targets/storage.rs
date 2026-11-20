@@ -18,13 +18,19 @@ use super::{CommandOutput, CommandSpec};
 /// Covers `No space left on device` (scp, ssh, coreutils, podman, docker and
 /// Rust's `os error 28`) and `Disk quota exceeded` (EDQUOT): a quota stops
 /// writes the same way a full filesystem does.
+///
+/// The errno names count only as words of their own: `/work/enospc-repro` in
+/// an unrelated error is a path, not a full disk.
 pub fn reports_no_space(text: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    text.contains("no space left on device")
-        || text.contains("enospc")
-        || text.contains("os error 28)")
-        || text.contains("disk quota exceeded")
-        || text.contains("edquot")
+    let lower = text.to_ascii_lowercase();
+    lower.contains("no space left on device")
+        || lower.contains("os error 28)")
+        || lower.contains("disk quota exceeded")
+        || lower
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/'))
+            })
+            .any(|word| word == "enospc" || word == "edquot")
 }
 
 /// The target path a no-space failure names, when it names one: scp's
@@ -309,6 +315,10 @@ pub struct FilesystemSpace {
     /// belongs to the filesystem of the longest of these that contains it.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// `available_bytes` is the probing user's or group's disk quota, which
+    /// is smaller than the filesystem's free space.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_limited: bool,
 }
 
 /// What one probe found on one host: every filesystem Mjolnir writes to there.
@@ -471,6 +481,9 @@ impl TargetStorageView {
             crate::move_workspace::format_bytes(space.available_bytes),
             space.mount
         );
+        if space.quota_limited {
+            text.push_str(" within its disk quota");
+        }
         if space.reserved_bytes >= WRITE_RESERVE_BYTES {
             text.push_str(&format!(
                 " (the filesystem reserves {} more for root)",
@@ -619,14 +632,20 @@ pub fn views_for<'a>(
         .collect()
 }
 
-/// Shell that prints the probing user's home, then measures each path given
-/// as an argument at its nearest existing ancestor:
+/// Shell that prints the probing user's home and clock, then measures each
+/// path given as an argument at its nearest existing ancestor:
 /// `storage=<avail-kib>\t<total-kib>\t<used-kib>\t<mount>\t<path>`. `df -Pk`
 /// is POSIX, so it reads the same on Linux and macOS; its "Available" column
 /// is what a non-root user can write. The ancestor walk ends whenever a step
 /// fails or makes no progress, so a host without `dirname` cannot spin it.
+///
+/// `df` does not see a user or group quota (statfs reports XFS and ext4
+/// project quotas already), so where Linux quota-tools are installed each
+/// filesystem's quota rows follow as `quota=<mount>\t<the nine columns>`.
+/// Elsewhere `quota` is absent or rejects these options, and prints nothing.
 pub const STORAGE_PROBE_SCRIPT: &str = r#"
 printf 'home=%s\n' "$HOME"
+printf 'now=%s\n' "$(date +%s)"
 for hel_path in "$@"; do
     hel_probe=$hel_path
     while [ ! -e "$hel_probe" ]; do
@@ -634,7 +653,12 @@ for hel_path in "$@"; do
         [ "$hel_parent" != "$hel_probe" ] || break
         hel_probe=$hel_parent
     done
-    df -Pk -- "$hel_probe" 2>/dev/null | awk -v hel_path="$hel_path" 'NR == 2 { mount = $6; for (i = 7; i <= NF; i++) mount = mount " " $i; printf "storage=%s\t%s\t%s\t%s\t%s\n", $4, $2, $3, mount, hel_path }'
+    hel_row=$(df -Pk -- "$hel_probe" 2>/dev/null | awk -v hel_path="$hel_path" 'NR == 2 { mount = $6; for (i = 7; i <= NF; i++) mount = mount " " $i; printf "storage=%s\t%s\t%s\t%s\t%s\n", $4, $2, $3, mount, hel_path }')
+    [ -n "$hel_row" ] || continue
+    printf '%s\n' "$hel_row"
+    command -v quota >/dev/null 2>&1 || continue
+    hel_mount=$(printf '%s\n' "$hel_row" | cut -f4)
+    LC_ALL=C quota -ug -w -p -v --show-mntpoint --hide-device -f "$hel_mount" 2>/dev/null | awk -v hel_mount="$hel_mount" '$1 == hel_mount && NF == 9 { printf "quota=%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9 }'
 done
 "#;
 
@@ -675,10 +699,71 @@ pub fn parse_storage_lines(output: &[u8]) -> (Option<String>, Vec<FilesystemSpac
                     .saturating_sub(available)
                     .saturating_mul(1024),
                 paths: vec![normalize_target_path(path, home.as_deref())],
+                quota_limited: false,
             },
         );
     }
+    let now = text
+        .lines()
+        .find_map(|line| line.strip_prefix("now="))
+        .and_then(|now| now.trim().parse::<u64>().ok());
+    for line in text.lines() {
+        let Some((mount, room)) = line
+            .strip_prefix("quota=")
+            .and_then(|row| quota_room_bytes(row, now))
+        else {
+            continue;
+        };
+        for filesystem in filesystems.iter_mut().filter(|known| known.mount == mount) {
+            if room < filesystem.available_bytes {
+                filesystem.available_bytes = room;
+                filesystem.quota_limited = true;
+            }
+        }
+    }
     (home, filesystems)
+}
+
+/// What one `quota -w -p -v` row (mount, then blocks, quota, limit and grace
+/// for space and for files; KiB, grace as epoch seconds, 0 when none) still
+/// lets its user or group write, or `None` when it sets no limit. A soft limit
+/// whose grace has run out stops writes like a hard one; without the probe's
+/// clock an expired grace cannot be told apart, so the hard limit decides.
+fn quota_room_bytes(row: &str, now: Option<u64>) -> Option<(&str, u64)> {
+    let fields = row.split('\t').collect::<Vec<_>>();
+    let [mount, rest @ ..] = fields.as_slice() else {
+        return None;
+    };
+    // `quota` marks a usage over its soft limit with `*`.
+    let numbers = rest
+        .iter()
+        .map(|field| field.trim_end_matches('*').parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let [
+        blocks,
+        soft,
+        hard,
+        grace,
+        files,
+        file_soft,
+        file_hard,
+        file_grace,
+    ] = numbers[..]
+    else {
+        return None;
+    };
+    let expired = |grace: u64| grace != 0 && now.is_some_and(|now| grace <= now);
+    let files_stopped = (file_hard != 0 && files >= file_hard)
+        || (file_soft != 0 && files > file_soft && expired(file_grace));
+    let blocks_stopped = soft != 0 && blocks > soft && expired(grace);
+    let room_kib = if files_stopped || blocks_stopped {
+        0
+    } else if hard != 0 {
+        hard.saturating_sub(blocks)
+    } else {
+        return None;
+    };
+    Some((mount, room_kib.saturating_mul(1024)))
 }
 
 /// Add one measurement, a filesystem holding one path, keeping one entry per
@@ -742,6 +827,7 @@ pub fn measure_windows_filesystems(paths: &[String]) -> Vec<FilesystemSpace> {
             // Free space beyond the caller's quota, which it cannot write.
             reserved_bytes: free.saturating_sub(available),
             paths: vec![path.to_string_lossy().into_owned()],
+            quota_limited: false,
         })
     };
     let mut filesystems = Vec::new();
@@ -758,6 +844,7 @@ mod tests {
     use super::*;
 
     // Hard-won: 540c9202: A full target filesystem stopped all workers and recovery repeatedly wrote to the same disk.
+    // Hard-won: #1620: an errno name inside a path, such as /work/enospc-repro, read as a full disk.
     #[test]
     fn recognises_a_full_disk_in_every_tool_s_words() {
         for text in [
@@ -770,6 +857,7 @@ mod tests {
             "Error response from daemon: ENOSPC: no space left on device, write",
             "cp: error writing '/home/u/.cache/mjolnir/uploads/x': Disk quota exceeded",
             "write failed (os error 28)",
+            "write: EDQUOT",
         ] {
             assert!(reports_no_space(text), "{text}");
         }
@@ -778,6 +866,8 @@ mod tests {
             "ssh: connect to host precision-3260 port 22: Connection timed out",
             "No such file or directory",
             "error 280 while writing",
+            "cat: /work/enospc-repro/log: Permission denied",
+            "open /srv/edquot_tests: No such file or directory",
         ] {
             assert!(!reports_no_space(text), "{text}");
         }
@@ -902,6 +992,70 @@ garbage\n";
         assert_eq!(filesystems.len(), 1, "{output:?}");
         assert!(filesystems[0].total_bytes > 0);
         assert_eq!(filesystems[0].paths.len(), 2);
+    }
+
+    /// Linux quota-tools 4.11 on a tmpfs mounted with `usrquota,grpquota`,
+    /// for a user over a 2000 KiB soft limit, under a 4000 KiB hard one.
+    #[cfg(unix)]
+    const RECORDED_QUOTA_OUTPUT: &str = "\
+Disk quotas for user u1 (uid 1000): 
+     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace
+         MOUNT    3000*   2000    4000 GRACE       2       0       0       0
+Disk quotas for group u1 (gid 1000): 
+     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace
+         MOUNT    3000       0       0       0       1       0       0       0
+";
+
+    // Hard-won: #1620: `df` cannot see a disk quota, so a worker stopped by one was restarted into it.
+    #[cfg(unix)]
+    #[test]
+    fn storage_probe_script_measures_the_user_s_disk_quota() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let tools = directory.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let output = directory.path().join("quota-output");
+        let fake = tools.join("quota");
+        // Answers for whichever mount `-f` names, as the real tool does.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nfor last; do :; done\nsed \"s|MOUNT|$last|\" '{}'\n",
+                output.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = |grace: &str| {
+            std::fs::write(&output, RECORDED_QUOTA_OUTPUT.replace("GRACE", grace)).unwrap();
+            let path = format!(
+                "{}:{}",
+                tools.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(STORAGE_PROBE_SCRIPT)
+                .arg("mj-storage")
+                .arg(directory.path())
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let (_, filesystems) = parse_storage_lines(&output.stdout);
+            assert_eq!(filesystems.len(), 1, "{output:?}");
+            filesystems.into_iter().next().unwrap()
+        };
+
+        // Within the grace period the hard limit leaves 1000 KiB.
+        let within_grace = probe("4102444800");
+        assert!(within_grace.quota_limited);
+        assert_eq!(within_grace.available_bytes, 1000 * 1024);
+
+        // Once the grace period has run out the soft limit stops writes.
+        let expired = probe("1000000000");
+        assert!(expired.quota_limited);
+        assert_eq!(expired.available_bytes, 0);
     }
 
     // Hard-won: a6ecbe614: without `dirname` on PATH, the probe of a missing path spun forever and outlived its daemon.

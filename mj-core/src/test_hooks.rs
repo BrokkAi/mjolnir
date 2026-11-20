@@ -174,8 +174,8 @@ pub mod latch_relay {
     pub const LATCH_RELAY_RUNNING: &str = "MJ_TEST_LATCH_RELAY_RUNNING";
     pub const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
     /// Open a new native session with this id instead of reloading one, as a
-    /// restored worker does when the harness has no record of the session it was
-    /// asked to reload.
+    /// restored worker does when its launch names no native session, or when
+    /// the harness has no record of the session it was asked to reload.
     pub const LATCH_RELAY_FRESH_NATIVE: &str = "MJ_TEST_LATCH_FRESH_NATIVE";
     /// With [`LATCH_RELAY_FRESH_NATIVE`]: the native session the new one replaced
     /// because this session never used it. Unset, the relay gives no reason.
