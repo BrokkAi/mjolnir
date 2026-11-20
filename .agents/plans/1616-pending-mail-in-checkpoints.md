@@ -20,7 +20,7 @@ After this change the checkpoint copies the worker's mail state at the cut, and 
 - [x] (2026-11-20) Restore: `restore_queue_policy` decides queue and mail together; the seed carries mail accordingly; the worker opens with it; Move admission and fresh-native resume submit deferred mail under `mailbox_command_id`.
 - [x] (2026-11-20) Store revision 142, breaking; the push migration test now checks its compatible revisions below that fence, as the usage-report test already does for revision 136.
 - [x] (2026-11-20) Tests: a worker round trip (relay at the cut, archive, restore under each policy, retries) and extensions of three controller tests (restart recapture at protocol 75, the close latch against a protocol-58 worker, Move queue replay with crash and retries). Clippy clean on the affected crates.
-- [ ] Commit and push.
+- [x] (2026-11-20) Committed as 39722ace5, merged with upstream master, and pushed to master after rerunning the changed tests on the merge.
 
 
 ## Surprises & Discoveries
