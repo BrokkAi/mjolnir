@@ -2454,7 +2454,9 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 );
             }
             snapshot.assessment = Some(std::sync::Arc::new(a));
-            if let Some(context) = &mut snapshot.assessment_context {
+            if !snapshot.goal.running()
+                && let Some(context) = &mut snapshot.assessment_context
+            {
                 Arc::make_mut(context).open_assistant_id = None;
             }
         }

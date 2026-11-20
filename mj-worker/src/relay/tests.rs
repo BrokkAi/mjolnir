@@ -10965,3 +10965,53 @@ fn bridge_restarts_keep_interrupted_autonomous_replies_separate_on_reopen() {
     let relay = DurableRelay::open(temp.path(), SESSION, "autonomous-restarts-reopen").unwrap();
     check(&relay);
 }
+
+// Hard-won: a72c7b7fd: ACP completion split a reply whose native goal was still running.
+#[test]
+fn native_goal_reply_spans_acp_completion_and_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "native-acp-completion").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    submit_relay(&mut relay, "native-goal-prompt", prompt("keep working"));
+    relay.claim_pending_commands(true).unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"running","turnId":"native-goal"}}
+    })).unwrap()).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"native-goal-reply",
+                "content":{"type":"text","text":"before completion; "}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    finish_prompt(&mut relay, "native-goal-prompt");
+    assert!(relay.snapshot.goal.running());
+    assert_eq!(relay.snapshot.execution, RelayExecutionState::Running);
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after completion"}
+    })).unwrap()).unwrap();
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "before completion; after completion"
+        );
+        let history = relay.snapshot.authorization_context().unwrap();
+        let reply = history.messages.last().unwrap();
+        assert_eq!(reply.id, "native-goal-reply");
+        assert_eq!(reply.text, "before completion; after completion");
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "native-acp-completion-reopen").unwrap();
+    check(&relay);
+}

@@ -182,11 +182,10 @@ impl TurnContext {
                     self.observe_prompt_delivery(delivered_prompt_command_id(observation), prompt);
                 }
             }
-            RelayObservation::CommandCompleted {
-                outcome: RelayCommandOutcome::Prompt { .. },
-                ..
-            }
-            | RelayObservation::SessionRestarted
+            // ACP completion may precede native execution's actual end.
+            // Deliveries, autonomous starts and these durable bridge/native
+            // boundaries own the reply stream instead.
+            RelayObservation::SessionRestarted
             | RelayObservation::HarnessTurnSettled {
                 prompt_in_flight: false,
                 ..
