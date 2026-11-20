@@ -67,6 +67,18 @@ pub struct RuntimeAvailability {
     pub targets: BTreeMap<String, AvailabilityVerdict>,
     pub target_notes: Vec<AvailabilityNote>,
     pub machines_without_runtime: BTreeMap<String, String>,
+    /// Explanations prepared for browser and API clients in the daemon.
+    #[serde(skip)]
+    pub browser: BrowserAvailabilityReasons,
     /// The local engine command is absent regardless of the last probe.
     pub uninstalled_engines: std::collections::BTreeSet<String>,
+}
+
+/// Public wording for the same missing verdicts. Only in-process projection
+/// code needs both versions. The terminal feed carries its own wording.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowserAvailabilityReasons {
+    pub profiles: BTreeMap<String, String>,
+    pub targets: BTreeMap<String, String>,
+    pub target_notes: Vec<AvailabilityNote>,
 }

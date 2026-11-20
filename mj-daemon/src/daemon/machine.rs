@@ -142,7 +142,9 @@ pub(super) async fn execute(
                     .map(|(id, profile)| {
                         (
                             id.clone(),
-                            mj_setup::setup::profile_presence(id, profile, &executor).err(),
+                            mj_setup::setup::profile_presence(id, profile, &executor)
+                                .err()
+                                .map(|failure| failure.detail),
                         )
                     })
                     .collect();

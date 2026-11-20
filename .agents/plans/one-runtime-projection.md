@@ -73,6 +73,10 @@ This plan does not add a new public API. A later plan will publish this projecti
   Rationale: an absent command is definitive. A probe may be stale or unknown and does not justify broadening admission refusals.
   Date/Author: 2026-11-20, parent session.
 
+- Decision: browser rows and launch options carry public explanations for the same availability verdicts. Terminal diagnostics retain the daemon-side details. Browser explanations identify the failed check and where to investigate it, without sending profile paths, configuration excerpts, SSH destinations, or subprocess diagnostics.
+  Rationale: a launch diagnostic can quote a credential from a malformed configuration file or from command output. Both surfaces must offer the same entries.
+  Date/Author: 2026-11-20, Milestone 1 review.
+
 - Decision: project-source resolution and quota surfacing are out of scope. Both surfaces call the same resolver and the same quota functions; only cache timing differs.
   Rationale: they are not two answers to one question, and including them would grow Milestone 3 without fixing a visible defect. Recorded under Outcomes as follow-ups.
   Date/Author: 2026-11-20, parent session.
@@ -168,7 +172,7 @@ When a milestone changes dashboard layout or a shared terminal renderer, run eve
 ## Validation and Acceptance
 
 
-Milestone 1 is accepted when, in a named instance with Docker installed but its service stopped, one SSH machine configured with an unreachable address, and one native-login profile whose agent home and command were removed, the terminal's new-session picker and the web viewer's new-session picker leave out the same three entries and name each with the same reason, and `curl` of `/api/v1/options` with the instance's API token reports the same three as missing. Before the first check completes, both pickers list all three (unknown is offered). Editing the profile so it differs from what was checked makes it unknown until the next check. With no Docker command on PATH, both pickers hide its target before the first check and an explicit create through `/api/v1` returns the existing HTTP 400.
+Milestone 1 is accepted when, in a named instance with Docker installed but its service stopped, one SSH machine configured with an unreachable address, and one native-login profile whose agent home and command were removed, the terminal's new-session picker and the web viewer's new-session picker leave out the same three entries and name the failed checks, with private diagnostic details restricted to the terminal, and `curl` of `/api/v1/options` with the instance's API token reports the same three as missing. Before the first check completes, both pickers list all three (unknown is offered). Editing the profile so it differs from what was checked makes it unknown until the next check. With no Docker command on PATH, both pickers hide its target before the first check and an explicit create through `/api/v1` returns the existing HTTP 400.
 
 Milestone 2 is accepted when, after editing the mbx `cache_dir` and pressing Refresh in the terminal, the Disks view shows the new filesystem without waiting for the daemon's next cycle, and the web viewer shows the same reading; and when no capacity sampler runs in the terminal process.
 

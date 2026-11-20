@@ -1641,6 +1641,33 @@ fn update_to_serializes_disjoint_process_edits() {
 }
 
 #[test]
+fn cancellable_config_edit_can_leave_a_contended_lock_without_saving() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let guard = ConfigLock::acquire(&path).unwrap();
+    let attempts = std::cell::Cell::new(0);
+    let result = Config::update_to_cancellable(
+        &path,
+        &|| {
+            attempts.set(attempts.get() + 1);
+            attempts.get() > 1
+        },
+        |_| -> Result<()> { panic!("an edit cancelled while waiting must not start") },
+    );
+    assert!(format!("{:#}", result.unwrap_err()).contains("file lock wait cancelled"));
+    assert!(!path.exists());
+    drop(guard);
+
+    let cancelled = std::cell::Cell::new(false);
+    let result = Config::update_to_cancellable(&path, &|| cancelled.get(), |_| {
+        cancelled.set(true);
+        Ok(())
+    });
+    assert!(format!("{:#}", result.unwrap_err()).contains("configuration edit cancelled"));
+    assert!(!path.exists());
+}
+
+#[test]
 fn update_to_failure_leaves_the_previous_file_unchanged() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

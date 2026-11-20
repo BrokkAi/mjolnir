@@ -2332,6 +2332,26 @@ impl Config {
         Self::update_to_locked(path, edit)
     }
 
+    /// As [`Self::update_to`], with a cancellable lock wait and edit.
+    pub fn update_to_cancellable<T, F>(
+        path: &Path,
+        cancelled: &dyn Fn() -> bool,
+        edit: F,
+    ) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        let file = ConfigLock::open(path)?;
+        let _lock = crate::file_lock::FileLock::acquire_cancellable(file, cancelled)
+            .with_context(|| format!("lock config {}", path.display()))?;
+        Self::update_to_locked(path, |config| {
+            anyhow::ensure!(!cancelled(), "configuration edit cancelled");
+            let value = edit(config)?;
+            anyhow::ensure!(!cancelled(), "configuration edit cancelled");
+            Ok(value)
+        })
+    }
+
     fn update_to_locked<T, F>(path: &Path, edit: F) -> Result<(Self, T)>
     where
         F: FnOnce(&mut Self) -> Result<T>,
@@ -2418,6 +2438,15 @@ pub(crate) struct ConfigLock {
 
 impl ConfigLock {
     pub(crate) fn acquire(config_path: &Path) -> Result<Self> {
+        let file = Self::open(config_path)?;
+        file.lock()
+            .with_context(|| format!("lock config {}", config_path.display()))?;
+        Ok(Self {
+            _file: crate::file_lock::FileLock::new(file),
+        })
+    }
+
+    fn open(config_path: &Path) -> Result<fs::File> {
         let lock_path = config_lock_path(config_path);
         let parent = lock_path
             .parent()
@@ -2433,14 +2462,9 @@ impl ConfigLock {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options
+        options
             .open(&lock_path)
-            .with_context(|| format!("open config lock {}", lock_path.display()))?;
-        file.lock()
-            .with_context(|| format!("lock config {}", config_path.display()))?;
-        Ok(Self {
-            _file: crate::file_lock::FileLock::new(file),
-        })
+            .with_context(|| format!("open config lock {}", lock_path.display()))
     }
 }
 

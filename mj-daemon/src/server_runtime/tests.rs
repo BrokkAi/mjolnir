@@ -1714,7 +1714,9 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
 // Hard-won: 97bf5586: A silent target must carry its unavailable status into the web picker snapshot.
 #[test]
 fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
-    use mj_client::availability::{AvailabilityVerdict, RuntimeAvailability};
+    use mj_client::availability::{
+        AvailabilityNote, AvailabilityVerdict, BrowserAvailabilityReasons, RuntimeAvailability,
+    };
     let mut controller = controller_with_profiles(&["codex"]);
     for id in ["answering", "silent", "unread"] {
         controller
@@ -1745,11 +1747,38 @@ fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
     let missing = AvailabilityVerdict::Missing {
         reason: "SSH to silent failed.".into(),
     };
+    let private = "private-credential-excerpt";
     let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
     runtime.metadata.availability = RuntimeAvailability {
+        profiles: [(
+            "codex".into(),
+            AvailabilityVerdict::Missing {
+                reason: private.into(),
+            },
+        )]
+        .into(),
+        target_notes: vec![AvailabilityNote {
+            full: private.into(),
+            text: private.into(),
+            routine: false,
+        }],
+        browser: BrowserAvailabilityReasons {
+            profiles: [("codex".into(), "Verify the profile.".into())].into(),
+            targets: [("silent".into(), "SSH to silent failed.".into())].into(),
+            target_notes: vec![AvailabilityNote {
+                full: "SSH to silent failed.".into(),
+                text: "SSH to silent failed.".into(),
+                routine: false,
+            }],
+        },
         targets: [
             ("answering".into(), AvailabilityVerdict::Available),
-            ("silent".into(), missing.clone()),
+            (
+                "silent".into(),
+                AvailabilityVerdict::Missing {
+                    reason: private.into(),
+                },
+            ),
             ("unread".into(), AvailabilityVerdict::Unknown),
         ]
         .into(),
@@ -1778,6 +1807,15 @@ fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
             reviews: &Default::default(),
         },
         1,
+    );
+    assert!(!serde_json::to_string(&snapshot).unwrap().contains(private));
+    assert_eq!(
+        snapshot.profiles[0].availability.missing_reason(),
+        Some("Verify the profile.")
+    );
+    assert_eq!(
+        snapshot.target_availability_notes[0].text,
+        "SSH to silent failed."
     );
     let target = |id: &str| snapshot.targets.iter().find(|t| t.id == id).unwrap();
     assert_eq!(

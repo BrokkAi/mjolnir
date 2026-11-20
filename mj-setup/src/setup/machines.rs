@@ -603,7 +603,7 @@ pub fn add_machine_runtimes(
     if additions(&Config::load_from(config_path)?).is_empty() {
         return Ok(BTreeMap::new());
     }
-    let (_, added) = Config::update_to(config_path, |latest| {
+    let (_, added) = Config::update_to_cancellable(config_path, cancelled, |latest| {
         // Decide against the latest file under its lock, so a concurrent
         // Settings save or another client's probe is preserved and never
         // doubled.

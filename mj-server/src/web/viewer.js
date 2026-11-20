@@ -2889,6 +2889,7 @@ let pendingNewPreflight = null;
 let pendingNewPreflightController = null;
 let renderedNewDraft = null;
 let renderedNewSignature = null;
+let renderedNewSteps = [];
 
 function abortPendingNewPreflight() {
   if (newDraft) newDraft.preflighted = false;
@@ -3448,11 +3449,19 @@ function renderNewForm() {
     settleSkippedNewSteps(newDraft);
   }
   const steps = visibleSteps();
+  if (renderedNewDraft === newDraft) {
+    const previous = renderedNewSteps[newDraft.step];
+    const sameStep = steps.findIndex(step => step.key === previous?.key);
+    newDraft.step = sameStep >= 0 ? sameStep : renderedNewSteps
+      .slice(0, newDraft.step)
+      .filter(previousStep => steps.some(step => step.key === previousStep.key)).length;
+  }
   if (changedChoice) {
     const choiceStep = steps.findIndex(step => step.key === changedChoice);
     newDraft.step = Math.min(newDraft.step, Math.max(0, choiceStep));
   }
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
+  renderedNewSteps = steps;
   const step = steps[newDraft.step];
   if (step.key === 'project' && !newDraft.catalogStep) {
     newDraft.catalogStep = true;
@@ -5463,17 +5472,18 @@ function freshMoveDraft(session) {
   const compatible = (session.compatible_resume_targets || []).filter(targetLaunchable);
   const recovery = session.move_recovery;
   const recoveryTarget = recovery?.destination_target_template_id;
+  const queueLocked = recovery?.queue_admission_started === true && recovery?.queue_admission_finished !== true;
   return {
     workspaceId: session.workspace_id || selectedWorkspaceId(),
     sessionId: session.id,
     profileId: recovery?.destination_profile_id || session.profile_id || snapshot.profiles[0]?.id || '',
-    targetId: compatible.includes(recoveryTarget)
+    targetId: (queueLocked && recoveryTarget) || compatible.includes(recoveryTarget)
       ? recoveryTarget
       : compatible.includes(session.target_id) ? session.target_id : compatible[0] || '',
     clearResourceAllocation: recovery?.clear_resource_allocation === true,
     destinationAdditionalMounts: recovery ? (recovery.destination_additional_mounts || []) : null,
     destinationResourceAllocation: recovery ? (recovery.destination_resource_allocation ?? null) : null,
-    queueLocked: recovery?.queue_admission_started === true && recovery?.queue_admission_finished !== true,
+    queueLocked,
     preparation: null,
     preparing: false,
     committing: false,
@@ -5652,7 +5662,7 @@ function renderMoveForm() {
     const targetIds = [...new Set([
       ...(session.compatible_resume_targets || []),
       recoveryTarget,
-    ].filter(Boolean).filter(targetLaunchable))];
+    ].filter(Boolean).filter(id => (draft.queueLocked && id === recoveryTarget) || targetLaunchable(id)))];
     const targets = targetIds.map(id => snapshot.targets.find(target => target.id === id) || { id });
     const targetPicker = pickerField('Target', `move-target-${session.id}`, targets, draft.targetId, value => {
       if (draft.queueLocked) return;

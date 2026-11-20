@@ -250,7 +250,7 @@ pub(crate) enum QuotaRefreshIntent {
 
 struct SurfaceNotice {
     notice: RuntimeNotice,
-    public: bool,
+    public_text: Option<String>,
 }
 
 pub struct RuntimeState {

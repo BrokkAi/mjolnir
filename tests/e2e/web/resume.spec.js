@@ -101,7 +101,9 @@ async function mount(page, {
       return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'fixture stops after preparation request' }) });
     }
     if (pathname === '/api/actions') {
-      state.actions.push(route.request().postDataJSON());
+      const body = route.request().postDataJSON();
+      if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
+      state.actions.push(body);
       if (state.holdAction) await state.holdAction;
       if (state.rejectAction) {
         return route.fulfill({

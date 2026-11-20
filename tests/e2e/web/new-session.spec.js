@@ -138,7 +138,9 @@ async function mount(page, {
       return json({ bundle_id: 'created' });
     }
     if (pathname === '/api/actions') {
-      state.actions.push(route.request().postDataJSON());
+      const body = route.request().postDataJSON();
+      if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
+      state.actions.push(body);
       if (state.holdLaunch) await state.holdLaunch;
       if (state.actionError) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify(state.actionError) });
       await route.fulfill({ status: 202, body: '' });
@@ -637,6 +639,20 @@ test('golden_viewer_new_session', async ({ context }) => {
   assertGolden('viewer_new_session', output.join('\n'));
 });
 
+test('a profile verdict that removes the Account step preserves the open Project step', async ({ page }) => {
+  const state = await mount(page, {
+    profiles: [{ id: 'alpha', harness_kind: 'codex' }, { id: 'beta', harness_kind: 'claude' }],
+  });
+  await projectStep(page, 'local');
+  const directory = page.locator('#new-project-directory');
+  await directory.fill('/work/in-progress');
+  state.snapshot.profiles[1].availability = { status: 'missing', reason: 'Claude Code failed its readiness check.' };
+  await refresh(page, state);
+  await expect(page.locator('#new-progress')).toContainText('Project');
+  await expect(directory).toHaveValue('/work/in-progress');
+  await expect(page.locator('#new-step')).toContainText('beta: Claude Code failed its readiness check.');
+});
+
 test('golden_web_new_session_wizard_steps', async ({ context }) => {
   const { assertGolden } = await import('./golden.mjs');
   const output = [];
@@ -645,8 +661,8 @@ test('golden_web_new_session_wizard_steps', async ({ context }) => {
   const cases = [
     ['one profile omits Account but keeps Where to run', [{ id: 'only', harness_kind: 'codex' }], [bare, sized]],
     ['several profiles keep Account', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, sized]],
-    ['only usable raw target omits Where to run', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, { ...sized, runtime_missing: true }, { id: 'mac', kind: 'ssh', requires_project_directory: true, availability: 'unavailable' }]],
-    ['unknown target remains offered', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, { ...sized, availability: 'unknown' }]],
+    ['only usable raw target omits Where to run', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, { ...sized, availability: { status: 'missing' } }, { id: 'mac', kind: 'ssh', requires_project_directory: true, availability: { status: 'missing' } }]],
+    ['unknown target remains offered', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, { ...sized, availability: { status: 'unknown' } }]],
     ['single sized target keeps Where to run', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [sized]],
   ];
   for (const [label, profiles, targets] of cases) {

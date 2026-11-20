@@ -3,7 +3,6 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -175,7 +174,7 @@ fn add_profiles_for(
     if existing.setup_additions(&discovered).profiles.is_empty() {
         return Ok(Vec::new());
     }
-    let (_, added) = Config::update_to(config_path, |latest| {
+    let (_, added) = Config::update_to_cancellable(config_path, cancelled, |latest| {
         // Choose identifiers against the latest file under its lock, so a
         // concurrent Settings save is preserved.
         let mut discovered = super::automatic_profiles_config(latest, homes);
@@ -200,14 +199,7 @@ fn acquire_setup_lock(
         options.mode(0o600);
     }
     let file = options.open(path).context("open setup lock")?;
-    loop {
-        ensure!(!cancelled(), "setup cancelled");
-        match file.try_lock() {
-            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
-            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
-            Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock setup"),
-        }
-    }
+    mj_core::file_lock::FileLock::acquire_cancellable(file, cancelled).context("lock setup")
 }
 
 /// Welcome displays errors and concrete remedies, without successful checks

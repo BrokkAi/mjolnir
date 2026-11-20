@@ -23,7 +23,7 @@ use crate::targets::CommandExecutor;
 pub struct AvailabilityReport {
     /// Every configured profile, as it was checked, and why it is missing,
     /// or `None` when it is there.
-    pub profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
+    pub profiles: BTreeMap<String, (HarnessProfile, Option<ProfilePresenceFailure>)>,
     /// Target templates that stood while probing, including exact additions.
     pub targets: BTreeMap<String, TargetTemplate>,
     /// This computer's container engines, usable or not.
@@ -36,6 +36,13 @@ pub struct AvailabilityReport {
     pub added_runtimes: BTreeMap<String, Vec<String>>,
 }
 
+/// Readiness detail for the local operator and an explanation safe to publish.
+#[derive(Debug, Clone)]
+pub struct ProfilePresenceFailure {
+    pub detail: String,
+    pub browser_reason: String,
+}
+
 /// Why `profile` cannot be used here, or `Ok` when it can. A profile is
 /// there when a harness can start from it (`HarnessProfile::ensure_ready`,
 /// which every launch asks) and, for an agent that keeps its login in its
@@ -46,10 +53,16 @@ pub fn profile_presence(
     id: &str,
     profile: &HarnessProfile,
     executor: &impl CommandExecutor,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), ProfilePresenceFailure> {
     profile
         .ensure_ready(id)
-        .map_err(|error| format!("{error:#}"))?;
+        .map_err(|error| ProfilePresenceFailure {
+            detail: format!("{error:#}"),
+            browser_reason: format!(
+                "{} failed its readiness check. Verify this profile in Settings › Profiles.",
+                profile.kind.display_name()
+            ),
+        })?;
     let logs_in_at_home = matches!(
         profile.auth_scheme(),
         AuthScheme::NativeLogin | AuthScheme::NativeLoginStore
@@ -61,11 +74,16 @@ pub fn profile_presence(
         && harness_cli_installed(profile.kind, executor) == Some(false)
     {
         let name = profile.kind.display_name();
-        return Err(format!(
-            "{name} is not installed here: {} does not exist and `{}` is not on PATH. Install {name}, or turn the profile off in Settings › Profiles.",
-            profile.home.display(),
-            profile.kind.cli_binary_name()
-        ));
+        return Err(ProfilePresenceFailure {
+            detail: format!(
+                "{name} is not installed here: {} does not exist and `{}` is not on PATH. Install {name}, or turn the profile off in Settings › Profiles.",
+                profile.home.display(),
+                profile.kind.cli_binary_name()
+            ),
+            browser_reason: format!(
+                "{name} is not installed here. Install {name}, or turn the profile off in Settings › Profiles."
+            ),
+        });
     }
     Ok(())
 }

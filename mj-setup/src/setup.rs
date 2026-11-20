@@ -19,7 +19,9 @@ pub use crate::import::github_repository;
 pub use crate::import::{GithubRepository, github_repository_from_origin};
 
 mod availability;
-pub use availability::{AvailabilityReport, check_availability, profile_presence};
+pub use availability::{
+    AvailabilityReport, ProfilePresenceFailure, check_availability, profile_presence,
+};
 mod machines;
 #[cfg(any(test, feature = "test-support"))]
 pub use machines::machine_probe_fixture;

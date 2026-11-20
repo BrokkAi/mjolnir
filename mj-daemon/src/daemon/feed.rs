@@ -251,6 +251,9 @@ impl RuntimeState {
             )
         };
         let availability_report = self.availability().report.clone();
+        history
+            .installed_engines
+            .observe_check(availability_report.as_ref());
         full.metadata.availability = super::availability::project(
             availability_report.as_deref(),
             &full.metadata.config,

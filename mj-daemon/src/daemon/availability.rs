@@ -114,26 +114,25 @@ pub(super) async fn run(state: Arc<RuntimeState>, cancellation: CancellationToke
                 }
                 other => other,
             };
-            let notice = {
+            let (notice, failure) = {
                 let mut availability = state.availability();
                 let notice = match result {
                     Ok(report) => {
                         let notice = discoveries(&report);
                         availability.report = Some(Arc::new(report));
                         availability.failure = None;
-                        notice
+                        (notice, false)
                     }
                     Err(error) => {
                         // A parse error chain can quote lines from the config.
-                        let summary = error.to_string();
                         let error = format!("{error:#}");
                         if availability.failure.as_ref() == Some(&error) {
-                            None
+                            (None, true)
                         } else {
-                            let notice = format!("Could not check what is available: {summary}");
-                            tracing::warn!(%error, "availability check failed");
+                            let notice = format!("Could not check what is available: {error}");
+                            tracing::warn!(summary = %notice.lines().next().unwrap_or_default(), "availability check failed");
                             availability.failure = Some(error);
-                            Some(notice)
+                            (Some(notice), true)
                         }
                     }
                 };
@@ -141,7 +140,14 @@ pub(super) async fn run(state: Arc<RuntimeState>, cancellation: CancellationToke
                 notice
             };
             if let Some(notice) = notice {
-                state.push_public_notice("", notice);
+                if failure {
+                    state.push_notice_with_public_text(
+                        notice,
+                        "Could not check what is available. Check the daemon configuration and try again.".to_owned(),
+                    );
+                } else {
+                    state.push_public_notice("", notice);
+                }
             } else {
                 state.publish_revision();
             }
@@ -173,21 +179,35 @@ pub(super) struct InstalledEngines {
     checked_at: Option<Instant>,
     path: Option<std::ffi::OsString>,
     missing: BTreeMap<&'static str, bool>,
+    checked_report: std::sync::Weak<AvailabilityReport>,
 }
 
 impl InstalledEngines {
-    fn runtime_missing(&mut self, template: &TargetTemplate) -> bool {
+    pub(super) fn observe_check(&mut self, report: Option<&Arc<AvailabilityReport>>) {
+        if let Some(report) = report {
+            let checked = Arc::downgrade(report);
+            if !self.checked_report.ptr_eq(&checked) {
+                self.checked_report = checked;
+                self.checked_at = None;
+            }
+        }
+    }
+
+    fn runtime_missing(
+        &mut self,
+        template: &TargetTemplate,
+        path: Option<&std::ffi::OsStr>,
+    ) -> bool {
         let Some(engine) = mj_controller::targets::local_engine_command(template) else {
             return false;
         };
-        let path = std::env::var_os("PATH");
-        if self.path != path
+        if self.path.as_deref() != path
             || self
                 .checked_at
                 .is_none_or(|at| at.elapsed() >= crate::pollers::CAPACITY_POLL_INTERVAL)
         {
             self.missing.clear();
-            self.path = path;
+            self.path = path.map(std::ffi::OsStr::to_owned);
             self.checked_at = Some(Instant::now());
         }
         *self.missing.entry(engine).or_insert_with(|| {
@@ -246,20 +266,28 @@ pub(super) fn project(
         .map(|probe| (probe.machine_id.as_str(), probe))
         .collect();
     for (id, current) in config.enabled_profiles() {
-        let verdict = report
+        let checked = report
             .and_then(|report| report.profiles.get(id))
-            .filter(|(checked, _)| checked == current)
-            .map_or(AvailabilityVerdict::Unknown, |(_, missing)| match missing {
-                Some(reason) => AvailabilityVerdict::Missing {
-                    reason: reason.clone(),
-                },
-                None => AvailabilityVerdict::Available,
-            });
+            .filter(|(checked, _)| checked == current);
+        let verdict = match checked {
+            Some((_, Some(failure))) => {
+                projection
+                    .browser
+                    .profiles
+                    .insert(id.to_owned(), failure.browser_reason.clone());
+                AvailabilityVerdict::Missing {
+                    reason: failure.detail.clone(),
+                }
+            }
+            Some((_, None)) => AvailabilityVerdict::Available,
+            None => AvailabilityVerdict::Unknown,
+        };
         projection.profiles.insert(id.to_owned(), verdict);
     }
     let mut unreachable = BTreeMap::<String, (Vec<&str>, String, String, bool)>::new();
+    let path = std::env::var_os("PATH");
     for (id, target) in &config.targets {
-        let installed_missing = engines.runtime_missing(target);
+        let installed_missing = engines.runtime_missing(target, path.as_deref());
         if installed_missing {
             projection.uninstalled_engines.insert(id.clone());
         }
@@ -281,6 +309,33 @@ pub(super) fn project(
             target_finding(config, id, target, report, &machines)
         };
         let verdict = finding.verdict();
+        let browser_reason = verdict.missing_reason().map(|reason| match &finding {
+            TargetFinding::Unreachable {
+                machine,
+                answered_nothing,
+                ..
+            } => {
+                format!(
+                    "{}. Check the connection in Settings › Runtimes.",
+                    ssh_failure(Some(machine), *answered_nothing)
+                )
+            }
+            TargetFinding::Verdict(_)
+                if installed_missing && config.enabled_target(id).is_some() =>
+            {
+                reason.to_owned()
+            }
+            TargetFinding::Verdict(_) => {
+                "This runtime failed its availability check. Verify it in Settings › Runtimes."
+                    .to_owned()
+            }
+        });
+        if let Some(reason) = &browser_reason {
+            projection
+                .browser
+                .targets
+                .insert(id.clone(), reason.clone());
+        }
         if config.enabled_target(id).is_some()
             && !(installed_missing && config.is_default_target(id))
         {
@@ -298,8 +353,16 @@ pub(super) fn project(
                         .push(id);
                 }
                 TargetFinding::Verdict(_) => {
-                    if let Some(reason) = verdict.missing_reason() {
+                    if let Some((reason, browser_reason)) =
+                        verdict.missing_reason().zip(browser_reason.as_deref())
+                    {
                         let text = format!("{id}: {reason}");
+                        let browser_text = format!("{id}: {browser_reason}");
+                        projection.browser.target_notes.push(AvailabilityNote {
+                            full: browser_text.clone(),
+                            text: browser_text,
+                            routine: false,
+                        });
                         projection.target_notes.push(AvailabilityNote {
                             full: text.clone(),
                             text,
@@ -317,6 +380,11 @@ pub(super) fn project(
             ssh_failure(Some(&machine), answered_nothing),
             ids.join(", ")
         );
+        projection.browser.target_notes.push(AvailabilityNote {
+            full: format!("{brief} Check the connection in Settings › Runtimes."),
+            text: brief.clone(),
+            routine: answered_nothing,
+        });
         let full = sentence(&format!("{brief} {}", detail.trim()), &remediation);
         projection.target_notes.push(AvailabilityNote {
             text: if answered_nothing {
@@ -353,6 +421,19 @@ pub(super) fn project(
                 routine: false,
             }
         };
+        let browser_text = match &probe.outcome {
+            MachineProbeOutcome::Unreachable {
+                answered_nothing, ..
+            } => {
+                format!("{}.", ssh_failure(Some(id), *answered_nothing))
+            }
+            MachineProbeOutcome::Answered(_) => format!("Machine {id} has no configured runtime."),
+        };
+        projection.browser.target_notes.push(AvailabilityNote {
+            full: format!("{browser_text} Verify it in Settings › Runtimes."),
+            text: browser_text,
+            routine: note.routine,
+        });
         projection
             .machines_without_runtime
             .insert(id.to_owned(), reason);
@@ -521,6 +602,36 @@ mod tests {
         assert!(state.request(), "a new request can wake the runner again");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_completed_availability_check_refreshes_the_engine_installation_fact() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let path = bin.path().as_os_str();
+        let config = Config::default().with_local_targets();
+        let docker = &config.targets["docker"];
+        let mut engines = InstalledEngines::default();
+        assert!(engines.runtime_missing(docker, Some(path)));
+
+        let executable = bin.path().join("docker");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            engines.runtime_missing(docker, Some(path)),
+            "the cache still has the earlier answer"
+        );
+        let completed = Arc::new(AvailabilityReport {
+            profiles: BTreeMap::new(),
+            targets: config.targets.clone(),
+            local: Vec::new(),
+            machines: Vec::new(),
+            added_profiles: Vec::new(),
+            added_runtimes: BTreeMap::new(),
+        });
+        engines.observe_check(Some(&completed));
+        assert!(!engines.runtime_missing(docker, Some(path)));
+    }
+
     // Hard-won: 471c11891: transmitting the checked profile lost readiness
     // when the client had resolved environments.
     #[tokio::test]
@@ -554,7 +665,13 @@ mod tests {
         state.availability().report = Some(Arc::new(AvailabilityReport {
             profiles: [(
                 "agent".into(),
-                (profile, Some("daemon credential missing".into())),
+                (
+                    profile,
+                    Some(mj_setup::setup::ProfilePresenceFailure {
+                        detail: "daemon credential missing".into(),
+                        browser_reason: "Verify the profile.".into(),
+                    }),
+                ),
             )]
             .into(),
             targets: config.targets.clone(),

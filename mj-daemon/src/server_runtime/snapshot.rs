@@ -519,20 +519,18 @@ pub(super) fn viewer_snapshot_selected(
         ),
         None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
     };
-    snapshot.target_availability_notes = availability.target_notes.clone();
+    snapshot.target_availability_notes = availability.browser.target_notes.clone();
     for profile in &mut snapshot.profiles {
-        profile.availability = availability
-            .profiles
-            .get(&profile.id)
-            .cloned()
-            .unwrap_or_default();
+        profile.availability = browser_availability(
+            availability.profiles.get(&profile.id),
+            availability.browser.profiles.get(&profile.id),
+        );
     }
     for target in &mut snapshot.targets {
-        target.availability = availability
-            .targets
-            .get(&target.id)
-            .cloned()
-            .unwrap_or_default();
+        target.availability = browser_availability(
+            availability.targets.get(&target.id),
+            availability.browser.targets.get(&target.id),
+        );
         target.runtime_missing = availability.uninstalled_engines.contains(&target.id);
         let Some(template) = controller.config.targets.get(&target.id) else {
             continue;
@@ -948,6 +946,22 @@ pub(super) fn viewer_snapshot_selected(
     }
     snapshot.capacity = capacity.to_vec();
     snapshot
+}
+
+fn browser_availability(
+    verdict: Option<&mj_client::availability::AvailabilityVerdict>,
+    public_reason: Option<&String>,
+) -> mj_client::availability::AvailabilityVerdict {
+    use mj_client::availability::AvailabilityVerdict;
+    match verdict {
+        Some(AvailabilityVerdict::Available) => AvailabilityVerdict::Available,
+        Some(AvailabilityVerdict::Missing { .. }) => AvailabilityVerdict::Missing {
+            reason: public_reason
+                .cloned()
+                .unwrap_or_else(|| "Failed its availability check.".to_owned()),
+        },
+        Some(AvailabilityVerdict::Unknown) | None => AvailabilityVerdict::Unknown,
+    }
 }
 
 fn question_message(
