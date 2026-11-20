@@ -4685,7 +4685,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         profile.environment = BTreeMap::from([
             ("AWS_PROFILE".into(), "bedrock".into()),
             ("AWS_REGION".into(), "us-east-1".into()),
-            ("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()),
+            ("CLAUDE_CODE_USE_BEDROCK".into(), " On ".into()),
         ])
         .into();
         for (target, launch) in launches_on_every_target(&profile) {
