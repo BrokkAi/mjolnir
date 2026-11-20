@@ -601,6 +601,21 @@ candidates="$root/gc-candidates-$$"
 track_cache_locks
 trap 'cleanup_cache_locks; rm -f -- "$candidates"' EXIT
 try_cache_lock "$root/locks/gc" gc || exit 0
+# An interrupted eviction may leave an unpublished mirror behind.
+rm -rf -- "$root"/mirrors/.trash-*
+evict_cache_mirror() {
+    trash=
+    if [ -d "$1" ]; then
+        trash=$(mktemp -d "$root/mirrors/.trash-$$-XXXXXX")
+        # Rename within mirrors so a reader sees either the whole entry or no
+        # entry, even if deleting the unpublished directory is interrupted.
+        mv -- "$1" "$trash/mirror"
+    fi
+    release_cache_lock
+    if [ -n "$trash" ]; then
+        rm -rf -- "$trash"
+    fi
+}
 for snapshot in "$root"/sessions/*; do
     [ -d "$snapshot" ] || continue
     session=${snapshot##*/}
@@ -623,8 +638,7 @@ for entry in "$root"/mirrors/*; do
     key=${entry##*/}
     [ -f "$entry/last-used" ] || continue
     if find "$entry/last-used" -mmin +43200 -print | grep -q . && try_cache_lock "$root/locks/$key"; then
-        rm -rf -- "$entry"
-        release_cache_lock
+        evict_cache_mirror "$entry"
     fi
 done
 size=$(du -sk "$root/mirrors" | awk '{print $1}')
@@ -635,8 +649,7 @@ if [ "$size" -gt "$limit_kib" ]; then
         entry=${used%/last-used}
         key=${entry##*/}
         if try_cache_lock "$root/locks/$key"; then
-            rm -rf -- "$entry"
-            release_cache_lock
+            evict_cache_mirror "$entry"
             size=$(du -sk "$root/mirrors" | awk '{print $1}')
             [ "$size" -le "$limit_kib" ] && break
         fi
@@ -1651,6 +1664,7 @@ exec "$CACHE_TEST_SLEEP" "$@"
     }
 
     // Hard-won: 932a8969f: interrupted GC left its eviction lock.
+    // Hard-won: 13c4fc559: interrupted eviction left a partial mirror.
     #[test]
     #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_evicts_the_oldest_mirror_to_meet_its_soft_cap() {
@@ -1684,9 +1698,13 @@ exec "$CACHE_TEST_SLEEP" "$@"
 
         #[cfg(unix)]
         {
-            // Run the size-based eviction again with a TERM arriving after
-            // GC owns the recent mirror's lock and before removal finishes.
+            // Interrupt GC after deletion removes Git metadata from a mirror.
             std::fs::remove_file(cache_root.join("last-gc")).unwrap();
+            let source = temporary.path().join("source");
+            for repository in [&source, &recent.join("repo.git")] {
+                let git = CommandSpec::new("git", ["init", "--bare", repository.to_str().unwrap()]);
+                checked(ProcessExecutor.execute(&git).unwrap(), &git).unwrap();
+            }
             let wrappers = temporary.path().join("bin");
             std::fs::create_dir(&wrappers).unwrap();
             let eviction_lock = cache_root.join("locks/recent");
@@ -1695,20 +1713,29 @@ exec "$CACHE_TEST_SLEEP" "$@"
                 "rm",
                 r#"#!/bin/sh
 set -eu
-if [ "$#" -ge 3 ] && [ "$3" = "${CACHE_TEST_EVICTION:-}" ]; then
-    test -f "$CACHE_TEST_EVICTION_LOCK"
+if [ "$1" = -rf ] && [ -d "${3:-}" ]; then
+    case "$3" in
+        "$CACHE_TEST_EVICTION") entry=$3 ;;
+        "$CACHE_TEST_MIRRORS"/.trash-*)
+            test ! -e "$CACHE_TEST_EVICTION_LOCK"
+            entry="$3/mirror"
+            ;;
+        *) exec /bin/rm "$@" ;;
+    esac
+    /bin/rm -- "$entry/repo.git/HEAD"
     kill -TERM "$PPID"
     exit 0
 fi
 exec /bin/rm "$@"
 "#,
             );
-            let mut executor = GitExecutor(BTreeMap::from([
+            let executor = GitExecutor(BTreeMap::from([
                 (
                     "PATH".into(),
                     format!("{}:{}", wrappers.display(), std::env::var("PATH").unwrap()),
                 ),
                 ("CACHE_TEST_EVICTION".into(), recent.display().to_string()),
+                ("CACHE_TEST_MIRRORS".into(), mirrors.display().to_string()),
                 (
                     "CACHE_TEST_EVICTION_LOCK".into(),
                     eviction_lock.display().to_string(),
@@ -1718,7 +1745,22 @@ exec /bin/rm "$@"
                 collect_garbage_with_limit(&CacheHost::Local, &cache_root, &[], 0, &executor)
                     .unwrap_err();
             assert!(error.to_string().contains("status 143"), "{error:#}");
-            assert!(recent.exists());
+            assert!(
+                !recent.exists(),
+                "an interrupted delete left a published mirror"
+            );
+            let trash = std::fs::read_dir(&mirrors)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".trash-")
+                })
+                .unwrap();
+            assert!(trash.join("mirror/repo.git").is_dir());
+            assert!(!trash.join("mirror/repo.git/HEAD").exists());
             assert!(!eviction_lock.exists());
             assert!(!cache_root.join("locks/gc").exists());
             assert!(std::fs::read_dir(&cache_root).unwrap().all(|entry| {
@@ -1729,10 +1771,7 @@ exec /bin/rm "$@"
                     .starts_with("gc-candidates-")
             }));
 
-            executor.0.remove("CACHE_TEST_EVICTION");
-            let source = temporary.path().join("source");
-            let git = CommandSpec::new("git", ["init", "--bare", source.to_str().unwrap()]);
-            checked(ProcessExecutor.execute(&git).unwrap(), &git).unwrap();
+            std::fs::remove_file(wrappers.join("rm")).unwrap();
             mj_core::test_hooks::install_fake_command(
                 &wrappers,
                 "sleep",
@@ -1751,8 +1790,16 @@ exec /bin/rm "$@"
                 &executor,
             )
             .unwrap();
-            assert!(snapshot.join("HEAD").exists());
+            assert!(snapshot.join("HEAD").is_file());
+            assert!(recent.join("repo.git/HEAD").is_file());
             assert!(!eviction_lock.exists());
+
+            collect_garbage(&CacheHost::Local, &cache_root, &[], &ProcessExecutor).unwrap();
+            assert!(
+                !trash.exists(),
+                "the next GC did not reap the interrupted eviction"
+            );
+            assert!(recent.exists());
         }
     }
 
