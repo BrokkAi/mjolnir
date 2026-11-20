@@ -583,11 +583,6 @@ impl ContextHistory {
         handback: bool,
     ) {
         use agent_client_protocol::v1::schema::ContentBlock;
-        // Restart recovery continues the same request and partial answer,
-        // matching TurnContext; it is not a new assistant-message boundary.
-        if crate::continuation::is_restart_continuation(id) {
-            return;
-        }
         self.open_assistant_id = None;
         let mut text = String::new();
         let mut non_text = false;

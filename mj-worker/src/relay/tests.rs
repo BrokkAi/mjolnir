@@ -10665,3 +10665,89 @@ fn old_bridge_retirement_preserves_replacement_terminal_admission() {
         assert!(cut.try_recv().unwrap().is_ok());
     }
 }
+
+// Hard-won: bd33e3913: pruning a queued prompt lost its later delivery boundary on replay.
+#[test]
+fn replayed_delivery_without_queue_event_resets_the_previous_reply() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "first-turn").unwrap();
+    submit_relay(&mut relay, "first-prompt", prompt("first request"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(&mut relay, "second-prompt", prompt("second request"));
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-queue", through);
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"first answer"}
+    })).unwrap()).unwrap();
+    finish_prompt(&mut relay, "first-prompt");
+    relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+        "second-prompt"
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "second-turn").unwrap();
+    let context = relay.turn_context();
+    let evidence = || {
+        context.evidence(
+            mj_core::config::HarnessKind::Codex,
+            mj_core::activity::verdict::TurnPhase::Running,
+            &Default::default(),
+            0,
+        )
+    };
+    assert_eq!(evidence().user_prompt_tail, "second request");
+    assert!(evidence().assistant_text_tail.is_empty());
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    assert!(evidence().assistant_text_tail.is_empty());
+}
+
+// Hard-won: bd33e3913: a recovery question inherited the interrupted reply's explicit ID.
+#[test]
+fn restart_continuation_starts_a_new_authorization_message_for_an_unlabelled_question() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "interrupted").unwrap();
+    submit_relay(&mut relay, "original", prompt("do the work"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"interrupted-reply",
+                "content":{"type":"text","text":"working"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "recovery").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert!(mj_core::continuation::is_restart_continuation(
+        &recovery[0].command_id
+    ));
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Which option?"}
+    })).unwrap()).unwrap();
+    let history = relay.snapshot.authorization_context().unwrap();
+    let question = history.messages.last().unwrap();
+    assert_eq!(question.text, "Which option?");
+    assert_ne!(question.id, "interrupted-reply");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .find(|message| message.id == "interrupted-reply")
+            .unwrap()
+            .text,
+        "working"
+    );
+}

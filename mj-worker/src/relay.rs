@@ -1044,7 +1044,28 @@ impl DurableRelay {
         // Startup already reads the active journal into the bounded hot window.
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {
-            let mut prompts = BTreeMap::<String, String>::new();
+            let prompt_text = |command: &RelayCommand| {
+                command.prompt_blocks().map(|prompt| {
+                    prompt
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            };
+            // The queue observation may be collected before delivery. The
+            // durable dispatch still owns the active prompt and its boundary.
+            let mut prompts: BTreeMap<String, String> = relay
+                .snapshot
+                .dispatches
+                .iter()
+                .filter_map(|(id, dispatch)| {
+                    prompt_text(&dispatch.command).map(|text| (id.clone(), text))
+                })
+                .collect();
             let earlier_history_omitted = relay
                 .hot_events
                 .front()
@@ -1059,19 +1080,9 @@ impl DurableRelay {
                     command,
                     ..
                 } = &event.observation
-                    && let Some(prompt) = command.prompt_blocks()
+                    && let Some(text) = prompt_text(command)
                 {
-                    prompts.insert(
-                        command_id.clone(),
-                        prompt
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
+                    prompts.insert(command_id.clone(), text);
                 }
                 let prompt = if let Some(command_id) =
                     mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
