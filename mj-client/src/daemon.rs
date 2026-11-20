@@ -136,8 +136,7 @@ impl FirstRunSetupReport {
         let mut lines = Vec::new();
         if self.agents.is_empty() {
             lines.push(
-                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
-                    .to_owned(),
+                "No coding agent found yet. Mjolnir can install one and sign you in.".to_owned(),
             );
         } else {
             lines.push(format!(
@@ -905,6 +904,10 @@ pub enum DaemonAction {
     /// environment. A client in another placement asks its daemon instead of
     /// writing the client's `config.toml`.
     RunFirstRunSetup,
+    /// Use the client's directory when both processes can see the same paths.
+    RunFirstRunSetupIn {
+        project_directory: PathBuf,
+    },
     /// Run the doctor in the daemon's own environment and return the
     /// actionable errors, which a client shows after first-run setup.
     RunDoctor,
@@ -2299,6 +2302,12 @@ impl DaemonClient {
         }
     }
 
+    /// Whether the connected daemon can resolve paths from this client.
+    pub fn shares_client_filesystem(&self, identity: &DaemonIdentity) -> bool {
+        !self.connector().is_some_and(|connector| connector.is_ssh())
+            && identity.placement.container() == mj_core::placement::daemon_container().as_deref()
+    }
+
     pub async fn first_run_setup_due(&mut self) -> Result<bool> {
         match self.request(DaemonAction::FirstRunSetupDue).await? {
             DaemonReply::FirstRunSetupDue(due) => Ok(due),
@@ -2306,8 +2315,15 @@ impl DaemonClient {
         }
     }
 
-    pub async fn run_first_run_setup(&mut self) -> Result<Option<FirstRunSetupReport>> {
-        match self.request(DaemonAction::RunFirstRunSetup).await? {
+    pub async fn run_first_run_setup(
+        &mut self,
+        project_directory: Option<PathBuf>,
+    ) -> Result<Option<FirstRunSetupReport>> {
+        let action = match project_directory {
+            Some(project_directory) => DaemonAction::RunFirstRunSetupIn { project_directory },
+            None => DaemonAction::RunFirstRunSetup,
+        };
+        match self.request(action).await? {
             DaemonReply::FirstRunSetup(report) => Ok(report),
             reply => bail!("unexpected first-run setup reply {reply:?}"),
         }
@@ -2789,7 +2805,7 @@ impl DaemonClient {
         resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<Option<mj_core::state::ContainerUpgradePreview>> {
         match self
             .request(DaemonAction::SetSessionContainerSettings {
                 session_id,
@@ -2799,7 +2815,8 @@ impl DaemonClient {
             })
             .await?
         {
-            DaemonReply::Done => Ok(()),
+            DaemonReply::Done => Ok(None),
+            DaemonReply::ContainerUpgradePreview(preview) => Ok(Some(preview)),
             reply => bail!("unexpected container-settings reply {reply:?}"),
         }
     }
@@ -3870,8 +3887,10 @@ pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 pub const SUSPEND_ONLY_CHECKPOINT_PROTOCOL: u32 = 110;
 /// Adoption streams cancellable quiescence waits before its atomic install.
 pub const QUIESCENT_ADOPTION_PROTOCOL: u32 = SUSPEND_ONLY_CHECKPOINT_PROTOCOL + 1;
+/// Tool permission forms name their transcript call, which older clients reject.
+pub const TOOL_PERMISSION_CALL_PROTOCOL: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
 /// The runtime feed carries host capacity, and clients can refresh it.
-pub const RUNTIME_HOST_CAPACITY_PROTOCOL: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
+pub const RUNTIME_HOST_CAPACITY_PROTOCOL: u32 = TOOL_PERMISSION_CALL_PROTOCOL + 1;
 pub const PROTOCOL_VERSION: u32 = RUNTIME_HOST_CAPACITY_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =

@@ -406,6 +406,7 @@ pub(super) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     }
 }
@@ -6451,6 +6452,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
             queued_prompts: Vec::new(),
             accepted_config: Default::default(),
             native_session_unused: false,
+            mailbox: None,
         })
         .unwrap(),
     )
@@ -6491,6 +6493,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
             .into_iter()
             .collect(),
             native_session_unused: false,
+            mailbox: None,
         })
         .unwrap(),
     )
@@ -6526,6 +6529,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
                 queued_prompts: Vec::new(),
                 accepted_config: Default::default(),
                 native_session_unused,
+                mailbox: None,
             })
             .unwrap(),
         )
@@ -6794,6 +6798,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
         [
             "CODEX_API_KEY".to_owned(),
             "OPENAI_API_KEY".to_owned(),
+            mj_core::jev::FASTINO_KEY_ENVIRONMENT.to_owned(),
             "MJ_REVIEW_GATE".to_owned()
         ]
     );
@@ -6841,7 +6846,7 @@ async fn the_acp_bridge_never_sees_an_excluded_variable() {
 
 // Hard-won: a4c6fe269: login environment composition could restore GitHub Enterprise tokens.
 #[tokio::test]
-async fn credential_free_supervisor_excludes_all_github_tokens_after_environment_composition() {
+async fn supervisor_excludes_private_keys_after_environment_composition() {
     let temp = tempfile::tempdir().unwrap();
     let observed = temp.path().join("observed");
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
@@ -6851,7 +6856,7 @@ async fn credential_free_supervisor_excludes_all_github_tokens_after_environment
     config.bridge_args = vec![
         "-c".into(),
         format!(
-            "printf '%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" > {}",
+            "printf '%s|%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" \"${{MJ_JEV_FASTINO_KEY-unset}}\" > {}",
             mj_core::targets::posix_quote(&observed.to_string_lossy()),
         ),
     ];
@@ -6865,13 +6870,17 @@ async fn credential_free_supervisor_excludes_all_github_tokens_after_environment
         spec.environment
             .insert(name.into(), "reintroduced-secret".into());
     }
+    spec.environment.insert(
+        mj_core::jev::FASTINO_KEY_ENVIRONMENT.into(),
+        "fastino-private".into(),
+    );
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
     unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
         .await
         .unwrap();
     assert_eq!(
         std::fs::read_to_string(observed).unwrap(),
-        "unset|unset|unset|unset"
+        "unset|unset|unset|unset|unset"
     );
 }
 
@@ -9393,6 +9402,40 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
     );
     daemon.abort();
     assert!(daemon.await.unwrap_err().is_cancelled());
+}
+
+/// #1617: a harness that cannot be prepared ends the worker with the typed
+/// startup failure its exit record carries, so the daemon stops restarting it
+/// and shows why. It no longer leaves a relay that answers with no harness.
+// Hard-won: #1617: a failed preparation left a live worker that could never run a turn.
+#[tokio::test]
+async fn a_harness_that_cannot_be_prepared_ends_the_worker_with_a_typed_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut config = launch_config("profile-home");
+    // Resolving a bridge that does not exist fails harness preparation.
+    config.bridge_command = temp.path().join("missing-bridge");
+    config.cwd = temp.path().to_owned();
+    let daemon = mj_core::runtime::spawn(unix::run_daemon(root.clone(), config));
+    let error = tokio::time::timeout(std::time::Duration::from_secs(60), daemon)
+        .await
+        .expect("a failed preparation must end the worker")
+        .unwrap()
+        .unwrap_err();
+    let failure = error
+        .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+        .unwrap_or_else(|| panic!("untyped preparation failure: {error:#}"));
+    assert!(
+        failure
+            .message
+            .starts_with("harness preparation failed at harness-resolve: "),
+        "{failure:?}"
+    );
+    assert!(
+        !root.join("control.sock").exists(),
+        "the failed worker left its control socket behind"
+    );
 }
 
 /// Start a coordinator whose session has a ready checkpoint barrier, fed by a

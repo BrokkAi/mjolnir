@@ -3383,7 +3383,7 @@ mod review_gate_tests {
     const REVIEW_RULES: [&str; 3] = [
         "mcp__mj-review__request_review",
         "mcp__mj-review__override_review",
-        "mcp__mj-review__set_review_baseline",
+        "mcp__mj-review__set_baseline",
     ];
 
     fn staged_profile() -> (tempfile::TempDir, PathBuf) {

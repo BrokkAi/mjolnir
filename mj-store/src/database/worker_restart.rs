@@ -9,23 +9,30 @@ pub struct WorkerRestartIntent {
 }
 
 pub fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
-    begin_worker_restart_for(session_id, intent, false)
+    begin_worker_restart_for(session_id, intent, false, None)
 }
 
 /// The wake and its boot owner become visible together. Recovery must never
 /// see a still-parked child whose worker has already accepted launch.
-pub fn begin_subagent_unpark(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
-    begin_worker_restart_for(session_id, intent, true)
+pub fn begin_subagent_unpark(
+    session_id: &str,
+    intent: &WorkerRestartIntent,
+    profile_change: Option<(&str, &str)>,
+) -> Result<()> {
+    begin_worker_restart_for(session_id, intent, true, profile_change)
 }
 
 fn begin_worker_restart_for(
     session_id: &str,
     intent: &WorkerRestartIntent,
     unpark: bool,
+    profile_change: Option<(&str, &str)>,
 ) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
     let session_id = session_id.to_owned();
     let intent = intent.clone();
+    let profile_change =
+        profile_change.map(|(previous, next)| (previous.to_owned(), next.to_owned()));
     submit_database_write("begin_worker_restart", move |connection| {
         let tx = connection.transaction()?;
         let record = state_io::load_session_with(&tx, &session_id)?;
@@ -43,6 +50,11 @@ fn begin_worker_restart_for(
             "another worker replacement already owns session {session_id}"
         );
         if unpark {
+            let (previous, next) = profile_change
+                .as_ref()
+                .map_or((None, None), |(previous, next)| {
+                    (Some(previous), Some(next))
+                });
             let parent: String = tx.query_row(
                 "SELECT parent_session_id FROM subagent_sessions WHERE child_session_id=?1",
                 [&session_id],
@@ -51,10 +63,12 @@ fn begin_worker_restart_for(
             super::session_restart::ensure_container_parent_available(&tx, &parent)?;
             ensure!(
                 tx.execute(
-                    "UPDATE sessions SET state='running', last_error=NULL, updated_at=?2
+                    "UPDATE sessions SET state='running', last_error=NULL, updated_at=?2,
+                         last_profile=COALESCE(?3, last_profile)
                      WHERE session_id=?1 AND state='parked'
+                       AND (?4 IS NULL OR last_profile=?4)
                        AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
-                    params![session_id, chrono::Utc::now().to_rfc3339()],
+                    params![session_id, chrono::Utc::now().to_rfc3339(), next, previous],
                 )? == 1,
                 "only a parked sub-agent can accept a wake"
             );

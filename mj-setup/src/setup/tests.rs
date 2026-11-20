@@ -451,78 +451,59 @@ fn claude_credential_evidence_requires_a_nonempty_login_secret() {
     assert!(!claude_credentials_contain_login(b"not json"));
 }
 
-// Hard-won: f1af21f10: a relative-path remote was taken for GitHub owner/repo.
-#[test]
-fn a_relative_path_origin_is_not_a_github_repository() {
-    let executor = RuntimeProbeExecutor::new([ok(b"mirror/repo.git\n")]);
-    assert_eq!(
-        discover_github_repository(&executor, Path::new("/work/mirror")),
-        None
-    );
-}
-
 #[test]
 fn golden_setup_origin_discovery() {
     use std::fmt::Write as _;
 
-    fn append_summary(out: &mut String, repository: Option<GithubRepository>) {
-        let summary = SetupReport {
+    let mut out = String::new();
+    for (label, remotes, fetch) in [
+        (
+            "origin and a fork",
+            "fork\norigin\n",
+            "https://github.com/BrokkAi/hel.git",
+        ),
+        (
+            "sole SSH remote",
+            "upstream\n",
+            "ssh://git@git.example.com/team/hel.git",
+        ),
+        (
+            "HTTP credentials",
+            "origin\n",
+            "https://name:password@git.example.com/team/hel.git?ref=1#clone",
+        ),
+        ("relative remote", "origin\n", "mirror/hel.git"),
+        ("ambiguous remotes", "fork\nupstream\n", ""),
+    ] {
+        let output = if remotes.lines().any(|remote| remote == "origin") {
+            vec![ok(fetch.as_bytes())]
+        } else {
+            vec![
+                failed(b"No such remote 'origin'"),
+                ok(remotes.as_bytes()),
+                ok(fetch.as_bytes()),
+            ]
+        };
+        let executor = RuntimeProbeExecutor::new(output);
+        let project =
+            mj_core::local_git::discover_project_source(Path::new("/work/hel"), &executor);
+        let (repository, stripped) = project
+            .map(|(source, stripped)| (Some(source), stripped))
+            .unwrap_or_default();
+        let summary = mj_client::daemon::FirstRunSetupReport {
             agents: Vec::new(),
-            repository: repository.as_ref().map(GithubRepository::source),
+            repository,
         }
         .summary();
-        let repository = repository
-            .map(|repository| repository.source())
-            .unwrap_or_else(|| "<none>".into());
-        writeln!(out, "repository prompt: {repository}").unwrap();
-        writeln!(out, "setup summary: {}", summary.join(" ")).unwrap();
+        writeln!(out, "=== {label} ===").unwrap();
+        if stripped {
+            writeln!(out, "{}", mj_core::remote_git::HTTP_USERINFO_REMOVED).unwrap();
+        }
+        writeln!(out, "{}", summary.join(" ")).unwrap();
+        for command in executor.commands.borrow().iter() {
+            writeln!(out, "git {}", command.args.join(" ")).unwrap();
+        }
     }
-
-    let mut out = String::new();
-    for (label, origin) in [
-        ("HTTPS remote", "https://github.com/BrokkAi/hel.git"),
-        ("SSH remote", "git@github.com:BrokkAi/hel.git"),
-        ("SSH URL", "ssh://git@github.com/BrokkAi/hel.git"),
-    ] {
-        writeln!(out, "=== {label} (1 setup summary) ===").unwrap();
-        append_summary(&mut out, github_repository_from_origin(origin));
-    }
-    writeln!(out, "=== non-GitHub remote (1 setup summary) ===").unwrap();
-    append_summary(
-        &mut out,
-        github_repository_from_origin("https://example.com/hel"),
-    );
-
-    let executor = RuntimeProbeExecutor::new([ok(b"git@github.com:BrokkAi/hel.git\n")]);
-    let discovered = discover_github_repository(&executor, Path::new("/work/hel"));
-    let commands = executor.commands.borrow();
-    assert_eq!(commands[0].program, "git");
-    assert_eq!(
-        commands[0].args,
-        ["-C", "/work/hel", "remote", "get-url", "origin"]
-    );
-    writeln!(out, "=== shared executor success (1 setup summary) ===").unwrap();
-    writeln!(
-        out,
-        "probe: git -C <working-directory> remote get-url origin"
-    )
-    .unwrap();
-    append_summary(&mut out, discovered);
-
-    let failing = RuntimeProbeExecutor::new([failed(b"not a git repository")]);
-    writeln!(out, "=== shared executor failure (1 setup summary) ===").unwrap();
-    writeln!(out, "probe: command failed").unwrap();
-    append_summary(
-        &mut out,
-        discover_github_repository(&failing, Path::new("/work/plain")),
-    );
-    let missing = RuntimeProbeExecutor::new([]);
-    writeln!(out, "=== shared executor unavailable (1 setup summary) ===").unwrap();
-    writeln!(out, "probe: no result").unwrap();
-    append_summary(
-        &mut out,
-        discover_github_repository(&missing, Path::new("/work/plain")),
-    );
 
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "setup-origin-discovery", &out);
 }

@@ -351,8 +351,9 @@ fn detecting_profiles_that_all_exist_says_each_agent_already_has_one() {
 }
 
 /// A profile page lists only the settings its kind reads: the guardian review
-/// model and Codex profile belong to Codex alone, and the Claude permission
-/// mode to Claude alone. Changing a profile's kind drops the old kind's fields.
+/// model and Codex profile belong to Codex alone, the Claude permission mode
+/// to Claude alone, and the Mjolnir guardian toggle to the harnesses it
+/// reviews. Changing a profile's kind drops the old kind's fields.
 // Hard-won: DSH campaign 2026-10-23: Settings showed guardian and Codex fields for DSH
 #[test]
 fn a_profile_page_hides_codex_only_settings_for_other_kinds() {
@@ -363,27 +364,42 @@ fn a_profile_page_hides_codex_only_settings_for_other_kinds() {
         draft
     };
     let keys = |draft: &Value| visible_keys(&path, draft.pointer(&pointer(&path)).unwrap());
-    let only = [
-        ("codex", "guardian_review_model"),
-        ("codex", "codex_profile"),
-        ("claude", "claude_permission_mode"),
+    let only: [(&[&str], &str); 4] = [
+        (&["codex"], "guardian_review_model"),
+        (&["codex"], "codex_profile"),
+        (&["claude"], "claude_permission_mode"),
+        (&["kimi", "open-code", "dsh"], "mjolnir_guardian"),
     ];
-    for kind in ["codex", "claude", "kimi", "grok", "muse", "opencode", "dsh"] {
+    for kind in [
+        "codex",
+        "claude",
+        "kimi",
+        "grok",
+        "muse",
+        "open-code",
+        "dsh",
+    ] {
         let shown = keys(&profile(kind));
-        for (owner, key) in only {
+        for (owners, key) in only {
             assert_eq!(
                 shown.contains(&key.to_owned()),
-                kind == owner,
+                owners.contains(&kind),
                 "{kind} {key}"
             );
         }
     }
 
-    let mut draft = profile("codex");
-    let kind = [path.clone(), vec!["kind".to_owned()]].concat();
-    mj_client::settings::edit::stage(&mut draft, &kind, &json!("claude")).unwrap();
-    let shown = keys(&draft);
-    for (owner, key) in only {
-        assert_eq!(shown.contains(&key.to_owned()), owner == "claude", "{key}");
+    for (from, to) in [("codex", "claude"), ("kimi", "claude")] {
+        let mut draft = profile(from);
+        let kind = [path.clone(), vec!["kind".to_owned()]].concat();
+        mj_client::settings::edit::stage(&mut draft, &kind, &json!(to)).unwrap();
+        let shown = keys(&draft);
+        for (owners, key) in only {
+            assert_eq!(
+                shown.contains(&key.to_owned()),
+                owners.contains(&to),
+                "{from} to {to}: {key}"
+            );
+        }
     }
 }

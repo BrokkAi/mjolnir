@@ -5,15 +5,21 @@ use mj_core::github_item::{GithubItemEvidence, MAX_BODY_BYTES};
 
 const ENDPOINT: &str = "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/github-item-glide";
 
-/// Always use the hosted classifier, irrespective of local Jev credentials.
-pub async fn classify_probability(evidence: &GithubItemEvidence) -> Result<f64> {
-    classify_at(evidence, ENDPOINT).await
+pub async fn classify_probability(
+    evidence: &GithubItemEvidence,
+    fastino_key: Option<&str>,
+) -> Result<f64> {
+    classify_at(evidence, ENDPOINT, fastino_key).await
 }
 
-async fn classify_at(evidence: &GithubItemEvidence, endpoint: &str) -> Result<f64> {
+async fn classify_at(
+    evidence: &GithubItemEvidence,
+    endpoint: &str,
+    fastino_key: Option<&str>,
+) -> Result<f64> {
     let response = crate::jev_transport::post_bounded_json(
         endpoint,
-        None,
+        fastino_key,
         serde_json::to_vec(&evidence)?,
         MAX_BODY_BYTES,
         "request GitHub item GLiDE probability",
@@ -57,6 +63,7 @@ mod tests {
                 listener.local_addr().unwrap()
             );
             let expected = serde_json::to_vec(&evidence).unwrap();
+            let own_key = body.contains("0.1123").then_some("test-personal-key");
             let server = mj_core::runtime::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -71,7 +78,12 @@ mod tests {
                 };
                 let header = String::from_utf8_lossy(&request[..header_end]);
                 assert!(header.starts_with("POST /v1/github-item-glide HTTP/1.1"));
-                assert!(!header.to_lowercase().contains("authorization:"));
+                let headers = header.to_lowercase();
+                assert!(!headers.contains("authorization:"));
+                assert_eq!(
+                    headers.contains("x-fastino-key: test-personal-key"),
+                    own_key.is_some()
+                );
                 let length: usize = header
                     .lines()
                     .find_map(|line| {
@@ -99,7 +111,7 @@ mod tests {
                     .await
                     .unwrap();
             });
-            let result = classify_at(&evidence, &endpoint).await;
+            let result = classify_at(&evidence, &endpoint, own_key).await;
             server.await.unwrap();
             if body.contains("0.1123") {
                 assert_eq!(result.unwrap(), 0.1123);

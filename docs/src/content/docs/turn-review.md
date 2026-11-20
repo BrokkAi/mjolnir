@@ -43,7 +43,7 @@ Review requires a committed Git checkout. Tracked changes must be committed befo
 
 ## Request a review
 
-Claude Code, Codex, and DSH sessions receive the `request_review` tool from the separate `mj-review` MCP server. The agent commits its work and calls the tool before pushing. `/review` in Prompt, `mj review start`, and `POST /review` also start a push review of committed work. The verdict arrives as a message to the agent. If a review cannot start, the requester sees the reason. `mj review status` shows the open review and verdict.
+Claude Code, Codex, and DSH sessions receive the `request_review` tool from the separate `mj-review` MCP server. The agent commits its work and calls the tool before pushing. With no arguments it reviews the repository that contains the session's working directory. `request_review(paths)` reviews the named worktrees together in one review, for example a change that spans two repositories. `/review` in Prompt, `mj review start`, and `POST /review` also start a push review of committed work. The verdict arrives as a message to the agent. If a review cannot start, the requester sees the reason. `mj review status` shows the open review and verdict.
 
 Reviewers read the whole change from its review base. They do not receive prior findings for a corrective pass. A findings verdict tells the agent to address findings and request review again.
 
@@ -55,7 +55,7 @@ A clean review advances the review base. It records the reviewed tree in `refs/m
 
 The `override_review` tool takes pairs of findings and reasons for findings the agent will not fix. The agent should record these before committing other fixes. The override allows pushing the exact reviewed commits, but does not move the review base. Mjolnir records overridden trees in `refs/mj/overridden/<tree>` and tells later reviewers not to report declined findings again. The declined list clears when the review base moves.
 
-`set_review_baseline(commit, path?)` moves the review base through a commit whose tree was reviewed or overridden. Later reviews start after that commit. Moving the base clears the declined list. The tools `request_review`, `override_review`, and `set_review_baseline` are provided by `mj-review`.
+`set_baseline(commit, path?)` moves the review base through a commit whose tree was reviewed or overridden. Later reviews start after that commit. Moving the base clears the declined list. The tools `request_review`, `override_review`, and `set_baseline` are provided by `mj-review`.
 
 The pre-push hook accepts trees recorded under either `refs/mj/reviewed/` or `refs/mj/overridden/`. A merge of the default branch does not require reviewing changes already covered by the prior review base.
 

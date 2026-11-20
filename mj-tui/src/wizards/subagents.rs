@@ -244,6 +244,18 @@ impl SubagentDraft {
         }
     }
     pub(crate) fn declare(&self, form: &mut Dialog<WizardControl>) {
+        form.declare_with_enabled(
+            WizardControl::Subagents,
+            ControlKind::ComboBox {
+                len: self.policies().len(),
+                selected: self
+                    .combo
+                    .selection(WizardControl::Subagents, self.policy_index()),
+                expanded: self.combo.is_open(WizardControl::Subagents),
+            },
+            true,
+        );
+        form.set_row_enabled(WizardControl::Subagents, self.enabled_policies());
         if self.oracle_available() {
             form.declare_with_enabled(
                 WizardControl::Oracle,
@@ -257,18 +269,6 @@ impl SubagentDraft {
                 true,
             );
         }
-        form.declare_with_enabled(
-            WizardControl::Subagents,
-            ControlKind::ComboBox {
-                len: self.policies().len(),
-                selected: self
-                    .combo
-                    .selection(WizardControl::Subagents, self.policy_index()),
-                expanded: self.combo.is_open(WizardControl::Subagents),
-            },
-            true,
-        );
-        form.set_row_enabled(WizardControl::Subagents, self.enabled_policies());
     }
     pub(crate) fn refresh_create(
         &mut self,

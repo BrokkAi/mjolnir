@@ -443,9 +443,11 @@ pub enum SubagentToolAction {
         ls: bool,
     },
     ListProfiles,
+    /// Review the worktrees in `paths` together. Empty means the repository
+    /// that contains the session's working directory.
     RequestReview {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
     },
     AskOracle {
         message: String,
@@ -526,7 +528,10 @@ enum SubagentToolActionWire {
     },
     ListProfiles,
     RequestReview {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        paths: Vec<String>,
+        /// A queued request from an older worker, which named one worktree.
+        #[serde(default)]
         path: Option<String>,
     },
     AskOracle {
@@ -655,7 +660,10 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 ls,
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
-            SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
+            SubagentToolActionWire::RequestReview { mut paths, path } => {
+                paths.extend(path);
+                Self::RequestReview { paths }
+            }
             SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
             SubagentToolActionWire::OverrideReview {
                 mut overrides,
@@ -996,7 +1004,7 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 pub const REVIEW_MCP_SERVER: &str = "mj-review";
 
 /// The tools the review server lists, in the order it lists them.
-pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_review_baseline"];
+pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_baseline"];
 
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
@@ -2008,13 +2016,21 @@ mod tests {
     fn request_review_path_preserves_legacy_encoding() {
         let old = r#"{"action":"request_review","params":{}}"#;
         let action: SubagentToolAction = serde_json::from_str(old).unwrap();
-        assert!(matches!(
+        assert_eq!(
             action,
-            SubagentToolAction::RequestReview { path: None }
-        ));
+            SubagentToolAction::RequestReview { paths: Vec::new() }
+        );
         assert_eq!(serde_json::to_string(&action).unwrap(), old);
+        // A request an older worker queued named one worktree.
+        let queued = r#"{"action":"request_review","params":{"path":"/worktree"}}"#;
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(queued).unwrap(),
+            SubagentToolAction::RequestReview {
+                paths: vec!["/worktree".into()]
+            }
+        );
         let scoped = SubagentToolAction::RequestReview {
-            path: Some("/worktree".into()),
+            paths: vec!["/worktree".into(), "/other".into()],
         };
         assert_eq!(
             serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&scoped).unwrap())
@@ -2724,7 +2740,7 @@ mod tests {
         assert_eq!(REVIEW_MCP_SERVER, "mj-review");
         assert_eq!(
             REVIEW_MCP_TOOLS,
-            ["request_review", "override_review", "set_review_baseline"]
+            ["request_review", "override_review", "set_baseline"]
         );
         for role in [
             SubagentMcpRole::Parent,

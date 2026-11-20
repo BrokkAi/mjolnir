@@ -20,8 +20,7 @@ Checks do not start stopped services, and launch performs a final preflight.
 
 Settings refuses to remove or rewrite configuration used by an active session;
 add an alternative entry or stop the session first. Global defaults and profile
-enablement remain editable. `mj setup` reruns automatic agent and repository
-discovery; direct `config.toml` editing also remains available.
+enablement remain editable. **Detect profiles** and **Detect runtimes** in Settings rerun discovery. You can also edit `config.toml` directly.
 
 If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
@@ -1314,8 +1313,8 @@ and finally the verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 
-Harness-home variables influence automatic first-run discovery and explicit
-`mj setup` reruns. Existing profiles retain their configured homes:
+Harness-home variables influence automatic first-run discovery and Settings'
+**Detect profiles**. Existing profiles retain their configured homes:
 
 | Harness | Discovery variable | Conventional home |
 | --- | --- | --- |

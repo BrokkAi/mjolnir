@@ -111,7 +111,8 @@ pub(crate) struct NewArgs {
     /// Existing bundle to run. Bare targets use `--project-directory` instead.
     #[arg(long)]
     bundle: Option<String>,
-    /// Existing directory on the selected bare target to run the session against.
+    /// Existing directory on the bare target, or a checkout on the controller
+    /// host for discovering an isolated project.
     #[arg(long)]
     project_directory: Option<PathBuf>,
     /// Start the workspace checked out at this full commit ID in the bundle's primary repository.
@@ -1264,21 +1265,8 @@ pub(crate) fn session_review(
 /// Create a session and deliver its optional first prompt.
 pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<String>) -> Result<()> {
     let prompt = read_prompt(args.prompt.clone(), args.prompt_file.clone())?;
-    if args.bundle.is_none() && args.project_directory.is_none() {
-        bail!("pass --bundle, --project-directory, or both");
-    }
-    // Every session lives in a workspace the dashboard and the viewer list,
-    // so the command names one (launch finding H-3).
-    let workspace_id = match (&args.workspace_id, requested_workspace.as_deref()) {
-        (Some(workspace_id), _) => Some(workspace_id.clone()),
-        (None, Some(name)) => {
-            // An unknown name is refused without starting a stopped daemon,
-            // as a missing one is (launch findings R2-14 and R5-9).
-            crate::refuse_unknown_workspace(name).await?;
-            Some(crate::resolve_store_workspace(Some(name)).await?)
-        }
-        (None, None) => return Err(crate::workspace_required("mj new").await),
-    };
+    let (client, workspace_id, target_id, project_directory) =
+        infer_new_session_inputs(&args, requested_workspace.as_deref()).await?;
     let request = StartSessionRequest {
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
@@ -1298,11 +1286,11 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         branch: args.branch.clone(),
         base: args.base.clone(),
         no_later_history: args.no_later_history,
-        workspace_id,
+        workspace_id: Some(workspace_id),
         profile_id: args.profile.clone(),
-        target_id: args.target.clone(),
+        target_id,
         bundle_id: args.bundle.clone(),
-        project_directory: args.project_directory.clone(),
+        project_directory,
         title: args.title.clone(),
         model: args.model.clone(),
         effort: args.effort.clone(),
@@ -1316,7 +1304,6 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
             })
             .transpose()?,
     };
-    let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
     if let Some(notice) = &response.notice {
         write_start_notice(std::io::stderr().lock(), notice)?;
@@ -1329,6 +1316,170 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         println!("turn {turn_id}");
     }
     Ok(())
+}
+
+async fn infer_new_session_inputs(
+    args: &NewArgs,
+    requested_workspace: Option<&str>,
+) -> Result<(ApiClient, String, Option<String>, Option<PathBuf>)> {
+    use mj_daemon::server::api::resolve_launch_choices;
+    let mut open = Vec::new();
+    let mut workspace_id = args.workspace_id.clone();
+    if workspace_id.is_none()
+        && let Some(name) = requested_workspace
+    {
+        crate::refuse_unknown_workspace(name).await?;
+        workspace_id = Some(crate::resolve_store_workspace(Some(name)).await?);
+    }
+    if let Some(workspace_id) = &workspace_id
+        && args.target.is_some()
+        && (args.profile.is_some() || args.model.is_some())
+        && args
+            .project_directory
+            .as_ref()
+            .map_or(args.bundle.is_some(), |path| path.is_absolute())
+    {
+        return Ok((
+            ApiClient::connect().await?,
+            workspace_id.clone(),
+            args.target.clone(),
+            args.project_directory.clone(),
+        ));
+    }
+    let mut listed = if workspace_id.is_none() {
+        crate::listed_workspaces_without_starting().await
+    } else {
+        None
+    };
+    let client = if listed.as_ref().is_some_and(Vec::is_empty) {
+        ApiClient::connect_running().await.ok()
+    } else {
+        Some(ApiClient::connect().await?)
+    };
+    if workspace_id.is_none() && listed.is_none() {
+        listed = crate::listed_workspaces_without_starting().await;
+    }
+
+    let options = match &client {
+        Some(client) => Some(client.launch_options().await?),
+        None => None,
+    };
+    let selected_target = options.as_ref().and_then(|options| {
+        let resolve = |need_profile| {
+            resolve_launch_choices(
+                args.profile.as_deref(),
+                args.target.as_deref(),
+                need_profile,
+                options.profiles.iter().map(|profile| profile.id.as_str()),
+                options
+                    .targets
+                    .iter()
+                    .filter(|target| !target.runtime_missing)
+                    .map(|target| target.id.as_str()),
+                options.default.as_ref(),
+            )
+        };
+        if let Err(choices) = resolve(args.model.is_none()) {
+            open.extend(choices.into_iter().map(|choice| {
+                choice.replacen("a profile_id", "--profile ID", 1).replacen(
+                    "a target_id",
+                    "--target ID",
+                    1,
+                )
+            }));
+        }
+        let (_, target_id) = resolve(false).ok()?;
+        options.targets.iter().find(|target| target.id == target_id)
+    });
+    if options.is_none() {
+        if args.profile.is_none() && args.model.is_none() {
+            open.push("--profile ID".to_owned());
+        }
+        if args.target.is_none() {
+            open.push("--target ID".to_owned());
+        }
+    }
+    let colocated = client
+        .as_ref()
+        .is_some_and(ApiClient::daemon_on_client_filesystem);
+    let local = colocated && selected_target.is_some_and(|target| target.kind != "ssh-bare");
+    let canonical_folder = std::cell::OnceCell::new();
+    let folder = || {
+        canonical_folder
+            .get_or_init(|| {
+                let resolve = || -> Result<PathBuf> {
+                    let path = match &args.project_directory {
+                        Some(path) => mj_core::path_input::expand_local(path)?,
+                        None => std::env::current_dir().context("read the current folder")?,
+                    };
+                    path.canonicalize()
+                        .with_context(|| format!("open folder {}", path.display()))
+                };
+                resolve().map_err(|error| format!("{error:#}"))
+            })
+            .clone()
+            .map_err(anyhow::Error::msg)
+    };
+
+    if workspace_id.is_none() {
+        let known_empty = listed.as_ref().is_some_and(Vec::is_empty);
+        let workspaces: Vec<_> = listed
+            .unwrap_or_default()
+            .into_iter()
+            .map(|workspace| crate::daemon::WorkspaceListing { workspace })
+            .collect();
+        if local && let Ok(directory) = folder() {
+            workspace_id = crate::go::inferred_workspace(&workspaces, &directory).await?;
+        }
+        if workspace_id.is_none() {
+            if let [only] = workspaces.as_slice() {
+                workspace_id = Some(only.workspace.id.clone());
+            } else if known_empty {
+                open.push("--workspace NAME (this instance has none yet. Create one with `mj workspaces create NAME`)".to_owned());
+            } else if workspaces.is_empty() {
+                open.push("--workspace NAME (see `mj workspaces`)".to_owned());
+            } else {
+                let names = workspaces
+                    .iter()
+                    .map(|entry| entry.workspace.name.as_str())
+                    .collect::<Vec<_>>();
+                open.push(format!("--workspace NAME (one of: {})", names.join(", ")));
+            }
+        }
+    }
+    let mut project_directory = args.project_directory.clone();
+    if project_directory.is_none() && args.bundle.is_none() {
+        match selected_target {
+            Some(target) if target.requires_project_directory && local => match folder() {
+                Ok(path) => project_directory = Some(path),
+                Err(error) => open.push(format!("--project-directory PATH ({error:#})")),
+            },
+            Some(target) if target.requires_project_directory => {
+                let host = target.host.as_deref().unwrap_or("the target host");
+                open.push(format!("--project-directory PATH (the folder on {host})"));
+            }
+            _ => open.push("--bundle ID or --project-directory PATH".to_owned()),
+        }
+    }
+    if !open.is_empty() {
+        bail!(
+            "mj new needs more than it was given. Pass:\n  {}",
+            open.join("\n  ")
+        );
+    }
+    if local && args.project_directory.is_some() {
+        project_directory = Some(folder()?);
+    }
+    // Pin the target used to interpret the directory even if the saved
+    // default changes between reading launch options and creating a session.
+    Ok((
+        client.context("launch options are unavailable")?,
+        workspace_id.context("no workspace was selected")?,
+        selected_target
+            .map(|target| target.id.clone())
+            .or_else(|| args.target.clone()),
+        project_directory,
+    ))
 }
 
 pub(crate) fn write_start_notice(

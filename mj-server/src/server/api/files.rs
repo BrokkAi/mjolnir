@@ -93,11 +93,9 @@ pub(super) async fn elicitations(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<mj_core::elicitation::ElicitationRequest>>, ApiFailure> {
     let snapshot = state.snapshot_rx.borrow();
-    Ok(Json(
-        require_session_record(&snapshot, &session_id)?
-            .pending_elicitations
-            .clone(),
-    ))
+    Ok(Json(super::types::v1_elicitations(
+        &require_session_record(&snapshot, &session_id)?.pending_elicitations,
+    )))
 }
 
 pub(super) async fn respond_elicitation(

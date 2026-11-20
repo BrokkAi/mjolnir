@@ -1,0 +1,177 @@
+//! The first launch on a computer that has never run a daemon asks where the
+//! daemon should run, before anything connects to one.
+//!
+//! The answer is the `[daemon]` placement every later launch reads, so an
+//! SSH destination is only saved once a real connection to it has worked: a
+//! mistyped host would otherwise fail every following launch.
+
+use anyhow::{Context, Result};
+use mj_client::daemon::ssh::{self, DiscoveryIntent};
+use mj_core::config::{DaemonConfig, DaemonRuntime, config_path};
+use std::io::{self, Write};
+
+pub(crate) enum PlacementChoice {
+    /// A placement is settled; start the dashboard.
+    Continue,
+    /// The user ended input (Ctrl-D or Ctrl-C) without choosing.
+    Cancelled,
+}
+
+enum Remote {
+    Saved,
+    Back,
+    Cancelled,
+}
+
+/// Whether no daemon has ever run on this computer: no `[daemon]` table
+/// is set, and there is neither a store nor an endpoint. Either means a
+/// local daemon already ran, so a computer that stopped its daemon is not
+/// asked again. Nothing else counts: a configuration copied to a new computer,
+/// or a standalone `mj setup`, has not started a daemon there.
+fn is_first_launch() -> Result<bool> {
+    // An explicit `[daemon]` table is a choice, even `runtime = "host"`.
+    if DaemonConfig::is_set_in(&config_path())? {
+        return Ok(false);
+    }
+    Ok(!mj_controller::database::database_path().exists()
+        && !mj_client::daemon::metadata_path().exists())
+}
+
+/// Ask where the daemon runs when this is the first launch, and save an SSH
+/// answer. Choosing this computer saves nothing: the default placement is a
+/// local daemon, and starting it creates the store that ends the first launch.
+pub(crate) async fn ask_where_daemon_runs() -> Result<PlacementChoice> {
+    let first = mj_core::runtime::spawn_blocking(is_first_launch)
+        .await
+        .context("first-launch check task failed")??;
+    if !first {
+        return Ok(PlacementChoice::Continue);
+    }
+    loop {
+        println!("No Mjolnir daemon has run on this computer. Where should it run?");
+        println!("  1) Start a daemon on this computer");
+        println!("  2) Connect to a daemon on another computer over SSH");
+        // Leaving, not the default: the default would start a daemon and a
+        // store, which ends this prompt for good.
+        let Answer::Text(answer) = ask("Choose 1 or 2 [1]: ").await? else {
+            return Ok(PlacementChoice::Cancelled);
+        };
+        match answer.as_str() {
+            "" | "1" => return Ok(PlacementChoice::Continue),
+            "2" => match connect_remote().await? {
+                Remote::Saved => return Ok(PlacementChoice::Continue),
+                Remote::Back => {}
+                Remote::Cancelled => return Ok(PlacementChoice::Cancelled),
+            },
+            _ => println!("Enter 1 or 2."),
+        }
+    }
+}
+
+enum Answer {
+    Text(String),
+    /// End of input (Ctrl-D).
+    Eof,
+    /// Ctrl-C. The terminal read cannot be cancelled and would take the next
+    /// line typed, so this ends the first launch rather than asking again.
+    Interrupted,
+}
+
+/// One line from the terminal. The terminal's own line editing is enough for
+/// a choice and a host name, and plain reading needs nothing from the
+/// terminal (no cursor-position reply) and writes to stdout like the
+/// dashboard, so redirecting stderr does not hide the question.
+///
+/// Ctrl-C is listened for here, not left to the default action: once an SSH
+/// attempt has installed tokio's handler, the default no longer applies, and a
+/// prompt that ignored the signal would leave the user without a way out.
+async fn ask(label: &'static str) -> Result<Answer> {
+    print!("{label}");
+    io::stdout().flush()?;
+    let read = mj_core::runtime::spawn_blocking(|| {
+        let mut line = String::new();
+        let read = io::stdin()
+            .read_line(&mut line)
+            .context("read terminal response")?;
+        Ok::<_, anyhow::Error>((read > 0).then(|| line.trim().to_owned()))
+    });
+    tokio::select! {
+        line = read => Ok(match line.context("prompt task failed")?? {
+            Some(line) => Answer::Text(line),
+            None => Answer::Eof,
+        }),
+        () = interrupted() => Ok(Answer::Interrupted),
+    }
+}
+
+/// Resolves on Ctrl-C. A handler that cannot be registered never resolves:
+/// that must not read as an interrupt.
+async fn interrupted() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn connect_remote() -> Result<Remote> {
+    loop {
+        let Answer::Text(host) =
+            ask("SSH destination (user@host, or a Host from your SSH config; empty to go back): ")
+                .await?
+        else {
+            return Ok(Remote::Cancelled);
+        };
+        if host.is_empty() {
+            return Ok(Remote::Back);
+        }
+        if host.starts_with('-') {
+            println!("An SSH destination cannot start with '-'.");
+            continue;
+        }
+        let placement = DaemonConfig {
+            runtime: DaemonRuntime::Ssh,
+            host: Some(host.clone()),
+            ..DaemonConfig::default()
+        };
+        println!("Connecting to {host}, starting its daemon if needed... (Ctrl-C to cancel)");
+        if let Err(error) = try_connect(&placement).await {
+            println!("Could not use the daemon on {host}: {error:#}\n");
+            continue;
+        }
+        let saved = placement.clone();
+        // The file must still hold the default this prompt was shown for: a
+        // second first launch that chose another host first is not replaced.
+        let saving = mj_core::runtime::spawn_blocking(move || {
+            saved.replace_placement(&config_path(), &DaemonConfig::default())
+        })
+        .await
+        .context("save daemon placement task failed")?;
+        match saving {
+            Ok(()) => {
+                println!(
+                    "This computer will use the daemon on {host}. To change that, edit [daemon] in {}.",
+                    config_path().display()
+                );
+                return Ok(Remote::Saved);
+            }
+            // The connection worked; only the saving did not. Report it and
+            // leave the menu open so local remains a choice.
+            Err(error) => println!("The connection works, but it could not be saved: {error:#}\n"),
+        }
+    }
+}
+
+/// The connection every later launch makes: discovery, the tunnel, and the
+/// proof of the daemon's identity. The tunnel is released again; the remote
+/// daemon keeps running. Ctrl-C cancels it and reaps the SSH process group,
+/// so a server that accepts the connection and then stalls can be left.
+async fn try_connect(placement: &DaemonConfig) -> Result<()> {
+    let instance = placement.remote_instance();
+    let mut lease = ssh::open(
+        placement,
+        instance.as_deref(),
+        DiscoveryIntent::Start,
+        interrupted(),
+    )
+    .await?;
+    lease.terminate().await
+}

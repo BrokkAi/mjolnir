@@ -65,8 +65,16 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
         Confirmation::RestartAgent { .. } => &["Cancel", "Restart agent"],
         Confirmation::RestartContainer {
-            upgrade_only: true, ..
-        } => &["Cancel", "Upgrade container and restart…"],
+            preview,
+            upgrade_only: true,
+            ..
+        } => {
+            if preview.settings.is_some() {
+                &["Cancel", "Apply settings and restart…"]
+            } else {
+                &["Cancel", "Upgrade container and restart…"]
+            }
+        }
         Confirmation::RestartContainer { .. } => {
             &["Cancel", "Restart agent", "Upgrade container and restart…"]
         }
@@ -1495,7 +1503,9 @@ pub(crate) fn confirmation_body(
             preview,
             upgrade_only,
         } => (
-            if *upgrade_only {
+            if preview.settings.is_some() {
+                " Apply container settings and restart? "
+            } else if *upgrade_only {
                 " Upgrade container and restart? "
             } else {
                 " Restart agent "

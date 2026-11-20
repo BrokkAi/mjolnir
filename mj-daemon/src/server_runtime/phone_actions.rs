@@ -141,6 +141,11 @@ pub(super) fn admit_phone_action(
     action: &ControllerAction,
     active_sessions: &mut std::collections::BTreeSet<String>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
+    if matches!(action, ControllerAction::UpgradeContainer { request } if request.selection.settings.is_some())
+    {
+        // The upgrade owner must be able to join a retry as soon as it has acknowledged it.
+        return Ok(None);
+    }
     let closing = matches!(
         action,
         ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }
@@ -175,9 +180,11 @@ pub(super) struct BundleCreated {
 }
 
 pub(super) struct MovePrepared {
-    pub(super) result: std::result::Result<mj_core::state::MovePreparation, String>,
-    pub(super) reply:
-        tokio::sync::oneshot::Sender<std::result::Result<mj_core::state::MovePreparation, String>>,
+    pub(super) result:
+        std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
+    pub(super) reply: tokio::sync::oneshot::Sender<
+        std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
+    >,
 }
 
 /// Loads durable controller state without occupying the phone control loop.

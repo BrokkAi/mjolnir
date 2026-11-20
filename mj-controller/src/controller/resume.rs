@@ -658,6 +658,55 @@ pub(super) struct RestoreIntoTarget<'a> {
     pub retire_after_ready: Option<&'a crate::database::EnvironmentRecord>,
 }
 
+/// Who dispatches the archived queue and the archived worker's pending mail.
+///
+/// The restored worker may own both at once only when nothing must happen
+/// first. A Move destination admits them after Move commits ownership
+/// (`admit_move_queue`): until then a failed Move hands the session back to
+/// its source, which still holds the same queue and mail. A fresh native
+/// session admits them after its handoff context is installed, which a turn
+/// started by a waking message would refuse.
+fn restore_queue_policy(
+    move_queue: Option<mj_core::state::ResumeQueueDisposition>,
+    native_continuity: bool,
+    discard_queued_prompts: bool,
+    replay_queue: bool,
+) -> mj_checkpoint::checkpoint::QueueRestorePolicy {
+    use mj_checkpoint::checkpoint::QueueRestorePolicy;
+    use mj_core::state::ResumeQueueDisposition;
+    match move_queue {
+        Some(ResumeQueueDisposition::Start) => QueueRestorePolicy::Defer,
+        Some(ResumeQueueDisposition::Discard) => QueueRestorePolicy::DiscardDeferringMail,
+        None if !native_continuity && replay_queue => QueueRestorePolicy::Defer,
+        None if !native_continuity => QueueRestorePolicy::DiscardDeferringMail,
+        None if discard_queued_prompts => QueueRestorePolicy::Discard,
+        None => QueueRestorePolicy::Restore,
+    }
+}
+
+/// The archived worker's pending mail, as the commands that admit it to a
+/// destination whose restore deferred it. Each keeps the command ID the daemon
+/// uses for that event, and the worker acknowledges a key it already holds or
+/// delivered without taking it again, so resubmitting after a lost answer or
+/// an interrupted admission cannot deliver twice.
+pub(super) fn deferred_mail_commands(
+    canonical: &mj_core::archive::CanonicalSessionSnapshot,
+) -> Vec<(String, RelayCommand)> {
+    canonical
+        .mailbox
+        .iter()
+        .flat_map(|mailbox| &mailbox.pending_events)
+        .map(|event| {
+            (
+                crate::mailbox_outbox::mailbox_command_id(&event.key),
+                RelayCommand::DeliverMailboxEvent {
+                    event: event.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 impl Controller {
     /// Prepare the destination worker, seed its relay, start the harness, and
     /// report the projection the destination answers with.
@@ -749,20 +798,17 @@ impl Controller {
             };
             let remote_archive = format!("{worker_root}/restore.hel.zip");
             let remote_spec = format!("{worker_root}/restore-spec.json");
-            use mj_checkpoint::checkpoint::QueueRestorePolicy;
-            let move_admission =
-                crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
+            let move_destination =
+                crate::database::load_move_operation(session_id)?.filter(|operation| {
                     operation.phase == mj_core::state::MovePhase::ResumingDestination
                         && !operation.queue_admission_started
-                        && operation.queue == mj_core::state::ResumeQueueDisposition::Start
                 });
-            let queue_policy = if move_admission || (!native_continuity && replay_queue) {
-                QueueRestorePolicy::Defer
-            } else if discard_queued_prompts {
-                QueueRestorePolicy::Discard
-            } else {
-                QueueRestorePolicy::Restore
-            };
+            let queue_policy = restore_queue_policy(
+                move_destination.as_ref().map(|operation| operation.queue),
+                native_continuity,
+                discard_queued_prompts,
+                replay_queue,
+            );
             let report_root = resumed_project_directory.as_ref().map_or_else(
                 || PathBuf::from(&workspace_root).join(mj_core::subagent::REPORT_ROOT_DIR),
                 |project| project.join(mj_core::subagent::PROJECT_REPORT_ROOT_DIR),
@@ -1096,6 +1142,14 @@ impl Controller {
                         relay.submit(prompt.command_id.clone(), command).await?;
                     }
                 }
+                // Mail waited for the handoff too, and joins the queue behind
+                // what was already queued. A Move admits it with its queue once
+                // it owns the destination.
+                if move_destination.is_none() {
+                    for (command_id, command) in deferred_mail_commands(canonical_session) {
+                        relay.submit(command_id, command).await?;
+                    }
+                }
             }
             // Last, and only once the resume has otherwise succeeded: a failure
             // before this point rolls the record back to a session whose
@@ -1289,12 +1343,12 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
         );
         (None, Some(mj_core::local_git::canonical_repository(path)?))
     } else {
-        let github = crate::import::github_repository_from_origin(replacement)
-            .context("origin must be a GitHub repository or an absolute local repository path")?;
-        (
-            Some(format!("{}/{}", github.owner, github.repository)),
-            None,
-        )
+        let source = mj_core::remote_git::project_source(replacement, mj_core::remote_git::Shorthand::Allowed)
+            .context("origin must be a Git URL, GitHub owner/repository, or an absolute local repository path")?;
+        if matches!(source, std::borrow::Cow::Owned(_)) {
+            tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+        }
+        (Some(source.into_owned()), None)
     };
     Ok(ProjectRepository {
         id: id.to_owned(),
@@ -1409,17 +1463,27 @@ fn fetch_source_commit(
             .github
             .as_deref()
             .context("repository source is missing")?;
-        let github = crate::import::github_repository_from_origin(source)
-            .context("configured repository is not a GitHub source")?;
-        if github_token.is_some() {
-            token_auth = true;
-            arguments.extend(mj_core::remote_git::github_token_credential_config());
-            format!(
-                "https://github.com/{}/{}.git",
-                github.owner, github.repository
-            )
+        let expanded = mj_core::remote_git::expand_github_source(source)?;
+        if let Some(github) = mj_core::remote_git::parse_github_remote(
+            source,
+            mj_core::remote_git::Shorthand::Allowed,
+        )
+        .filter(|github| github.is_default_endpoint())
+        {
+            if github_token.is_some() {
+                token_auth = true;
+                arguments.extend(mj_core::remote_git::github_token_credential_config());
+                format!(
+                    "https://github.com/{}/{}.git",
+                    github.owner, github.repository
+                )
+            } else if github.spelling == mj_core::remote_git::GithubSpelling::Shorthand {
+                format!("git@github.com:{}/{}.git", github.owner, github.repository)
+            } else {
+                expanded
+            }
         } else {
-            format!("git@github.com:{}/{}.git", github.owner, github.repository)
+            expanded
         }
     };
     if accepted_source.is_some() && github_token.is_some() && is_github_https_url(&source) {

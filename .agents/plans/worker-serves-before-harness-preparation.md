@@ -37,6 +37,7 @@ To see it working: start a session in an isolated instance with a harness whose 
 - Decision: a worker whose preparation fails keeps serving its relay in the `Failed` state instead of exiting.
   Rationale: the daemon then receives the failure as a fact with the step and message, and the session can still be checkpointed and closed through the normal relay. The daemon's failed-launch rollback then removes the target.
   Date/Author: 2026-10-05, Claude.
+  Superseded 2026-11-20 by `.agents/plans/harness-startup-failure-exits-worker.md` (#1617): a worker whose harness cannot start now exits with a typed startup failure in its exit record. The live `Failed` mode produced stranded Closes, a Close racing Started, and preparation threads writing after teardown. Daemons still read `Failed` from older workers.
 - Decision: while a worker reports `Preparing`, the daemon applies no deadline of its own. The worker bounds each preparation step and reports `Failed` when a bound is exceeded. The daemon's existing 300-second native-session deadline applies from `Started` until the ACP session opens. User cancellation still ends the wait at any time.
   Rationale: a deadline on a worker that reports progress is the guess this plan removes. The worker knows which step is slow and can say so.
   Date/Author: 2026-10-05, Claude.

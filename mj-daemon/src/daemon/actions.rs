@@ -89,21 +89,21 @@ pub(super) async fn handle_action(
             .context("daemon first-run check task panicked")??;
             Ok(DaemonReply::FirstRunSetupDue(due))
         }
-        DaemonAction::RunFirstRunSetup => {
-            let report = blocking(|| {
+        DaemonAction::RunFirstRunSetup | DaemonAction::RunFirstRunSetupIn { .. } => {
+            let project_directory = match action {
+                DaemonAction::RunFirstRunSetupIn { project_directory } => Some(project_directory),
+                _ => None,
+            };
+            let report = blocking(move || {
                 let executor = mj_controller::targets::ProcessExecutor;
-                let report = mj_setup::setup::run_setup(
+                mj_setup::setup::run_setup(
                     &mj_core::config::config_path(),
                     &mj_core::config::data_dir(),
-                    false,
+                    project_directory.as_deref(),
                     &executor,
                     &|| false,
                     || {},
-                )?;
-                Ok(report.map(|report| FirstRunSetupReport {
-                    agents: report.agents,
-                    repository: report.repository,
-                }))
+                )
             })
             .await?;
             if report.is_some() {
@@ -122,7 +122,7 @@ pub(super) async fn handle_action(
                     mj_setup::doctor::current_apple_platform(&executor),
                     mj_setup::doctor::DoctorOptions { smoke: false },
                 );
-                mj_setup::setup::actionable_errors(&checks)
+                mj_setup::setup::welcome_errors(&checks)
             })
             .await
             .context("daemon doctor task panicked")?;
@@ -522,25 +522,17 @@ pub(super) async fn handle_action(
             mounts,
             mount_history,
         } => {
-            ensure!(
-                !mj_controller::controller::move_session::move_owns_session(&session_id),
-                "session is moving; change container settings after Move finishes"
-            );
-            state
-                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
-                .await?;
-            blocking(move || {
-                Controller::load()?.update_session_container_settings(
-                    &session_id,
-                    resource_allocation,
-                    mounts,
-                    mount_history,
-                    &mj_controller::targets::ProcessExecutor,
-                )
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
+            let settings = mj_core::state::ContainerSettingsChange {
+                resource_allocation,
+                mounts,
+                mount_history: Some(mount_history),
+            };
+            Ok(
+                match state.set_container_settings(session_id, settings).await? {
+                    Some(preview) => DaemonReply::ContainerUpgradePreview(preview),
+                    None => DaemonReply::Done,
+                },
+            )
         }
         DaemonAction::MarkSessionTargetMissing {
             session_id: _,
@@ -559,7 +551,7 @@ pub(super) async fn handle_action(
             state.project_catalog(refresh, retry).await?,
         )),
         DaemonAction::CreateProject { sources } => {
-            let created = state.create_bundle_from_sources(sources).await?;
+            let created = state.create_bundle_from_sources(sources, false).await?;
             let id = created.bundle_id;
             let bundle = created
                 .config
@@ -1356,6 +1348,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::AdoptRecovery(_)
             | DaemonAction::WikiSyncWatch { .. }
             | DaemonAction::MoveSession(_)
+            | DaemonAction::SetSessionContainerSettings { .. }
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
