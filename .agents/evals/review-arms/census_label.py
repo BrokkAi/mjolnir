@@ -29,11 +29,11 @@ MJOLNIR_REVISION = "259fada3e1c39f022a47c3640c37359e9f3848d0"
 # Missing-step kinds from label-SPEC.md; the menu ranks these.
 MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
                  "keyed_matching", "contract", "other")
-# Default profile, model and quota scope per labeller. --profile pins a profile. Replication has
-# no default: each batch runs on the --profiles entry (the coordinator's Claude allotment) with
-# the most of its week left. The user chose Sonnet/high on a 10% sample for replication
-# (2026-11-20), as a trial before deciding on more.
-ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": (None, "sonnet", "sonnet")}
+# Default profile, model and quota scope per labeller; --profile runs a labeller on another
+# profile the coordinator allots (codex2 for the primary, claude3/claude5/claude6 for
+# replication). Moving to another profile is the operator's decision. The user chose Sonnet/high
+# on a 10% sample for replication (2026-11-20), as a trial before deciding on more.
+ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude5", "sonnet", "sonnet")}
 # The replication sample: within each split and repo, the items ranked first by a salted hash of
 # their id, round(10%) of them and at least one. Fixed before any replication label exists.
 REPLICATION_SHARE = 0.10
@@ -701,65 +701,6 @@ def collect(output, expected, role, repo, allowed):
 def quota(args, role):
     _, _, scope = ROLES[role]
     profile = role_profile(args, role)
-    if role == "replication":
-        # A pinned profile goes through the same checks as the allotment; pinning only narrows
-        # which profiles are considered.
-        candidates = [profile] if profile else args.profiles
-        previous = None
-        while True:
-            readings, unavailable, exhausted = {}, {}, {}
-            for candidate in candidates:
-                # A disabled or missing profile makes mj quota fail; it can't clear the floor,
-                # but the other allotted profiles still can.
-                try:
-                    report = driver.mj("quota", "--profile", candidate).get("profiles") or []
-                except RuntimeError as error:
-                    readings[candidate], unavailable[candidate] = None, str(error)[-300:]
-                    continue
-                # Only a Claude profile can run the Sonnet labeller; another harness's quota
-                # would otherwise rank like any other.
-                harness = report[0].get("harness") if report else None
-                if harness != "claude":
-                    readings[candidate], unavailable[candidate] = None, f"harness {harness}, not claude"
-                    continue
-                # A usage-billed profile (for example through Bedrock) has no weekly window, so it
-                # can never clear the weekly floor. mj reports "unknown" billing while it has no
-                # reading yet; that profile stays a candidate and is read again.
-                billing = report[0].get("billing")
-                if billing == "usage":
-                    readings[candidate], unavailable[candidate] = None, f"billing {billing} has no weekly quota"
-                    continue
-                report = (report[0].get("report") or {}) if report else {}
-                scoped = [window for window in report.get("windows", [])
-                          if not window.get("model_scope") or scope in window["model_scope"].split(",")]
-                windows = [w for w in scoped if w.get("duration_seconds") == 7 * 24 * 60 * 60]
-                values = [w.get("remaining_percent") for w in windows]
-                readings[candidate] = (min(values) if values and None not in values
-                                       and not report.get("error") else None)
-                # A shorter window (Claude's five hours) that is used up would stop the turn,
-                # whatever the week shows, so that profile waits for the window to reset.
-                spent = [w for w in scoped if w.get("duration_seconds") != 7 * 24 * 60 * 60
-                         and w.get("remaining_percent") is not None and w["remaining_percent"] <= 0]
-                if spent:
-                    exhausted[candidate] = min(w.get("resets") or "unknown" for w in spent)
-            # Every allotted profile refused by mj quota is a configuration error (a misspelled
-            # or disabled profile), not quota that will recover, so report it instead of holding.
-            if len(unavailable) == len(candidates):
-                raise RuntimeError(f"no allotted replication profile is usable: {json.dumps(unavailable)}")
-            eligible = [(value, candidate) for candidate, value in readings.items()
-                        if value is not None and value > 25 and candidate not in exhausted]
-            if eligible:
-                value, candidate = max(eligible)
-                log(args.labels_dir, "quota-cleared", role=role, profile=candidate, remaining_percent=value,
-                    unavailable=unavailable, short_window_spent=exhausted)
-                return candidate
-            if (readings, unavailable, exhausted) != previous:
-                log(args.labels_dir, "quota-held", role=role, readings=readings, unavailable=unavailable,
-                    short_window_spent=exhausted)
-                previous = readings, unavailable, exhausted
-            if args.check_quota:
-                return None
-            time.sleep(60)
     previous = None
     while hold := driver.quota_hold(scope, floor=f"{profile}=25", weekly=True, strict=True):
         if hold != previous:
@@ -1061,9 +1002,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=("test", "development"))
     parser.add_argument("--labeller", choices=ROLES, required=False)
-    parser.add_argument("--profile", help="pin this labeller to a profile of the same model family")
-    parser.add_argument("--profiles", default="claude3,claude5,claude6",
-                        help="replication profiles eligible for quota-based selection")
+    parser.add_argument("--profile", help="run this labeller on another allotted profile of the same model family")
     parser.add_argument("--target", help="mj target (primary: localhost; replication: only "
                         f"{REPLICATION_TARGET}); a container target starts each session from the "
                         "repo's census bundle")
@@ -1087,14 +1026,6 @@ def main():
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
     if args.labeller == "replication":
-        # Deduplicated, so "every allotted profile is unusable" counts distinct profiles.
-        profiles = list(dict.fromkeys(profile.strip() for profile in args.profiles.split(",")))
-        if not profiles or any(not profile for profile in profiles):
-            parser.error("--profiles must be a comma-separated list of profile names")
-        excluded = EXCLUDED_PROFILES.intersection(profiles)
-        if excluded:
-            parser.error(f"profiles excluded from the census: {', '.join(sorted(excluded))}")
-        args.profiles = profiles
         args.target = args.target or REPLICATION_TARGET
         if args.target != REPLICATION_TARGET:
             parser.error(f"replication runs only on the approved isolated target {REPLICATION_TARGET}")
