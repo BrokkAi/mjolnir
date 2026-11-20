@@ -79,6 +79,9 @@ pub(super) struct ReviewEvidence {
     pub(super) session_id: String,
     /// The whole recent messages the person wrote, oldest first.
     pub(super) user_instructions: Vec<String>,
+    /// Their identities, to tell a new message from the history's window
+    /// moving.
+    pub(super) user_message_ids: Vec<String>,
     /// Whether older messages from the person were left out.
     pub(super) user_instructions_omitted: bool,
     /// The recent transcript, rendered by [`mj_transcript::summary`].
@@ -95,34 +98,35 @@ impl ReviewEvidence {
         action: &serde_json::Value,
     ) -> Self {
         let authorization = turn_context.authorization_context();
-        let (user_instructions, user_instructions_omitted) = match &authorization {
-            Some(history) => (
-                history
-                    .messages
-                    .iter()
-                    .filter(|message| message.role == "user")
-                    .map(|message| message.text.clone())
-                    .collect(),
-                !history.authorization_complete,
-            ),
-            // No durable history was published, so nothing the person wrote
-            // can be vouched for; the reviewer is told so.
-            None => (Vec::new(), true),
-        };
+        let person = authorization
+            .iter()
+            .flat_map(|history| &history.messages)
+            .filter(|message| message.role == "user");
+        let user_instructions = person.clone().map(|message| message.text.clone()).collect();
+        let user_message_ids = person.map(|message| message.id.clone()).collect();
+        // No durable history means nothing the person wrote can be vouched
+        // for; the reviewer is told so.
+        let user_instructions_omitted = authorization
+            .as_ref()
+            .is_none_or(|history| !history.authorization_complete);
         Self {
             harness,
             session_id: turn_context.session_id(),
             user_instructions,
+            user_message_ids,
             user_instructions_omitted,
             transcript: turn_context.render_transcript(TRANSCRIPT_BYTES),
             action: serde_json::to_string_pretty(action).expect("planned action serializes"),
         }
     }
 
-    /// Whether `other` rests on the same messages from the person.
-    pub(super) fn same_authorization(&self, other: &Self) -> bool {
-        self.user_instructions == other.user_instructions
-            && self.user_instructions_omitted == other.user_instructions_omitted
+    /// Whether the person wrote something this evidence does not hold, such
+    /// as a new grant or a revocation. The history's window moving on, or the
+    /// relay republishing it, is not new authorization.
+    pub(super) fn person_wrote_since(&self, earlier: &Self) -> bool {
+        self.user_message_ids
+            .iter()
+            .any(|id| !earlier.user_message_ids.contains(id))
     }
 
     /// The review request, framed as Codex frames a synchronous full review.

@@ -510,7 +510,6 @@ where
                             () = cancellation.cancelled() => None,
                             decision = guardian.review(&request, input.as_ref(), native_child) => Some(decision),
                         };
-                        drop(ticket);
                         let title = request.tool_call.fields.title.as_deref().map(str::trim)
                             .filter(|title| !title.is_empty()).unwrap_or("a tool call");
                         let subject = permission_title_with_command(title, input.as_ref());
@@ -521,18 +520,33 @@ where
                             // Once only: an allow the harness remembers would let
                             // later calls skip review.
                             Some(guardian::GuardianDecision::Allow) => match guardian::allow_once_response(&request) {
-                                Some(response) => return responder.respond(response),
+                                // Settled under the withdrawal lock: a verdict
+                                // never follows a cancel the agent was told of.
+                                Some(response) => return ticket.settle(|withdrawn| responder.respond(if withdrawn {
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                } else {
+                                    response
+                                })),
                                 None => guardian_preface = Some(guardian::ask_person_preface(
                                     "the guardian allowed it, but the harness offered no way to allow it once",
                                 )),
                             },
                             Some(guardian::GuardianDecision::Deny { rationale }) => {
-                                permission_events
-                                    .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
-                                    .await
-                                    .map_err(|_| relay_event_channel_error())?;
-                                return responder.respond(guardian::rejection_response(&request));
+                                let (withdrawn, answered) = ticket.settle(|withdrawn| (withdrawn, responder.respond(if withdrawn {
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                } else {
+                                    guardian::rejection_response(&request)
+                                })));
+                                if !withdrawn {
+                                    permission_events
+                                        .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
+                                        .await
+                                        .map_err(|_| relay_event_channel_error())?;
+                                }
+                                return answered;
                             }
+                            // A turn withdrawn from here on still reaches the
+                            // form: registering it answers `cancelled`.
                             Some(guardian::GuardianDecision::AskPerson { reason }) => {
                                 guardian_preface = Some(guardian::ask_person_preface(&reason));
                             }
@@ -1319,6 +1333,7 @@ pub(super) fn cancel_prompt_turn(
     pending: &PendingElicitations,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
     terminals.kill_live();
+    pending.begin_withdrawal();
     let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
     // Some agents (Kimi, I2-15) never withdraw the request themselves, which
     // left the form open on an idle session.

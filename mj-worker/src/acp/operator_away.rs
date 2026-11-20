@@ -223,6 +223,7 @@ impl OperatorAwayState {
 /// request. Dropping it, when the review ends, unregisters it.
 pub(super) struct PendingReviewTicket {
     owner: OperatorAway,
+    bridge: u64,
     id: u64,
     withdrawn: tokio_util::sync::CancellationToken,
 }
@@ -231,6 +232,22 @@ impl PendingReviewTicket {
     /// Resolves when the turn's tool permission requests are withdrawn.
     pub(super) async fn withdrawn(&self) {
         self.withdrawn.cancelled().await;
+    }
+
+    /// Answer the request under the lock that withdraws turns: `answer` learns
+    /// whether the turn was withdrawn, so no verdict is sent after a cancel
+    /// the agent has already been told about. `answer` must not take that
+    /// lock itself; an ACP responder only queues a message.
+    pub(super) fn settle<T>(self, answer: impl FnOnce(bool) -> T) -> T {
+        let state = self
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        let withdrawn = self.withdrawn.is_cancelled()
+            || state.withdrawn_turns.contains(&self.bridge)
+            || !state.reviews.iter().any(|review| review.id == self.id);
+        answer(withdrawn)
     }
 }
 
@@ -489,9 +506,23 @@ impl PendingElicitations {
         });
         Some(PendingReviewTicket {
             owner: self.0.owner.clone(),
+            bridge: self.0.id,
             id,
             withdrawn,
         })
+    }
+
+    /// Mark the turn withdrawn before the agent is told of the cancel, so a
+    /// guardian review that settles in between answers `cancelled`, and no
+    /// request arriving later in the turn is reviewed or shown.
+    pub(super) fn begin_withdrawal(&self) {
+        self.0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .withdrawn_turns
+            .insert(self.0.id);
     }
 
     /// Withdraw the turn's tool permission requests in one decision: drop the
@@ -529,6 +560,25 @@ impl PendingElicitations {
             .expect("operator-away state lock poisoned")
             .withdrawn_turns
             .remove(&self.0.id);
+    }
+
+    /// Whether the only outstanding requests are guardian reviews, which end
+    /// on their own within the review deadline.
+    pub(super) fn only_reviews(&self) -> bool {
+        let state = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        state
+            .reviews
+            .iter()
+            .any(|review| review.bridge == self.0.id)
+            && !state
+                .pending
+                .iter()
+                .any(|entry| entry.bridge == self.0.id && entry.responder.acp_identity().is_some())
     }
 
     pub(super) fn is_empty(&self) -> bool {

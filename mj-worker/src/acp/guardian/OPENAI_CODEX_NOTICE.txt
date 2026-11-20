@@ -15,11 +15,16 @@ at commit 076ac7856b1235947f271930bd7437bae54a0dfc:
   follow the prompt framing of codex-rs/guardian-context and the output
   contract, verdict parser, outcome thresholds, review deadline and attempt
   budget of codex-rs/ext/guardian-reviewer.
-- The per-turn denial breaker in mj-transcript/src/turn_context.rs follows
-  codex-rs/ext/guardian-reviewer/src/circuit_breaker.rs.
+- The per-turn denial breaker in mj-transcript/src/turn_context.rs
+  re-implements the behaviour of
+  codex-rs/ext/guardian-reviewer/src/circuit_breaker.rs (its thresholds); no
+  Codex code or text is copied there.
 
-A copy of this notice ships inside the brokk-mj-worker-runtime crate as
-mj-worker/src/acp/guardian/OPENAI_CODEX_NOTICE.txt.
+This notice ships twice: in release archives as
+licenses/native/OPENAI_CODEX_GUARDIAN_NOTICE.txt, and inside the
+brokk-mj-worker-runtime crate, which carries the Codex text, as
+mj-worker/src/acp/guardian/OPENAI_CODEX_NOTICE.txt. A worker test keeps the
+two identical.
 
 Codex's NOTICE file:
 

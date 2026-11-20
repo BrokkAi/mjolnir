@@ -15,7 +15,7 @@
 // "reviewer": the guardian's own reviewer may only read. Anything else, or
 // anything that would ask, is denied, which OpenCode reports to the model as
 // a tool error instead of ending the review.
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 const mode = __MJ_GUARDIAN_MODE__;
@@ -29,11 +29,15 @@ const UNREVIEWED = new Set([
   // A sub-agent's own tool calls pass through this hook too.
   "subagent",
 ]);
+// Compared without case: macOS and Windows file systems ignore it, so
+// `.GIT/hooks` is git's hooks directory there.
 const PROTECTED_DIRECTORIES = new Set([".git", ".agents", ".codex", ".aws", ".opencode"]);
-const PROTECTED_FILES = new Set(["AGENTS.md", "opencode.json", "opencode.jsonc"]);
+const PROTECTED_FILES = new Set(["agents.md", "opencode.json", "opencode.jsonc"]);
 
 // Where a path really lands: the real path of its nearest existing ancestor,
 // so a symbolic link inside the workspace cannot carry an edit outside it.
+// `null` when that cannot be known: a link whose target does not exist yet
+// still sends the write wherever it points.
 function real(target) {
   const rest = [];
   let current = target;
@@ -41,6 +45,7 @@ function real(target) {
     try {
       return path.join(realpathSync(current), ...rest.reverse());
     } catch {
+      if (lstatSync(current, { throwIfNoEntry: false })?.isSymbolicLink()) return null;
       const parent = path.dirname(current);
       if (parent === current) return target;
       rest.push(path.basename(current));
@@ -49,13 +54,14 @@ function real(target) {
   }
 }
 
-const realRoots = roots.map((root) => real(path.resolve(root)));
+const realRoots = roots.map((root) => real(path.resolve(root)) ?? path.resolve(root));
 
 function workspaceEdit(resource) {
   const target = real(path.resolve(roots[0], resource));
+  if (target === null) return false;
   const root = realRoots.find((root) => target === root || target.startsWith(root + path.sep));
   if (root === undefined) return false;
-  const parts = path.relative(root, target).split(path.sep);
+  const parts = path.relative(root, target).toLowerCase().split(path.sep);
   return !parts.some((part) => PROTECTED_DIRECTORIES.has(part))
     && !PROTECTED_FILES.has(parts[parts.length - 1]);
 }

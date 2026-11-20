@@ -142,14 +142,14 @@ impl Guardian {
         GuardianDecision::Deny { rationale }
     }
 
-    /// Review `action` against the evidence as it stands. If the person's
-    /// messages changed while it was reviewed, the verdict may rest on stale
-    /// authorization, so it is reviewed once more on the new evidence, as
-    /// Codex discards a stale verdict (`review_request.rs`).
+    /// Review `action` against the evidence as it stands. If the person wrote
+    /// while it was reviewed, the verdict may rest on stale authorization, so
+    /// it is reviewed again on what they now say, as Codex discards a stale
+    /// verdict (`review_request.rs`). Each repeat follows a new message; the
+    /// review deadline bounds them.
     async fn decide(&self, first: HostSlot<'_>, action: &serde_json::Value) -> Result<Assessment> {
         let mut slot = Some(first);
         let mut attempts = 0;
-        let mut reviewed_again = false;
         loop {
             let evidence =
                 ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
@@ -160,17 +160,12 @@ impl Guardian {
             let assessment = self.assess(&mut slot, &prompt, &mut attempts).await?;
             let current =
                 ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
-            if current.same_authorization(&evidence) {
+            if !current.person_wrote_since(&evidence) {
                 return Ok(assessment);
             }
-            ensure!(
-                !reviewed_again,
-                "your messages changed again while it was reviewing"
-            );
-            reviewed_again = true;
             tracing::info!(
                 target: "mj_guardian",
-                "the person's messages changed during a guardian review; reviewing again"
+                "the person wrote during a guardian review; reviewing again"
             );
         }
     }

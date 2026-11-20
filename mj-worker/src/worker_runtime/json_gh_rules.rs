@@ -63,17 +63,23 @@ pub(super) fn configure_opencode_plugin(
 /// One native permission rule, as OpenCode 2.2.7 lists them in `permissions`.
 type Rule = (&'static str, &'static str, &'static str);
 
-/// OpenCode tools that run without consulting its permissions at all, so
-/// neither its rules nor the guardian's hook would ever see them. Under
-/// configured approvals they are denied; OpenCode then does not offer them.
-/// `worktree_remove` consults only `edit`, which an inside-the-workspace
-/// removal passes, so it goes too. Mjolnir sessions use none of them.
-const PERMISSIONLESS_TOOLS: [&str; 5] = [
+/// OpenCode 2.2.7 tools that change something without consulting its
+/// permissions, so neither its rules nor the guardian's hook would ever see
+/// them. Under configured approvals they are denied; OpenCode then does not
+/// offer them. `worktree_remove` consults only `edit`, which an
+/// inside-the-workspace removal passes, so it goes too. Mjolnir sessions use
+/// none of them.
+const PERMISSIONLESS_TOOLS: [&str; 10] = [
     "worktree_create",
     "worktree_remove",
     "session_move",
     "artifact_create",
+    "artifact_update",
+    "artifact_delete",
     "schedule_create",
+    "schedule_pause",
+    "schedule_resume",
+    "schedule_delete",
 ];
 
 /// The guardian's OpenCode plugin, one directory per mode. Only the session
@@ -147,11 +153,12 @@ const REVIEWER_RULES: [Rule; 8] = [
 ];
 
 /// The environment a guardian reviewer's OpenCode starts with: the session's,
-/// with every plugin Mjolnir registered for the session replaced by the
-/// reviewer's hook, so the reviewer never drains the session's mailbox or
-/// inherits its hooks, and with [`REVIEWER_RULES`] appended. A session
-/// launched without the guardian's plugin cannot have a contained reviewer,
-/// so that is an error.
+/// with the plugins Mjolnir registered for the session (its mailbox and the
+/// session hook) replaced by the reviewer's hook, so the reviewer never drains
+/// the session's mailbox, and with [`REVIEWER_RULES`] appended. The person's
+/// own plugins stay, since a provider may need one to sign in; the reviewer's
+/// hook is registered after them. A session launched without the guardian's
+/// plugin cannot have a contained reviewer, so that is an error.
 pub(crate) fn opencode_reviewer_environment(
     environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
@@ -168,13 +175,29 @@ pub(crate) fn opencode_reviewer_environment(
         .filter_map(|node| string_value(Some(node.clone())))
         .find(|entry| std::path::Path::new(entry).file_name() == Some(GUARDIAN_PLUGIN.as_ref()))
         .context("this OpenCode session was launched without the guardian's plugin; restart it")?;
+    let directory = std::path::Path::new(&session_hook).parent();
     let reviewer_hook = std::path::Path::new(&session_hook)
         .with_file_name(GUARDIAN_REVIEWER_PLUGIN)
         .to_str()
         .context("OpenCode guardian plugin path is not UTF-8")?
         .to_owned();
     for node in plugins.elements() {
-        node.remove();
+        let mjolnir = string_value(Some(node.clone())).is_some_and(|entry| {
+            let entry = std::path::Path::new(&entry);
+            entry.parent() == directory
+                && entry.file_name().is_some_and(|name| {
+                    [
+                        super::subagents::OPENCODE_MAILBOX_PLUGIN,
+                        GUARDIAN_PLUGIN,
+                        GUARDIAN_REVIEWER_PLUGIN,
+                    ]
+                    .iter()
+                    .any(|plugin| name == *plugin)
+                })
+        });
+        if mjolnir {
+            node.remove();
+        }
     }
     plugins.append(reviewer_hook.as_str().into());
     let rules = object
@@ -335,7 +358,8 @@ mod tests {
         assert_eq!(
             resources,
             [
-                "gh *", "*", "rm *", ".env", "gh", "gh *", "*", "*", "*", "*", "*", "*"
+                "gh *", "*", "rm *", ".env", "gh", "gh *", "*", "*", "*", "*", "*", "*", "*", "*",
+                "*", "*", "*"
             ]
         );
         let actions = rules
@@ -345,7 +369,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            actions[actions.len() - 8..],
+            actions[actions.len() - 13..],
             [
                 "shell",
                 "shell",
@@ -353,7 +377,12 @@ mod tests {
                 "worktree_remove",
                 "session_move",
                 "artifact_create",
+                "artifact_update",
+                "artifact_delete",
                 "schedule_create",
+                "schedule_pause",
+                "schedule_resume",
+                "schedule_delete",
                 "execute"
             ]
         );
@@ -410,7 +439,12 @@ mod tests {
                         ("worktree_remove", "deny"),
                         ("session_move", "deny"),
                         ("artifact_create", "deny"),
+                        ("artifact_update", "deny"),
+                        ("artifact_delete", "deny"),
                         ("schedule_create", "deny"),
+                        ("schedule_pause", "deny"),
+                        ("schedule_resume", "deny"),
+                        ("schedule_delete", "deny"),
                     ]);
                 }
                 expected.push(("execute", "deny"));
@@ -472,6 +506,11 @@ mod tests {
             (".env", "ask"),
             ("gh", "allow"),
             ("gh *", "allow"),
+            ("*", "deny"),
+            ("*", "deny"),
+            ("*", "deny"),
+            ("*", "deny"),
+            ("*", "deny"),
             ("*", "deny"),
             ("*", "deny"),
             ("*", "deny"),
@@ -890,6 +929,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let work = root.path().join("work");
         std::fs::create_dir_all(work.join(".git/hooks")).unwrap();
+        // A link whose target does not exist yet, as a cloned repository can
+        // carry one, sends a write outside the workspace.
+        std::os::unix::fs::symlink(root.path().join("outside.txt"), work.join("escape")).unwrap();
+        // The person's own plugin, which the reviewer must keep.
+        let person = root.path().join("person-plugin");
+        std::fs::create_dir_all(&person).unwrap();
+        std::fs::write(
+            person.join("index.js"),
+            "export default { id: \"person\", async setup() { return () => {}; } };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            person.join("package.json"),
+            r#"{"name":"person","type":"module","main":"index.js"}"#,
+        )
+        .unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let scripts = Arc::new(BTreeMap::from([
@@ -907,6 +962,14 @@ mod tests {
                     (
                         "write",
                         serde_json::json!({"path": ".git/hooks/post-checkout", "content": "#!/bin/sh"}),
+                    ),
+                    (
+                        "write",
+                        serde_json::json!({"path": "escape", "content": "out"}),
+                    ),
+                    (
+                        "write",
+                        serde_json::json!({"path": ".GIT/config", "content": "x"}),
                     ),
                     ("shell", serde_json::json!({"command": "rm notes.txt"})),
                     ("read", serde_json::json!({"path": "notes.txt"})),
@@ -946,7 +1009,8 @@ mod tests {
                         "limit": {"context": 100000, "output": 4000}}}}},
                 "model": "stub/m", "small_model": "stub/m", "autoupdate": false,
                 // The person's own deny, which must outlast Mjolnir's rules.
-                "permissions": [{"action": "shell", "resource": "rm *", "effect": "deny"}]
+                "permissions": [{"action": "shell", "resource": "rm *", "effect": "deny"}],
+                "plugins": [person.to_string_lossy()]
             })
             .to_string(),
         )]);
@@ -990,11 +1054,17 @@ mod tests {
                     .to_owned()
             })
             .collect();
-        // The shell command and the edit to git's hooks asked; the workspace
-        // edit and the read did not; the person's deny refused `rm` unasked.
+        // The shell command, the edit to git's hooks, the write through the
+        // dangling link and the edit to `.GIT` asked; the workspace edit and
+        // the read did not; the person's deny refused `rm` unasked.
         assert_eq!(
             asked,
-            ["touch by-shell.txt", ".git/hooks/post-checkout"],
+            [
+                "touch by-shell.txt",
+                ".git/hooks/post-checkout",
+                "escape",
+                ".GIT/config"
+            ],
             "{:?}",
             session.asked
         );
@@ -1019,11 +1089,11 @@ mod tests {
             "once",
         );
         assert!(!work.join("by-plan.txt").exists());
-        assert_eq!(session.asked.len(), 2, "{:?}", session.asked);
+        assert_eq!(session.asked.len(), 4, "{:?}", session.asked);
         drop(session);
 
-        // The reviewer reads and does nothing else, without asking, and its
-        // launch carries only the reviewer's hook.
+        // The reviewer reads and does nothing else, without asking. Its launch
+        // keeps the person's plugin and swaps Mjolnir's for its own hook.
         let reviewer = opencode_reviewer_environment(&environment).unwrap();
         let (_, object) = document(&reviewer[OPENCODE_CONTENT]).unwrap();
         let plugins: Vec<String> = object
@@ -1035,11 +1105,13 @@ mod tests {
             .collect();
         assert_eq!(
             plugins,
-            [root
-                .path()
-                .join(GUARDIAN_REVIEWER_PLUGIN)
-                .to_string_lossy()
-                .into_owned()]
+            [
+                person.to_string_lossy().into_owned(),
+                root.path()
+                    .join(GUARDIAN_REVIEWER_PLUGIN)
+                    .to_string_lossy()
+                    .into_owned()
+            ]
         );
         offered.lock().unwrap().clear();
         let mut review = LiveOpenCode::start(root.path(), &work, &reviewer[OPENCODE_CONTENT]);

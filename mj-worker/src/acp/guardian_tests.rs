@@ -336,8 +336,8 @@ async fn cancelling_the_turn_withdraws_a_review_in_flight() {
 
 /// A reviewer process that dies mid-review is replaced, and the review
 /// finishes on the fresh one within the same request.
-#[tokio::test]
 // Hard-won: fc5517c30: a pending reviewer request failed before the host saw its process exit, so no retry ran.
+#[tokio::test]
 async fn a_review_survives_its_reviewer_process_dying() {
     let temp = tempfile::tempdir().unwrap();
     let (_requests, _events, runtime, _context) = start_scripted_kimi(
@@ -394,4 +394,18 @@ async fn a_verdict_reached_while_the_person_wrote_again_is_reviewed_again() {
         prompts[1]
     );
     runtime.abort();
+}
+
+/// Release archives ship the Codex notice from `licenses/native`, and the
+/// published worker crate, which carries Codex's policy text, ships its own
+/// copy; both must say the same.
+#[test]
+fn the_codex_notice_in_the_crate_matches_the_release_copy() {
+    let crate_copy = include_str!("guardian/OPENAI_CODEX_NOTICE.txt");
+    let release_copy = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../licenses/native/OPENAI_CODEX_GUARDIAN_NOTICE.txt"),
+    )
+    .unwrap();
+    assert_eq!(crate_copy, release_copy);
 }

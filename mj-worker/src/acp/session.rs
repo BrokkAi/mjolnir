@@ -977,8 +977,12 @@ pub(super) async fn serve_session(
                         RuntimeEvent::CommandRejected {
                             reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                             request_id,
-                            message: "/clear requires all pending interactions to be resolved"
-                                .into(),
+                            message: if pending_elicitations.only_reviews() {
+                                "/clear waits for the Mjolnir guardian to finish reviewing a tool request, which takes at most 90 seconds; send it again then"
+                            } else {
+                                "/clear requires all pending interactions to be resolved"
+                            }
+                            .into(),
                         },
                     )
                     .await?;
@@ -1405,6 +1409,8 @@ pub(super) async fn serve_session(
                                 implementation_deadline = None;
                                 if !prompt_running {
                                     apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
+                                    // No turn runs, so none stays withdrawn.
+                                    pending_elicitations.end_withdrawal();
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished {
                                         request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None }).await?;
                                     break;
@@ -1878,6 +1884,8 @@ pub(super) async fn serve_session(
                     pending_elicitations,
                 )
                 .await?;
+                // No prompt runs, so no turn stays withdrawn.
+                pending_elicitations.end_withdrawal();
             }
             CommandRequest::ResolveElicitation {
                 elicitation_id,

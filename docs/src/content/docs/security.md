@@ -90,13 +90,15 @@ plugin whose permission hook runs after OpenCode's rules. An action those rules
 allow asks instead, unless it is a read or search, a planning tool, one of
 OpenCode's own sub-agents (whose calls pass through the same hook), or an edit
 inside the workspace. Edits that resolve outside the workspace, through a
-symbolic link included, and edits to `.git`, `.agents`, `.codex`, `.aws`,
-`.opencode`, `opencode.json`, `opencode.jsonc`, or an `AGENTS.md` ask too, as
-Codex keeps its own workspace metadata out of reach. Every deny stands: yours,
+symbolic link included (one whose target does not exist yet too), and edits to
+`.git`, `.agents`, `.codex`, `.aws`, `.opencode`, `opencode.json`,
+`opencode.jsonc`, or an `AGENTS.md`, in any letter case, ask too, as Codex
+keeps its own workspace metadata out of reach. Every deny stands: yours,
 and OpenCode's own (Plan mode cannot edit, its read-only agents stay
 read-only). Your own allow rules still go to the guardian. OpenCode's tools
 that never consult its permissions (`worktree_create`, `worktree_remove`,
-`session_move`, `artifact_create`, `schedule_create`) are turned off.
+`session_move`, and the artifact and schedule tools that create, update,
+delete, pause, or resume) are turned off.
 Each of those requests goes to the Mjolnir guardian.
 
 Under configured approvals Mjolnir also pre-approves the GitHub CLI (`gh`),
@@ -143,8 +145,9 @@ client terminal, and no client file system, and refuses every permission
 request it raises, so the reviewer can read files to gather evidence but not
 run commands, write, or reach the network through any tool that asks first.
 An OpenCode reviewer runs without the session's Mjolnir plugins (it never sees
-the session's mailbox), and its own hook denies everything but reading, which
-OpenCode reports to it as a tool error. A Kimi Code reviewer still loads the
+the session's mailbox); your own plugins stay, since a provider may need one to
+sign in. Its own hook and rules deny everything but reading, which OpenCode
+reports to it as a tool error. A Kimi Code reviewer still loads the
 MCP servers in the session's staged `mcp.json`, Mjolnir's included; their calls
 are refused when Kimi Code asks before them. Each review sees:
 
@@ -164,7 +167,7 @@ and allow or deny. Mjolnir enforces Codex's thresholds on that answer: a
 `critical` action is always denied, and a `high`-risk one unless you
 authorized it at least in substance. If you write to the session while a
 review runs, its verdict is set aside and the action reviewed again on what you
-now say. An allowed action runs once, never as a remembered rule; a denied one
+now say, within the same deadline. An allowed action runs once, never as a remembered rule; a denied one
 is refused once, and the transcript shows a notice that starts `Mjolnir
 guardian denied`, names the tool and command, and gives the reviewer's reason.
 Kimi Code and DSH report the refusal to the agent, which carries on; OpenCode
@@ -183,7 +186,8 @@ The person decides instead when the guardian cannot:
 Either way the ordinary permission form opens, headed by the reason. When you
 are away, Mjolnir's away handling answers it with Skip, which refuses the call.
 Cancelling the turn withdraws a review in flight, as it withdraws an open form,
-and a request that arrives later in the cancelled turn is refused.
+and a request that arrives later in the cancelled turn is refused. `/clear`
+waits while a review runs and says so.
 
 Each review is a turn of the session's model, charged to the session's
 profile; DSH is usage-priced. Reviews run for seconds to tens of seconds. The
