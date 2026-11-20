@@ -148,7 +148,7 @@ func WriteLogin(path string, data []byte) (CredentialSnapshot, error) {
 	if err != nil {
 		return CredentialSnapshot{}, err
 	}
-	if err := RefuseSymlinkedToken("slopcop login", path); err != nil {
+	if err := refuseSymlinkedToken("slopcop login", path); err != nil {
 		return CredentialSnapshot{}, err
 	}
 	if err := AtomicWriteExisting(path, login.Encode()); err != nil {
@@ -158,7 +158,7 @@ func WriteLogin(path string, data []byte) (CredentialSnapshot, error) {
 }
 
 func RemoveLogin(path string) error {
-	if err := RefuseSymlinkedToken("slopcop login", path); err != nil {
+	if err := refuseSymlinkedToken("slopcop login", path); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {

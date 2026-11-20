@@ -2089,7 +2089,7 @@ func (r *SessionRecord) UnmarshalJSON(data []byte) error {
 	r.Target = aux.Target.V
 	r.Subagents = nil
 	if aux.Subagents != nil {
-		policy, err := deserializeOptionalPolicy(aux.Subagents)
+		policy, err := DeserializeOptionalPolicy(aux.Subagents)
 		if err != nil {
 			return err
 		}
@@ -2657,7 +2657,7 @@ func (s *StateState) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if aux.LastSubagentPolicies != nil {
-		policies, err := deserializePolicyMap(aux.LastSubagentPolicies)
+		policies, err := DeserializePolicyMap(aux.LastSubagentPolicies)
 		if err != nil {
 			return err
 		}

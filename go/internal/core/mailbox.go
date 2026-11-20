@@ -485,10 +485,31 @@ func DecodeMailboxEventBody(data []byte) (MailboxEventBody, error) {
 		err = transcriptStrictDecode(data, &v, true, "type")
 		return MailboxEventBodyOperatorBack(v), err
 	case "review_verdict":
-		type plain MailboxEventBodyReviewVerdict
-		var v plain
-		err = transcriptStrictDecode(data, &v, true, "type")
-		return MailboxEventBodyReviewVerdict(v), err
+		// Verdict is a sealed interface, so it is read raw and decoded by
+		// its own decoder.
+		var v struct {
+			ReviewID   string          `json:"review_id"`
+			Repository string          `json:"repository"`
+			BaseCommit string          `json:"base_commit"`
+			HeadCommit string          `json:"head_commit"`
+			Tree       string          `json:"tree"`
+			Verdict    json.RawMessage `json:"verdict"`
+		}
+		if err = transcriptStrictDecode(data, &v, true, "type"); err != nil {
+			return nil, err
+		}
+		verdict, err := UnmarshalReviewVerdict(v.Verdict)
+		if err != nil {
+			return nil, err
+		}
+		return MailboxEventBodyReviewVerdict{
+			ReviewID:   v.ReviewID,
+			Repository: v.Repository,
+			BaseCommit: v.BaseCommit,
+			HeadCommit: v.HeadCommit,
+			Tree:       v.Tree,
+			Verdict:    verdict,
+		}, nil
 	case "subagent_finished":
 		type plain MailboxEventBodySubagentFinished
 		var v plain

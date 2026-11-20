@@ -414,6 +414,26 @@ type RuntimeEventNativeAgent struct {
 	Event NativeAgentEvent `json:"event"`
 }
 
+// UnmarshalJSON reads the variant's fields; Event is a sealed interface
+// decoded by UnmarshalNativeAgentEvent.
+func (v *RuntimeEventNativeAgent) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Event json.RawMessage `json:"event"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Event == nil {
+		return fmt.Errorf("missing field `event`")
+	}
+	event, err := UnmarshalNativeAgentEvent(wire.Event)
+	if err != nil {
+		return err
+	}
+	v.Event = event
+	return nil
+}
+
 type RuntimeEventConnected struct {
 	AgentName         *string                   `json:"agent_name"`
 	AgentVersion      *string                   `json:"agent_version"`

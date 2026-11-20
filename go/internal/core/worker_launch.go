@@ -538,7 +538,7 @@ func (c *InitialWorkerCommand) UnmarshalJSON(data []byte) error {
 	if err := workerLaunchDecodeStrict(data, &wire, "command_id", "command"); err != nil {
 		return err
 	}
-	command, err := UnmarshalRelayCommand(wire.Command)
+	command, err := UnmarshalRelayCommandJSON(wire.Command)
 	if err != nil {
 		return err
 	}

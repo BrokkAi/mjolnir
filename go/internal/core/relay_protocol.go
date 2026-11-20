@@ -1667,6 +1667,26 @@ type RelayRequestHistoryQuery struct {
 
 func (RelayRequestHistoryQuery) isRelayRequest() {}
 
+// UnmarshalJSON reads the variant's fields; Query is a sealed interface
+// decoded by DecodeHistoryQuery.
+func (v *RelayRequestHistoryQuery) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Query json.RawMessage `json:"query"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Query == nil {
+		return fmt.Errorf("missing field `query`")
+	}
+	query, err := DecodeHistoryQuery(wire.Query)
+	if err != nil {
+		return err
+	}
+	v.Query = query
+	return nil
+}
+
 // MarshalJSON writes the serde-tagged form of RelayRequestHistoryQuery.
 func (v RelayRequestHistoryQuery) MarshalJSON() ([]byte, error) {
 	type plain RelayRequestHistoryQuery

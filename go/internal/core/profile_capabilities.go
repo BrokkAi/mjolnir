@@ -118,7 +118,7 @@ func (s *ProfileCapabilitiesSnapshot) Options(config *Config, model *string) *Su
 
 // ModelOffers is the models completed enabled profiles offer, one offer per
 // value, with usagePriced saying which profiles are billed per use.
-func (s *ProfileCapabilitiesSnapshot) ModelOffers(config *Config, usagePriced func(string) bool) []ReviewAutoconfigureModelOffer {
+func (s *ProfileCapabilitiesSnapshot) ModelOffers(config *Config, usagePriced func(string) bool) []AutoconfigureModelOffer {
 	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::model_offers")
 }
 

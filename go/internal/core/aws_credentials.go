@@ -132,7 +132,7 @@ func (s AwsCredentialSource) String() string {
 	names := slices.Sorted(maps.Keys(s.Environment))
 	role := "None"
 	if s.Role != nil {
-		role = fmt.Sprintf("Some(%q)", s.Role.RoleArn)
+		role = fmt.Sprintf("Some(%q)", s.Role.RoleARN)
 	}
 	return fmt.Sprintf("AwsCredentialSource { environment_names: %q, role: %s }", names, role)
 }

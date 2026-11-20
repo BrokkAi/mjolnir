@@ -48,7 +48,7 @@ type QueuedPrompt struct {
 // MarshalJSON omits Kind for a prompt (serde skip_serializing_if is_prompt).
 func (q QueuedPrompt) MarshalJSON() ([]byte, error) {
 	var kind *QueuedCommandKind
-	if !q.Kind.IsPrompt() {
+	if q.Kind != nil && !q.Kind.IsPrompt() {
 		kind = &q.Kind
 	}
 	return relayMarshalJSON(struct {
@@ -66,7 +66,25 @@ func (q *QueuedPrompt) UnmarshalJSON(data []byte) error {
 	if err := relayRejectUnknownFields(data, reflect.TypeFor[plain](), ""); err != nil {
 		return fmt.Errorf("queued prompt: %w", err)
 	}
-	return json.Unmarshal(data, (*plain)(q))
+	// Kind is a sealed interface, so it is read raw and decoded by
+	// unmarshalQueuedCommandKind.
+	var wire struct {
+		plain
+		Kind json.RawMessage `json:"kind"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*q = QueuedPrompt(wire.plain)
+	q.Kind = QueuedCommandKindPrompt{}
+	if wire.Kind != nil {
+		kind, err := unmarshalQueuedCommandKind(wire.Kind)
+		if err != nil {
+			return err
+		}
+		q.Kind = kind
+	}
+	return nil
 }
 
 // WorkerSnapshot is the minimal snapshot shape retained for importing

@@ -17,7 +17,7 @@ type GoRecipe struct {
 	CreateManagedWorktree *bool   `json:"create_managed_worktree"`
 	// Also read as `mjolnir_subagents`; stored legacy booleans are accepted.
 	// nil is Rust's None.
-	Subagents        SubagentPolicy    `json:"subagents"`
+	Subagents        *SubagentPolicy   `json:"subagents"`
 	AdditionalMounts []AdditionalMount `json:"additional_mounts"`
 	// nil is Rust's None.
 	ResourceAllocation SessionResourceAllocation `json:"resource_allocation"`

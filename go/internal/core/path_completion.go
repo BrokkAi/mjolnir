@@ -110,7 +110,7 @@ func unmarshalCompletionHost(data []byte) (CompletionHost, error) {
 			}
 			return CompletionHostTarget{ID: id}, nil
 		case "Machine":
-			machine, err := unmarshalMachine(content)
+			machine, err := UnmarshalMachineJSON(content)
 			if err != nil {
 				return nil, err
 			}
