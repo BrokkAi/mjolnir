@@ -696,6 +696,9 @@ fn parse_snapshot(snapshot: &Value, account_plan: Option<&str>) -> Option<CodexU
 // https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/tui/src/status/helpers.rs#L187-L215
 fn plan_monthly_price(plan: &str) -> Option<u32> {
     match plan {
+        // ChatGPT Go includes a Codex allowance at a US list price of $8:
+        // https://openai.com/index/introducing-chatgpt-go/
+        "go" => Some(8),
         "plus" => Some(20),
         "prolite" => Some(100),
         "pro" => Some(200),
