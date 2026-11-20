@@ -2913,9 +2913,7 @@ pub(crate) mod tests {
         );
         assert!(dashboard.wanted_notification_message().is_none());
 
-        while dashboard.notification_entries()[0].session_id != "i1" {
-            dashboard.handle_key(alt(KeyCode::Char('s')));
-        }
+        skip_to(&mut dashboard, "i1");
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::DismissNotification {
@@ -2934,9 +2932,7 @@ pub(crate) mod tests {
             dashboard.state.sessions["i1"].viewed_through_event_ordinal,
             8
         );
-        while dashboard.notification_entries()[0].session_id != "q1" {
-            dashboard.handle_key(alt(KeyCode::Char('s')));
-        }
+        skip_to(&mut dashboard, "q1");
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::DismissNotification {
@@ -3072,6 +3068,18 @@ pub(crate) mod tests {
         assert_eq!(dashboard.notifications.scroll, 0);
     }
 
+    /// Skip until `session_id` leads the queue, at most one pass through it,
+    /// so an unreachable card fails the test instead of hanging it.
+    fn skip_to(dashboard: &mut DashboardState, session_id: &str) {
+        for _ in 0..=dashboard.notification_entries().len() {
+            if dashboard.notification_entries()[0].session_id == session_id {
+                return;
+            }
+            dashboard.handle_key(alt(KeyCode::Char('s')));
+        }
+        panic!("{session_id} never reached the front of the notification queue");
+    }
+
     #[test]
     fn notifications_keys_rotate_submit_and_restore_failed_dismissals() {
         let mut dashboard = dashboard();
@@ -3102,9 +3110,7 @@ pub(crate) mod tests {
         );
         assert_eq!(dashboard.notifications.errors["q1"], "Worker disconnected");
         assert_eq!(dashboard.attention_level("q1"), AttentionLevel::Waiting);
-        while dashboard.notification_entries()[0].session_id != "i1" {
-            dashboard.handle_key(alt(KeyCode::Char('s')));
-        }
+        skip_to(&mut dashboard, "i1");
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::DismissNotification {
