@@ -805,6 +805,11 @@ def suspend_session(sid, report=lambda **fields: None):
         while True:
             session = driver.session(sid)
             error = session.get("error")
+            # mj can publish a suspension error while its lifecycle operation still owns the
+            # session (lifecycle "suspending"); a suspend sent then would join that same
+            # operation. Read the error only after the operation has released the session.
+            if error is not None and session["lifecycle"] == "suspending":
+                error = None
             if error is not None:
                 if not (error.startswith("the suspension did not finish:") and ". Retry suspension" in error):
                     raise RuntimeError(error)
@@ -814,9 +819,12 @@ def suspend_session(sid, report=lambda **fields: None):
                 # needs a change outside the runner, so surface it and stop.
                 print(f"suspension of {sid} failed (attempt {attempt}): {error}", file=sys.stderr, flush=True)
                 report(session=sid, attempt=attempt, error=error)
-                if error == previous_error:
+                # mj appends a per-attempt "Reference lifecycle-<id>." to the error, so compare
+                # the error without it.
+                cause = re.sub(r"\s*Reference lifecycle-[0-9a-f]+\.?", "", error).strip()
+                if cause == previous_error:
                     raise RuntimeError(f"suspension keeps failing with the same error: {error}")
-                previous_error = error
+                previous_error = cause
                 time.sleep(delay)
                 delay = min(2 * delay, 30)
                 break
