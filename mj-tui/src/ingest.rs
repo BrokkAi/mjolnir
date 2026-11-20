@@ -371,13 +371,18 @@ impl PreparedMaterializedSessionDetail {
         let latest_agent_activity =
             latest_agent_activity(&session.transcript, unchanged_prefix, &previous);
         // `/clear` starts a new conversation; the preview fields describe
-        // only that conversation, never the one before the boundary.
+        // only that conversation, never the one before the boundary. The
+        // cutoff is by position, as in the stored summary, so an item tied
+        // with the boundary (a restored archive allows ties) is excluded by
+        // both.
         let conversation_start = session
             .transcript
             .iter()
-            .rposition(|item| mj_core::archive::is_context_boundary(&item.stable_id));
-        let in_conversation =
-            |index: &usize| conversation_start.is_none_or(|boundary| *index > boundary);
+            .rfind(|item| mj_core::archive::is_context_boundary(&item.stable_id))
+            .map(|item| item.position);
+        let in_conversation = |index: &usize| {
+            conversation_start.is_none_or(|start| session.transcript[*index].position > start)
+        };
         let last_user_message = session
             .transcript
             .iter()
