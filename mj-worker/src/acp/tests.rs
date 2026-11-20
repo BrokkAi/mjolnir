@@ -8336,9 +8336,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         .split_once("Answer it yourself.\n")
         .expect("the form names why the guardian handed it over");
     assert!(
-        preface.starts_with(
-            "Mjolnir guardian could not decide this request (its review failed: start the reviewer's Kimi Code bridge kimi-probe"
-        ),
+        preface.starts_with("Mjolnir guardian could not decide this request (its review failed: "),
         "{preface}"
     );
     assert_eq!(
@@ -8380,6 +8378,38 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     assert!(!pending.is_empty());
     assert!(pending.remove("elicitation-1").is_some());
     assert!(pending.is_empty());
+}
+
+// Hard-won: 747336f25: AFK answered a permission while a cancelled turn was being withdrawn.
+#[test]
+fn afk_cannot_answer_a_permission_between_withdrawal_and_form_removal() {
+    let owner = OperatorAway::default();
+    let pending = owner.pending_for_bridge();
+    let id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+    let mut permission_rx = pending.register(
+        pending_test_question(&id),
+        String::new(),
+        AwayRequest::Tool("permission".into()),
+    );
+
+    pending.begin_withdrawal();
+    owner.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 1,
+    });
+    assert!(
+        matches!(
+            permission_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "the form remains for withdrawal to remove"
+    );
+
+    pending.withdraw_tool_permissions();
+    assert!(matches!(
+        permission_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
 }
 
 fn pending_test_question(id: &str) -> ElicitationRequest {

@@ -4,14 +4,15 @@
 //!
 //! This ports OpenAI Codex's synchronous guardian reviewer
 //! (<https://github.com/openai/codex>, commit 076ac78; Apache License 2.0,
-//! see `licenses/native/OPENAI_CODEX_GUARDIAN_NOTICE.txt`):
+//! see `guardian/OPENAI_CODEX_NOTICE.txt`):
 //!
 //! - `guardian/policy.md` is Codex's `prompts/templates/guardian/policy.md`
 //!   unchanged, inserted into `guardian/policy_template.md`, Codex's template
-//!   with the passages about Codex's sandbox and tools rewritten for a
-//!   harness that runs on the host and a reviewer that can only read files.
+//!   with its evidence-handling, investigation and execution-environment
+//!   passages describing Mjolnir's sessions and reviewer instead of Codex's
+//!   sandbox and tools.
 //! - The prompt framing follows `guardian-context` (`composition.rs`,
-//!   `action.rs`), the output contract and tolerant parser follow
+//!   `action.rs`), the output contract and verdict parser follow
 //!   `ext/guardian-reviewer/src/assessment.rs`, and the deadline, attempt
 //!   budget and per-turn denial breaker follow `ext/guardian-reviewer`.
 //!
@@ -78,6 +79,9 @@ pub(super) struct ReviewEvidence {
     pub(super) session_id: String,
     /// The whole recent messages the person wrote, oldest first.
     pub(super) user_instructions: Vec<String>,
+    /// Their identities, to tell a new message from the history's window
+    /// moving.
+    pub(super) user_message_ids: Vec<String>,
     /// Whether older messages from the person were left out.
     pub(super) user_instructions_omitted: bool,
     /// The recent transcript, rendered by [`mj_transcript::summary`].
@@ -94,28 +98,35 @@ impl ReviewEvidence {
         action: &serde_json::Value,
     ) -> Self {
         let authorization = turn_context.authorization_context();
-        let (user_instructions, user_instructions_omitted) = match &authorization {
-            Some(history) => (
-                history
-                    .messages
-                    .iter()
-                    .filter(|message| message.role == "user")
-                    .map(|message| message.text.clone())
-                    .collect(),
-                !history.authorization_complete,
-            ),
-            // No durable history was published, so nothing the person wrote
-            // can be vouched for; the reviewer is told so.
-            None => (Vec::new(), true),
-        };
+        let person = authorization
+            .iter()
+            .flat_map(|history| &history.messages)
+            .filter(|message| message.role == "user");
+        let user_instructions = person.clone().map(|message| message.text.clone()).collect();
+        let user_message_ids = person.map(|message| message.id.clone()).collect();
+        // No durable history means nothing the person wrote can be vouched
+        // for; the reviewer is told so.
+        let user_instructions_omitted = authorization
+            .as_ref()
+            .is_none_or(|history| !history.authorization_complete);
         Self {
             harness,
             session_id: turn_context.session_id(),
             user_instructions,
+            user_message_ids,
             user_instructions_omitted,
             transcript: turn_context.render_transcript(TRANSCRIPT_BYTES),
             action: serde_json::to_string_pretty(action).expect("planned action serializes"),
         }
+    }
+
+    /// Whether the person wrote something this evidence does not hold, such
+    /// as a new grant or a revocation. The history's window moving on, or the
+    /// relay republishing it, is not new authorization.
+    pub(super) fn person_wrote_since(&self, earlier: &Self) -> bool {
+        self.user_message_ids
+            .iter()
+            .any(|id| !earlier.user_message_ids.contains(id))
     }
 
     /// The review request, framed as Codex frames a synchronous full review.
@@ -279,20 +290,21 @@ struct AssessmentPayload {
     rationale: Option<String>,
 }
 
-/// Codex's `parse_guardian_assessment`: strict JSON, or the outermost
-/// `{...}` of a reply that wrapped it in prose, with Codex's defaults for
-/// omitted fields.
+/// Codex's `parse_guardian_assessment`, with Codex's defaults for omitted
+/// fields: the reply is strict JSON, or prose that ends with the verdict
+/// object (a closing markdown fence aside). Codex takes the span from the
+/// first `{` to the last `}`, relying on the output schema it can also
+/// enforce; nothing enforces one over ACP, so only the object the reply ends
+/// with counts, and an object quoted from the evidence earlier in the reply
+/// is never taken for the verdict.
 pub(super) fn parse_assessment(text: &str) -> Result<Assessment> {
-    let payload = if let Ok(payload) = serde_json::from_str::<AssessmentPayload>(text.trim()) {
-        payload
-    } else if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
-        && start < end
-    {
-        serde_json::from_str::<AssessmentPayload>(&text[start..=end])
-            .context("guardian assessment was not valid JSON")?
-    } else {
-        bail!("guardian assessment was not valid JSON");
-    };
+    let text = text.trim();
+    let text = text.strip_suffix("```").map_or(text, str::trim_end);
+    let payload = text
+        .char_indices()
+        .filter(|(_, character)| *character == '{')
+        .find_map(|(start, _)| serde_json::from_str::<AssessmentPayload>(&text[start..]).ok())
+        .context("guardian assessment was not valid JSON")?;
     let outcome = payload.outcome;
     Ok(Assessment {
         risk_level: payload.risk_level.unwrap_or(match outcome {
@@ -345,6 +357,22 @@ pub(super) enum GuardianDecision {
     AskPerson {
         reason: String,
     },
+}
+
+/// Allow this one call, never as a rule the harness would remember: the
+/// request's one-time allow, or `None` when it offers none.
+pub(super) fn allow_once_response(
+    request: &RequestPermissionRequest,
+) -> Option<RequestPermissionResponse> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        .map(|option| {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option.option_id.clone()),
+            ))
+        })
 }
 
 /// Refuse this one call: the request's one-time rejection, never a

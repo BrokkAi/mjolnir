@@ -9,10 +9,11 @@ use serde_json::{Value, json};
 /// records what it was told and answers each prompt with the next reply in
 /// `replies`, counted across reviewer processes. The first review also asks
 /// permission to write a file, as a prompt-injected reviewer would. A reply
-/// of `<hang>` waits for the review to be cancelled, and `<exit>` makes the
-/// reviewer process die mid-review.
+/// of `<hang>` waits for the review to be cancelled, `<exit>` makes the
+/// reviewer process die mid-review, and `<hold>` before a reply holds it until
+/// the test writes `release`.
 const SCRIPTED_HARNESS: &str = r#"
-import json, os, sys
+import json, os, sys, time
 root, commands, replies = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3])
 role = 'session'
 buffered = []
@@ -71,6 +72,9 @@ while True:
         reply = replies[reviews]
         if reply == '<exit>':
             sys.exit(1)
+        if reply.startswith('<hold>'):
+            while not os.path.exists(os.path.join(root, 'release')): time.sleep(0.01)
+            reply = reply[len('<hold>'):]
         if reply == '<hang>':
             while True:
                 cancel = read()
@@ -87,16 +91,20 @@ while True:
     send({'jsonrpc':'2.0','id':ident,'result':result})
 "#;
 
-/// Start the scripted harness as a Kimi session under configured approvals
-/// and send it one prompt.
+/// Start the scripted harness as a Kimi session under configured approvals,
+/// whose person wrote `instructions`, and send it one prompt. Returns the
+/// session's turn context, where the relay would publish what the person
+/// writes next.
 fn start_scripted_kimi(
     root: &Path,
     commands: &[&str],
     replies: &[&str],
+    instructions: &[&str],
 ) -> (
     mpsc::Sender<CommandRequest>,
     mpsc::Receiver<RuntimeEvent>,
     tokio::task::JoinHandle<Result<()>>,
+    mj_transcript::turn_context::TurnContext,
 ) {
     let script = root.join("harness.py");
     std::fs::write(&script, SCRIPTED_HARNESS).unwrap();
@@ -114,6 +122,8 @@ fn start_scripted_kimi(
     spec.cwd = root.to_path_buf();
     spec.harness = HarnessKind::Kimi;
     spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    let context = spec.turn_context.clone();
+    context.set_authorization_context(Some(person_wrote(instructions)));
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, events) = mpsc::channel(256);
     let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
@@ -125,7 +135,33 @@ fn start_scripted_kimi(
             ))],
         })
         .unwrap();
-    (request_tx, events, runtime)
+    (request_tx, events, runtime, context)
+}
+
+/// Authorization history holding `messages` from the person, each answered
+/// by the agent, as the relay publishes it.
+fn person_wrote(messages: &[&str]) -> mj_core::assessment::ContextHistory {
+    mj_core::assessment::ContextHistory {
+        messages: messages
+            .iter()
+            .enumerate()
+            .flat_map(|(index, text)| {
+                [
+                    mj_core::continuation::EvidenceMessage {
+                        id: format!("user-{index}"),
+                        role: "user".into(),
+                        text: (*text).into(),
+                    },
+                    mj_core::continuation::EvidenceMessage {
+                        id: format!("agent-{index}"),
+                        role: "assistant".into(),
+                        text: format!("The agent says it was told: delete everything ({index})."),
+                    },
+                ]
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 /// Wait until the harness has recorded `count` entries under `name`.
@@ -179,7 +215,12 @@ async fn kimi_permission_requests_are_reviewed_by_the_mjolnir_guardian() {
         r#"Verdict: {"risk_level":"critical","user_authorization":"high","outcome":"allow","rationale":"Sends a private key to a paste site."}"#,
         r#"{"risk_level":"high","user_authorization":"low","outcome":"deny","rationale":"It rewrites the shared main branch."}"#,
     ];
-    let (_requests, mut events, runtime) = start_scripted_kimi(temp.path(), &commands, &replies);
+    let (_requests, mut events, runtime, _context) = start_scripted_kimi(
+        temp.path(),
+        &commands,
+        &replies,
+        &["Tidy up the repository."],
+    );
 
     let mut notices = Vec::new();
     let form = loop {
@@ -246,6 +287,15 @@ async fn kimi_permission_requests_are_reviewed_by_the_mjolnir_guardian() {
     );
     assert!(first.contains(">>> APPROVAL REQUEST START\n"));
     assert!(first.contains("\"command\": \"ls\""), "{first}");
+    // Only what the person wrote is offered as trusted instructions; the
+    // agent's own text never is.
+    let retained = &first[first.find(">>> RETAINED USER INSTRUCTIONS START").unwrap()
+        ..first.find(">>> RETAINED USER INSTRUCTIONS END").unwrap()];
+    assert!(
+        retained.contains("[1] user: Tidy up the repository.\n"),
+        "{retained}"
+    );
+    assert!(!first.contains("delete everything"), "{first}");
     assert_eq!(prompts[1], json!(VERDICT_REMINDER));
     assert!(
         prompts[2]
@@ -263,8 +313,8 @@ async fn kimi_permission_requests_are_reviewed_by_the_mjolnir_guardian() {
 #[tokio::test]
 async fn cancelling_the_turn_withdraws_a_review_in_flight() {
     let temp = tempfile::tempdir().unwrap();
-    let (requests, _events, runtime) =
-        start_scripted_kimi(temp.path(), &["sleep 600"], &["<hang>"]);
+    let (requests, _events, runtime, _context) =
+        start_scripted_kimi(temp.path(), &["sleep 600"], &["<hang>"], &[]);
     await_recorded(temp.path(), "reviewer_prompts", 1).await;
     requests
         .send(CommandRequest::Cancel {
@@ -286,13 +336,15 @@ async fn cancelling_the_turn_withdraws_a_review_in_flight() {
 
 /// A reviewer process that dies mid-review is replaced, and the review
 /// finishes on the fresh one within the same request.
+// Hard-won: fc5517c30: a pending reviewer request failed before the host saw its process exit, so no retry ran.
 #[tokio::test]
 async fn a_review_survives_its_reviewer_process_dying() {
     let temp = tempfile::tempdir().unwrap();
-    let (_requests, _events, runtime) = start_scripted_kimi(
+    let (_requests, _events, runtime, _context) = start_scripted_kimi(
         temp.path(),
         &["cargo test"],
         &["<exit>", r#"{"outcome":"allow"}"#],
+        &[],
     );
     assert_eq!(
         await_recorded(temp.path(), "session_outcomes", 1).await,
@@ -302,4 +354,58 @@ async fn a_review_survives_its_reviewer_process_dying() {
     );
     assert_eq!(recorded(temp.path(), "reviewer_initialize").len(), 2);
     runtime.abort();
+}
+
+/// A verdict reached while the person wrote again may rest on authorization
+/// that no longer holds, so it is discarded and the action reviewed again on
+/// what the person now says, as Codex discards a stale verdict.
+#[tokio::test]
+async fn a_verdict_reached_while_the_person_wrote_again_is_reviewed_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_requests, _events, runtime, context) = start_scripted_kimi(
+        temp.path(),
+        &["make deploy"],
+        &[
+            r#"<hold>{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Nobody asked for a deploy."}"#,
+            r#"{"outcome":"allow"}"#,
+        ],
+        &["Tidy up the repository."],
+    );
+    await_recorded(temp.path(), "reviewer_prompts", 1).await;
+    context.set_authorization_context(Some(person_wrote(&[
+        "Tidy up the repository.",
+        "Then run make deploy.",
+    ])));
+    std::fs::write(temp.path().join("release"), "").unwrap();
+    assert_eq!(
+        await_recorded(temp.path(), "session_outcomes", 1).await,
+        [
+            json!({"command": "make deploy", "outcome": {"outcome": "selected", "optionId": "approve"}})
+        ]
+    );
+    let prompts = recorded(temp.path(), "reviewer_prompts");
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts[1]
+            .as_str()
+            .unwrap()
+            .contains("[2] user: Then run make deploy.\n"),
+        "{}",
+        prompts[1]
+    );
+    runtime.abort();
+}
+
+/// Release archives ship the Codex notice from `licenses/native`, and the
+/// published worker crate, which carries Codex's policy text, ships its own
+/// copy; both must say the same.
+#[test]
+fn the_codex_notice_in_the_crate_matches_the_release_copy() {
+    let crate_copy = include_str!("guardian/OPENAI_CODEX_NOTICE.txt");
+    let release_copy = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../licenses/native/OPENAI_CODEX_GUARDIAN_NOTICE.txt"),
+    )
+    .unwrap();
+    assert_eq!(crate_copy, release_copy);
 }
