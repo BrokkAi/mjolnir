@@ -186,23 +186,28 @@ impl RuntimeState {
     /// before that change can still have one open, and it must survive a
     /// daemon handoff.
     ///
-    /// While the host is still restoring reviews, or has stopped, it says
-    /// nothing about this child, so the child is held and its completion and
-    /// report retry later. When the host's startup recovery failed, a review
-    /// it did not restore cannot produce a verdict in this daemon run, and
-    /// waiting would only block the child forever, so the child settles.
+    /// While the host is still restoring reviews, or the daemon is stopping,
+    /// a later answer will exist, so the child is held and its completion and
+    /// report retry. When the host's startup recovery failed, or its task
+    /// ended while the daemon keeps running, no verdict can arrive in this
+    /// daemon run, and waiting would block the child forever, so it settles.
     pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
+        use crate::review_host::OpenReviewUnknown;
         match self.review_host().has_open_review(child_id).await {
             Ok(open) => open,
-            Err(crate::review_host::OpenReviewUnknown::RecoveryFailed(error)) => {
+            Err(OpenReviewUnknown::NotReady | OpenReviewUnknown::ShuttingDown) => true,
+            Err(OpenReviewUnknown::RecoveryFailed(error)) => {
                 tracing::debug!(child_session_id = child_id, %error,
                     "cannot tell whether the child's review is open; settling it as having none");
                 false
             }
-            Err(
-                crate::review_host::OpenReviewUnknown::NotReady
-                | crate::review_host::OpenReviewUnknown::HostStopped,
-            ) => true,
+            Err(OpenReviewUnknown::HostStopped) => {
+                tracing::warn!(
+                    child_session_id = child_id,
+                    "the review host stopped while the daemon runs; settling the child as having no open review"
+                );
+                false
+            }
         }
     }
 

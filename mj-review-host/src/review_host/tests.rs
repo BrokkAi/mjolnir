@@ -2462,6 +2462,11 @@ async fn the_host_reports_a_session_with_a_running_review_as_open_until_it_close
     .await
     .expect("a cancelled review closes");
     host.shutdown().await.expect("shutdown the host");
+    // Hard-won: c1f229945: a stopping daemon must be told apart from a host that died, or children are held forever or released before their verdict.
+    assert_eq!(
+        host.has_open_review(session).await,
+        Err(crate::review_host::OpenReviewUnknown::ShuttingDown)
+    );
 }
 
 /// A saved group's busy child remains owned after a daemon restart; its

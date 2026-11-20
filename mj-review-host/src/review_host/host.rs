@@ -12,6 +12,9 @@ pub struct HostShared {
     pub views: Mutex<BTreeMap<String, RuntimeReviewView>>,
     pub changed: Arc<dyn Fn() + Send + Sync>,
     pub shutdown: tokio::sync::OnceCell<Result<(), String>>,
+    /// Set when the daemon asks the host to stop, before the host's task
+    /// ends. A host gone without it set stopped on its own.
+    pub stopping: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for TurnReviewHost {
@@ -45,6 +48,7 @@ impl TurnReviewHost {
             views: Mutex::default(),
             changed,
             shutdown: tokio::sync::OnceCell::new(),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         });
         let host = Self {
             events: events.clone(),
@@ -181,8 +185,21 @@ impl TurnReviewHost {
                 session_id: session_id.to_owned(),
                 reply,
             })
-            .map_err(|_| OpenReviewUnknown::HostStopped)?;
-        answer.await.map_err(|_| OpenReviewUnknown::HostStopped)?
+            .map_err(|_| self.stopped())?;
+        answer.await.map_err(|_| self.stopped())?
+    }
+
+    /// Why the host's task no longer answers.
+    fn stopped(&self) -> OpenReviewUnknown {
+        if self
+            .shared
+            .stopping
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            OpenReviewUnknown::ShuttingDown
+        } else {
+            OpenReviewUnknown::HostStopped
+        }
     }
 
     /// Puts the host in the state a failed startup recovery leaves it in.
@@ -279,6 +296,9 @@ impl TurnReviewHost {
     /// down.
     pub async fn shutdown(&self) -> Result<(), String> {
         self.shared
+            .stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shared
             .shutdown
             .get_or_init(|| async {
                 let (reply, answer) = oneshot::channel();
@@ -342,6 +362,8 @@ pub enum OpenReviewUnknown {
     RecoveryFailed(String),
     /// Its startup sweep has not finished restoring reviews yet.
     NotReady,
-    /// The host task is gone.
+    /// The daemon is stopping; the next daemon restores open reviews.
+    ShuttingDown,
+    /// The host task ended while the daemon was still running.
     HostStopped,
 }
