@@ -674,9 +674,12 @@ fn parse_report(
 }
 
 fn parse_snapshot(snapshot: &Value, account_plan: Option<&str>) -> Option<CodexUsageReport> {
+    // Codex reports `"unknown"` when the quota snapshot lacks billing
+    // information; treat it as missing and use the account's plan.
     let plan = snapshot
         .get("planType")
         .and_then(Value::as_str)
+        .filter(|plan| *plan != "unknown")
         .or(account_plan);
     let report = CodexUsageReport {
         monthly_price_usd: plan.and_then(plan_monthly_price),
@@ -703,8 +706,11 @@ fn plan_monthly_price(plan: &str) -> Option<u32> {
         // (reported as `team` or `self_serve_business_usage_based`) has the
         // same five-hour Codex estimates as Plus:
         // https://learn.chatgpt.com/docs/pricing#included-usage
-        // Enterprise, Edu and Business Premium have no documented equivalent.
+        // Enterprise and Edu have no documented equivalent.
         "plus" | "team" | "self_serve_business_usage_based" => Some(20),
+        // Business Premium lists at $100 per seat per month (annual billing):
+        // https://help.openai.com/en/articles/11391654-chatgpt-business-release-notes
+        "self_serve_business_prolite" => Some(100),
         "prolite" => Some(100),
         "pro" => Some(200),
         "promax" => Some(500),
