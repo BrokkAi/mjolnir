@@ -219,7 +219,14 @@ catalogue lists the packages.
 
 `usize` is `int` because Go lengths and indexes are `int`. Rust arithmetic that
 would overflow panics in the development profile, where the tests run, so
-correct code never relies on wrapping. Where the Rust code asks for a specific
+correct code never relies on wrapping. `usize::MAX` is `rs.UsizeMax`, the
+largest Go `int` (2^63-1), not Rust's 2^64-1. The two agree as a bound or a
+sentinel, which is how the product uses it, but not where Rust lets the value
+be seen: `u64::try_from(usize::MAX)` and `usize::MAX as u64` are
+`rs.UsizeMaxU64`, and printing or serializing `usize::MAX` writes
+`rs.UsizeMaxU64`. Arithmetic on it (`usize::MAX / 2`) keeps its meaning only
+relative to other values; check each such use and say in a comment what it
+relies on. Where the Rust code asks for a specific
 overflow behaviour it says so, and you use the matching helper:
 `rs.CheckedAdd`, `rs.SaturatingSub`, `rs.WrappingMul`, and so on. `usize::MAX`
 is `rs.UsizeMax`. A cast written with `as` from a float to an integer is

@@ -24,7 +24,9 @@
 //! - `var_error {s}`: `VarError` texts.
 //! - `env_set_get {k, v}`, `env_get {k}`, `env_remove {k}`: the environment.
 //! - `chdir {p}`: `set_current_dir` then `current_dir`.
-//! - `temp_dir {tmpdir}`, `home_dir {home}`, `consts {}`, `current_exe {}`.
+//! - `temp_dir {tmpdir}`, `home_dir {home}`: with the variable set to the
+//!   value, or removed when it is missing.
+//! - `consts {}`, `current_exe {}`.
 
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
@@ -105,14 +107,14 @@ pub fn handle(request: &Value) -> Value {
             "is_separator": separators,
             })
         }
+        // The oracle and the Go test asking it are different programs, so
+        // the reply says only what holds for any program started by the path
+        // of its file, as both are.
         "current_exe" => match std::env::current_exe() {
             Ok(exe) => json!({
                 "is_absolute": exe.is_absolute(),
-                "file_name": optional_hex(exe.file_name()),
-                "args0_file_name": optional_hex(
-                    std::env::args_os().next().as_deref().map(Path::new).and_then(Path::file_name)
-                ),
-                "args": std::env::args_os().count(),
+                "file_name_is_args0_file_name": exe.file_name()
+                    == std::env::args_os().next().as_deref().map(Path::new).and_then(Path::file_name),
             }),
             Err(error) => io_error(&error),
         },

@@ -16,6 +16,11 @@ package that passed may import one that was just dropped.
 
     python3 go/port/checkpoint.py            # stage what is green, print a summary
     python3 go/port/checkpoint.py --list     # only say what would be staged
+    python3 go/port/checkpoint.py go/crates/x go/rs   # consider only these directories
+
+Restricting the directories only limits what is staged: the check still
+builds the whole staged snapshot, so a package that needs another
+directory's uncommitted work fails it.
 
 It never commits. Review `git status`, then commit and push.
 """
@@ -134,7 +139,14 @@ def main(argv: list[str]) -> int:
         env.pop(name, None)
     env.update({"CGO_ENABLED": "0", "LC_ALL": "C.UTF-8", "LANGUAGE": "en"})
 
+    wanted = [a.rstrip("/") for a in argv[1:] if not a.startswith("--")]
     staged = [d for d in candidates() if os.path.isdir(os.path.join(ROOT, d))]
+    if wanted:
+        unknown = [w for w in wanted if w not in staged]
+        if unknown:
+            print(f"not a candidate directory: {', '.join(unknown)}", file=sys.stderr)
+            return 2
+        staged = [d for d in staged if d in wanted]
     compress_corpora()
     run(["git", "add", "--", *staged, *[e for e in EXTRA if os.path.exists(os.path.join(ROOT, e))]])
     dropped: dict[str, str] = {}

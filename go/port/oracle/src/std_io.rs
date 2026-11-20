@@ -28,7 +28,10 @@
 //!
 //! - `fs {umask, steps}`: a script of `std::fs` calls run in a fresh
 //!   directory, which is the working directory while it runs. The reply
-//!   holds each step's value or error.
+//!   holds each step's value or error. Besides the calls themselves, steps
+//!   report `created()` availability and the `Debug` forms of the fs types,
+//!   with the script's directory written `$ROOT` and a File's descriptor
+//!   number written `FD`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -810,6 +813,20 @@ fn reply_path(path: &Path, root: &Path) -> Value {
     }
 }
 
+/// Text with the script's directory replaced by `$ROOT`.
+fn root_relative(text: &str, root: &Path) -> String {
+    text.replace(&*root.to_string_lossy(), "$ROOT")
+}
+
+/// A File's Debug with its descriptor number replaced by `FD`, which differs
+/// between processes.
+fn normalize_fd(debug: &str) -> String {
+    let Some(start) = debug.find("fd: ") else { return debug.to_owned() };
+    let digits = start + 4;
+    let end = debug[digits..].find(|c: char| !c.is_ascii_digit()).map_or(debug.len(), |n| digits + n);
+    format!("{}FD{}", &debug[..digits], &debug[end..])
+}
+
 fn file_type_name(file_type: fs::FileType) -> &'static str {
     if file_type.is_file() {
         return "file";
@@ -1102,10 +1119,55 @@ fn fs_step(script: &mut Script, step: &Value) -> Option<Value> {
             script.files.remove(&name);
             Value::Null
         }
-        "set_times_now_check" => {
-            // Unused placeholder kept out of the protocol.
-            return None;
+        "read_show" => result_json(fs::read(&p).map(|data| show(&data))),
+        "created" | "symlink_created" => {
+            let metadata =
+                if crate::text(step, "do") == "created" { fs::metadata(&p) } else { fs::symlink_metadata(&p) };
+            match metadata.and_then(|metadata| metadata.created()) {
+                Ok(_) => json!({ "ok": true }),
+                Err(error) => json!({ "err": err_json(&error) }),
+            }
         }
+        "debug_file_type" => {
+            result_json(fs::symlink_metadata(&p).map(|metadata| format!("{:?}", metadata.file_type())))
+        }
+        "debug_open_options" => json!(format!("{:?}", open_options(step))),
+        "debug_file_times" => {
+            let mut times = fs::FileTimes::new();
+            if step.get("secs").is_some() {
+                times = times.set_modified(system_time(step, "secs", "nanos"));
+            }
+            if step.get("asecs").is_some() {
+                times = times.set_accessed(system_time(step, "asecs", "ananos"));
+            }
+            json!(format!("{times:?}"))
+        }
+        "debug_read_dir" => match fs::read_dir(&p) {
+            Ok(listing) => {
+                let mut entries: Vec<String> = Vec::new();
+                let listing_debug = format!("{listing:?}");
+                for entry in listing.flatten() {
+                    entries.push(root_relative(&format!("{entry:?}"), &root));
+                }
+                entries.sort();
+                json!({ "ok": root_relative(&listing_debug, &root), "entries": entries })
+            }
+            Err(error) => json!({ "err": err_json(&error) }),
+        },
+        "debug_metadata_shape" => match fs::symlink_metadata(&p) {
+            // The times in Metadata's Debug change from run to run; the
+            // fields before them and the field names do not.
+            Ok(metadata) => {
+                let debug = format!("{metadata:?}");
+                let cut = debug.find(", modified").unwrap_or(debug.len());
+                let names: Vec<&str> = ["modified", "accessed", "created"]
+                    .into_iter()
+                    .filter(|name| debug.contains(&format!("{name}: SystemTime")))
+                    .collect();
+                json!({ "ok": &debug[..cut], "times": names, "ends": debug.ends_with(", .. }") })
+            }
+            Err(error) => json!({ "err": err_json(&error) }),
+        },
         other if other.starts_with("file_") => {
             let Some(file) = script.files.get_mut(&name) else {
                 return Some(json!({ "oracle_error": format!("no open file {name}") }));
@@ -1208,6 +1270,23 @@ fn file_step(
         "file_modified" => time_json(file.metadata().and_then(|metadata| metadata.modified())),
         "file_accessed" => time_json(file.metadata().and_then(|metadata| metadata.accessed())),
         "file_is_terminal" => json!(io::IsTerminal::is_terminal(&*file)),
+        "file_created" => match file.metadata().and_then(|metadata| metadata.created()) {
+            Ok(_) => json!({ "ok": true }),
+            Err(error) => json!({ "err": err_json(&error) }),
+        },
+        "file_debug" => json!(normalize_fd(&root_relative(&format!("{file:?}"), _root))),
+        "file_stream_len_matches" => {
+            // stream_len is unstable; its parts are not: the length and the
+            // position, which seeking to the end must not change.
+            let before = file.stream_position();
+            let end = file.seek(SeekFrom::End(0));
+            let after = before.as_ref().ok().map(|position| file.seek(SeekFrom::Start(*position)));
+            json!({
+                "before": before.ok(),
+                "end": end.ok(),
+                "restored": after.map(|result| result.ok()),
+            })
+        }
         other => return file_unix_step(file, other, step),
     };
     Some((value, None))
@@ -1294,6 +1373,27 @@ fn unix_step(script: &mut Script, action: &str, step: &Value, p: &Path, q: &Path
             Some(unsafe { getegid() }),
         )),
         "chown_none" => unit_json(std::os::unix::fs::chown(p, None, None)),
+        "debug_permissions" => {
+            let permissions = fs::Permissions::from_mode(uint(step, "mode") as u32);
+            json!({ "debug": format!("{permissions:?}"), "readonly": permissions.readonly() })
+        }
+        "debug_dir_builder" => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(flag(step, "recursive"));
+            if let Some(mode) = step.get("mode").and_then(Value::as_u64) {
+                builder.mode(mode as u32);
+            }
+            json!(format!("{builder:?}"))
+        }
+        "try_lock_error_debug" => {
+            let would_block = fs::TryLockError::WouldBlock;
+            let failed = fs::TryLockError::Error(io::Error::from_raw_os_error(uint(step, "code") as i32));
+            json!({
+                "would_block": [would_block.to_string(), format!("{would_block:?}")],
+                "error": [failed.to_string(), format!("{failed:?}")],
+                "would_block_io": err_json(&io::Error::from(fs::TryLockError::WouldBlock)),
+            })
+        }
         "lchown_self" => unit_json(std::os::unix::fs::lchown(
             p,
             Some(unsafe { geteuid() }),
