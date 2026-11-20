@@ -185,6 +185,7 @@ pub fn nitro_workspace_volume(container: &str) -> String {
 pub struct NitroMbxRemote<'a> {
     pub url: &'a str,
     pub region: Option<&'a str>,
+    pub budget: Option<&'a str>,
     /// The first namespace is the guest's default.
     pub namespaces: Vec<String>,
 }
@@ -254,6 +255,9 @@ pub(super) fn nitro_run_args(
         args.extend(["--mbx-remote".to_owned(), remote.url.to_owned()]);
         if let Some(region) = remote.region {
             args.push(format!("--mbx-remote-region={region}"));
+        }
+        if let Some(budget) = remote.budget {
+            args.push(format!("--mbx-cache-budget={budget}"));
         }
         for namespace in &remote.namespaces {
             // Namespace segments may start with a hyphen.

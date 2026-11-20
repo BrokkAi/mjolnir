@@ -1018,6 +1018,22 @@ impl Controller {
                 executor,
                 |_| None,
                 |outputs| {
+                    // The creation plan ends with the engine's run command.
+                    if matches!(nitro_cache, NitroBuildCache::Remote(_))
+                        && let Some(output) = outputs.last()
+                    {
+                        let warning = format!(
+                            "warning: {resource_name} starts without the remote mbx cache: "
+                        );
+                        if let Some(reason) = String::from_utf8_lossy(&output.stderr)
+                            .lines()
+                            .find_map(|line| line.strip_prefix(&warning))
+                        {
+                            executor.notify_notice(&format!(
+                                "This Nitro sandbox started without the shared mbx build cache: {reason}. Builds use the cache inside the VM."
+                            ));
+                        }
+                    }
                     let locator = super::backend::locator_after_provision_named(
                         template,
                         &target,
@@ -1799,6 +1815,7 @@ pub(super) fn nitro_build_cache<'a>(
     Ok(NitroBuildCache::Remote(targets::NitroMbxRemote {
         url,
         region: cache.remote_region.as_deref(),
+        budget: cache.max_total_size.as_deref(),
         namespaces,
     }))
 }

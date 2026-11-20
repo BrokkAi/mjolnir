@@ -758,14 +758,20 @@ fn launch(layout: &Layout, state: &mut VmState) -> Result<()> {
         .context("start the VM unit")?;
     }
     let mut env = state.env.clone();
+    if state.mbx_remote.is_some() {
+        env.retain(|entry| !entry.starts_with(mj_core::worker_launch::MBX_REMOTE_ENV_PREFIX));
+    }
     // The remote cache is optional: a proxy that cannot start leaves the VM
     // with its guest-local cache and no remote settings, and says so.
     let remote = state.mbx_remote.as_ref().filter(|_| {
         match mbx_proxy::start_unit(layout, state, &link, &boot) {
             Ok(()) => true,
             Err(error) => {
+                // The provisioning controller reads this warning as one line.
+                let reason = format!("{error:#}");
+                let reason = reason.lines().map(str::trim).collect::<Vec<_>>().join(" ");
                 eprintln!(
-                    "warning: {} starts without the remote mbx cache: {error:#}",
+                    "warning: {} starts without the remote mbx cache: {reason}",
                     state.name
                 );
                 false
@@ -781,7 +787,6 @@ fn launch(layout: &Layout, state: &mut VmState) -> Result<()> {
             ("MBX_REMOTE_NAMESPACE", remote.namespaces[0].clone()),
             ("MBX_REMOTE_MODE", "read-only".to_owned()),
         ] {
-            env.retain(|entry| entry.split('=').next() != Some(key));
             env.push(format!("{key}={value}"));
         }
     }

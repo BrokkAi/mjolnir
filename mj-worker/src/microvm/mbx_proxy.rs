@@ -13,7 +13,7 @@ use std::os::linux::net::SocketAddrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -65,6 +65,8 @@ pub(super) struct ProxyArgs {
     namespaces: Vec<String>,
     #[arg(long)]
     cache_dir: PathBuf,
+    #[arg(long)]
+    cache_budget: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -83,12 +85,19 @@ pub(super) fn parse_remote(
     url: &str,
     region: Option<String>,
     namespaces: Vec<String>,
+    budget: Option<u64>,
 ) -> Result<MbxRemote> {
     let location = url
         .strip_prefix("s3://")
         .context("--mbx-remote must start with s3://")?;
     let (bucket, prefix) = location.split_once('/').unwrap_or((location, ""));
-    remote(bucket.to_owned(), prefix.to_owned(), region, namespaces)
+    remote(
+        bucket.to_owned(),
+        prefix.to_owned(),
+        region,
+        namespaces,
+        budget,
+    )
 }
 
 fn remote(
@@ -96,20 +105,10 @@ fn remote(
     prefix: String,
     region: Option<String>,
     namespaces: Vec<String>,
+    budget: Option<u64>,
 ) -> Result<MbxRemote> {
     ensure!(
-        !bucket.is_empty()
-            && bucket
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
-            && bucket
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_alphanumeric)
-            && bucket
-                .as_bytes()
-                .last()
-                .is_some_and(u8::is_ascii_alphanumeric),
+        mj_core::config::valid_mbx_s3_bucket(&bucket),
         "invalid S3 bucket {bucket:?}"
     );
     let prefix = prefix.trim_matches('/').to_owned();
@@ -134,6 +133,7 @@ fn remote(
         bucket,
         prefix,
         region,
+        budget,
         namespaces,
     })
 }
@@ -261,6 +261,9 @@ pub(super) fn start_unit(
     if let Some(region) = &remote.region {
         args.push(format!("--region={}", region.replace('$', "$$")));
     }
+    if let Some(budget) = remote.budget {
+        args.push(format!("--cache-budget={budget}"));
+    }
     for namespace in &remote.namespaces {
         args.push(format!("--namespace={namespace}"));
     }
@@ -283,17 +286,19 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 pub(super) fn run(args: ProxyArgs) -> Result<i32> {
-    let remote = remote(args.bucket, args.prefix, args.region, args.namespaces)?;
+    let remote = remote(
+        args.bucket,
+        args.prefix,
+        args.region,
+        args.namespaces,
+        args.cache_budget,
+    )?;
     runtime()?.block_on(async {
         // Readiness covers only the listener. Credentials are fetched on the
         // first request, so an IMDS hiccup or a missing role never keeps the
         // VM from starting; each request then fails with the reason instead.
         let listener = bind(&args.device, args.listen)?;
-        let app = router(Proxy {
-            remote,
-            cache: args.cache_dir,
-            store: tokio::sync::OnceCell::new(),
-        });
+        let app = router(Arc::new(Proxy::new(remote, args.cache_dir)));
         notify_ready()?;
         axum::serve(listener, app)
             .await
@@ -303,7 +308,13 @@ pub(super) fn run(args: ProxyArgs) -> Result<i32> {
 }
 
 pub(super) fn check(args: CheckArgs) -> Result<i32> {
-    let remote = remote(args.bucket, args.prefix, args.region, vec![args.namespace])?;
+    let remote = remote(
+        args.bucket,
+        args.prefix,
+        args.region,
+        vec![args.namespace],
+        None,
+    )?;
     let (message, code) = runtime()?.block_on(check_remote(&remote));
     println!("{message}");
     Ok(code)
@@ -377,8 +388,16 @@ fn notify_ready() -> Result<()> {
 struct Proxy {
     remote: MbxRemote,
     cache: PathBuf,
+    budget: u64,
+    trim_progress: Mutex<TrimProgress>,
     /// Connected on first use; a failed connection is retried by the next request.
     store: tokio::sync::OnceCell<S3>,
+}
+
+#[derive(Default)]
+struct TrimProgress {
+    published: u64,
+    running: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -432,8 +451,8 @@ fn object(path: &str) -> Option<(Kind, Digest)> {
     Some((kind, digest))
 }
 
-fn router(proxy: Proxy) -> Router {
-    Router::new().fallback(handle).with_state(Arc::new(proxy))
+fn router(proxy: Arc<Proxy>) -> Router {
+    Router::new().fallback(handle).with_state(proxy)
 }
 
 async fn handle(State(proxy): State<Arc<Proxy>>, request: Request) -> Response {
@@ -480,6 +499,72 @@ fn namespace<'a>(headers: &'a HeaderMap, remote: &MbxRemote) -> Option<&'a str> 
 }
 
 impl Proxy {
+    fn new(remote: MbxRemote, cache: PathBuf) -> Self {
+        let budget = remote.budget.unwrap_or_else(|| trim::cache_budget(&cache));
+        Self {
+            remote,
+            cache,
+            budget,
+            trim_progress: Mutex::default(),
+            store: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    fn record_publish(self: &Arc<Self>, size: u64) {
+        // A scan every budget/20 published bytes bounds the overshoot between
+        // scans to 5% of the budget per proxy, plus in-flight writes, without
+        // scanning the directory on every write.
+        let threshold = self.budget / 20;
+        {
+            let mut progress = self.trim_progress.lock().unwrap();
+            progress.published = progress.published.saturating_add(size);
+            if progress.running || progress.published <= threshold {
+                return;
+            }
+            progress.published = 0;
+            progress.running = true;
+        }
+        let proxy = Arc::clone(self);
+        mj_core::runtime::spawn_blocking(move || {
+            loop {
+                if let Err(error) = trim::trim(&proxy.cache, Some(proxy.budget)) {
+                    eprintln!("trim the mbx host cache: {error:#}");
+                }
+                let mut progress = proxy.trim_progress.lock().unwrap();
+                if progress.published <= threshold {
+                    progress.running = false;
+                    break;
+                }
+                // Catch writes that crossed the threshold during the scan
+                // even if there are no more requests after this one.
+                progress.published = 0;
+            }
+        });
+    }
+
+    fn publish(
+        self: &Arc<Self>,
+        temporary: NamedTempFile,
+        entry: &Path,
+        size: u64,
+    ) -> Result<File> {
+        match temporary.persist_noclobber(entry) {
+            Ok(file) => {
+                self.record_publish(size);
+                Ok(file)
+            }
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                Ok(error.file.into_file())
+            }
+            Err(error) if error.error.raw_os_error() == Some(libc::ENOSPC) => {
+                eprintln!("mbx host cache is full; serving the object without caching it");
+                Ok(error.file.into_file())
+            }
+            Err(error) => Err(error.error)
+                .with_context(|| format!("publish mbx cache entry {}", entry.display())),
+        }
+    }
+
     async fn store(&self) -> Result<&S3, ReadError> {
         Ok(self
             .store
@@ -506,7 +591,7 @@ impl Proxy {
     }
 
     async fn read(
-        &self,
+        self: &Arc<Self>,
         namespace: &str,
         kind: Kind,
         digest: &Digest,
@@ -542,7 +627,7 @@ impl Proxy {
         };
         if kind == Kind::Blob {
             let file = match stage_blob(&mut upstream, digest, &self.cache).await {
-                Ok(file) => publish(file, &entry)?,
+                Ok(file) => self.publish(file, &entry, digest.size)?,
                 Err(error) if no_space(&error) => {
                     eprintln!("mbx host cache is full; serving the blob without caching it");
                     // The partially consumed response cannot be rewound.
@@ -599,7 +684,8 @@ impl Proxy {
             let mut output = tokio::fs::File::from_std(temporary.reopen()?);
             output.write_all(&bytes).await?;
             output.flush().await?;
-            publish(temporary, &entry).map(drop)
+            self.publish(temporary, &entry, bytes.len() as u64)
+                .map(drop)
         }
         .await;
         if let Err(error) = cached {
@@ -656,22 +742,6 @@ fn staging_file(directory: &Path) -> io::Result<NamedTempFile> {
     tempfile::Builder::new()
         .prefix(STAGING_PREFIX)
         .tempfile_in(directory)
-}
-
-fn publish(temporary: NamedTempFile, entry: &Path) -> Result<File> {
-    match temporary.persist_noclobber(entry) {
-        Ok(file) => Ok(file),
-        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-            Ok(error.file.into_file())
-        }
-        Err(error) if error.error.raw_os_error() == Some(libc::ENOSPC) => {
-            eprintln!("mbx host cache is full; serving the object without caching it");
-            Ok(error.file.into_file())
-        }
-        Err(error) => {
-            Err(error.error).with_context(|| format!("publish mbx cache entry {}", entry.display()))
-        }
-    }
 }
 
 fn no_space(error: &anyhow::Error) -> bool {

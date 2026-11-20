@@ -313,6 +313,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     container.build_cache = Some(mj_core::config::TargetBuildCache {
         remote: Some("s3://test-build-cache/mbx".into()),
         remote_region: Some("us-east-1".into()),
+        max_total_size: Some("20GiB".into()),
         ..Default::default()
     });
     container.environment = with_secret_resolver(resolver, || {
@@ -395,6 +396,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         "{line}"
     );
     assert!(line.contains("'--mbx-remote-region=us-east-1'"), "{line}");
+    assert!(line.contains("'--mbx-cache-budget=20GiB'"), "{line}");
     assert!(
         line.contains("'--mbx-namespace=Acme/App' '--mbx-namespace=-Cache/tools'"),
         "{line}"

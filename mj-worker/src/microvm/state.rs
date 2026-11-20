@@ -297,6 +297,8 @@ pub struct MbxRemote {
     pub bucket: String,
     pub prefix: String,
     pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u64>,
     /// Non-empty. The first namespace is the guest client's default.
     pub namespaces: Vec<String>,
 }
@@ -606,6 +608,7 @@ mod tests {
             bucket: "ci-builds".to_owned(),
             prefix: "mbx".to_owned(),
             region: None,
+            budget: Some(20 << 30),
             namespaces: vec!["org/repo".to_owned()],
         });
         state.write(&layout).unwrap();

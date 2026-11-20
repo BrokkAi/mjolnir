@@ -162,6 +162,8 @@ struct RunArgs {
     mbx_remote: Option<String>,
     #[arg(long, requires = "mbx_remote")]
     mbx_remote_region: Option<String>,
+    #[arg(long, requires = "mbx_remote", value_parser = parse_mbx_cache_budget)]
+    mbx_cache_budget: Option<u64>,
     #[arg(long = "mbx-namespace", requires = "mbx_remote")]
     mbx_namespaces: Vec<String>,
     /// Accepted: the guest agent is always an init.
@@ -746,7 +748,14 @@ fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         env: resolve_env(args.env),
         mbx_remote: args
             .mbx_remote
-            .map(|url| mbx_proxy::parse_remote(&url, args.mbx_remote_region, args.mbx_namespaces))
+            .map(|url| {
+                mbx_proxy::parse_remote(
+                    &url,
+                    args.mbx_remote_region,
+                    args.mbx_namespaces,
+                    args.mbx_cache_budget,
+                )
+            })
             .transpose()?,
         user: args.user,
         workdir: args.workdir,

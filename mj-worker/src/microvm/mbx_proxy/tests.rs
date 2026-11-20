@@ -101,7 +101,13 @@ async fn upstream() -> (Arc<FakeS3>, String) {
     (fake, endpoint)
 }
 
-fn test_proxy(endpoint: &str, prefix: &str, namespaces: &[&str], cache: &Path) -> Proxy {
+fn test_proxy(
+    endpoint: &str,
+    prefix: &str,
+    namespaces: &[&str],
+    cache: &Path,
+    budget: Option<u64>,
+) -> Arc<Proxy> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let endpoint = endpoint.parse().unwrap();
     let remote = remote(
@@ -109,6 +115,7 @@ fn test_proxy(endpoint: &str, prefix: &str, namespaces: &[&str], cache: &Path) -
         prefix.to_owned(),
         Some("us-east-1".to_owned()),
         namespaces.iter().map(|ns| (*ns).to_owned()).collect(),
+        budget,
     )
     .unwrap();
     let store = S3::new(
@@ -126,11 +133,9 @@ fn test_proxy(endpoint: &str, prefix: &str, namespaces: &[&str], cache: &Path) -
         Some(endpoint),
     )
     .unwrap();
-    Proxy {
-        remote,
-        store: tokio::sync::OnceCell::new_with(Some(store)),
-        cache: cache.to_owned(),
-    }
+    let proxy = Proxy::new(remote, cache.to_owned());
+    assert!(proxy.store.set(store).is_ok());
+    Arc::new(proxy)
 }
 
 fn blob_path(digest: &Digest) -> String {
@@ -138,6 +143,50 @@ fn blob_path(digest: &Digest) -> String {
         "/v1/blobs/{}/{}/{}",
         digest.algorithm, digest.hash, digest.size
     )
+}
+
+// Hard-won: #1495: publishing can exceed the host cache budget between maintenance runs.
+#[test]
+fn mbx_proxy_trims_after_publishing_over_budget() {
+    runtime().unwrap().block_on(async {
+        let (fake, endpoint) = upstream().await;
+        let cache = tempfile::tempdir().unwrap();
+        let budget = LARGE.len() as u64;
+        let proxy = test_proxy(&endpoint, "cache", &[NAMESPACE], cache.path(), Some(budget));
+        let url = serve(router(proxy.clone())).await;
+        let client = reqwest::Client::new();
+        for bytes in [
+            Bytes::from_static(&LARGE),
+            Bytes::from(vec![0x9b; LARGE.len()]),
+        ] {
+            let path = blob_path(&Digest::blake3(&bytes));
+            fake.objects
+                .lock()
+                .unwrap()
+                .insert(format!("/bucket/cache/{NAMESPACE}{path}"), bytes.clone());
+            let response = client
+                .get(format!("{url}{path}"))
+                .header(NAMESPACE_HEADER, NAMESPACE)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            assert_eq!(response.bytes().await.unwrap(), bytes);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while proxy.trim_progress.lock().unwrap().running {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("cache trim finished");
+        let retained: u64 = fs::read_dir(cache.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum();
+        assert_eq!(retained, budget);
+    });
 }
 
 const CHECK_FIXTURE: &str = "MJ_TEST_MBX_CHECK_FIXTURE";
@@ -163,8 +212,8 @@ fn mbx_proxy_protocol_boundary() {
 async fn protocol_boundary() {
     let (fake, endpoint) = upstream().await;
     let cache = tempfile::tempdir().unwrap();
-    let proxy = test_proxy(&endpoint, "cache", &[NAMESPACE, OTHER], cache.path());
-    let denied = test_proxy(&endpoint, "denied", &[NAMESPACE], cache.path());
+    let proxy = test_proxy(&endpoint, "cache", &[NAMESPACE, OTHER], cache.path(), None);
+    let denied = test_proxy(&endpoint, "denied", &[NAMESPACE], cache.path(), None);
     let check_endpoint = endpoint.clone();
     let check = mj_core::runtime::spawn_blocking(move || {
         execute(
@@ -420,7 +469,13 @@ fn mbx_proxy_device_binding() {
                 SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 1 + 4 * index as u8), PORT),
             )
             .unwrap();
-            let app = router(test_proxy(&endpoint, "cache", &[namespace], cache.path()));
+            let app = router(test_proxy(
+                &endpoint,
+                "cache",
+                &[namespace],
+                cache.path(),
+                None,
+            ));
             mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         }
         path
@@ -509,6 +564,7 @@ async fn mbx_proxy_real_client() {
         "cache",
         &[NAMESPACE],
         &fixture.path().join("proxy"),
+        None,
     )))
     .await;
 

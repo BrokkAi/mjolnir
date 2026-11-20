@@ -302,15 +302,21 @@ impl TargetBuildCache {
     }
 }
 
+/// Check the bucket name's length, alphabet and endpoints for an mbx S3 remote.
+pub fn valid_mbx_s3_bucket(bucket: &str) -> bool {
+    (3..=63).contains(&bucket.len())
+        && bucket.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+        && bucket.as_bytes()[0].is_ascii_alphanumeric()
+        && bucket.as_bytes()[bucket.len() - 1].is_ascii_alphanumeric()
+}
+
 /// Split an mbx S3 cache location, allowing the bucket root as its prefix.
 pub fn mbx_s3_location(remote: &str) -> Result<(&str, &str)> {
     let location = remote.strip_prefix("s3://").unwrap_or_default();
     let (bucket, prefix) = location.split_once('/').unwrap_or((location, ""));
-    if bucket.is_empty()
-        || !bucket.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
-        })
-    {
+    if !valid_mbx_s3_bucket(bucket) {
         bail!("build cache remote {remote:?} must be s3://<bucket>/<prefix>");
     }
     let prefix = prefix.trim_matches('/');

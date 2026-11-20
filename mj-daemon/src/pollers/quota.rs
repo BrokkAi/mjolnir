@@ -779,15 +779,13 @@ pub(super) fn refresh_one_host(
     Some((host, refresh.image, error))
 }
 
-/// Finish the host's pull batch before reconciling the Nitro tag store. A
-/// failed or cancelled pull leaves all existing references in place.
+/// Finish the host's pull batch before reconciling the Nitro tag store.
 pub(super) fn refresh_host_images(
     host: &ImageHost,
     plan: mj_controller::targets::ImageRefreshPlan,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
 ) -> Vec<(String, String, Option<String>)> {
-    let complete = plan.pulls.len();
     let results: Vec<_> = plan
         .pulls
         .into_iter()
@@ -796,14 +794,10 @@ pub(super) fn refresh_host_images(
         .collect();
     if matches!(host, ImageHost::SshNitro(_)) && !executor.cancellation_requested() {
         let mut args = vec![host.engine().into(), "maintain".into()];
-        // Image references are reconciled only after every pull succeeded, so
-        // a failed pull never shrinks the host's images below what it needs.
-        // The mbx cache is trimmed regardless, or a persistent registry error
-        // would stop enforcing the budget.
-        if results.len() == complete && results.iter().all(|(_, _, failure)| failure.is_none()) {
-            for image in plan.keep_images {
-                args.extend(["--keep-image".into(), image]);
-            }
+        // Configuration owns the keep set, even when a pull fails. Removing
+        // obsolete tags can free the space a failed pull needs to succeed.
+        for image in plan.keep_images {
+            args.extend(["--keep-image".into(), image]);
         }
         if let Some(budget) = plan.mbx_cache_budget {
             args.push(format!("--mbx-cache-budget={budget}"));

@@ -394,8 +394,11 @@ fn bootstrap_login_environment(
                 .is_some()
             {
                 environment.remove("MJ_MBX_CONFIG_DIR");
-                // Login scripts can export defaults, but the Nitro engine's
-                // guest environment owns these settings when it supplies them.
+                // Drop settings inherited from login scripts and the image
+                // overlay, then restore only the engine's remote settings.
+                environment.retain(|name, _| {
+                    !name.starts_with(mj_core::worker_launch::MBX_REMOTE_ENV_PREFIX)
+                });
                 for name in mj_core::worker_launch::MBX_REMOTE_ENVIRONMENT {
                     if let Ok(value) = std::env::var(name) {
                         environment.insert(name.to_owned(), value);

@@ -285,10 +285,9 @@ pub fn worker_launch_config_with_checkout(
     if nitro_build_cache {
         target_environment.insert(nitro_mbx_directive.into(), "1".into());
         // The engine owns the remote settings in the guest process environment.
-        for key in mj_core::worker_launch::MBX_REMOTE_ENVIRONMENT {
-            target_environment.remove(key);
-            environment.remove(key);
-        }
+        let remote_prefix = mj_core::worker_launch::MBX_REMOTE_ENV_PREFIX;
+        target_environment.retain(|name, _| !name.starts_with(remote_prefix));
+        environment.retain(|name, _| !name.starts_with(remote_prefix));
         for key in ["MBX_CACHE_DIR", "MBX_SHIMS_DIR"] {
             environment.insert(key.into(), target_environment[key].clone());
         }

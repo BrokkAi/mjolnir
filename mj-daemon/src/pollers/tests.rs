@@ -2895,7 +2895,7 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
 }
 
 #[test]
-fn nitro_maintenance_waits_for_every_pull_and_keeps_all_targets_images() {
+fn nitro_maintenance_keeps_all_targets_images_after_successful_and_failed_pulls() {
     use mj_core::config::Config;
     let config: Config = toml::from_str(
         r#"
@@ -2948,29 +2948,22 @@ destination = "app"
                 command.contains("'maintain'").then_some((index, command))
             })
             .collect();
-        if failed_image.is_empty() {
-            let [(index, command)] = maintenance.as_slice() else {
-                panic!("expected one maintain command, got {commands:?}");
-            };
-            assert_eq!(*index, commands.len() - 1);
-            for image in ["base:latest", "bundle:latest", "offline:1"] {
-                assert!(
-                    command.contains(&format!("'--keep-image' 'ghcr.io/example/{image}'")),
-                    "{command}"
-                );
-            }
-        } else {
+        let [(index, command)] = maintenance.as_slice() else {
+            panic!("expected one maintain command, got {commands:?}");
+        };
+        assert_eq!(*index, commands.len() - 1);
+        for image in ["base:latest", "bundle:latest", "offline:1"] {
             assert!(
-                results
-                    .iter()
-                    .any(|(_, image, error)| image == failed_image && error.is_some())
+                command.contains(&format!("'--keep-image' 'ghcr.io/example/{image}'")),
+                "{command}"
             );
-            // The cache is still trimmed, but no image reference is touched.
-            let [(_, command)] = maintenance.as_slice() else {
-                panic!("expected one maintain command, got {commands:?}");
-            };
-            assert!(!command.contains("--keep-image"), "{command}");
         }
+        assert_eq!(
+            results
+                .iter()
+                .find_map(|(_, image, error)| { error.as_ref().map(|_| image.as_str()) }),
+            (!failed_image.is_empty()).then_some(failed_image)
+        );
     }
 }
 
