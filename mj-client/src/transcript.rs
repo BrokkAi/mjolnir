@@ -524,9 +524,8 @@ pub fn materialized_chat_entry_with_outputs(
             let call = decode_tool_call(item, call);
             let mut entry = ChatEntry::tool(
                 item.position,
-                call.as_ref().map_or("[invalid tool call]".into(), |call| {
-                    tool_display_title(&call.title)
-                }),
+                call.as_ref()
+                    .map_or("[invalid tool call]", |call| call.title.as_str()),
                 Some(item.stable_id.clone()),
                 call.as_ref()
                     .map_or(ToolStatus::Pending, |call| tool_status(&call.status)),

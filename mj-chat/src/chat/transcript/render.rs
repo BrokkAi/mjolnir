@@ -1,4 +1,5 @@
 use super::*;
+use mj_transcript::tool_display_title;
 
 /// `title_controls` is the number of columns the host reserves at the right
 /// of the title row for its own chips; the title stops short of them.
@@ -381,8 +382,8 @@ fn inline_tool_rows(
 ) -> Vec<Line<'static>> {
     let (glyph, label, status_style) = tool_row_presentation(entry);
     let presentation = entry.tool_presentation.as_ref();
-    let source = presentation.map_or(
-        std::borrow::Cow::Borrowed(entry.text.as_str()),
+    let source = presentation.map_or_else(
+        || tool_display_title(&entry.text),
         |presentation| presentation.source.text(),
     );
     let source = sanitize_terminal_text(&source);
@@ -954,30 +955,34 @@ fn entry_body_source(entry: &ChatEntry, mode: TranscriptRenderMode, expanded_too
             mj_core::transcript::sanitize_terminal_text(error)
         ));
     }
+    let text = if entry.role == ChatRole::Tool {
+        tool_display_title(&entry.text)
+    } else {
+        std::borrow::Cow::Borrowed(entry.text.as_str())
+    };
     let mut source = match mode {
         TranscriptRenderMode::Rich if expanded_tool && entry.role == ChatRole::Tool => {
             if details.is_empty() {
-                entry.text.clone()
+                text.into_owned()
             } else {
-                format!("{}\n{}", entry.text, details.join("\n"))
+                format!("{text}\n{}", details.join("\n"))
             }
         }
         TranscriptRenderMode::Raw if !details.is_empty() => {
-            format!("{}\n{}", entry.text, details.join("\n"))
+            format!("{text}\n{}", details.join("\n"))
         }
         TranscriptRenderMode::Rich if !entry.tool_diffstats.is_empty() => {
             format!(
                 "{}\n{}",
-                entry.tool_summary.as_deref().unwrap_or(&entry.text),
+                entry.tool_summary.as_deref().unwrap_or(&text),
                 entry.tool_diffstats.join("\n")
             )
         }
         TranscriptRenderMode::Rich if entry.role == ChatRole::Tool => entry
             .tool_summary
-            .as_deref()
-            .unwrap_or(&entry.text)
-            .to_owned(),
-        _ => entry.text.clone(),
+            .clone()
+            .unwrap_or_else(|| text.into_owned()),
+        _ => text.into_owned(),
     };
     if entry.leading_omitted {
         source.insert_str(0, "[… earlier content omitted …]\n");

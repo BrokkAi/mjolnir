@@ -4497,6 +4497,7 @@ fn golden_rich_transcript_tool_presentation() {
         &serde_json::json!({
             "sessionUpdate": "tool_call_update",
             "toolCallId": "message-1",
+            "title": "mcp__mj-agents__send_message",
             "status": "completed",
             "content": [{"type": "content", "content": {
                 "type": "text", "text": "{\"status\":\"queued\",\"via\":\"mailbox\"}"
@@ -4538,6 +4539,10 @@ fn golden_rich_transcript_tool_presentation() {
         Vec::new(),
         Vec::new(),
     );
+    let TranscriptBody::Tool { call, .. } = &session.transcript[0].body else {
+        panic!("materialized tool call");
+    };
+    assert_eq!(call.decode().unwrap().title, "mcp__mj-agents__send_message");
     let mut restored = ChatState::from_materialized(&session, &[], &[]);
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 28));
     click_rendered_text(&mut restored, &rows, "mj_send_message");

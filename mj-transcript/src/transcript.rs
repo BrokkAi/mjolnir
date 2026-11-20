@@ -1560,7 +1560,7 @@ pub fn apply_session_update_to_entries(
             let presentation = tool_call_presentation(&call);
             let mut entry = ChatEntry::tool(
                 seq,
-                tool_display_title(&call.title),
+                call.title,
                 Some(call.tool_call_id.to_string()),
                 tool_status(&call.status),
             )
@@ -1597,7 +1597,7 @@ pub fn apply_session_update_to_entries(
                 entry.tool_error = tool_error_detail(Some(raw_output));
             }
             if let Some(title) = update.fields.title {
-                entry.text = sanitize_terminal_text(&tool_display_title(&title));
+                entry.text = sanitize_terminal_text(&title);
             }
             if let Some(status) = update.fields.status {
                 entry.tool_status = Some(tool_status(&status));
