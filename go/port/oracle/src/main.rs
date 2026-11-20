@@ -47,6 +47,7 @@ modules! {
     "std_time" => std_time,
     "std_process" => std_process,
     "std_sort" => std_sort,
+    "std_cmp" => std_cmp,
     "std_num" => std_num,
     "serde_derive" => serde_derive,
     "serde_json" => serde_json_oracle,
