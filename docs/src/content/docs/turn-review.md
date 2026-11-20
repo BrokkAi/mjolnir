@@ -43,7 +43,7 @@ Review requires a committed Git checkout. Tracked changes must be committed befo
 
 ## Request a review
 
-Claude Code, Codex, and DSH sessions receive the `request_review` tool from the separate `mj-review` MCP server. The agent commits its work and calls the tool before pushing. With no arguments it reviews the repository that contains the session's working directory. `request_review(paths)` reviews the named worktrees together in one review, for example a change that spans two repositories. `/review` in Prompt, `mj review start`, and `POST /review` also start a push review of committed work. The verdict arrives as a message to the agent. If a review cannot start, the requester sees the reason. `mj review status` shows the open review and verdict.
+Claude Code, Codex, and DSH sessions receive the `request_review` tool from the separate `mj-review` MCP server. The agent commits its work and calls the tool before pushing. With no arguments it reviews the repository that contains the session's working directory. `request_review(paths)` reviews the named worktrees together in one review, for example a change that spans two repositories. A session can have several reviews open at once when they cover different worktrees: asking for review of worktree `c` while worktree `a` is under review starts a second review, and each delivers its own verdict. A request that names a worktree an open review already covers is refused, and the refusal says to request the free worktrees now or to wait for that verdict. A session whose worker predates concurrent review keeps one open review at a time. `/review` in Prompt, `mj review start`, and `POST /review` also start a push review of committed work. The verdict arrives as a message to the agent. If a review cannot start, the requester sees the reason. `mj review status` shows the open review and verdict.
 
 Reviewers read the whole change from its review base. They do not receive prior findings for a corrective pass. A findings verdict tells the agent to address findings and request review again.
 
@@ -53,7 +53,7 @@ A clean review advances the review base. It records the reviewed tree in `refs/m
 
 ## Overrides and review base
 
-The `override_review` tool takes pairs of findings and reasons for findings the agent will not fix. The agent should record these before committing other fixes. The override allows pushing the exact reviewed commits, but does not move the review base. Mjolnir records overridden trees in `refs/mj/overridden/<tree>` and tells later reviewers not to report declined findings again. The declined list clears when the review base moves.
+The `override_review` tool takes pairs of findings and reasons for findings the agent will not fix. With more than one verdict outstanding, `path` names a worktree the verdict covers; with only one outstanding, it can be omitted. The agent should record these before committing other fixes. The override allows pushing the exact reviewed commits, but does not move the review base. Mjolnir records overridden trees in `refs/mj/overridden/<tree>` and tells later reviewers not to report declined findings again. The declined list clears when the review base moves.
 
 `set_baseline(commit, path?)` moves the review base through a commit whose tree was reviewed or overridden. Later reviews start after that commit. Moving the base clears the declined list. The tools `request_review`, `override_review`, and `set_baseline` are provided by `mj-review`.
 

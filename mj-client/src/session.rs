@@ -67,6 +67,8 @@ pub enum ReviewerAction {
         path: Option<std::path::PathBuf>,
         commit: String,
     },
+    /// Name the repository roots `paths` select, changing nothing.
+    ResolveRepositories { paths: Vec<std::path::PathBuf> },
 }
 
 impl ReviewerAction {
@@ -76,6 +78,7 @@ impl ReviewerAction {
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
             Self::RecordOverridden { .. } => "reviewer_record_overridden",
             Self::SetReviewBase { .. } => "reviewer_set_review_base",
+            Self::ResolveRepositories { .. } => "reviewer_resolve_repositories",
         }
     }
 }
@@ -92,6 +95,9 @@ pub enum ReviewerOutcome {
         commit: String,
         tree: String,
         changed: bool,
+    },
+    Repositories {
+        roots: Vec<std::path::PathBuf>,
     },
 }
 

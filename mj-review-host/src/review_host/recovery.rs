@@ -2,12 +2,8 @@ use super::*;
 
 impl HostState {
     /// Reattach durable reviewer work without waiting for a worker turn.
-    pub fn restore_group(
-        &mut self,
-        session_id: String,
-        state: TurnReviewState,
-    ) -> Result<(), String> {
-        let Some(group) = state.active_group.as_ref() else {
+    pub fn restore_group(&mut self, session_id: &str, review: OpenReview) -> Result<(), String> {
+        let Some(group) = review.active_group.as_ref() else {
             return Err(format!("{session_id}: missing active review group"));
         };
         let snapshot = group.driver.clone();
@@ -63,20 +59,39 @@ impl HostState {
         }
         let mut driver = TurnReviewDriver::restore(snapshot.clone())
             .map_err(|error| format!("{session_id}: invalid stored review group: {error}"))?;
-        if self.reviews.contains_key(&session_id) {
+        let key = ReviewKey {
+            session_id: session_id.to_owned(),
+            review_id: snapshot.review_id.clone(),
+        };
+        if self.reviews.contains_key(&key) {
             return Err(format!("{session_id}: review already restored"));
+        }
+        // Reviews of one session cover disjoint roots. A stored row that says
+        // otherwise was not written by this build.
+        let roots = review.roots();
+        if let Some(Overlap::Review { root, .. }) = self.first_overlap(session_id, &roots) {
+            return Err(format!(
+                "{session_id}: two stored reviews both cover {}",
+                root.display()
+            ));
         }
         let requests = driver.recovery_requests();
         self.next_epoch = self.next_epoch.saturating_add(1);
+        let reviewers = group.reviewers.clone();
         self.reviews.insert(
-            session_id.clone(),
+            key.clone(),
             ReviewSlot {
                 epoch: self.next_epoch,
                 driver,
-                reviewers: group.reviewers.clone(),
-                state,
+                reviewers,
+                open: review,
+                // The worker has not reconnected, so its protocol is not
+                // known; delivery reads the latest view's.
+                protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 _background: None,
                 finishing: false,
+                leaving_row: false,
+                delivery_undo: None,
                 delivery: Arc::new(super::resolve::Delivery::default()),
                 retry_delay: std::time::Duration::from_secs(1),
                 start_reply: None,
@@ -85,7 +100,7 @@ impl HostState {
                 ended_while_queued: BTreeMap::new(),
             },
         );
-        self.run(&session_id, requests);
+        self.run(&key, requests);
         Ok(())
     }
 }

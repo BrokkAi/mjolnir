@@ -6,6 +6,7 @@ impl HostState {
         &mut self,
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
+        protocol: Option<u32>,
     ) {
         if snapshot.as_ref().is_some_and(|snapshot| {
             matches!(
@@ -13,7 +14,7 @@ impl HostState {
                 mj_core::state::MaterializedExecutionState::Closing
                     | mj_core::state::MaterializedExecutionState::Closed
             )
-        }) && self.reviews.contains_key(&session_id)
+        }) && self.has_slot(&session_id)
             && let Err(error) = self.resolve(&session_id, Resolution::Cancelled)
         {
             tracing::debug!(session_id, %error, "review was already committing when the session closed");
@@ -22,20 +23,21 @@ impl HostState {
             session_id.clone(),
             SessionWatch {
                 materialized: snapshot,
+                protocol,
             },
         );
-        let parents: Vec<_> = self
+        let parents: BTreeSet<_> = self
             .reviews
             .iter()
             .filter(|(_, slot)| {
-                slot.state.active_group.as_ref().is_some_and(|group| {
+                slot.open.active_group.as_ref().is_some_and(|group| {
                     group
                         .registrations
                         .iter()
                         .any(|item| item.child_session_id.as_deref() == Some(&session_id))
                 })
             })
-            .map(|(parent, _)| parent.clone())
+            .map(|(key, _)| key.session_id.clone())
             .collect();
         for parent in parents {
             self.publish(&parent);
@@ -48,20 +50,8 @@ impl HostState {
         scope: super::reviewer::ReviewScope,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
-        let refusal = if mj_session_runtime::session_manager::move_ownership::move_owns_session(
-            &session_id,
-        ) {
-            Some("session is moving")
-        } else if self.reviews.contains_key(&session_id) || self.preparing.contains_key(&session_id)
-        {
-            Some(
-                "a review is already open; wait for its verdict or cancel it before starting another",
-            )
-        } else {
-            None
-        };
-        if let Some(reason) = refusal {
-            let _ = reply.send(Err(StartRefusal(reason.into())));
+        if mj_session_runtime::session_manager::move_ownership::move_owns_session(&session_id) {
+            let _ = reply.send(Err(StartRefusal("session is moving".into())));
             return;
         }
         let config = (self.config)(&session_id);
@@ -73,21 +63,44 @@ impl HostState {
                 session_id,
                 reply,
                 "review-off",
-                move |control, _persistence, _events, owner| run_review_off(control, owner, scope),
+                move |control, link, owner| run_review_off(control, link, owner, scope),
             );
             return;
         }
-        let control = self.control.clone();
-        let environment = self.environment.clone();
-        let events = self.events.clone();
+        // Whether this review may open next to the session's others is decided
+        // when it is ready to open, from the roots its capture returned.
+        self.next_epoch = self.next_epoch.saturating_add(1);
+        let request = self.next_epoch;
         let cancel = tokio_util::sync::CancellationToken::new();
-        self.preparing.insert(
-            session_id.clone(),
-            PreparingOperation::Review {
+        let base_generation = self.base_generation(&session_id);
+        self.preparations.insert(
+            request,
+            Preparation {
+                session_id: session_id.clone(),
+                scope: scope.clone(),
                 cancel: cancel.clone(),
+                base_generation,
+                reply,
             },
         );
         self.publish(&session_id);
+        self.spawn_preparation(request, session_id, scope, cancel, config);
+    }
+
+    /// Prepares the review that `request` asked for: captures its change and
+    /// chooses its reviewers, then tells the host, which decides whether it
+    /// may open.
+    pub fn spawn_preparation(
+        &self,
+        request: u64,
+        session_id: String,
+        scope: super::reviewer::ReviewScope,
+        cancel: tokio_util::sync::CancellationToken,
+        config: ReviewConfig,
+    ) {
+        let control = self.control.clone();
+        let environment = self.environment.clone();
+        let events = self.events.clone();
         mj_core::runtime::spawn(async move {
             // No deadline covers preparation as a whole: most of it is waiting
             // on the session actor, the worker or other work holding the
@@ -116,52 +129,38 @@ impl HostState {
                 },
                 "review preparation finished"
             );
-            let accepted = prepared.as_ref().ok().map(|prepared| {
-                let repositories: Vec<_> = prepared.captured.iter().map(|delta| serde_json::json!({
-                    "repository": delta.root, "base_commit": delta.base_commit, "base_kind": delta.base_kind,
-                    "head_commit": delta.head_commit, "changed_file_count": delta.files.len()
-                })).collect();
-                serde_json::json!({"accepted": true, "repositories": repositories})
+            let _ = events.send(HostEvent::Prepared {
+                request,
+                prepared: Box::new(prepared),
             });
-            let (opened, result) = oneshot::channel();
-            if events
-                .send(HostEvent::Prepared {
-                    session_id,
-                    reply: Some(opened),
-                    prepared: Box::new(prepared),
-                })
-                .is_err()
-            {
-                let _ = reply.send(Err(StartRefusal("the review host stopped".into())));
-                return;
-            }
-            let outcome = result
-                .await
-                .unwrap_or_else(|_| Err(StartRefusal("the review host stopped".into())));
-            let _ = reply.send(outcome.map(|()| accepted.expect("accepted review has a capture")));
         });
     }
 }
 
+/// What the caller of an accepted review is told: the repositories it covers.
+pub fn accepted_review(captured: &[mj_core::relay::RepoDelta]) -> serde_json::Value {
+    let repositories: Vec<_> = captured
+        .iter()
+        .map(|delta| {
+            serde_json::json!({
+                "repository": delta.root, "base_commit": delta.base_commit, "base_kind": delta.base_kind,
+                "head_commit": delta.head_commit, "changed_file_count": delta.files.len()
+            })
+        })
+        .collect();
+    serde_json::json!({"accepted": true, "repositories": repositories})
+}
+
 /// Accepts a review request from a session whose review is off. It performs no
-/// review; it only records the current trees as allowed to push.
+/// review; it only records the current trees as allowed to push, after the host
+/// agrees that no open review owns them.
 async fn run_review_off(
     control: SessionManagerControl,
+    link: OperationLink,
     session_id: String,
     scope: super::reviewer::ReviewScope,
 ) -> Result<serde_json::Value, StartRefusal> {
-    let protocol = control
-        .session(session_id.clone())
-        .await
-        .map_err(|error| {
-            StartRefusal(format!(
-                "{error:#}; resume the session before requesting review"
-            ))
-        })?
-        .view()
-        .snapshot
-        .and_then(|snapshot| snapshot.operational.relay_protocol_version)
-        .unwrap_or(0);
+    let protocol = session_protocol(&control, &session_id).await?;
     let repositories = super::reviewer::capture_scope(scope, protocol)?;
     let outcome = resolve::push_action(
         &control,
@@ -183,6 +182,11 @@ async fn run_review_off(
         })
         .collect();
     if !trees.is_empty() {
+        link.ask(OperationRequest::ReserveCaptured {
+            protocol,
+            roots: trees.keys().cloned().collect(),
+        })
+        .await?;
         // A worker that predates overridden records can only write the
         // reviewed ref; with review off that moves no base anyone reads.
         let action = if protocol < mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL {

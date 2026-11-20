@@ -193,6 +193,18 @@ fn answer_for(action: &ReviewerAction) -> anyhow::Result<ReviewerOutcome> {
             commit: commit.clone(),
             tree: "settree".into(),
         }),
+        ReviewerAction::ResolveRepositories { paths } => Ok(ReviewerOutcome::Repositories {
+            roots: paths
+                .iter()
+                .map(|path| {
+                    if path == std::path::Path::new(".") {
+                        PathBuf::from("/workspace/app")
+                    } else {
+                        path.clone()
+                    }
+                })
+                .collect(),
+        }),
     }
 }
 
@@ -305,6 +317,32 @@ struct FakeEnvironment {
     resolve_hangs: std::sync::atomic::AtomicBool,
     /// Every report the host handed to persistence, in arrival order.
     saved_reports: Mutex<Vec<mj_store::database::AcceptedReport>>,
+}
+
+/// The single-review reading of a stored row. Most host tests run one review
+/// in one session, and ask what the row says about it.
+trait OnlyReview {
+    fn active(&self) -> Option<String>;
+    fn active_group(&self) -> Option<mj_core::storage::ActiveReviewGroup>;
+    fn findings(&self) -> Option<mj_core::storage::PushFindingsRecord>;
+}
+
+impl OnlyReview for TurnReviewState {
+    fn active(&self) -> Option<String> {
+        self.open_reviews
+            .first()
+            .and_then(|review| review.active.clone())
+    }
+
+    fn active_group(&self) -> Option<mj_core::storage::ActiveReviewGroup> {
+        self.open_reviews
+            .first()
+            .and_then(|review| review.active_group.clone())
+    }
+
+    fn findings(&self) -> Option<mj_core::storage::PushFindingsRecord> {
+        self.push_findings.first().cloned()
+    }
 }
 
 struct SaveGate {
@@ -489,7 +527,11 @@ impl ReviewEnvironment for FakeEnvironment {
             gate.wait();
         }
         let state = self.state();
-        if state.active_group.is_none() {
+        if state
+            .open_reviews
+            .iter()
+            .all(|review| review.active_group.is_none())
+        {
             return Ok(Vec::new());
         }
         Ok(self
@@ -675,8 +717,7 @@ impl ReviewEnvironment for FakeEnvironment {
         {
             return Err("database busy".into());
         }
-        if state.active_group.is_none()
-            && state.active.is_none()
+        if state.open_reviews.is_empty()
             && let Some(error) = self.final_save_error.lock().unwrap().take()
         {
             return Err(error);
@@ -692,8 +733,17 @@ impl ReviewEnvironment for FakeEnvironment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let next = state.clone();
-        if let Some(group) = next.active_group.as_ref() {
-            for event in partial_review_events(session_id, stored.active_group.as_ref(), group) {
+        for group in next
+            .open_reviews
+            .iter()
+            .filter_map(|review| review.active_group.as_ref())
+        {
+            let previous = stored
+                .open_reviews
+                .iter()
+                .filter_map(|review| review.active_group.as_ref())
+                .find(|previous| previous.driver.review_id == group.driver.review_id);
+            for event in partial_review_events(session_id, previous, group) {
                 self.enqueue_verdict(session_id, &event)?;
             }
         }
@@ -724,10 +774,13 @@ impl ReviewEnvironment for FakeEnvironment {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let interrupted = state.active_group.is_none() && (state.active.is_some());
-        if state.active_group.is_none() {
-            state.active = None;
-        }
+        let interrupted = state
+            .open_reviews
+            .iter()
+            .any(|review| review.active_group.is_none());
+        state
+            .open_reviews
+            .retain(|review| review.active_group.is_some());
         let owner = self
             .owner
             .lock()
@@ -1036,7 +1089,7 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
         [("Brief writer", "running", Some(writer.as_str()))],
         "the writer is visible while it works"
     );
-    let group = environment.state().active_group.unwrap();
+    let group = environment.state().active_group().unwrap();
     assert!(
         group
             .registrations
@@ -1212,24 +1265,26 @@ async fn restart_while_the_writer_ended(
     }
     *environment.owner.lock().unwrap() = Some(session.clone());
     *environment.state.lock().unwrap() = TurnReviewState {
-        active: Some(review_id.into()),
-        active_group: Some(mj_core::storage::ActiveReviewGroup {
-            brief_writer: Some(ReviewerIdentity::default()),
-            driver: driver.snapshot(),
-            reviewers: vec![ReviewerIdentity::default()],
-            registrations: vec![
-                mj_core::storage::ReviewerRegistration {
-                    role: "reviewer-1".into(),
-                    request_key: "key-reviewer".into(),
-                    child_session_id: None,
-                },
-                mj_core::storage::ReviewerRegistration {
-                    role: "brief-writer".into(),
-                    request_key: "key-writer".into(),
-                    child_session_id: Some("writer-child".into()),
-                },
-            ],
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some(review_id.into()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
+                brief_writer: Some(ReviewerIdentity::default()),
+                driver: driver.snapshot(),
+                reviewers: vec![ReviewerIdentity::default()],
+                registrations: vec![
+                    mj_core::storage::ReviewerRegistration {
+                        role: "reviewer-1".into(),
+                        request_key: "key-reviewer".into(),
+                        child_session_id: None,
+                    },
+                    mj_core::storage::ReviewerRegistration {
+                        role: "brief-writer".into(),
+                        request_key: "key-writer".into(),
+                        child_session_id: Some("writer-child".into()),
+                    },
+                ],
+            }),
+        }],
         ..Default::default()
     };
     environment.standings.lock().unwrap().insert(
@@ -1337,7 +1392,7 @@ async fn wait_for_group_children(
         loop {
             let children: Vec<_> = environment
                 .state()
-                .active_group
+                .active_group()
                 .as_ref()
                 .map(|group| {
                     group
@@ -1566,11 +1621,13 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
         .await
         .expect("the active write reaches the blocking lane");
 
-    let refusal = tokio::time::timeout(Duration::from_secs(1), host.start(session))
-        .await
-        .expect("the host loop remains responsive while persistence blocks")
-        .expect_err("the same review is already starting");
-    assert!(refusal.0.contains("already open"), "{refusal}");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), host.has_open_review(session))
+            .await
+            .expect("the host loop remains responsive while persistence blocks")
+            .unwrap(),
+        "the review being recorded counts as open"
+    );
     assert!(
         host.view(session).is_some(),
         "preparation is visible while persistence runs"
@@ -1579,7 +1636,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     open_gate.release();
     // The child stays open without a handback while shutdown drains persistence.
     let _child = wait_for_child(&environment, &host, session).await;
-    assert!(environment.state().active.is_some());
+    assert!(environment.state().active().is_some());
     assert!(host.view(session).is_some());
 
     let close_gate = environment.block_saves();
@@ -1607,7 +1664,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     host.shutdown().await.expect("shutdown stays idempotent");
 
     assert!(
-        environment.state().active.is_some(),
+        environment.state().active().is_some(),
         "the in-flight marker survives shutdown, so the next daemon can tell the person"
     );
     assert!(host.view(session).is_none());
@@ -1615,12 +1672,12 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     assert!(
         writes
             .first()
-            .is_some_and(|(state, _)| state.active.is_some())
+            .is_some_and(|(state, _)| state.active().is_some())
     );
     assert!(
         writes
             .last()
-            .is_some_and(|(state, _)| state.active.is_some())
+            .is_some_and(|(state, _)| state.active().is_some())
     );
     let test_thread = std::thread::current().id();
     assert!(
@@ -1665,7 +1722,7 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
         }],
     }));
     let child = wait_for_child(&environment, &old, session).await;
-    assert!(environment.state().active.is_some());
+    assert!(environment.state().active().is_some());
 
     // Restart before the first verdict is delivered.
     old.shutdown().await.unwrap();
@@ -1694,7 +1751,7 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
         !environment.closed.lock().unwrap().contains(&child),
         "restart retains the owned reviewer"
     );
-    assert!(state.active_group.is_some());
+    assert!(state.active_group().is_some());
     finish_child(&new, &environment, session, &child, Some("No findings.")).await;
     let (_, action, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
@@ -1845,7 +1902,7 @@ async fn a_failed_review_closes_without_advancing_coverage() {
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if host.view(session).is_none() && environment.state().active.is_none() {
+            if host.view(session).is_none() && environment.state().active().is_none() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1935,7 +1992,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     .await
     .unwrap();
     let state = environment.state();
-    assert!(state.active.is_none());
+    assert!(state.active().is_none());
     assert!(environment.closed.lock().unwrap().contains(&child));
     assert_eq!(environment.live_holds(), 0);
     host.shutdown().await.unwrap();
@@ -1969,7 +2026,7 @@ async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
     assert!(
         environment
             .state()
-            .active_group
+            .active_group()
             .as_ref()
             .unwrap()
             .driver
@@ -1982,6 +2039,7 @@ async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
     assert_eq!(
         environment.saved_reports.lock().unwrap().clone(),
         vec![mj_store::database::AcceptedReport {
+            review_id: environment.state().active_group().unwrap().driver.review_id,
             role: "reviewer-1".into(),
             text: "No findings.".into(),
         }],
@@ -2075,7 +2133,7 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
         Some("second defect"),
     )
     .await;
-    let review_id = environment.state().active_group.unwrap().driver.review_id;
+    let review_id = environment.state().active_group().unwrap().driver.review_id;
     {
         let mailbox = environment.mailbox.lock().unwrap();
         assert_eq!(mailbox.len(), 1, "findings arrive before the slow peer");
@@ -2175,7 +2233,7 @@ async fn clean_reviewers_are_silent_until_the_final_result() {
             "Review finished; this is the final result. No reviewers are still running."
         ));
         assert_eq!(
-            environment.state().push_findings.is_some(),
+            environment.state().findings().is_some(),
             matches!(name, "clean-first" | "clean-last")
         );
         host.shutdown().await.unwrap();
@@ -2201,13 +2259,13 @@ async fn clean_and_failed_group_closes_without_advancing_baseline() {
     .await;
     finish_child(&host, &environment, &session, &children[1], None).await;
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.view(&session).is_some() || environment.state().active.is_some() {
+        while host.view(&session).is_some() || environment.state().active().is_some() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("the failed group closes itself");
-    assert!(environment.state().active.is_none());
+    assert!(environment.state().active().is_none());
     host.shutdown().await.unwrap();
 }
 
@@ -2268,7 +2326,7 @@ async fn wait_for_child(
                 assert!(
                     environment
                         .state()
-                        .active_group
+                        .active_group()
                         .as_ref()
                         .is_some_and(|group| group.registrations.iter().any(|item| {
                             item.child_session_id.as_deref() == Some(child.as_str())
@@ -2343,6 +2401,7 @@ fn observe_question(host: &TurnReviewHost, child: &str, message: &str) {
         });
     host.events
         .send(HostEvent::View {
+            protocol: None,
             session_id: child.into(),
             snapshot: Some(Box::new(snapshot)),
         })
@@ -2415,10 +2474,26 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
     })
     .await
     .expect("the question is published");
-    let refusal = host.start(session).await.expect_err("one review at a time");
+    let second = {
+        let host = host.clone();
+        let session = session.to_owned();
+        mj_core::runtime::spawn(async move { host.start(&session).await })
+    };
+    let (_, _, capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![push_delta("/workspace/app", "newer")],
+        }))
+        .unwrap();
+    let refusal = second
+        .await
+        .unwrap()
+        .expect_err("a root is in one review at a time");
     assert_eq!(
         refusal.0,
-        "a review is already open; wait for its verdict or cancel it before starting another"
+        "/workspace/app is already in the open review of /workspace/app. Wait for that verdict and then request /workspace/app together."
     );
     host.shutdown().await.expect("shutdown the host");
 }
@@ -2501,7 +2576,7 @@ async fn a_reviewer_handback_arriving_after_restart_completes_the_saved_group() 
     })
     .await
     .unwrap();
-    assert!(environment.state().active_group.is_none());
+    assert!(environment.state().active_group().is_none());
     new.shutdown().await.unwrap();
 }
 
@@ -2541,7 +2616,7 @@ async fn restart_between_reviewer_registration_and_id_save_keeps_the_adopted_chi
         .await
         .unwrap();
     let relation = environment.child_relations.lock().unwrap()[0].clone();
-    let group = environment.state().active_group.unwrap();
+    let group = environment.state().active_group().unwrap();
     assert!(group.registrations[0].child_session_id.is_none());
     assert_eq!(
         relation.request_key,
@@ -2567,7 +2642,7 @@ async fn restart_between_reviewer_registration_and_id_save_keeps_the_adopted_chi
 #[tokio::test]
 async fn startup_restores_group_before_push_or_override_admission() {
     let session = session_id("startup-group-gate");
-    let manager = FakeManager::new(&session).await;
+    let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     let seed = mj_core::review::driver::TurnReviewSeed {
         task: "inspect the push".into(),
@@ -2582,18 +2657,7 @@ async fn startup_restores_group_before_push_or_override_admission() {
     );
     driver.delta_captured(vec![push_delta("/workspace/app", "newtree")]);
     let state = TurnReviewState {
-        active: Some("group-1".into()),
-        active_group: Some(mj_core::storage::ActiveReviewGroup {
-            brief_writer: None,
-            driver: driver.snapshot(),
-            reviewers: vec![ReviewerIdentity::default()],
-            registrations: vec![mj_core::storage::ReviewerRegistration {
-                role: "reviewer-1".into(),
-                request_key: "stable-key".into(),
-                child_session_id: Some("busy-child".into()),
-            }],
-        }),
-        push_findings: Some(mj_core::storage::PushFindingsRecord {
+        push_findings: vec![mj_core::storage::PushFindingsRecord {
             review_id: "older-verdict".into(),
             trees: [(
                 PathBuf::from("/workspace/app"),
@@ -2601,7 +2665,20 @@ async fn startup_restores_group_before_push_or_override_admission() {
             )]
             .into(),
             synthesis: "older finding".into(),
-        }),
+        }],
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("group-1".into()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
+                brief_writer: None,
+                driver: driver.snapshot(),
+                reviewers: vec![ReviewerIdentity::default()],
+                registrations: vec![mj_core::storage::ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: "stable-key".into(),
+                    child_session_id: Some("busy-child".into()),
+                }],
+            }),
+        }],
         ..Default::default()
     };
     *environment.state.lock().unwrap() = state;
@@ -2622,19 +2699,30 @@ async fn startup_restores_group_before_push_or_override_admission() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("old finding"))
+            host.override_push(&session, None, one_override("old finding"))
                 .await
         })
     };
     tokio::task::yield_now().await;
     assert!(!push.is_finished() && !override_request.is_finished());
     gate.release();
+    // The restored review owns its root, so a review that captures it is
+    // refused when it is ready to open, and an override of the older verdict
+    // for that root is refused at once.
+    let (_, _, capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![push_delta("/workspace/app", "othertree")],
+        }))
+        .unwrap();
     assert!(
         push.await
             .unwrap()
             .unwrap_err()
             .0
-            .contains("review is already open")
+            .contains("is already in the open review of")
     );
     assert!(
         override_request
@@ -2642,12 +2730,12 @@ async fn startup_restores_group_before_push_or_override_admission() {
             .unwrap()
             .unwrap_err()
             .0
-            .contains("review is open")
+            .contains("is still open")
     );
     assert_eq!(
         environment
             .state()
-            .active_group
+            .active_group()
             .as_ref()
             .unwrap()
             .registrations[0]
@@ -2707,13 +2795,15 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
         });
     *environment.owner.lock().unwrap() = Some(session.clone());
     *environment.state.lock().unwrap() = TurnReviewState {
-        active: Some("partly-failed-group".into()),
-        active_group: Some(mj_core::storage::ActiveReviewGroup {
-            brief_writer: None,
-            driver: driver.snapshot(),
-            reviewers: vec![ReviewerIdentity::default(); 2],
-            registrations,
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("partly-failed-group".into()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
+                brief_writer: None,
+                driver: driver.snapshot(),
+                reviewers: vec![ReviewerIdentity::default(); 2],
+                registrations,
+            }),
+        }],
         ..Default::default()
     };
     let host = TurnReviewHost::spawn_in(
@@ -2739,7 +2829,7 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
     .await
     .expect("only the role still awaiting an outcome survives startup");
     host.shutdown().await.unwrap();
-    assert!(environment.state().active.is_some());
+    assert!(environment.state().active().is_some());
 }
 
 struct DecrementOnDrop<'a>(&'a std::sync::atomic::AtomicUsize);
@@ -2819,21 +2909,23 @@ async fn restore_busy_group(
     let children: Vec<String> = (1..=count).map(|n| format!("busy-child-{n}")).collect();
     *environment.owner.lock().unwrap() = Some(manager.session.clone());
     *environment.state.lock().unwrap() = TurnReviewState {
-        active: Some("restored-group".into()),
-        active_group: Some(mj_core::storage::ActiveReviewGroup {
-            brief_writer: None,
-            driver: driver.snapshot(),
-            reviewers: vec![ReviewerIdentity::default(); count],
-            registrations: children
-                .iter()
-                .enumerate()
-                .map(|(index, child)| mj_core::storage::ReviewerRegistration {
-                    role: format!("reviewer-{}", index + 1),
-                    request_key: format!("key-{child}"),
-                    child_session_id: Some(child.clone()),
-                })
-                .collect(),
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("restored-group".into()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
+                brief_writer: None,
+                driver: driver.snapshot(),
+                reviewers: vec![ReviewerIdentity::default(); count],
+                registrations: children
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| mj_core::storage::ReviewerRegistration {
+                        role: format!("reviewer-{}", index + 1),
+                        request_key: format!("key-{child}"),
+                        child_session_id: Some(child.clone()),
+                    })
+                    .collect(),
+            }),
+        }],
         ..Default::default()
     };
     let host = TurnReviewHost::spawn_in(
@@ -2893,7 +2985,7 @@ fn stored_handback(
 ) -> Option<mj_core::subagent::SubagentHandback> {
     let request_key = environment
         .state()
-        .active_group
+        .active_group()
         .expect("a restored group")
         .registrations
         .iter()
@@ -2951,7 +3043,7 @@ async fn a_restored_reviewer_that_ends_without_an_outcome_leaves_an_incomplete_r
         failures[0].reason.contains("session ended (stopped)"),
         "{failures:?}"
     );
-    assert!(environment.state().active_group.is_none());
+    assert!(environment.state().active_group().is_none());
     host.shutdown().await.unwrap();
 }
 
@@ -3168,9 +3260,11 @@ async fn a_reviewer_that_ended_behind_a_failing_save_is_settled_from_its_standin
     let gate = SaveGate::new();
     *environment.save_gate.lock().unwrap() = Some(gate.clone());
     *environment.save_error.lock().unwrap() = Some("database busy".into());
+    // The failed save is followed by a repair save of the restored state, and
+    // then by the second reviewer's save; both fail too.
     environment
         .extra_save_failures
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+        .store(2, std::sync::atomic::Ordering::SeqCst);
     let first = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
@@ -3505,7 +3599,7 @@ async fn a_reviewer_without_a_handback_fails_without_advancing_the_baseline() {
     })
     .await
     .expect("failed reviewer resolves itself");
-    assert!(environment.state().active.is_none());
+    assert!(environment.state().active().is_none());
     host.shutdown().await.unwrap();
 }
 
@@ -4135,13 +4229,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 "the declined findings reach the reviewer"
             );
         }
-        assert_eq!(
-            host.begin_push(&session, ReviewScope::WorkingDirectory)
-                .await
-                .unwrap_err()
-                .0,
-            "a review is already open; wait for its verdict or cancel it before starting another"
-        );
+        let refusal =
+            refused_overlapping_review(&mut manager, &host, &session, "/workspace/app").await;
+        // This worker is below the concurrency protocol: one review at a time.
+        assert!(refusal.contains("a review is already open"), "{refusal}");
         let finished = {
             let host = host.clone();
             let session = session.clone();
@@ -4189,8 +4280,8 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             },
             "a scoped clean verdict clears only its repositories"
         );
-        assert_eq!(state.push_findings.is_some(), name == "pushfindings");
-        if let Some(findings) = &state.push_findings {
+        assert_eq!(state.findings().is_some(), name == "pushfindings");
+        if let Some(findings) = &state.findings() {
             assert_eq!(
                 findings.synthesis,
                 format!("Reviewer 1 (session {child})\nA correctness defect needs a fix")
@@ -4200,7 +4291,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 ("newtree".into(), "bbbbbbb456".into())
             );
         }
-        assert!(state.active.is_none());
+        assert!(state.active().is_none());
         tokio::time::timeout(Duration::from_secs(5), async {
             while !environment.closed.lock().unwrap().contains(&child) {
                 tokio::task::yield_now().await;
@@ -4244,7 +4335,7 @@ async fn incomplete_push_findings_clear_stale_override_without_advancing_coverag
     .await
     .unwrap();
     let state = environment.state();
-    assert!(state.push_findings.is_none());
+    assert!(state.findings().is_none());
     assert_eq!(state.declined_findings, original_declined);
     {
         let mailbox = environment.mailbox.lock().unwrap();
@@ -4269,7 +4360,7 @@ async fn push_delivery_retries_same_mailbox_key_after_final_state_save_fails() {
     let child = open_push(&mut manager, &host, &environment).await;
     let review_id = environment
         .state()
-        .active_group
+        .active_group()
         .as_ref()
         .unwrap()
         .driver
@@ -4300,7 +4391,7 @@ async fn push_delivery_retries_same_mailbox_key_after_final_state_save_fails() {
         );
         assert!(mailbox[0].key.contains(&review_id));
     }
-    assert!(environment.state().active_group.is_none());
+    assert!(environment.state().active_group().is_none());
     host.shutdown().await.unwrap();
 }
 
@@ -4324,7 +4415,7 @@ fn pending_push_findings(environment: &FakeEnvironment) {
             entry: declined("[P3] old finding", "old reason"),
             repositories: vec!["/workspace/app".into()],
         }],
-        push_findings: Some(mj_core::storage::PushFindingsRecord {
+        push_findings: vec![mj_core::storage::PushFindingsRecord {
             review_id: "review-1".into(),
             trees: [(
                 PathBuf::from("/workspace/app"),
@@ -4332,9 +4423,37 @@ fn pending_push_findings(environment: &FakeEnvironment) {
             )]
             .into(),
             synthesis: "fix the regression".into(),
-        }),
+        }],
         ..Default::default()
     };
+}
+
+/// Asks for a review of `root` while another review of it is open, and
+/// returns the refusal. The refusal comes when the preparation, which captures
+/// first, is ready to open: only then are its roots known.
+async fn refused_overlapping_review(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    session: &str,
+    root: &str,
+) -> String {
+    let request = {
+        let host = host.clone();
+        let session = session.to_owned();
+        mj_core::runtime::spawn(async move {
+            host.begin_push(&session, ReviewScope::WorkingDirectory)
+                .await
+        })
+    };
+    let (_, _, capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![push_delta(root, "overlapping-tree")],
+        }))
+        .unwrap();
+    request.await.unwrap().unwrap_err().0
 }
 
 fn push_delta(root: &str, tree: &str) -> mj_core::relay::RepoDelta {
@@ -4446,7 +4565,10 @@ async fn push_override_rejects_empty_or_blank_entries_before_any_capture() {
             "at most 32",
         ),
     ] {
-        let error = host.override_push(&session, overrides).await.unwrap_err();
+        let error = host
+            .override_push(&session, None, overrides)
+            .await
+            .unwrap_err();
         assert!(error.0.contains(expected), "{}", error.0);
     }
     assert!(
@@ -4501,7 +4623,8 @@ async fn push_override_rejects_missing_or_changed_findings_without_unlocking_a_t
             let host = host.clone();
             let session = session.clone();
             mj_core::runtime::spawn(async move {
-                host.override_push(&session, one_override("disagree")).await
+                host.override_push(&session, None, one_override("disagree"))
+                    .await
             })
         };
         if pending {
@@ -4514,7 +4637,7 @@ async fn push_override_rejects_missing_or_changed_findings_without_unlocking_a_t
                 .is_err(),
             "no audit or ref write follows refusal"
         );
-        assert_eq!(environment.state().push_findings.is_some(), pending);
+        assert_eq!(environment.state().findings().is_some(), pending);
         host.shutdown().await.unwrap();
     }
 }
@@ -4531,7 +4654,7 @@ async fn push_override_audit_refusal_keeps_findings_and_never_records_a_ref() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override(&"🔥".repeat(4000)))
+            host.override_push(&session, None, one_override(&"🔥".repeat(4000)))
                 .await
         })
     };
@@ -4563,7 +4686,7 @@ async fn push_override_audit_refusal_keeps_findings_and_never_records_a_ref() {
             .is_err(),
         "no reviewed ref is recorded without audit"
     );
-    assert!(environment.state().push_findings.is_some());
+    assert!(environment.state().findings().is_some());
     host.shutdown().await.unwrap();
 }
 
@@ -4579,7 +4702,7 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("incorrect"))
+            host.override_push(&session, None, one_override("incorrect"))
                 .await
         })
     };
@@ -4587,18 +4710,37 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert!(
-        host.override_push(&session, one_override("again"))
+        host.override_push(&session, None, one_override("again"))
             .await
             .unwrap_err()
             .0
-            .contains("review is open")
+            .contains("override is still running")
     );
+    // A review of the same repository is prepared, and refused when it is
+    // ready to open: the override holds its root.
+    let review = {
+        let host = host.clone();
+        let session = session.clone();
+        mj_core::runtime::spawn(async move {
+            host.begin_push(&session, ReviewScope::WorkingDirectory)
+                .await
+        })
+    };
+    let (_, _, review_capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    review_capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![push_delta("/workspace/app", "othertree")],
+        }))
+        .unwrap();
     assert!(
-        host.begin_push(&session, ReviewScope::WorkingDirectory)
+        review
             .await
+            .unwrap()
             .unwrap_err()
             .0
-            .contains("review is already open")
+            .contains("being changed by the override")
     );
     capture
         .send(Ok(ReviewerOutcome::Delta {
@@ -4614,11 +4756,11 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
     gate.entered().await;
     assert!(!request.is_finished());
     assert!(
-        host.override_push(&session, one_override("again"))
+        host.override_push(&session, None, one_override("again"))
             .await
             .unwrap_err()
             .0
-            .contains("review is open")
+            .contains("override is still running")
     );
     let shutdown = {
         let host = host.clone();
@@ -4637,7 +4779,7 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
     assert!(error.0.contains("repeat the request after restart"));
     gate.release();
     shutdown.await.unwrap().unwrap();
-    assert!(environment.state().push_findings.is_some());
+    assert!(environment.state().findings().is_some());
     assert_eq!(environment.state().declined_findings.len(), 2);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
@@ -4669,7 +4811,7 @@ async fn push_override_retries_after_initial_save_or_ref_failure() {
                 let host = host.clone();
                 let session = session.clone();
                 mj_core::runtime::spawn(async move {
-                    host.override_push(&session, one_override("false positive"))
+                    host.override_push(&session, None, one_override("false positive"))
                         .await
                 })
             };
@@ -4692,12 +4834,12 @@ async fn push_override_retries_after_initial_save_or_ref_failure() {
                         .unwrap();
                 }
                 assert!(request.await.unwrap().is_err());
-                assert!(environment.state().push_findings.is_some());
+                assert!(environment.state().findings().is_some());
             } else {
                 finish_override_worker_actions(&mut manager, "false positive").await;
                 assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
                 let state = environment.state();
-                assert!(state.push_findings.is_none());
+                assert!(state.findings().is_none());
                 assert_eq!(state.declined_findings.len(), 2);
             }
         }
@@ -4718,7 +4860,7 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
             let host = host.clone();
             let session = session.clone();
             mj_core::runtime::spawn(async move {
-                host.override_push(&session, one_override("false positive"))
+                host.override_push(&session, None, one_override("false positive"))
                     .await
             })
         };
@@ -4734,12 +4876,12 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
         if attempt == 0 {
             assert!(result.unwrap_err().0.contains("database busy"));
             assert!(
-                environment.state().push_findings.is_some(),
+                environment.state().findings().is_some(),
                 "a retry must still know the exact reviewed trees"
             );
         } else {
             assert_eq!(result.unwrap()["accepted"], true);
-            assert!(environment.state().push_findings.is_none());
+            assert!(environment.state().findings().is_none());
             // The first save kept the decline before the ref write. Retrying
             // the failed final save must not duplicate that decline.
             assert_eq!(
@@ -4790,7 +4932,7 @@ async fn push_override_on_an_old_worker_records_reviewed_and_says_the_base_moved
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("false positive"))
+            host.override_push(&session, None, one_override("false positive"))
                 .await
         })
     };
@@ -4818,7 +4960,7 @@ async fn push_override_on_a_current_worker_says_the_base_is_unchanged() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("false positive"))
+            host.override_push(&session, None, one_override("false positive"))
                 .await
         })
     };
@@ -4890,7 +5032,7 @@ async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
     );
 
     assert!(
-        state.push_findings.is_some(),
+        state.findings().is_some(),
         "a pending findings verdict stays overridable"
     );
     assert!(
@@ -4983,19 +5125,31 @@ async fn set_review_baseline_refuses_an_old_worker_and_a_running_review() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("false positive"))
+            host.override_push(&session, None, one_override("false positive"))
                 .await
         })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
-    let error = host
-        .set_push_base(&session, "abc1234".into(), None)
-        .await
-        .unwrap_err();
+    let base = {
+        let host = host.clone();
+        let session = session.clone();
+        mj_core::runtime::spawn(async move {
+            host.set_push_base(&session, "abc1234".into(), None).await
+        })
+    };
+    let (_, _, resolved) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::ResolveRepositories { .. }))
+        .await;
+    resolved
+        .send(Ok(ReviewerOutcome::Repositories {
+            roots: vec!["/workspace/app".into()],
+        }))
+        .unwrap();
+    let error = base.await.unwrap().unwrap_err();
     assert!(
-        error.0.contains("review is open") && error.0.contains("try again"),
+        error.0.contains("override is still running") && error.0.contains("try again"),
         "{}",
         error.0
     );
@@ -5080,22 +5234,23 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("incorrect"))
+            host.override_push(&session, None, one_override("incorrect"))
                 .await
         })
     };
     clear_gate.entered().await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
-            .await
-            .is_err(),
-        "FIFO load cannot capture while the earlier clearing save is blocked"
-    );
+    // The override never reads the row: the host composes every save from the
+    // state it owns, so nothing the override saves can predate the clearing
+    // save queued before it.
     clear_gate.release();
     answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
     finish_override_worker_actions_for(&mut manager, "incorrect", true).await;
     assert_eq!(override_request.await.unwrap().unwrap()["accepted"], true);
-    assert!(environment.state().push_findings.is_none());
+    assert!(environment.state().findings().is_none());
+    assert!(
+        environment.state().open_reviews.is_empty(),
+        "the cancelled review's marker is not written back"
+    );
     host.shutdown().await.unwrap();
 }
 
@@ -5111,7 +5266,7 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("incorrect"))
+            host.override_push(&session, None, one_override("incorrect"))
                 .await
         })
     };
@@ -5122,10 +5277,10 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
     drop(capture);
     assert!(request.await.unwrap().is_err());
     assert!(
-        environment.state().active.is_none(),
+        environment.state().active().is_none(),
         "override preparation is not a review to recover"
     );
-    assert!(environment.state().push_findings.is_some());
+    assert!(environment.state().findings().is_some());
     assert!(
         tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
             .await
@@ -5197,7 +5352,7 @@ async fn a_push_review_restart_keeps_its_busy_child_and_delivers_its_verdict() {
     .await
     .unwrap();
     assert_eq!(environment.mailbox.lock().unwrap().len(), 1);
-    assert!(environment.state().active_group.is_none());
+    assert!(environment.state().active_group().is_none());
     restarted.shutdown().await.unwrap();
 }
 
@@ -5378,7 +5533,7 @@ async fn push_recording_waits_past_ten_seconds_without_losing_clean_verdict() {
         },
     );
     tokio::time::sleep(Duration::from_secs(11)).await;
-    assert!(environment.state().active_group.is_some());
+    assert!(environment.state().active_group().is_some());
     assert!(environment.mailbox.lock().unwrap().is_empty());
     release.send(()).unwrap();
     assert!(
@@ -5581,7 +5736,7 @@ async fn push_recording_failure_stays_pending_then_replays_the_same_trees() {
             _ => panic!("expected recording failure notice"),
         }
         assert!(environment.mailbox.lock().unwrap().is_empty());
-        let snapshot = environment.state().active_group.unwrap().driver;
+        let snapshot = environment.state().active_group().unwrap().driver;
         assert_eq!(snapshot.last_verdict, Some(ReviewVerdict::Clean));
         if restart {
             host.shutdown().await.unwrap();
@@ -5623,7 +5778,7 @@ async fn push_recording_failure_stays_pending_then_replays_the_same_trees() {
                 .iter()
                 .any(|text| text.starts_with("Review complete:"))
         );
-        assert!(environment.state().active_group.is_none());
+        assert!(environment.state().active_group().is_none());
         assert_eq!(environment.mailbox.lock().unwrap().len(), 1);
         host.shutdown().await.unwrap();
     }
@@ -5665,7 +5820,7 @@ async fn push_recording_permanent_refusal_delivers_failure_without_retrying() {
             .iter()
             .any(|text| text.starts_with("Review complete:"))
     );
-    assert!(environment.state().active_group.is_none());
+    assert!(environment.state().active_group().is_none());
     let mailbox = environment.mailbox.lock().unwrap().clone();
     assert!(
         mj_core::mailbox::render_mailbox_event(&mailbox[0]).contains("approval recording failed")
@@ -5695,7 +5850,7 @@ async fn push_recording_can_be_cancelled_while_awaiting_acknowledgement() {
             && text.contains("request review again")
     ));
     assert!(environment.mailbox.lock().unwrap().is_empty());
-    assert!(environment.state().active_group.is_none());
+    assert!(environment.state().active_group().is_none());
     host.shutdown().await.unwrap();
 }
 
@@ -5741,7 +5896,7 @@ async fn push_recording_does_not_block_daemon_handoff() {
     assert_eq!(
         environment
             .state()
-            .active_group
+            .active_group()
             .unwrap()
             .driver
             .last_verdict,
@@ -5784,7 +5939,7 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
             if baseline {
                 host.set_push_base(&session, "abc1234".into(), None).await
             } else {
-                host.override_push(&session, one_override("incorrect"))
+                host.override_push(&session, None, one_override("incorrect"))
                     .await
             }
         })
@@ -5849,7 +6004,7 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
     );
     release.send(()).unwrap();
     order.drain().await.unwrap();
-    assert!(environment.state().push_findings.is_some());
+    assert!(environment.state().findings().is_some());
 }
 
 // Hard-won: Reliability soak 2026-11-16: a review-off start sent its capture into a recovery copy's checkpoint barrier and the worker refused it.
@@ -5952,5 +6107,486 @@ async fn review_admission_deadline_reports_refusal_and_releases_its_hold() {
         host.view(&session).is_none(),
         "a refused admission leaves review available to retry"
     );
+    host.shutdown().await.unwrap();
+}
+
+// ---- Several reviews in one session -------------------------------------
+
+async fn publish_running(manager: &FakeManager) {
+    manager
+        .publisher
+        .publish(
+            manager.session.clone(),
+            view(
+                &manager.session,
+                MaterializedExecutionState::Running { started_at_ms: 1 },
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+/// Asks for a review of exactly these worktrees.
+fn begin_scoped(
+    host: &TurnReviewHost,
+    session: &str,
+    paths: &[&str],
+) -> tokio::task::JoinHandle<Result<serde_json::Value, StartRefusal>> {
+    let host = host.clone();
+    let session = session.to_owned();
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    mj_core::runtime::spawn(
+        async move { host.begin_push(&session, ReviewScope::Paths(paths)).await },
+    )
+}
+
+/// The next scoped capture the worker is asked for, with the paths it names.
+async fn next_scoped_capture(
+    manager: &mut FakeManager,
+) -> (
+    Vec<PathBuf>,
+    oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
+) {
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| {
+            matches!(
+                action,
+                ReviewerAction::CaptureDelta {
+                    repositories: Some(_)
+                }
+            )
+        })
+        .await;
+    let ReviewerAction::CaptureDelta {
+        repositories: Some(paths),
+    } = action
+    else {
+        unreachable!("the wanted action is a scoped capture")
+    };
+    (paths, reply)
+}
+
+fn delta_reply(roots: &[&str], tree: &str) -> anyhow::Result<ReviewerOutcome> {
+    Ok(ReviewerOutcome::Delta {
+        repositories: roots.iter().map(|root| push_delta(root, tree)).collect(),
+    })
+}
+
+/// Opens a review of one worktree and waits until its caller is told.
+async fn open_scoped_review(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    session: &str,
+    root: &str,
+    tree: &str,
+) {
+    let request = begin_scoped(host, session, &[root]);
+    let (paths, reply) = next_scoped_capture(manager).await;
+    assert_eq!(paths, vec![PathBuf::from(root)]);
+    reply.send(delta_reply(&[root], tree)).unwrap();
+    assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
+}
+
+/// The reviewer child of each open review, by the first root it covers, once
+/// every review has its child running.
+async fn children_by_root(
+    environment: &FakeEnvironment,
+    reviews: usize,
+) -> std::collections::BTreeMap<PathBuf, String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = environment.state();
+            let children: std::collections::BTreeMap<_, _> = state
+                .open_reviews
+                .iter()
+                .filter_map(|review| {
+                    let group = review.active_group.as_ref()?;
+                    let child = group.registrations.first()?.child_session_id.clone()?;
+                    let root = group.driver.deltas.first()?.root.clone();
+                    environment
+                        .started
+                        .lock()
+                        .unwrap()
+                        .contains(&child)
+                        .then_some((root, child))
+                })
+                .collect();
+            if children.len() == reviews {
+                return children;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every review has a running reviewer")
+}
+
+/// A reviewer hands back its report; a clean one makes the worker record the
+/// approved tree. Waits until the review has left the host.
+async fn settle_review(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    environment: &FakeEnvironment,
+    session: &str,
+    child: &str,
+    report: &str,
+) -> Vec<PathBuf> {
+    let open_before = environment.state().open_reviews.len();
+    let finished = {
+        let host = host.clone();
+        let (session, child, report) = (session.to_owned(), child.to_owned(), report.to_owned());
+        mj_core::runtime::spawn(async move {
+            host.reviewer_finished(session, child, Some(report)).await
+        })
+    };
+    let mut recorded = Vec::new();
+    if report == "No findings." {
+        let (_, action, reply) = manager
+            .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+            .await;
+        let ReviewerAction::RecordReviewed { trees } = &action else {
+            unreachable!("the wanted action records a reviewed tree")
+        };
+        recorded = trees.keys().cloned().collect();
+        reply.send(answer_for(&action)).unwrap();
+    }
+    finished.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while environment.state().open_reviews.len() >= open_before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the settled review leaves the stored row");
+    recorded
+}
+
+/// Waits until the session shows this many reviews.
+async fn wait_for_views(host: &TurnReviewHost, session: &str, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.views_of(session).len() != count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the session shows {count} reviews"));
+}
+
+#[tokio::test]
+async fn reviews_of_disjoint_roots_run_together_and_each_delivers_its_own_verdict() {
+    let session = session_id("disjoint-roots");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    publish_running(&manager).await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/a", "tree-a").await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/c", "tree-c").await;
+    assert_eq!(environment.state().open_reviews.len(), 2);
+    assert_eq!(host.views_of(&session).len(), 2);
+
+    // A request that names a root an open review owns is refused, and the
+    // refusal offers the roots that are free.
+    let partly = begin_scoped(&host, &session, &["/workspace/a", "/workspace/b"]);
+    let (_, reply) = next_scoped_capture(&mut manager).await;
+    reply
+        .send(delta_reply(&["/workspace/a", "/workspace/b"], "tree-ab"))
+        .unwrap();
+    assert_eq!(
+        partly.await.unwrap().unwrap_err().0,
+        "/workspace/a is already in the open review of /workspace/a. Request a review of /workspace/b now, or wait for that verdict and then request /workspace/a, /workspace/b together."
+    );
+    let wholly = begin_scoped(&host, &session, &["/workspace/a", "/workspace/c"]);
+    let (_, reply) = next_scoped_capture(&mut manager).await;
+    reply
+        .send(delta_reply(&["/workspace/a", "/workspace/c"], "tree-ac"))
+        .unwrap();
+    assert_eq!(
+        wholly.await.unwrap().unwrap_err().0,
+        "/workspace/a is already in the open review of /workspace/a. Wait for that verdict and then request /workspace/a, /workspace/c together."
+    );
+    assert_eq!(environment.state().open_reviews.len(), 2);
+
+    let children = children_by_root(&environment, 2).await;
+    let recorded = settle_review(
+        &mut manager,
+        &host,
+        &environment,
+        &session,
+        &children[&PathBuf::from("/workspace/a")],
+        "No findings.",
+    )
+    .await;
+    assert_eq!(recorded, vec![PathBuf::from("/workspace/a")]);
+    wait_for_views(&host, &session, 1).await;
+    settle_review(
+        &mut manager,
+        &host,
+        &environment,
+        &session,
+        &children[&PathBuf::from("/workspace/c")],
+        "A defect needs a fix",
+    )
+    .await;
+
+    let mailbox = environment.mailbox.lock().unwrap().clone();
+    assert_eq!(mailbox.len(), 2, "one verdict message per review");
+    for root in ["/workspace/a", "/workspace/c"] {
+        assert!(
+            mailbox.iter().any(|event| event.key.ends_with(root)),
+            "a verdict names {root}"
+        );
+    }
+    let state = environment.state();
+    assert!(state.open_reviews.is_empty());
+    assert_eq!(state.push_findings.len(), 1, "only the findings verdict");
+    assert!(state.push_findings[0].covers(std::path::Path::new("/workspace/c")));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn overlapping_requests_that_race_are_decided_when_they_open() {
+    for first in ["a-b", "b-c"] {
+        let session = session_id(&format!("race-{first}"));
+        let mut manager = FakeManager::new(&session).await;
+        let environment = FakeEnvironment::new();
+        let host =
+            TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+        publish_running(&manager).await;
+        let ab = begin_scoped(&host, &session, &["/workspace/a", "/workspace/b"]);
+        let bc = begin_scoped(&host, &session, &["/workspace/b", "/workspace/c"]);
+        let mut captures = Vec::new();
+        for _ in 0..2 {
+            captures.push(next_scoped_capture(&mut manager).await);
+        }
+        let position = |wanted: &str| {
+            captures
+                .iter()
+                .position(|(paths, _)| paths.contains(&PathBuf::from(wanted)))
+                .unwrap()
+        };
+        let (ab_capture, bc_capture) = (position("/workspace/a"), position("/workspace/c"));
+        let mut replies: Vec<_> = captures.into_iter().map(|(_, reply)| Some(reply)).collect();
+        let ab_reply = replies[ab_capture].take().unwrap();
+        let bc_reply = replies[bc_capture].take().unwrap();
+        // Whichever preparation finishes first opens; the other is refused.
+        let (opened, refused, expected) = if first == "a-b" {
+            ab_reply
+                .send(delta_reply(&["/workspace/a", "/workspace/b"], "tree-ab"))
+                .unwrap();
+            assert_eq!(ab.await.unwrap().unwrap()["accepted"], true);
+            bc_reply
+                .send(delta_reply(&["/workspace/b", "/workspace/c"], "tree-bc"))
+                .unwrap();
+            (
+                "a",
+                bc,
+                "/workspace/b is already in the open review of /workspace/a, /workspace/b. Request a review of /workspace/c now, or wait for that verdict and then request /workspace/b, /workspace/c together.",
+            )
+        } else {
+            bc_reply
+                .send(delta_reply(&["/workspace/b", "/workspace/c"], "tree-bc"))
+                .unwrap();
+            assert_eq!(bc.await.unwrap().unwrap()["accepted"], true);
+            ab_reply
+                .send(delta_reply(&["/workspace/a", "/workspace/b"], "tree-ab"))
+                .unwrap();
+            (
+                "c",
+                ab,
+                "/workspace/b is already in the open review of /workspace/b, /workspace/c. Request a review of /workspace/a now, or wait for that verdict and then request /workspace/a, /workspace/b together.",
+            )
+        };
+        assert_eq!(refused.await.unwrap().unwrap_err().0, expected);
+        let state = environment.state();
+        assert_eq!(state.open_reviews.len(), 1, "exactly one opened");
+        let roots = state.open_reviews[0].roots();
+        assert!(
+            roots.contains(&PathBuf::from(format!("/workspace/{opened}"))),
+            "{roots:?}"
+        );
+        host.shutdown().await.unwrap();
+    }
+}
+
+// A capture made before another review of its root closed may be older than a
+// base that review moved, so it is captured again instead of opened.
+#[tokio::test]
+async fn a_capture_older_than_a_closed_review_of_its_root_is_taken_again() {
+    let session = session_id("stale-capture");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    publish_running(&manager).await;
+    let stale = begin_scoped(&host, &session, &["/workspace/a"]);
+    let (_, stale_reply) = next_scoped_capture(&mut manager).await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/a", "tree-1").await;
+    let children = children_by_root(&environment, 1).await;
+    settle_review(
+        &mut manager,
+        &host,
+        &environment,
+        &session,
+        &children[&PathBuf::from("/workspace/a")],
+        "No findings.",
+    )
+    .await;
+    // Only the stale request's own placeholder is left.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !host
+            .views_of(&session)
+            .iter()
+            .all(|view| view.status.starts_with("Preparing"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the closed review leaves the host");
+    stale_reply
+        .send(delta_reply(&["/workspace/a"], "tree-old"))
+        .unwrap();
+    let (_, again) = next_scoped_capture(&mut manager).await;
+    again
+        .send(delta_reply(&["/workspace/a"], "tree-new"))
+        .unwrap();
+    assert_eq!(stale.await.unwrap().unwrap()["accepted"], true);
+    let state = environment.state();
+    let deltas = &state.open_reviews[0]
+        .active_group
+        .as_ref()
+        .unwrap()
+        .driver
+        .deltas;
+    assert_eq!(deltas[0].current_tree, "tree-new");
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn two_open_reviews_survive_a_host_restart_and_each_settles_on_its_own() {
+    let session = session_id("restart-two");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    publish_running(&manager).await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/a", "tree-a").await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/c", "tree-c").await;
+    children_by_root(&environment, 2).await;
+    host.shutdown().await.unwrap();
+    assert_eq!(
+        environment.state().open_reviews.len(),
+        2,
+        "both reviews are left stored"
+    );
+
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.views_of(&session).len() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both reviews are restored");
+    let children = children_by_root(&environment, 2).await;
+    settle_review(
+        &mut manager,
+        &host,
+        &environment,
+        &session,
+        &children[&PathBuf::from("/workspace/c")],
+        "No findings.",
+    )
+    .await;
+    wait_for_views(&host, &session, 1).await;
+    assert_eq!(environment.state().open_reviews.len(), 1);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn override_review_selects_the_verdict_by_path_and_keeps_the_others() {
+    let session = session_id("override-by-path");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    environment
+        .state
+        .lock()
+        .unwrap()
+        .push_findings
+        .push(mj_core::storage::PushFindingsRecord {
+            review_id: "review-2".into(),
+            trees: [(
+                PathBuf::from("/workspace/other"),
+                ("othertree".into(), "ccccccc789".into()),
+            )]
+            .into(),
+            synthesis: "another finding".into(),
+        });
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    // With two verdicts outstanding, no path cannot choose.
+    let error = host
+        .override_push(&session, None, one_override("incorrect"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.contains("more than one findings verdict") && error.0.contains("pass the path"),
+        "{}",
+        error.0
+    );
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        mj_core::runtime::spawn(async move {
+            host.override_push(
+                &session,
+                Some("/workspace/app".into()),
+                one_override("incorrect"),
+            )
+            .await
+        })
+    };
+    answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
+    finish_override_worker_actions(&mut manager, "incorrect").await;
+    assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
+    let state = environment.state();
+    assert_eq!(state.push_findings.len(), 1);
+    assert_eq!(state.push_findings[0].review_id, "review-2");
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_verdict_for_one_root_leaves_the_findings_of_the_other_roots_of_an_older_record() {
+    let session = session_id("shrink-findings");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment.state.lock().unwrap().push_findings = vec![mj_core::storage::PushFindingsRecord {
+        review_id: "older".into(),
+        trees: ["/workspace/a", "/workspace/b"]
+            .map(|root| (PathBuf::from(root), ("tree".into(), "head".into())))
+            .into(),
+        synthesis: "older findings".into(),
+    }];
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    publish_running(&manager).await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/a", "tree-a").await;
+    let children = children_by_root(&environment, 1).await;
+    settle_review(
+        &mut manager,
+        &host,
+        &environment,
+        &session,
+        &children[&PathBuf::from("/workspace/a")],
+        "No findings.",
+    )
+    .await;
+    let state = environment.state();
+    assert_eq!(state.push_findings.len(), 1);
+    assert!(!state.push_findings[0].covers(std::path::Path::new("/workspace/a")));
+    assert!(state.push_findings[0].covers(std::path::Path::new("/workspace/b")));
     host.shutdown().await.unwrap();
 }

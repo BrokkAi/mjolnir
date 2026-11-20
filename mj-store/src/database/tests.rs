@@ -5069,9 +5069,9 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
         rusqlite::params!["session-1", "{}"],
     ).unwrap();
     let mut state = turn_review_state_in(&database, "session-1").unwrap();
-    assert!(state.push_findings.is_none());
-    assert!(state.active_group.is_none());
-    state.push_findings = Some(mj_core::storage::PushFindingsRecord {
+    assert!(state.push_findings.is_empty());
+    assert!(state.open_reviews.is_empty());
+    state.push_findings = vec![mj_core::storage::PushFindingsRecord {
         review_id: "review-1".into(),
         trees: [(
             std::path::PathBuf::from("/workspace/app"),
@@ -5079,8 +5079,11 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
         )]
         .into(),
         synthesis: "fix the regression".into(),
-    });
-    state.active = Some("interrupted".into());
+    }];
+    state.open_reviews = vec![mj_core::storage::OpenReview {
+        active: Some("interrupted".into()),
+        active_group: None,
+    }];
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
     assert_eq!(
         clear_interrupted_turn_reviews_in(&database).unwrap(),
@@ -5088,7 +5091,7 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
     );
     let restored = turn_review_state_in(&database, "session-1").unwrap();
     assert_eq!(restored.push_findings, state.push_findings);
-    assert!(restored.active.is_none());
+    assert!(restored.open_reviews.is_empty());
 }
 
 #[test]
@@ -5122,25 +5125,27 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
             .collect(),
     );
     let mut state = TurnReviewState {
-        active: Some("async-review".into()),
-        active_group: Some(ActiveReviewGroup {
-            brief_writer: None,
-            driver: driver.snapshot(),
-            reviewers: vec![Default::default(); 3],
-            registrations: (1..=3)
-                .map(|index| ReviewerRegistration {
-                    role: format!("reviewer-{index}"),
-                    request_key: format!("review-key-{index}"),
-                    child_session_id: Some(format!("review-child-{index}")),
-                })
-                .collect(),
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("async-review".into()),
+            active_group: Some(ActiveReviewGroup {
+                brief_writer: None,
+                driver: driver.snapshot(),
+                reviewers: vec![Default::default(); 3],
+                registrations: (1..=3)
+                    .map(|index| ReviewerRegistration {
+                        role: format!("reviewer-{index}"),
+                        request_key: format!("review-key-{index}"),
+                        child_session_id: Some(format!("review-child-{index}")),
+                    })
+                    .collect(),
+            }),
+        }],
         ..Default::default()
     };
     save_turn_review_state_in(&database, owner, &state).unwrap();
     let command = driver.snapshot().roles[0].command_id.clone();
     driver.role_turn_completed(&command, "review-child-1", "No findings.");
-    state.active_group.as_mut().unwrap().driver = driver.snapshot();
+    state.open_reviews[0].active_group.as_mut().unwrap().driver = driver.snapshot();
     save_turn_review_state_in(&database, owner, &state).unwrap();
     let before_findings = state.clone();
     let connection = open(&database).unwrap();
@@ -5165,7 +5170,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
         .unwrap();
     let command = driver.snapshot().roles[1].command_id.clone();
     driver.role_turn_completed(&command, "review-child-2", "The parser drops queued input.");
-    state.active_group.as_mut().unwrap().driver = driver.snapshot();
+    state.open_reviews[0].active_group.as_mut().unwrap().driver = driver.snapshot();
     let error = save_turn_review_state_in(&database, owner, &state).unwrap_err();
     assert!(error.to_string().contains("outbox unavailable"));
     assert_eq!(
@@ -5196,18 +5201,142 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
         "reloading and saving sends no duplicates"
     );
     let mut driver = mj_review::driver::TurnReviewDriver::restore(
-        restored.active_group.as_ref().unwrap().driver.clone(),
+        restored.open_reviews[0]
+            .active_group
+            .as_ref()
+            .unwrap()
+            .driver
+            .clone(),
     )
     .unwrap();
     let command = driver.snapshot().roles[2].command_id.clone();
     driver.role_turn_completed(&command, "review-child-3", "No findings.");
-    restored.active_group.as_mut().unwrap().driver = driver.snapshot();
+    restored.open_reviews[0]
+        .active_group
+        .as_mut()
+        .unwrap()
+        .driver = driver.snapshot();
     save_turn_review_state_in(&database, owner, &restored).unwrap();
     assert_eq!(
         outbox(),
         messages,
         "the final result uses the existing final delivery"
     );
+}
+
+// Revision 145 moves a session's open review and findings record into lists.
+// A store an older build left with a restored review group, a findings record
+// and an interrupted marker must keep all three, with the marker still
+// cleared through its own path, and refuse that older build afterwards.
+#[test]
+fn review_state_migration_moves_the_open_review_and_findings_into_lists() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-group", "project-1")).unwrap();
+    save_session_to(&database, &session("session-interrupted", "project-1")).unwrap();
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        declined: Vec::new(),
+        brief: None,
+    };
+    let (driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "group-1".into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    let mut state = TurnReviewState {
+        push_findings: vec![mj_core::storage::PushFindingsRecord {
+            review_id: "earlier".into(),
+            trees: [(PathBuf::from("/workspace"), ("tree".into(), "head".into()))].into(),
+            synthesis: "a finding".into(),
+        }],
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("group-1".into()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
+                brief_writer: None,
+                driver: driver.snapshot(),
+                reviewers: vec![Default::default()],
+                registrations: vec![mj_core::storage::ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: "key-1".into(),
+                    child_session_id: Some("child-1".into()),
+                }],
+            }),
+        }],
+        ..Default::default()
+    };
+    state.decline_findings(
+        [mj_core::subagent::ReviewOverride {
+            finding: "F".into(),
+            reason: "R".into(),
+        }],
+        vec![PathBuf::from("/workspace")],
+    );
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    let interrupted = TurnReviewState {
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("review-preparing".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, "session-interrupted", &interrupted).unwrap();
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    schema::restore_pre145_review_columns(&connection);
+    connection
+        .execute_batch(
+            "DELETE FROM schema_migrations WHERE version >= 145;
+             UPDATE schema_compatibility SET minimum_compatible_version = 144 WHERE singleton = 1;
+             PRAGMA user_version = 144;",
+        )
+        .unwrap();
+    let (active, group, findings): (Option<String>, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT active, active_group, push_findings FROM turn_review_state WHERE session_id='session-group'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(active.as_deref(), Some("group-1"));
+    assert!(
+        group.unwrap().starts_with('{'),
+        "an older build stored one group object"
+    );
+    assert!(
+        findings.unwrap().starts_with('{'),
+        "an older build stored one findings object"
+    );
+    drop(connection);
+    schema::forget_verified_schema(&database);
+
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
+    );
+    assert_eq!(
+        active_review_groups_in(&database).unwrap(),
+        vec![("session-group".into(), state.clone())]
+    );
+    assert_eq!(
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
+        vec!["session-interrupted".to_owned()]
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-interrupted").unwrap(),
+        TurnReviewState::default()
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
+    );
+    let schema = schema::read_schema_state(&open(&database).unwrap()).unwrap();
+    assert_eq!(
+        schema.minimum_compatible,
+        Some(schema::MINIMUM_COMPATIBLE_VERSION)
+    );
+    assert!(schema.ensure_supported_by(144).is_err());
 }
 
 #[test]
@@ -5244,8 +5373,10 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         ],
     };
     let state = TurnReviewState {
-        active: Some("group-1".into()),
-        active_group: Some(group),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("group-1".into()),
+            active_group: Some(group),
+        }],
         ..Default::default()
     };
     save_turn_review_state_in(
@@ -5351,21 +5482,23 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
         },
     ];
     let state = TurnReviewState {
-        active: Some("finished-review".into()),
-        active_group: Some(ActiveReviewGroup {
-            driver: driver.snapshot(),
-            reviewers,
-            registrations: children
-                .iter()
-                .enumerate()
-                .map(|(index, child)| ReviewerRegistration {
-                    role: format!("reviewer-{}", index + 1),
-                    request_key: format!("review-key-{index}"),
-                    child_session_id: Some((*child).to_owned()),
-                })
-                .collect(),
-            brief_writer: None,
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("finished-review".into()),
+            active_group: Some(ActiveReviewGroup {
+                driver: driver.snapshot(),
+                reviewers,
+                registrations: children
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| ReviewerRegistration {
+                        role: format!("reviewer-{}", index + 1),
+                        request_key: format!("review-key-{index}"),
+                        child_session_id: Some((*child).to_owned()),
+                    })
+                    .collect(),
+                brief_writer: None,
+            }),
+        }],
         ..Default::default()
     };
     save_reviewer_outcome_in(
@@ -5374,10 +5507,12 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
         &state,
         vec![
             super::AcceptedReport {
+                review_id: "finished-review".into(),
                 role: "reviewer-1".into(),
                 text: "The parser drops queued input.".into(),
             },
             super::AcceptedReport {
+                review_id: "finished-review".into(),
                 role: "reviewer-2".into(),
                 text: "No findings.".into(),
             },
@@ -5423,8 +5558,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
         )
         .unwrap();
     let closed = TurnReviewState {
-        active: None,
-        active_group: None,
+        open_reviews: Vec::new(),
         ..state.clone()
     };
     // A reviewer's child can record another command's handback afterwards. The
@@ -5444,6 +5578,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
     close_turn_review_state_in(
         &database,
         owner,
+        "finished-review",
         &closed,
         FinishedReviewResolution::Completed,
     )
@@ -5568,20 +5703,29 @@ fn a_failed_reviewer_keeps_no_handback_from_another_command() {
         "the reviewer's session ended before it handed back",
     );
     let state = TurnReviewState {
-        active: Some("failed-review".into()),
-        active_group: Some(ActiveReviewGroup {
-            driver: driver.snapshot(),
-            reviewers: vec![Default::default()],
-            registrations: vec![ReviewerRegistration {
-                role: "reviewer-1".into(),
-                request_key: "review-key".into(),
-                child_session_id: Some(child.into()),
-            }],
-            brief_writer: None,
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("failed-review".into()),
+            active_group: Some(ActiveReviewGroup {
+                driver: driver.snapshot(),
+                reviewers: vec![Default::default()],
+                registrations: vec![ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: "review-key".into(),
+                    child_session_id: Some(child.into()),
+                }],
+                brief_writer: None,
+            }),
+        }],
         ..Default::default()
     };
-    close_turn_review_state_in(&database, owner, &state, FinishedReviewResolution::Failed).unwrap();
+    close_turn_review_state_in(
+        &database,
+        owner,
+        "failed-review",
+        &state,
+        FinishedReviewResolution::Failed,
+    )
+    .unwrap();
     let finished = finished_review_in(&database, owner, None)
         .unwrap()
         .expect("the failed review is recorded");
@@ -5631,29 +5775,31 @@ fn a_cancelled_review_keeps_the_host_decision_over_its_stored_verdict() {
     let command = driver.snapshot().roles[0].command_id.clone();
     driver.role_turn_completed(&command, child, "No findings.");
     let state = TurnReviewState {
-        active: Some("cancelled-review".into()),
-        active_group: Some(ActiveReviewGroup {
-            driver: driver.snapshot(),
-            reviewers: vec![Default::default()],
-            registrations: vec![ReviewerRegistration {
-                role: "reviewer-1".into(),
-                request_key: "review-key".into(),
-                child_session_id: Some(child.into()),
-            }],
-            brief_writer: None,
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("cancelled-review".into()),
+            active_group: Some(ActiveReviewGroup {
+                driver: driver.snapshot(),
+                reviewers: vec![Default::default()],
+                registrations: vec![ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: "review-key".into(),
+                    child_session_id: Some(child.into()),
+                }],
+                brief_writer: None,
+            }),
+        }],
         ..Default::default()
     };
     save_turn_review_state_in(&database, owner, &state).unwrap();
     // The verdict is in the stored driver; the host decides to cancel it.
     let cleared = TurnReviewState {
-        active: None,
-        active_group: None,
+        open_reviews: Vec::new(),
         ..state.clone()
     };
     close_turn_review_state_in(
         &database,
         owner,
+        "cancelled-review",
         &cleared,
         FinishedReviewResolution::Cancelled,
     )
@@ -8515,6 +8661,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
         save_session_to(&database, &session(id, "project-1")).unwrap();
     }
     let connection = open(&database).unwrap();
+    schema::restore_pre145_review_columns(&connection);
     for (id, group, forward) in [
         (
             "turn",
@@ -8546,7 +8693,10 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     schema::forget_verified_schema(&database);
     let connection = open(&database).unwrap();
     let groups: Vec<(String, bool, bool, bool)> = connection.prepare(
-        "SELECT session_id, active_group IS NOT NULL, pending_forward IS NOT NULL, pending_followup FROM turn_review_state ORDER BY session_id"
+        "SELECT session_id,
+                EXISTS(SELECT 1 FROM json_each(open_reviews) WHERE json_extract(value, '$.group') IS NOT NULL),
+                pending_forward IS NOT NULL, pending_followup
+         FROM turn_review_state ORDER BY session_id"
     ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(
         groups,
@@ -8559,8 +8709,8 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     assert_eq!(
         turn_review_state_in(&database, "turn")
             .unwrap()
-            .active_group,
-        None
+            .open_reviews,
+        Vec::new()
     );
 }
 
@@ -9084,4 +9234,102 @@ fn projection_repair_never_rewinds_a_frontier_an_attachment_can_acknowledge() {
             serde_json::to_value(&durable).unwrap()
         );
     }
+}
+
+// Two reviews of one session can have a role of the same name. A report
+// belongs to the review it names, and closing one review finishes only it.
+#[test]
+fn closing_one_of_two_open_reviews_finishes_only_that_review() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let owner = "two-reviews-owner";
+    save_session_to(&database, &session(owner, "project-1")).unwrap();
+    let open_review = |review_id: &str, root: &str| {
+        let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+            mj_core::review::driver::TurnReviewSeed {
+                task: "inspect".into(),
+                user_messages: Vec::new(),
+                declined: Vec::new(),
+                brief: None,
+            },
+            review_id.into(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        );
+        driver.delta_captured(vec![mj_core::relay::RepoDelta {
+            root: root.into(),
+            base_commit: Some("base".into()),
+            head_commit: Some("head".into()),
+            current_tree: format!("tree-{review_id}"),
+            patch: "+one".into(),
+            ..Default::default()
+        }]);
+        mj_core::storage::OpenReview {
+            active: Some(review_id.into()),
+            active_group: Some(ActiveReviewGroup {
+                driver: driver.snapshot(),
+                reviewers: vec![Default::default()],
+                registrations: vec![ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: format!("key-{review_id}"),
+                    child_session_id: None,
+                }],
+                brief_writer: None,
+            }),
+        }
+    };
+    let (first, second) = (
+        open_review("review-a", "/workspace/a"),
+        open_review("review-c", "/workspace/c"),
+    );
+    assert_eq!(first.roots(), vec![PathBuf::from("/workspace/a")]);
+    let both = TurnReviewState {
+        open_reviews: vec![first, second.clone()],
+        ..Default::default()
+    };
+    // The report names review-a; review-c has a role of the same name.
+    save_reviewer_outcome_in(
+        &database,
+        owner,
+        &both,
+        vec![super::AcceptedReport {
+            review_id: "review-a".into(),
+            role: "reviewer-1".into(),
+            text: "A's report".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(turn_review_state_in(&database, owner).unwrap(), both);
+
+    close_turn_review_state_in(
+        &database,
+        owner,
+        "review-a",
+        &TurnReviewState {
+            open_reviews: vec![second],
+            ..Default::default()
+        },
+        FinishedReviewResolution::Completed,
+    )
+    .unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("review-a finished");
+    assert_eq!(finished.review_id, "review-a");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Completed);
+    assert_eq!(finished.roles[0].handback.as_deref(), Some("A's report"));
+    assert!(
+        finished_review_in(&database, owner, Some("review-c"))
+            .unwrap()
+            .is_none(),
+        "the other review is still open"
+    );
+    let connection = open(&database).unwrap();
+    let other_handback: Option<String> = connection
+        .query_row(
+            "SELECT handback FROM review_reports WHERE review_id = 'review-c'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(other_handback, None, "A's report did not reach review-c");
 }

@@ -6,55 +6,107 @@ pub fn brief_skipped_notice(reason: &str) -> String {
 }
 
 impl HostState {
-    pub fn prepared(
-        &mut self,
-        session_id: String,
-        reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-        prepared: Result<Prepared, StartRefusal>,
-    ) {
+    /// One preparation finished. This is the one place that decides whether
+    /// the review may open: only now are its roots known, and nothing else can
+    /// run between this decision and the insert into `pending_open`.
+    pub fn prepared(&mut self, request: u64, prepared: Result<Prepared, StartRefusal>) {
+        let Some(preparation) = self.preparations.remove(&request) else {
+            return;
+        };
+        let session_id = preparation.session_id.clone();
         // A cancellation that arrives after preparation succeeded still wins:
         // nothing has opened yet. A preparation that failed keeps its own
         // reason, which says more than the cancellation that followed it.
-        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancel }) if cancel.is_cancelled());
         let prepared = match prepared {
-            Ok(_) if cancelled => Err(StartRefusal("review preparation cancelled".into())),
+            Ok(_) if preparation.cancel.is_cancelled() => {
+                Err(StartRefusal("review preparation cancelled".into()))
+            }
             prepared => prepared,
         };
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(refusal) => {
-                self.preparing.remove(&session_id);
                 self.publish(&session_id);
-                answer(reply, Err(refusal));
+                let _ = preparation.reply.send(Err(refusal));
                 return;
             }
         };
-        if self.reviews.contains_key(&session_id) {
-            self.preparing.remove(&session_id);
-            let refusal = StartRefusal("a review is already open".to_owned());
-            answer(reply, Err(refusal));
+        // A review of this session closed, or a base moved, since this capture
+        // began, and the capture may be older than that. It captures again
+        // rather than opening a review of a stale range; each restart follows a
+        // real base move, so they end.
+        if self.base_generation(&session_id) != preparation.base_generation {
+            tracing::info!(
+                %session_id,
+                "a review base moved while a review was being prepared; capturing again"
+            );
+            let Preparation {
+                session_id,
+                scope,
+                cancel,
+                reply,
+                ..
+            } = preparation;
+            let base_generation = self.base_generation(&session_id);
+            self.preparations.insert(
+                request,
+                Preparation {
+                    session_id: session_id.clone(),
+                    scope: scope.clone(),
+                    cancel: cancel.clone(),
+                    base_generation,
+                    reply,
+                },
+            );
+            let config = (self.config)(&session_id);
+            self.spawn_preparation(request, session_id, scope, cancel, config);
             return;
         }
+        let roots: Vec<_> = prepared
+            .captured
+            .iter()
+            .map(|delta| delta.root.clone())
+            .collect();
+        if let Some(refusal) = self.open_refusal(&session_id, prepared.protocol, &roots) {
+            self.publish(&session_id);
+            let _ = preparation.reply.send(Err(refusal));
+            return;
+        }
+        let Preparation { cancel, reply, .. } = preparation;
+        self.open_review(session_id, prepared, cancel, reply);
+    }
+
+    /// Opens a review that may open: allocates it, writes its durable marker,
+    /// and holds its roots from here on.
+    fn open_review(
+        &mut self,
+        session_id: String,
+        prepared: Prepared,
+        cancel: tokio_util::sync::CancellationToken,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    ) {
         self.next_epoch = self.next_epoch.saturating_add(1);
         let epoch = self.next_epoch;
-        let mut prepared = prepared;
+        let accepted = super::begin::accepted_review(&prepared.captured);
+        let fail = |reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+                    what: &str,
+                    error: anyhow::Error| {
+            let _ = reply.send(Err(StartRefusal(format!("{what}: {error:#}"))));
+        };
         let review_id = match new_command_id("review-group") {
             Ok(id) => id,
             Err(error) => {
-                self.preparing.remove(&session_id);
-                answer(
-                    reply,
-                    Err(StartRefusal(format!(
-                        "could not allocate review id: {error:#}"
-                    ))),
-                );
+                self.publish(&session_id);
+                fail(reply, "could not allocate review id", error);
                 return;
             }
         };
         let mut seed = prepared.seed.clone();
-        seed.declined = prepared
-            .state
-            .declined_findings
+        seed.declined = self
+            .review_state
+            .get(&session_id)
+            .map(|owner| owner.part.declined_findings.as_slice())
+            .unwrap_or_default()
             .iter()
             .filter(|entry| {
                 prepared
@@ -78,75 +130,68 @@ impl HostState {
                 driver.delta_captured_with_writer(deltas, prepared.brief_writer.is_some())
             }
         };
-        {
-            let mut registrations = Vec::new();
-            for role in &driver.snapshot().roles {
-                let request_key = match new_command_id("reviewer-child") {
-                    Ok(key) => key,
-                    Err(error) => {
-                        self.preparing.remove(&session_id);
-                        answer(
-                            reply,
-                            Err(StartRefusal(format!(
-                                "could not allocate reviewer request: {error:#}"
-                            ))),
-                        );
-                        return;
-                    }
-                };
-                registrations.push(mj_core::storage::ReviewerRegistration {
+        let mut registrations = Vec::new();
+        for role in &driver.snapshot().roles {
+            match new_command_id("reviewer-child") {
+                Ok(request_key) => registrations.push(mj_core::storage::ReviewerRegistration {
                     role: role.role.clone(),
                     request_key,
                     child_session_id: None,
-                });
+                }),
+                Err(error) => {
+                    self.publish(&session_id);
+                    fail(reply, "could not allocate reviewer request", error);
+                    return;
+                }
             }
-            if prepared.brief_writer.is_some() {
-                let request_key = match new_command_id("reviewer-child") {
-                    Ok(id) => id,
-                    Err(error) => {
-                        self.preparing.remove(&session_id);
-                        answer(
-                            reply,
-                            Err(StartRefusal(format!(
-                                "could not allocate brief writer request: {error:#}"
-                            ))),
-                        );
-                        return;
-                    }
-                };
-                registrations.push(mj_core::storage::ReviewerRegistration {
+        }
+        if prepared.brief_writer.is_some() {
+            match new_command_id("reviewer-child") {
+                Ok(request_key) => registrations.push(mj_core::storage::ReviewerRegistration {
                     role: mj_core::review::driver::BRIEF_WRITER_ROLE.to_owned(),
                     request_key,
                     child_session_id: None,
-                });
+                }),
+                Err(error) => {
+                    self.publish(&session_id);
+                    fail(reply, "could not allocate brief writer request", error);
+                    return;
+                }
             }
-            prepared.state.active_group = Some(mj_core::storage::ActiveReviewGroup {
+        }
+        let open = OpenReview {
+            active: Some(review_id.clone()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
                 driver: driver.snapshot(),
                 reviewers: prepared.reviewers.clone(),
                 registrations,
                 brief_writer: prepared.brief_writer.clone(),
-            });
-        }
-        prepared.state.active = Some(review_id);
-        let state = prepared.state.clone();
+            }),
+        };
+        let key = ReviewKey {
+            session_id: session_id.clone(),
+            review_id: review_id.clone(),
+        };
+        // The review owns its roots from here, before its marker is durable.
         self.pending_open.insert(
-            session_id.clone(),
+            key.clone(),
             PendingOpen {
                 epoch,
-                reply,
+                reply: Some(OpenReply { reply, accepted }),
                 prepared,
+                open,
+                cancel,
                 driver,
                 requests,
             },
         );
         if let Err(error) =
-            self.persist(session_id.clone(), state, Some(PersistenceCompletion::Open))
+            self.persist(&session_id, Some(PersistenceCompletion::Open { review_id }))
         {
             let pending = self
                 .pending_open
-                .remove(&session_id)
+                .remove(&key)
                 .expect("pending review was just inserted");
-            self.preparing.remove(&session_id);
             self.publish(&session_id);
             answer(
                 pending.reply,
@@ -163,41 +208,43 @@ impl HostState {
         completion: PersistenceCompletion,
         result: Result<(), String>,
     ) {
+        let key = ReviewKey {
+            session_id: session_id.clone(),
+            review_id: completion.review_id().to_owned(),
+        };
         match completion {
-            PersistenceCompletion::Captured => {
-                let Some(requests) = self.awaiting_capture_persistence.remove(&session_id) else {
+            PersistenceCompletion::Captured { .. } => {
+                let Some(requests) = self.awaiting_capture_persistence.remove(&key) else {
                     return;
                 };
                 if let Err(error) = result {
-                    self.fail(&session_id, error);
+                    self.fail(&key, error);
                 } else {
-                    self.run(&session_id, requests);
+                    self.run(&key, requests);
                 }
             }
-            PersistenceCompletion::LaunchChild { role } => {
+            PersistenceCompletion::LaunchChild { role, .. } => {
                 if let Err(error) = result {
-                    if let Some(slot) = self.reviews.get(&session_id) {
+                    if let Some(slot) = self.reviews.get(&key) {
                         self.role_failed(&session_id, slot.epoch, &role, None, error);
                     }
                     return;
                 }
                 // Registration is durable. Provisioning and harness readiness
                 // continue asynchronously, within the accepted review.
-                if let Some(slot) = self.reviews.get_mut(&session_id) {
+                if let Some(slot) = self.reviews.get_mut(&key) {
                     answer(slot.start_reply.take(), Ok(()));
                 }
-                self.launch_reviewer_child(&session_id, &role, true);
+                self.launch_reviewer_child(&key, &role, true);
             }
-            PersistenceCompletion::Open => {
-                let Some(pending) = self.pending_open.remove(&session_id) else {
+            PersistenceCompletion::Open { .. } => {
+                let Some(pending) = self.pending_open.remove(&key) else {
                     return;
                 };
-                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancel }) if cancel.is_cancelled());
-                if cancelled && result.is_ok() {
-                    let mut state = pending.prepared.state;
-                    state.active = None;
-                    state.active_group = None;
-                    if let Err(error) = self.persist(session_id.clone(), state, None) {
+                if pending.cancel.is_cancelled() && result.is_ok() {
+                    // The marker is durable; a save that leaves this review out
+                    // clears it.
+                    if let Err(error) = self.persist(&session_id, None) {
                         tracing::warn!(%session_id, %error, "could not clear cancelled review preparation");
                     }
                     self.publish(&session_id);
@@ -208,6 +255,11 @@ impl HostState {
                     return;
                 }
                 if let Err(error) = result {
+                    // Another review's save queued meanwhile listed this one.
+                    // A save that leaves it out takes its marker back.
+                    if let Err(repair) = self.persist(&session_id, None) {
+                        tracing::warn!(%session_id, error = %repair, "could not clear a review that failed to open");
+                    }
                     self.publish(&session_id);
                     answer(
                         pending.reply,
@@ -219,14 +271,17 @@ impl HostState {
                 }
                 let brief_skipped = pending.prepared.brief_skipped;
                 self.reviews.insert(
-                    session_id.clone(),
+                    key.clone(),
                     ReviewSlot {
                         epoch: pending.epoch,
                         driver: pending.driver,
                         reviewers: pending.prepared.reviewers,
-                        state: pending.prepared.state,
+                        open: pending.open,
+                        protocol: pending.prepared.protocol,
                         _background: pending.prepared.background,
                         finishing: false,
+                        leaving_row: false,
+                        delivery_undo: None,
                         delivery: Arc::new(super::resolve::Delivery::default()),
                         retry_delay: std::time::Duration::from_secs(1),
                         start_reply: pending.reply,
@@ -235,7 +290,7 @@ impl HostState {
                         ended_while_queued: BTreeMap::new(),
                     },
                 );
-                if let Some(slot) = self.reviews.get_mut(&session_id)
+                if let Some(slot) = self.reviews.get_mut(&key)
                     && slot.driver.last_verdict() == Some(&ReviewVerdict::Clean)
                 {
                     answer(slot.start_reply.take(), Ok(()));
@@ -243,10 +298,10 @@ impl HostState {
                 if let Some(reason) = brief_skipped {
                     self.record_notice(&session_id, brief_skipped_notice(&reason));
                 }
-                self.run(&session_id, pending.requests);
+                self.run(&key, pending.requests);
             }
-            PersistenceCompletion::Close(_resolution) => {
-                self.closing.remove(&session_id);
+            PersistenceCompletion::Close { .. } => {
+                self.closing.remove(&key);
                 if let Err(error) = result {
                     tracing::warn!(
                         session_id = %session_id,
@@ -254,12 +309,12 @@ impl HostState {
                         "could not clear the active review marker"
                     );
                 }
-                let notice = self.reviews.get(&session_id).and_then(|slot| {
+                let notice = self.reviews.get(&key).and_then(|slot| {
                     resolution_notice(slot.driver.phase(), slot.driver.last_verdict())
                 });
                 let warnings = self
                     .reviews
-                    .get(&session_id)
+                    .get(&key)
                     .map(|slot| {
                         if slot.driver.last_verdict() == Some(&ReviewVerdict::Clean) {
                             slot.driver
@@ -271,7 +326,7 @@ impl HostState {
                         }
                     })
                     .unwrap_or_default();
-                self.reviews.remove(&session_id);
+                self.drop_slot(&key);
                 if let Some(notice) = notice {
                     self.record_notice(&session_id, notice);
                 }
@@ -281,22 +336,5 @@ impl HostState {
                 self.publish(&session_id);
             }
         }
-    }
-
-    pub fn persist(
-        &self,
-        session_id: String,
-        state: TurnReviewState,
-        completion: Option<PersistenceCompletion>,
-    ) -> Result<(), String> {
-        self.persistence
-            .as_ref()
-            .ok_or_else(|| "the review persistence lane stopped".to_owned())?
-            .send(PersistenceRequest::Save {
-                session_id,
-                state: Box::new(state),
-                completion,
-            })
-            .map_err(|_| "the review persistence lane stopped".to_owned())
     }
 }

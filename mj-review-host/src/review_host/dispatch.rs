@@ -13,7 +13,7 @@ impl HostState {
                 | HostEvent::HasOpenReview { session_id, .. } => Some(session_id),
                 _ => None,
             };
-            if active_owner.is_some_and(|session_id| self.reviews.contains_key(session_id)) {
+            if active_owner.is_some_and(|session_id| self.has_slot(session_id)) {
                 return Box::pin(self.handle_without_startup_failure(event)).await;
             }
             match event {
@@ -60,11 +60,26 @@ impl HostState {
             self.deferred_admissions.push(event);
             return false;
         }
+        // These need the session's stored review state, which the host reads
+        // once and then owns. They wait for it.
+        let event = match &event {
+            HostEvent::StartPush { session_id, .. }
+            | HostEvent::OverridePush { session_id, .. }
+            | HostEvent::SetPushBase { session_id, .. } => {
+                let session_id = session_id.clone();
+                match self.when_loaded(&session_id, event) {
+                    Some(event) => event,
+                    None => return false,
+                }
+            }
+            _ => event,
+        };
         match event {
             HostEvent::View {
                 session_id,
                 snapshot,
-            } => self.observe(session_id, snapshot).await,
+                protocol,
+            } => self.observe(session_id, snapshot, protocol).await,
             HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::StartPush {
                 session_id,
@@ -73,21 +88,26 @@ impl HostState {
             } => self.begin_push(session_id, scope, reply),
             HostEvent::OverridePush {
                 session_id,
+                path,
                 overrides,
                 reply,
-            } => self.override_push(session_id, overrides, reply),
+            } => self.override_push(session_id, path, overrides, reply),
             HostEvent::SetPushBase {
                 session_id,
                 commit,
                 path,
                 reply,
             } => self.set_push_base(session_id, commit, path, reply),
-            HostEvent::OverrideFinished { session_id } => self.override_finished(&session_id),
-            HostEvent::Prepared {
-                session_id,
+            HostEvent::OperationRequest {
+                operation,
+                request,
                 reply,
-                prepared,
-            } => self.prepared(session_id, reply, *prepared),
+            } => self.operation_request(operation, request, reply),
+            HostEvent::OperationFinished { operation } => self.operation_finished(operation),
+            HostEvent::Prepared { request, prepared } => self.prepared(request, *prepared),
+            HostEvent::SessionLoaded { session_id, result } => {
+                self.session_loaded(session_id, result).await
+            }
             HostEvent::StateSaved {
                 session_id,
                 completion,
@@ -130,15 +150,9 @@ impl HostState {
                 role,
                 origin,
             } => {
-                if self
-                    .reviews
-                    .get(&session_id)
-                    .is_some_and(|slot| slot.epoch == epoch)
-                {
+                if let Some(key) = self.key_for_epoch(&session_id, epoch) {
                     match origin {
-                        StandingRead::Restored => {
-                            self.launch_reviewer_child(&session_id, &role, false)
-                        }
+                        StandingRead::Restored => self.launch_reviewer_child(&key, &role, false),
                         StandingRead::Ended {
                             child_session_id,
                             reason,
@@ -147,17 +161,15 @@ impl HostState {
                 }
             }
             HostEvent::RetryPushDelivery { session_id, epoch } => {
-                if self
-                    .reviews
-                    .get(&session_id)
-                    .is_some_and(|slot| slot.epoch == epoch && !slot.finishing)
+                if let Some(key) = self.key_for_epoch(&session_id, epoch)
+                    && self.reviews.get(&key).is_some_and(|slot| !slot.finishing)
                 {
                     let requests = self
                         .reviews
-                        .get_mut(&session_id)
+                        .get_mut(&key)
                         .map(|slot| slot.driver.recovery_requests())
                         .unwrap_or_default();
-                    self.run(&session_id, requests);
+                    self.run(&key, requests);
                 }
             }
             HostEvent::ReviewerOutcomeSaved {
@@ -172,25 +184,16 @@ impl HostState {
                 question_id,
                 reply,
             } => {
-                let target =
-                    self.reviews
-                        .get(&session_id)
-                        .and_then(|slot| slot.state.active_group.as_ref())
-                        .filter(|group| {
-                            group.registrations.iter().any(|item| {
-                                item.child_session_id.as_deref() == Some(&child_session_id)
-                            })
-                        })
-                        .map(|_| (child_session_id, question_id));
+                let target = self
+                    .key_for_child(&session_id, &child_session_id)
+                    .map(|_| (child_session_id, question_id));
                 let _ = reply.send(target);
             }
             // Never deferred: callers hold admissions or deliver other
             // events while they ask, so before the startup sweep finishes a
             // session it has not restored yet answers "not ready".
             HostEvent::HasOpenReview { session_id, reply } => {
-                let open = self.reviews.contains_key(&session_id)
-                    || self.preparing.contains_key(&session_id)
-                    || self.pending_open.contains_key(&session_id);
+                let open = self.has_open_work(&session_id);
                 let _ = reply.send(if open || self.startup_ready {
                     Ok(open)
                 } else {
@@ -208,7 +211,7 @@ impl HostState {
                 report,
                 reply,
             } => {
-                if !self.startup_ready && !self.reviews.contains_key(&session_id) {
+                if !self.startup_ready && !self.has_slot(&session_id) {
                     self.deferred_handbacks.push((
                         session_id,
                         ReviewerHandback {
@@ -246,10 +249,19 @@ impl HostState {
                 abandoned_children,
             } => {
                 for (session_id, state) in groups {
-                    if let Err(error) = self.restore_group(session_id, state) {
-                        let _ =
-                            Box::pin(self.handle(HostEvent::StartupRecoveryFailed(error))).await;
-                        return false;
+                    self.adopt(&session_id, &state);
+                    // A review without a group was cut off before it opened;
+                    // the sweep reported it and cleared it.
+                    for review in state
+                        .open_reviews
+                        .into_iter()
+                        .filter(|review| review.active_group.is_some())
+                    {
+                        if let Err(error) = self.restore_group(&session_id, review) {
+                            let _ = Box::pin(self.handle(HostEvent::StartupRecoveryFailed(error)))
+                                .await;
+                            return false;
+                        }
                     }
                 }
                 self.sweep_queue = abandoned_children.into();
@@ -292,7 +304,7 @@ impl HostState {
                         }
                         // A group restored before the failure still runs.
                         HostEvent::HasOpenReview { session_id, reply } => {
-                            let _ = reply.send(if self.reviews.contains_key(&session_id) {
+                            let _ = reply.send(if self.has_slot(&session_id) {
                                 Ok(true)
                             } else {
                                 Err(super::OpenReviewUnknown::RecoveryFailed(format!(
@@ -320,54 +332,46 @@ impl HostState {
     pub fn step(&mut self, session_id: String, epoch: u64, step: ReviewStep) {
         // A result from a review that has since been cancelled, resolved, or
         // replaced is not this review's business.
-        if self.reviews.get(&session_id).map(|slot| slot.epoch) != Some(epoch) {
+        let Some(key) = self.key_for_epoch(&session_id, epoch) else {
             return;
-        }
+        };
         match step {
+            ReviewStep::PushRecorded(result) => match result {
+                Ok(approval) => self.deliver(&key, approval),
+                Err(error) => self.delivery_failed(&key, error),
+            },
             ReviewStep::PushDelivered(result) => match result {
-                Ok((state, verdict)) => {
-                    if let Some(slot) = self.reviews.get_mut(&session_id) {
-                        slot.state = *state;
+                Ok(verdict) => {
+                    if let Some(slot) = self.reviews.get_mut(&key) {
+                        slot.delivery_undo = None;
                         if let ReviewVerdict::Failed { reason } = verdict {
                             slot.driver.request_failed(reason);
                         }
                         slot.driver.complete();
                     }
-                    self.close_reviewer_child(&session_id);
-                    self.run_one(&session_id, ReviewRequest::Close);
+                    self.close_reviewer_child(&key);
+                    self.run_one(&key, ReviewRequest::Close);
                 }
-                Err(error) => {
-                    self.close_reviewer_child(&session_id);
-                    self.drop_review_if_owner_gone(
-                        &session_id,
-                        epoch,
-                        Some(ReviewStep::PushRetry(error)),
-                    );
-                }
+                Err(error) => self.delivery_failed(&key, error),
             },
-            ReviewStep::PushRetry(error) => self.retry_push_delivery(&session_id, error),
+            ReviewStep::PushRetry(error) => self.retry_push_delivery(&key, error),
             ReviewStep::OwnerGone => {
-                let review_id = self
-                    .reviews
-                    .get(&session_id)
-                    .map(|slot| slot.driver.snapshot().review_id)
-                    .unwrap_or_default();
                 // Nothing to tell the person: the session is destroyed, and
                 // its review state went with its record.
                 tracing::info!(
                     session_id,
-                    review_id,
+                    review_id = key.review_id,
                     "dropping the review of a session that no longer exists"
                 );
-                self.close_reviewer_child(&session_id);
-                self.reviews.remove(&session_id);
+                self.close_reviewer_child(&key);
+                self.drop_slot(&key);
                 self.publish(&session_id);
             }
             ReviewStep::Delta(result) => {
                 let requests = match result {
                     Ok(deltas) => self
                         .reviews
-                        .get_mut(&session_id)
+                        .get_mut(&key)
                         .map(|slot| {
                             if mj_review::delta::trees_unchanged(&deltas) {
                                 slot.driver.empty_push_delta_captured(deltas)
@@ -377,27 +381,22 @@ impl HostState {
                         })
                         .unwrap_or_default(),
                     Err(error) => {
-                        self.fail(
-                            &session_id,
-                            format!("the change could not be captured: {error}"),
-                        );
+                        self.fail(&key, format!("the change could not be captured: {error}"));
                         return;
                     }
                 };
-                if let Some(slot) = self.reviews.get_mut(&session_id) {
-                    if let Some(group) = slot.state.active_group.as_mut() {
-                        group.driver = slot.driver.snapshot();
-                    }
-                    let state = slot.state.clone();
+                if let Some(slot) = self.reviews.get_mut(&key) {
+                    slot.sync_group();
                     self.awaiting_capture_persistence
-                        .insert(session_id.clone(), requests);
+                        .insert(key.clone(), requests);
                     if let Err(error) = self.persist(
-                        session_id.clone(),
-                        state,
-                        Some(PersistenceCompletion::Captured),
+                        &session_id,
+                        Some(PersistenceCompletion::Captured {
+                            review_id: key.review_id.clone(),
+                        }),
                     ) {
-                        self.awaiting_capture_persistence.remove(&session_id);
-                        self.fail(&session_id, error);
+                        self.awaiting_capture_persistence.remove(&key);
+                        self.fail(&key, error);
                     }
                 }
             }
@@ -458,11 +457,11 @@ impl HostState {
     /// transcript) does not linger. The in-flight review state in `reviews`/
     /// `closing` is separate and keeps its own lifetime.
     pub fn retain_sessions(&mut self, live: &std::collections::BTreeSet<String>) {
-        let removed: Vec<_> = self
+        let removed: BTreeSet<_> = self
             .reviews
             .keys()
-            .filter(|id| !live.contains(*id))
-            .cloned()
+            .filter(|key| !live.contains(&key.session_id))
+            .map(|key| key.session_id.clone())
             .collect();
         for session_id in removed {
             if let Err(error) = self.resolve(&session_id, Resolution::Cancelled) {
@@ -471,5 +470,6 @@ impl HostState {
         }
         self.sessions
             .retain(|session_id, _| live.contains(session_id));
+        self.release_idle_state(live);
     }
 }

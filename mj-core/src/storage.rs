@@ -250,6 +250,10 @@ pub enum FinishedReviewResolution {
 }
 
 /// Durable review work, findings and declined findings for this session.
+///
+/// One row per session. The review host's actor is its only writer: it keeps
+/// the session part (`declined_findings`, `push_findings`) in memory, adds the
+/// reviews it has open, and saves the whole row in the order it decides.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
     /// Findings the author declined to fix with `override_review`, newest last.
@@ -258,15 +262,58 @@ pub struct TurnReviewState {
     /// repository from their coverage. Bounded to `DECLINED_FINDINGS_BYTES`.
     #[serde(default)]
     pub declined_findings: Vec<DeclinedFinding>,
-    /// A review that was running when the daemon stopped. On recovery it is
-    /// cleared without advancing the baseline.
+    /// The exact trees covered by each outstanding before-push findings
+    /// verdict. No two records share a repository root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_findings: Vec<PushFindingsRecord>,
+    /// The reviews that are open, or were when the daemon stopped. No two
+    /// share a repository root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_reviews: Vec<OpenReview>,
+}
+
+/// One open review as it is stored.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OpenReview {
+    /// A review that was running when the daemon stopped. On recovery one
+    /// without a group is cleared without advancing the baseline.
+    #[serde(default)]
     pub active: Option<String>,
-    /// The exact trees covered by the last before-push findings verdict.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push_findings: Option<PushFindingsRecord>,
     /// A reviewer group survives daemon handoff with its exact commands and children.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "group")]
     pub active_group: Option<ActiveReviewGroup>,
+}
+
+impl OpenReview {
+    /// Which review this is: the group's review ID, or the marker of one that
+    /// never got a group.
+    pub fn review_id(&self) -> Option<&str> {
+        self.active_group
+            .as_ref()
+            .map(|group| group.driver.review_id.as_str())
+            .or(self.active.as_deref())
+    }
+
+    /// The repository roots the review covers: those its capture returned.
+    /// A review that has no group yet covers none.
+    pub fn roots(&self) -> Vec<std::path::PathBuf> {
+        self.active_group
+            .as_ref()
+            .map(|group| {
+                group
+                    .driver
+                    .deltas
+                    .iter()
+                    .map(|delta| delta.root.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the stored row still has anything to say about this review.
+    pub fn is_stored(&self) -> bool {
+        self.active.is_some() || self.active_group.is_some()
+    }
 }
 
 /// How many bytes of declined findings and reasons a session keeps. The
@@ -274,6 +321,25 @@ pub struct TurnReviewState {
 pub const DECLINED_FINDINGS_BYTES: usize = 24 * 1024;
 
 impl TurnReviewState {
+    /// Stores `record` as the outstanding verdict for its roots, replacing every
+    /// record that shares a root with it: the latest verdict for a root is the
+    /// one the author must answer.
+    pub fn replace_findings(&mut self, record: PushFindingsRecord) {
+        self.retire_findings(record.trees.keys());
+        self.push_findings.push(record);
+    }
+
+    /// Stops covering `roots` with outstanding findings. A record that also
+    /// covers other roots keeps them, so the author can still answer it for
+    /// those; a record left with none is dropped.
+    pub fn retire_findings<'a>(&mut self, roots: impl IntoIterator<Item = &'a std::path::PathBuf>) {
+        let roots: Vec<_> = roots.into_iter().collect();
+        self.push_findings.retain_mut(|record| {
+            record.trees.retain(|root, _| !roots.contains(&root));
+            !record.trees.is_empty()
+        });
+    }
+
     /// Stop covering the repositories whose review base moved, dropping entries
     /// left with none. An entry without recorded repositories is dropped.
     pub fn advance_review_bases(&mut self, moved: &[std::path::PathBuf]) {
@@ -375,6 +441,13 @@ pub struct PushFindingsRecord {
     pub review_id: String,
     pub trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     pub synthesis: String,
+}
+
+impl PushFindingsRecord {
+    /// Whether the verdict covers the worktree whose repository root is `root`.
+    pub fn covers(&self, root: &std::path::Path) -> bool {
+        self.trees.contains_key(root)
+    }
 }
 
 /// Prompt-history queries shorter than this many characters match nothing:

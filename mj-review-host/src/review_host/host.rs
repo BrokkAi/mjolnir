@@ -9,7 +9,10 @@ pub struct TurnReviewHost {
 
 /// What surfaces read without waiting for the host's task.
 pub struct HostShared {
-    pub views: Mutex<BTreeMap<String, RuntimeReviewView>>,
+    /// Every open review's view, by session and then review key. A review in
+    /// preparation or an operation in flight has a placeholder view whose key
+    /// starts with `~`, after every review's.
+    pub views: Mutex<BTreeMap<(String, String), RuntimeReviewView>>,
     pub changed: Arc<dyn Fn() + Send + Sync>,
     pub shutdown: tokio::sync::OnceCell<Result<(), String>>,
     /// Set when the daemon asks the host to stop, before the host's task
@@ -78,10 +81,13 @@ impl TurnReviewHost {
                 child_closure_owners: BTreeMap::new(),
                 sweep_queue: std::collections::VecDeque::new(),
                 reviews: BTreeMap::new(),
-                preparing: BTreeMap::new(),
+                preparations: BTreeMap::new(),
+                operations: BTreeMap::new(),
                 pending_open: BTreeMap::new(),
                 closing: BTreeSet::new(),
                 awaiting_capture_persistence: BTreeMap::new(),
+                review_state: BTreeMap::new(),
+                loading: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
                 startup_ready: false,
@@ -106,6 +112,10 @@ impl TurnReviewHost {
         // Retain the latest reviewer questions without blocking the daemon's
         // update loop.
         let _ = self.events.send(HostEvent::View {
+            protocol: view
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.operational.relay_protocol_version),
             session_id: session_id.to_owned(),
             snapshot: view
                 .snapshot
@@ -135,12 +145,14 @@ impl TurnReviewHost {
     pub async fn override_push(
         &self,
         session_id: &str,
+        path: Option<String>,
         overrides: Vec<ReviewOverride>,
     ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::OverridePush {
                 session_id: session_id.to_owned(),
+                path,
                 overrides,
                 reply,
             })
@@ -316,27 +328,42 @@ impl TurnReviewHost {
             .clone()
     }
 
-    /// Every open review, for a snapshot a surface renders.
+    /// One review per session, for a snapshot a surface renders: the session's
+    /// first, so a placeholder never hides a real review. A surface that shows
+    /// every review reads [`Self::views_of`].
     #[must_use]
     pub fn views(&self) -> Vec<RuntimeReviewView> {
-        self.shared
+        let views = self
+            .shared
             .views
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .cloned()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = BTreeSet::new();
+        views
+            .iter()
+            .filter(|((session, _), _)| sessions.insert(session.clone()))
+            .map(|(_, view)| view.clone())
             .collect()
     }
 
-    /// One session's review, if it has one.
+    /// One session's review, if it has one: its first, or a placeholder when
+    /// it has only a review in preparation.
     #[must_use]
     pub fn view(&self, session_id: &str) -> Option<RuntimeReviewView> {
+        self.views_of(session_id).into_iter().next()
+    }
+
+    /// Every review of one session that a surface shows.
+    #[must_use]
+    pub fn views_of(&self, session_id: &str) -> Vec<RuntimeReviewView> {
         self.shared
             .views
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(session_id)
-            .cloned()
+            .iter()
+            .filter(|((session, _), _)| session == session_id)
+            .map(|(_, view)| view.clone())
+            .collect()
     }
 
     pub async fn question_target(

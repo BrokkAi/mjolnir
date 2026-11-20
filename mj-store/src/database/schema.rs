@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 144;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 145;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2774,6 +2774,42 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 144 {
         migrate_origin_delta_archives(connection)?;
     }
+    // Breaking: a session's review state holds a list of open reviews
+    // (`open_reviews`) and a list of findings records (`push_findings`), so
+    // reviews of disjoint worktrees can run at the same time. The single
+    // `active` and `active_group` columns move into `open_reviews`, and
+    // `push_findings` becomes a JSON array. Older daemons read the removed
+    // columns and a single findings object, so they would see no open review
+    // and could start a second review over a restored one.
+    if version < 145 {
+        // A store that already has the list shape only needs the revision.
+        let convert =
+            if super::legacy_schema::table_has_column(connection, "turn_review_state", "active")? {
+                "ALTER TABLE turn_review_state ADD COLUMN open_reviews TEXT NOT NULL DEFAULT '[]';
+             UPDATE turn_review_state
+                 SET open_reviews = json_array(json_object(
+                     'active', active,
+                     'group', CASE WHEN active_group IS NULL THEN NULL ELSE json(active_group) END
+                 ))
+                 WHERE active IS NOT NULL OR active_group IS NOT NULL;
+             UPDATE turn_review_state
+                 SET push_findings = json_array(json(push_findings))
+                 WHERE push_findings IS NOT NULL;
+             ALTER TABLE turn_review_state DROP COLUMN active;
+             ALTER TABLE turn_review_state DROP COLUMN active_group;"
+            } else {
+                ""
+            };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {convert}
+             UPDATE schema_compatibility SET minimum_compatible_version = 145 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (145, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 145;
+             COMMIT;"
+        ))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3562,6 +3598,29 @@ pub(super) fn restore_github_v84_schema(connection: &Connection) {
         ).unwrap();
 }
 
+/// Rewinds revision 145 in a current-schema database: the single `active`
+/// and `active_group` columns and a single `push_findings` object return, and
+/// `open_reviews` goes, so a historical fixture has the shape older builds
+/// wrote. Does nothing to a store that already has that shape.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn restore_pre145_review_columns(connection: &Connection) {
+    if !legacy_schema::table_has_column(connection, "turn_review_state", "open_reviews").unwrap() {
+        return;
+    }
+    connection
+        .execute_batch(
+            "ALTER TABLE turn_review_state ADD COLUMN active TEXT;
+             ALTER TABLE turn_review_state ADD COLUMN active_group TEXT;
+             UPDATE turn_review_state SET
+                 active = json_extract(open_reviews, '$[0].active'),
+                 active_group = json_extract(open_reviews, '$[0].group');
+             UPDATE turn_review_state SET push_findings = json_extract(push_findings, '$[0]')
+                 WHERE push_findings IS NOT NULL;
+             ALTER TABLE turn_review_state DROP COLUMN open_reviews;",
+        )
+        .unwrap();
+}
+
 /// Rewinds the preference table in a current-schema database so an ad-hoc
 /// historical fixture has the singleton shape that existed before revision 101.
 #[cfg(any(test, feature = "test-support"))]
@@ -3583,6 +3642,9 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 145 {
+        restore_pre145_review_columns(connection);
+    }
     // Rewinding the ledger must also restore the constraint removed by 126,
     // otherwise historical harness-admission migrations see a modern table.
     if version < 126 {
@@ -5025,6 +5087,9 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 145 {
+            super::restore_pre145_review_columns(&connection);
+        }
         if version < 137 {
             connection
                 .execute_batch(
@@ -5243,6 +5308,7 @@ mod reader_tests {
         save_session_to(&path, &session).unwrap();
         let connection = Connection::open(&path).unwrap();
         drop_environment_schema(&connection);
+        restore_pre145_review_columns(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN no_github_credentials;
