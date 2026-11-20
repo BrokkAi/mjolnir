@@ -4555,6 +4555,17 @@ fn a_chatgpt_codex_launch_carries_no_api_key_on_any_target() {
 #[test]
 fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
     let home = tempfile::tempdir().unwrap();
+    let fresh = mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_owned());
+    for (target, launch) in launches_on_every_target(&fresh) {
+        assert_eq!(
+            launch.environment.get("CODEX_API_KEY").map(String::as_str),
+            Some("sk-target"),
+            "{target}"
+        );
+        assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+
+    let home = tempfile::tempdir().unwrap();
     let profile = codex_login_profile(home.path(), "apikey");
     for (target, launch) in launches_on_every_target(&profile) {
         assert_eq!(

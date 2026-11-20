@@ -116,7 +116,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
 /// address from; a profile that uses an API key keeps them.
 // Hard-won: c4e2838d: a leaked API key broke ChatGPT Codex turns
 #[test]
-fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
+fn codex_launch_protects_chatgpt_logins_and_allows_keys_for_fresh_profiles() {
     let environment = || {
         BTreeMap::from([
             ("OPENAI_API_KEY".to_owned(), "sk-svcacct-test".to_owned()),
@@ -161,12 +161,13 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
     );
     assert_eq!(launched.keys().collect::<Vec<_>>(), ["RUST_LOG"]);
 
-    // A profile with no login yet has no key of its own either.
-    let fresh = profile(HarnessKind::Codex, Path::new("/does/not/exist"));
-    assert_eq!(fresh.codex_login(), Some(CodexLogin::ChatGpt));
+    // A profile without a login file can receive keys from the target.
+    let home = tempfile::tempdir().expect("temporary home");
+    let fresh = profile(HarnessKind::Codex, home.path());
+    assert_eq!(fresh.codex_login(), None);
     let mut launched = environment();
-    assert_eq!(fresh.exclude_harness_environment(&mut launched), every_name);
-    assert_eq!(launched.keys().collect::<Vec<_>>(), ["RUST_LOG"]);
+    assert!(fresh.exclude_harness_environment(&mut launched).is_empty());
+    assert_eq!(launched, environment());
 
     // `codex login --with-api-key` stores the key and says so.
     let api_key = tempfile::tempdir().expect("temporary home");
