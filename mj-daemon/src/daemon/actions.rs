@@ -559,7 +559,7 @@ pub(super) async fn handle_action(
             state.project_catalog(refresh, retry).await?,
         )),
         DaemonAction::CreateProject { sources } => {
-            let created = state.create_bundle_from_sources(sources).await?;
+            let created = state.create_bundle_from_sources(sources, false).await?;
             let id = created.bundle_id;
             let bundle = created
                 .config
