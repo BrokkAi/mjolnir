@@ -4466,7 +4466,7 @@ fn golden_rich_transcript_tool_presentation() {
         &serde_json::json!({
             "sessionUpdate": "tool_call",
             "toolCallId": "message-1",
-            "title": "mcp__mj-agents__send_message",
+            "title": "mcp.mj_agents.send_message",
             "status": "pending"
         }),
     );
@@ -4483,7 +4483,7 @@ fn golden_rich_transcript_tool_presentation() {
         }),
     );
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28));
-    click_rendered_text(&mut chat, &rows, "mcp__mj-agents__send_message");
+    click_rendered_text(&mut chat, &rows, "mj_send_message");
     append_transcript_golden_state(
         &mut output,
         "message input arrives while running",
@@ -4540,7 +4540,7 @@ fn golden_rich_transcript_tool_presentation() {
     );
     let mut restored = ChatState::from_materialized(&session, &[], &[]);
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 28));
-    click_rendered_text(&mut restored, &rows, "mcp__mj-agents__send_message");
+    click_rendered_text(&mut restored, &rows, "mj_send_message");
     append_transcript_golden_state(
         &mut output,
         "restored message includes original arguments",

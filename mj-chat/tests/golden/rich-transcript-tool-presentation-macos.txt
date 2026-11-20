@@ -244,7 +244,7 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach
 === message input arrives while running (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ ● Tool · running                                                            ▐│
-│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ mj_send_message                                                           ▐│
 │ │ Input arguments                                                           ▐│
 │ │ session_id:                                                               ▐│
 │ │ peer-session                                                              ▐│
@@ -274,7 +274,7 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 === message input survives result update (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ ✓ Tool · done                                                               ▐│
-│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ mj_send_message                                                           ▐│
 │ │ Input arguments                                                           ▐│
 │ │ session_id:                                                               ▐│
 │ │ peer-session                                                              ▐│
@@ -304,7 +304,7 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 === raw message includes arguments and receipt (80x28) ===
 ╭ Conversation · raw source ───────────────────────────────────────────────────╮
 │ ✓ Tool · done                                                               ▐│
-│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ mj_send_message                                                           ▐│
 │ │ Input arguments                                                           ▐│
 │ │ {                                                                         ▐│
 │ │   "session_id": "peer-session",                                           ▐│
@@ -334,7 +334,7 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 === restored message includes original arguments (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ ✓ Tool · done · 15:00                                                       ▐│
-│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ mj_send_message                                                           ▐│
 │ │ Input arguments                                                           ▐│
 │ │ session_id:                                                               ▐│
 │ │ peer-session                                                              ▐│
@@ -364,7 +364,7 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 === empty input replaces earlier message arguments (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ ✓ Tool · done · 15:00                                                       ▐│
-│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ mj_send_message                                                           ▐│
 │ │ Input arguments                                                           ▐│
 │ │ {}                                                                        ▐│
 │ │ {"status":"queued","via":"mailbox"}                                       ▐│
