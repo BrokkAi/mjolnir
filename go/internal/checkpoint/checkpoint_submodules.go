@@ -9,8 +9,10 @@ package checkpoint
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -87,25 +89,127 @@ func rejectDirtySubmodules(runner GitCommandRunner, repository string) error {
 // checked-out submodule in turn. prefix is the checkout's path from the
 // outermost top level.
 func inspectCheckout(runner GitCommandRunner, checkout string, prefix string, inspection *SubmoduleInspection) error {
-	panic("unported: mj-checkpoint/src/checkpoint/submodules.rs inspect_checkout")
+	links, err := gitlinks(runner, checkout)
+	if err != nil {
+		return err
+	}
+	if len(links) == 0 {
+		return nil
+	}
+	registered, err := registeredSubmodulePaths(runner, checkout)
+	if err != nil {
+		return err
+	}
+	for _, gitlink := range links {
+		named := core.Join(prefix, gitlink)
+		if _, ok := registered[checkpointNormalize(gitlink)]; !ok {
+			inspection.Unregistered = append(inspection.Unregistered, named)
+			continue
+		}
+		submodule := core.Join(checkout, gitlink)
+		// A submodule that was never checked out has no work to lose.
+		if !checkpointExists(core.Join(submodule, ".git")) {
+			continue
+		}
+		status, err := submoduleGit(runner, submodule, []string{"status", "--porcelain"})
+		if err != nil {
+			return err
+		}
+		if len(bytes.TrimLeft(status, " \t\n\f\r")) != 0 {
+			inspection.Dirty = append(inspection.Dirty, named)
+		}
+		if err := inspectCheckout(runner, submodule, named, inspection); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // gitlinks are the gitlink paths in the checkout's index, sorted and
 // deduplicated as a Rust BTreeSet<PathBuf>. A conflicted gitlink has one
 // entry per stage, so the paths are collected as a set.
 func gitlinks(runner GitCommandRunner, checkout string) ([]string, error) {
-	panic("unported: mj-checkpoint/src/checkpoint/submodules.rs gitlinks")
+	listed, err := submoduleGit(runner, checkout, []string{"ls-files", "--stage", "-z"})
+	if err != nil {
+		return nil, err
+	}
+	var links []string
+	for _, entry := range bytes.Split(listed, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		// Each entry is `<mode> <object> <stage>\t<path>`.
+		tab := bytes.IndexByte(entry, '\t')
+		if tab < 0 {
+			return nil, errors.New("failed to inspect submodules: git ls-files printed an entry with no path")
+		}
+		if bytes.HasPrefix(entry, []byte("160000 ")) {
+			path, err := core.FromGitBytes(entry[tab+1:])
+			if err != nil {
+				return nil, err
+			}
+			links = append(links, path)
+		}
+	}
+	slices.SortStableFunc(links, checkpointPathCompare)
+	return slices.CompactFunc(links, checkpointPathEqual), nil
 }
 
 // registeredSubmodulePaths are the submodule paths that `.gitmodules`
-// registers. Git's own submodule commands read the file from the working
-// tree, and so does this.
+// registers, keyed by normalized path. Git's own submodule commands read the
+// file from the working tree, and so does this.
 func registeredSubmodulePaths(runner GitCommandRunner, checkout string) (map[string]struct{}, error) {
-	panic("unported: mj-checkpoint/src/checkpoint/submodules.rs registered_submodule_paths")
+	registered := map[string]struct{}{}
+	if !checkpointExists(core.Join(checkout, ".gitmodules")) {
+		return registered, nil
+	}
+	command := gitCommand([]string{
+		"config",
+		"--file",
+		".gitmodules",
+		"--null",
+		"--get-regexp",
+		`^submodule\..*\.path$`,
+	})
+	output, err := runner.Run(checkout, &command)
+	if err != nil {
+		return nil, err
+	}
+	// `git config` exits 1 when no key matches.
+	if output.Status == 1 {
+		return registered, nil
+	}
+	if err := ensureInspected(&output); err != nil {
+		return nil, err
+	}
+	// With `--null`, each entry is the key, a newline, the value, and a NUL.
+	for _, entry := range bytes.Split(output.Stdout, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		newline := bytes.IndexByte(entry, '\n')
+		if newline < 0 {
+			return nil, errors.New("failed to inspect submodules: git config printed a key with no value")
+		}
+		path, err := core.FromGitBytes(entry[newline+1:])
+		if err != nil {
+			return nil, err
+		}
+		registered[checkpointNormalize(path)] = struct{}{}
+	}
+	return registered, nil
 }
 
 func submoduleGit(runner GitCommandRunner, directory string, arguments []string) ([]byte, error) {
-	panic("unported: mj-checkpoint/src/checkpoint/submodules.rs submodule_git")
+	command := gitCommand(arguments)
+	output, err := runner.Run(directory, &command)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureInspected(&output); err != nil {
+		return nil, err
+	}
+	return output.Stdout, nil
 }
 
 func gitCommand(arguments []string) GitCommand {

@@ -4,19 +4,99 @@ package checkpoint
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
+	"lukechampine.com/blake3"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 func rewriteKimiWorkspaceRegistry(data []byte, targetCwd string) ([]byte, error) {
-	panic("unported: mj-checkpoint/src/checkpoint/harness_paths.rs rewrite_kimi_workspace_registry")
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse Kimi workspace registry: %w", err)
+	}
+	registry, _ := value.(jsonvalue.Object)
+	listed, _ := registry.Get("workspaces")
+	workspaces, ok := listed.(jsonvalue.Object)
+	if !ok {
+		return nil, errors.New("Kimi workspace registry has no workspaces object")
+	}
+	keys := workspaces.Keys()
+	if len(keys) != 1 {
+		return nil, errors.New("Kimi workspace registry must contain one imported workspace")
+	}
+	entry, _ := workspaces.Get(keys[0])
+	workspace, ok := entry.(jsonvalue.Object)
+	if !ok {
+		return nil, errors.New("Kimi workspace registry entry is not an object")
+	}
+	workspace = workspace.Clone()
+	workspace.Set("root", checkpointLossy([]byte(targetCwd)))
+	if name, ok := checkpointFileName(targetCwd); ok && utf8.ValidString(name) {
+		workspace.Set("name", name)
+	}
+	registry.Set("workspaces", jsonvalue.Object{{Key: kimiWorkspaceKey(targetCwd), Value: workspace}})
+	return jsonvalue.Marshal(registry)
 }
 
 func rewriteKimiSessionIndex(data []byte, targetCwd string, harnessHome string) ([]byte, error) {
-	panic("unported: mj-checkpoint/src/checkpoint/harness_paths.rs rewrite_kimi_session_index")
+	text, err := gitDecodeUTF8(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode Kimi session index: %w", err)
+	}
+	var rewritten []byte
+	targetWorkspace := kimiWorkspaceKey(targetCwd)
+	for lineNumber, line := range checkpointLines(text) {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		value, err := jsonvalue.Parse([]byte(line))
+		if err != nil {
+			return nil, fmt.Errorf("parse Kimi session index line %d: %w", lineNumber+1, err)
+		}
+		entry, isObject := value.(jsonvalue.Object)
+		sessionValue, _ := entry.Get("sessionId")
+		sessionID, ok := sessionValue.(string)
+		if !ok {
+			return nil, errors.New("Kimi session index entry lacks sessionId")
+		}
+		if !isObject {
+			return nil, errors.New("Kimi session index entry is not an object")
+		}
+		entry.Set("workDir", checkpointLossy([]byte(targetCwd)))
+		sessionDir := core.Join(core.Join(core.Join(harnessHome, "sessions"), targetWorkspace), sessionID)
+		entry.Set("sessionDir", checkpointLossy([]byte(sessionDir)))
+		if rewritten, err = jsonvalue.Append(rewritten, entry); err != nil {
+			return nil, err
+		}
+		rewritten = append(rewritten, '\n')
+	}
+	if len(rewritten) == 0 {
+		return nil, errors.New("Kimi session index has no imported sessions")
+	}
+	return rewritten, nil
+}
+
+// checkpointLines splits text as Rust's `str::lines` does: on "\n", dropping
+// one "\r" before it, with no empty last line for a trailing newline.
+func checkpointLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.SplitAfter(text, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i, line := range lines {
+		line = strings.TrimSuffix(line, "\n")
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 // harnessStorageCwd is the working directory a harness keys its native
@@ -56,7 +136,26 @@ func isGrokSessionSummary(relativePath string) bool {
 // directory and home in `summary.json`; both must follow the restored
 // session to its new workspace.
 func rewriteGrokSessionSummary(data []byte, targetCwd string, harnessHome string) ([]byte, error) {
-	panic("unported: mj-checkpoint/src/checkpoint/harness_paths.rs rewrite_grok_session_summary")
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse Grok Build session summary: %w", err)
+	}
+	summary, ok := value.(jsonvalue.Object)
+	if !ok {
+		return nil, errors.New("Grok Build session summary is not a JSON object")
+	}
+	if _, ok := summary.Get("grok_home"); ok {
+		summary.Set("grok_home", checkpointLossy([]byte(harnessHome)))
+	}
+	if value, ok := summary.Get("info"); ok {
+		if info, ok := value.(jsonvalue.Object); ok {
+			if _, ok := info.Get("cwd"); ok {
+				info.Set("cwd", checkpointLossy([]byte(targetCwd)))
+				summary.Set("info", info)
+			}
+		}
+	}
+	return jsonvalue.Marshal(summary)
 }
 
 type grokSessionPath struct {
@@ -97,7 +196,25 @@ func grokSessionArtifact(relative string, sessionID string) bool {
 // working directory, or fall back to `{slug}-{blake3-hex-16}` when that
 // would exceed one filesystem name.
 func grokCwdKey(cwd string) string {
-	panic("unported: mj-checkpoint/src/checkpoint/harness_paths.rs grok_cwd_key")
+	// macOS APFS, Linux ext4, and NTFS all cap a name at 255 bytes.
+	const maxDirnameBytes = 255
+	const maxSlugChars = 40
+
+	text := checkpointLossy([]byte(cwd))
+	encoded := urlEncode(text)
+	if len(encoded) <= maxDirnameBytes {
+		return encoded
+	}
+	digest := blake3.Sum256([]byte(text))
+	leaf, ok := checkpointFileName(text)
+	if !ok || !utf8.ValidString(leaf) {
+		leaf = "workspace"
+	}
+	slug := grokSlug(leaf, maxSlugChars)
+	if slug == "" {
+		slug = "workspace"
+	}
+	return fmt.Sprintf("%s-%s", slug, core.LowerHex(digest[:])[:16])
 }
 
 // urlEncode percent-encodes every byte outside the RFC 3986 unreserved set,
@@ -122,7 +239,7 @@ func urlEncode(value string) string {
 func grokSlug(input string, maxChars int) string {
 	var slug strings.Builder
 	previousDash := false
-	for _, character := range strings.ToLower(input) {
+	for _, character := range grokLowercase(input) {
 		if character < 0x80 && (('a' <= character && character <= 'z') || ('A' <= character && character <= 'Z') || ('0' <= character && character <= '9')) {
 			slug.WriteRune(character)
 			previousDash = false
@@ -136,6 +253,14 @@ func grokSlug(input string, maxChars int) string {
 		trimmed = trimmed[:maxChars]
 	}
 	return trimmed
+}
+
+// grokLowercase is Rust's str::to_lowercase as far as it can reach an ASCII
+// letter: U+0130 lowercases to "i̇" there, where Go's ToLower gives a
+// bare "i". Every other difference stays outside ASCII, which the slug turns
+// into a dash either way.
+func grokLowercase(input string) string {
+	return strings.ToLower(strings.ReplaceAll(input, "İ", "i̇"))
 }
 
 // ClaudeProjectSlug is Claude Code's on-disk project-key algorithm, captured

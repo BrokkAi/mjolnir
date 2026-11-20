@@ -21,8 +21,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -557,7 +560,28 @@ func (w *stagedLinkedWorktree) UnmarshalJSON(data []byte) error {
 // Public because the same rule applies wherever a session delta is bundled,
 // including the raw-checkout conversion in the controller.
 func RepairOriginRefs(git GitCommandRunner, path string, id string) error {
-	panic("unported: mj-checkpoint/src/checkpoint.rs repair_origin_refs")
+	listed := func() (bool, error) {
+		ok, err := HasOriginRefs(git, path)
+		if err != nil {
+			return false, fmt.Errorf("repository '%s': %w", id, err)
+		}
+		return ok, nil
+	}
+	if ok, err := listed(); err != nil || ok {
+		return err
+	}
+	fetch, err := git.Run(path, &GitCommand{Arguments: []string{"fetch", "origin"}})
+	if err != nil {
+		return err
+	}
+	if ok, err := listed(); err != nil || ok {
+		return err
+	}
+	outcome := "repair fetch produced no origin refs"
+	if fetch.Status != 0 {
+		outcome = fmt.Sprintf("repair fetch failed with status %d: %s", fetch.Status, strings.TrimSpace(checkpointLossy(fetch.Stderr)))
+	}
+	return fmt.Errorf("repository '%s' has no origin refs to delta against; refusing to bundle full history (%s)", id, outcome)
 }
 
 // CurrentNativeSessionReceivedPrompt is whether the native session the
@@ -996,4 +1020,67 @@ func checkpointCanonicalize(path string) (string, error) {
 		return "", err
 	}
 	return filepath.EvalSymlinks(absolute)
+}
+
+// errCheckpointPrefixNotFound is Rust's StripPrefixError, which a failed
+// Path::strip_prefix leaves on the error chain.
+var errCheckpointPrefixNotFound = errors.New("prefix not found")
+
+// checkpointIsDir is Path::is_dir: it follows symlinks and is false when the
+// path cannot be inspected.
+func checkpointIsDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// checkpointExists is Path::exists: it follows symlinks and is false when the
+// path cannot be inspected.
+func checkpointExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// checkpointIsSymlink reports a symbolic link in Lstat information.
+func checkpointIsSymlink(info fs.FileInfo) bool {
+	return info.Mode()&fs.ModeSymlink != 0
+}
+
+// checkpointDebugString renders text as Rust's `{:?}` does for a str.
+func checkpointDebugString(text string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i, r := range text {
+		switch {
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == 0:
+			b.WriteString(`\0`)
+		case r == utf8.RuneError && !strings.HasPrefix(text[i:], "�"):
+			// Invalid UTF-8 cannot occur in a Rust str; keep the byte visible.
+			fmt.Fprintf(&b, `\u{%x}`, text[i])
+		case !unicode.IsGraphic(r) || unicode.In(r, unicode.Mn, unicode.Me):
+			// Rust escapes non-printable and grapheme-extending characters.
+			fmt.Fprintf(&b, `\u{%x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// checkpointSortArtifacts sorts artifacts by relative path as Rust's stable
+// `sort_by` on PathBuf does.
+func checkpointSortArtifacts(artifacts []core.NativeArtifact) {
+	slices.SortStableFunc(artifacts, func(left, right core.NativeArtifact) int {
+		return checkpointPathCompare(left.RelativePath, right.RelativePath)
+	})
 }
