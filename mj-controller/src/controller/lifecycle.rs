@@ -105,10 +105,14 @@ impl Controller {
         ignore_nested_repositories: bool,
     ) -> Result<CheckpointExportPolicy> {
         let checkout = self.state.checkout(session_id)?;
-        if checkout
+        let origin_delta = match checkout
             .managed_worktree()
-            .is_some_and(mj_core::state::ManagedWorktree::uses_origin_delta_suspend)
+            .filter(|clone| clone.uses_origin_delta_suspend())
         {
+            Some(clone) => OriginDeltaSuspend::applies(self, session_id, &clone.worktree_root)?,
+            None => false,
+        };
+        if origin_delta {
             Ok(CheckpointExportPolicy::OriginDelta)
         } else if ignore_nested_repositories {
             Ok(CheckpointExportPolicy::IgnoreNestedRepositories)

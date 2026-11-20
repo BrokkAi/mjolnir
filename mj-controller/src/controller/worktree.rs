@@ -2258,11 +2258,14 @@ fn create_managed_clone_with_snapshot(
         }
         let notices = if let Some(snapshot) = snapshot {
             let mut notices = snapshot.notices.clone();
-            notices.extend(mj_checkpoint::snapshot::restore_workspace_snapshot(
-                &mj_checkpoint::archive::SystemGit,
-                snapshot,
-                &staging,
-            )?);
+            // Restore runs Git fetches; keep them off the async workers.
+            notices.extend(mj_core::runtime::off_async_worker(|| {
+                mj_checkpoint::snapshot::restore_workspace_snapshot(
+                    &mj_checkpoint::archive::SystemGit,
+                    snapshot,
+                    &staging,
+                )
+            })?);
             notices
         } else {
             Vec::new()

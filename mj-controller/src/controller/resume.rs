@@ -1747,6 +1747,19 @@ impl Controller {
             target_id,
         )
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        // An origin-delta checkpoint restores only into its own clone so far.
+        // Refuse a move to another target here, before Resume is accepted.
+        if (transferring_workspace || plan != ResumePlan::InPlace)
+            && archive_manifest
+                .repositories
+                .iter()
+                .any(|repository| repository.metadata.origin_delta.is_some())
+        {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "This session's checkpoint can be resumed only on its original target for now. Resume it there; it can then be moved.",
+            )
+            .into());
+        }
         // A worktree that stays put is reached with the machine's current ssh
         // options; only its location had to match (J-21).
         if plan == ResumePlan::InPlace

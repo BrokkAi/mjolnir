@@ -2392,11 +2392,15 @@ fn capture_prepared_workspace(
         });
     }
     let prerequisites = pack_prerequisites(runner, checkout, &tips, &exclusions.objects)?;
+    // Pack against the recorded prerequisites, not every exclusion. An
+    // exclusion that is not an ancestor of the saved state can share blobs
+    // with it; restore never checks for such a tip, so those objects must
+    // travel in the pack.
     let owned = write_snapshot_pack(
         runner,
         checkout,
         &tips,
-        &exclusions.objects,
+        &prerequisites,
         &repository.pack_path,
     )?;
     let pack = owned.as_ref().map(|path| path.to_path_buf());

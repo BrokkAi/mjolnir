@@ -4345,7 +4345,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA + 1,
     ] {
         let incompatible = temp
             .path()

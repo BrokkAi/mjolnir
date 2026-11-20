@@ -14,6 +14,38 @@ pub(super) struct OriginDeltaSuspend {
 }
 
 impl OriginDeltaSuspend {
+    /// Whether this suspend captures OriginDelta. An accepted suspend keeps
+    /// the capture it started with, even after its worker has exited. A new
+    /// one needs a live worker that can quiesce the checkout and a clone with
+    /// an origin to delta against; otherwise it keeps the capture this
+    /// release replaced, so an older worker or an originless clone suspends
+    /// as it did before the upgrade.
+    pub(super) fn applies(controller: &Controller, session_id: &str, clone: &std::path::Path) -> Result<bool> {
+        let (_, root) = controller.worker_placement(session_id)?;
+        let root = PathBuf::from(root);
+        mj_core::runtime::off_async_worker(|| -> Result<bool> {
+            if wire::read::<String>(&root, wire::ACCEPTED)?.is_some() {
+                return Ok(true);
+            }
+            let capable = match wire::read::<wire::WorkerIdentity>(&root, wire::CAPABILITY)? {
+                Some(worker) => worker.is_alive()?,
+                None => false,
+            };
+            if !capable {
+                return Ok(false);
+            }
+            use mj_checkpoint::archive::GitCommandRunner;
+            let origin = mj_checkpoint::archive::SystemGit.run(
+                clone,
+                &mj_checkpoint::archive::GitCommand {
+                    arguments: ["config", "--get", "remote.origin.url"].map(Into::into).into(),
+                    ..Default::default()
+                },
+            )?;
+            Ok(origin.status == 0 && !origin.stdout.trim_ascii().is_empty())
+        })
+    }
+
     pub(super) fn load(controller: &Controller, session_id: &str) -> Result<Self> {
         let checkout = controller.state.checkout(session_id)?;
         let checkout = checkout
@@ -249,9 +281,22 @@ impl OriginDeltaSuspend {
                 }
                 connection
             } else {
-                restart.swap_admission = Some(crate::upgrade::activity_unless_draining(
-                    "start managed clone suspend worker",
-                )?);
+                const LABEL: &str = "start managed clone suspend worker";
+                // A draining handoff refuses the swap. Step aside instead of
+                // failing the accepted suspend: either the handoff closes the
+                // gate, which interrupts this lifecycle for shutdown and the
+                // next daemon resumes it from its durable intent, or the drain
+                // lapses and the swap is admitted.
+                restart.swap_admission = Some(loop {
+                    match crate::upgrade::activity_unless_draining(LABEL) {
+                        Ok(work) => break work,
+                        Err(_) if crate::upgrade::is_draining() => {
+                            executor.begin_resumable_work()?;
+                            executor.end_resumable_work(LABEL)?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                });
                 let result = controller
                     .restart_worker_with_installed_binary(session_id, executor, restart)
                     .await;
