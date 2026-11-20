@@ -92,7 +92,9 @@ import "embed"
 //go:embed mj-tui/tests/fixtures/quota-provider-readings.json
 //go:embed mj-worker-staging/src/worker_binary/profile_receiver.pl
 //go:embed mj-worker-staging/tests/fixtures/container-attachment-mounts.json
+//go:embed mj-worker/assets/opencode-guardian.js
 //go:embed mj-worker/assets/opencode-mailbox.js
+//go:embed mj-worker/src/acp/guardian/OPENAI_CODEX_NOTICE.txt
 //go:embed mj-worker/src/acp/guardian/policy.md
 //go:embed mj-worker/src/acp/guardian/policy_template.md
 //go:embed mj-worker/src/acp/testdata/antigravity_project_grants.json
