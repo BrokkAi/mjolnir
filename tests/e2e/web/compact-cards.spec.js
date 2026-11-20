@@ -1240,6 +1240,32 @@ test('composer steering survives reconnect and Escape never confirms cancellatio
   await expect(composer).toHaveText('keep this draft');
 });
 
+// Hard-won: f1947384e: worker-issued browser controls stayed visible under a held Move.
+test('a held Move hides worker-issued turn controls', async ({ page }) => {
+  const parent = session('held-move', 'project', 'Project', {
+    capabilities: { prompt: true, interrupt_turn: true },
+  });
+  parent.active_prompt_id = 'turn-one';
+  parent.chat_phase = 'running';
+  parent.turn_controls = {
+    status: 'ready',
+    primary: { kind: 'steer', command: { type: 'steer', data: { active_prompt_id: 'turn-one', queued_prompt_id: 'next' } } },
+    interrupt: { type: 'cancel_turn_for', data: { active_prompt_id: 'turn-one' } },
+  };
+  const state = await mount(page, [parent]);
+  await card(page, parent.id).click();
+  await expect(page.locator('#cancel-turn')).toBeVisible();
+  await expect(page.locator('#turn-actions')).toBeVisible();
+
+  parent.verdict = { live_dashboard: true, move_queue_held: true };
+  parent.capabilities.interrupt_turn = false;
+  await refresh(page, state);
+  await expect(page.locator('#cancel-turn')).toBeHidden();
+  await expect(page.locator('#turn-actions')).toBeHidden();
+  await page.locator('#prompt-text').press('Escape');
+  expect(state.actions).toHaveLength(0);
+});
+
 test('a moved parent keeps 23 native histories without claiming any are working', async ({ page }) => {
   const parent = session('native-parent', 'project', 'Project');
   parent.native_subagents = Array.from({ length: 23 }, (_, i) => ({

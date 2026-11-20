@@ -44,18 +44,14 @@ fn interrupt_targets<'a>(
         if !seen.insert(id) {
             continue;
         }
-        if verdict(id).is_some_and(|v| v.move_queue_held)
-            || runtime
-                .native_agents
-                .get(id)
-                .and_then(|native| verdict(&native.agent.owner_session_id))
-                .is_some_and(|v| v.move_queue_held)
-        {
-            // A native child shares its owner's worker and must not provide
-            // a way to interrupt work already admitted by the Move.
-            continue;
-        }
-        if verdict(id).is_some_and(|v| v.interrupt_member) {
+        let native_owner_held = runtime
+            .native_agents
+            .get(id)
+            .and_then(|native| verdict(&native.agent.owner_session_id))
+            .is_some_and(|v| v.move_queue_held);
+        // Native children share their owner's worker. Managed descendants
+        // have independent workers and are visited even under a held Move.
+        if !native_owner_held && verdict(id).is_some_and(|v| v.interrupt_member) {
             targets.push(id);
         }
         pending.extend(children.get(id).into_iter().flatten().map(|(id, _)| *id));
@@ -116,6 +112,20 @@ fn has_waiting_form(view: Option<&RuntimeSessionView>) -> bool {
         .is_some_and(|view| !view.pending_elicitations.is_empty())
 }
 
+fn turn_interrupt_command(
+    live: Option<&mj_core::relay::RelayOperationalState>,
+) -> Result<RelayCommand> {
+    let command = live.and_then(|live| live.turn_controls.as_ref()?.interrupt.as_ref());
+    // A raw cancel can hit a newly started prompt after autonomous
+    // goal work settles between capture and worker admission.
+    ensure!(
+        !live.is_some_and(|live| live.goal.running() && live.active_prompt.is_none())
+            || matches!(command, Some(RelayCommand::CancelTurnFor { .. })),
+        "this worker cannot target the current autonomous goal turn; open the session to use its goal controls"
+    );
+    Ok(command.cloned().unwrap_or(RelayCommand::CancelTurn))
+}
+
 fn own_verdict(
     runtime: &RuntimeProjection,
     id: &str,
@@ -170,12 +180,17 @@ fn own_verdict(
                 .get(id)
                 .is_some_and(|tail| tail.header.active_turn.is_some())
     });
-    let interrupt_member = state.has_live_worker()
-        && live.is_some()
-        && (running || form || super::attention::semantic_question(runtime, id).is_some());
+    let question = !form && super::attention::semantic_question(runtime, id).is_some();
+    let unfinished_turn =
+        state.has_live_worker() && live.is_some() && (running || form || question);
     let active_work = state.has_live_worker()
         && !form
-        && (running || activity.as_ref().is_some_and(|state| !state.is_idle()));
+        && (running
+            || activity
+                .as_ref()
+                .is_some_and(|state| state.has_work_in_flight()));
+    let can_interrupt = !queue_held && !form && state.has_live_worker();
+    let turn_targetable = !queue_held && unfinished_turn && turn_interrupt_command(live).is_ok();
     let failed_first_launch = runtime.metadata.failed_launch_retries.contains(id);
     let resume = if failed_first_launch && operation == Ready {
         Ready
@@ -211,9 +226,11 @@ fn own_verdict(
                 mj_client::usage_format::SessionActivity::of(live).is_working(None, form)
             }),
         active_work,
-        unfinished: interrupt_member || active_work,
-        interrupt: !queue_held && running && !form && state.has_live_worker(),
-        interrupt_member,
+        unfinished: unfinished_turn || active_work,
+        interrupt: can_interrupt && running && turn_targetable,
+        interrupt_shell: can_interrupt
+            && live.is_some_and(|live| !live.active_user_shells.is_empty()),
+        interrupt_member: !queue_held && unfinished_turn && (question || turn_targetable),
         stop: if state.is_active() {
             if operation == TransitionFailed {
                 Ready
@@ -497,15 +514,7 @@ impl RuntimeState {
             );
             RelayCommand::DismissQuestion { question }
         } else {
-            let command = live.and_then(|live| live.turn_controls.as_ref()?.interrupt.clone());
-            // A raw cancel can hit a newly started prompt after autonomous
-            // goal work settles between capture and worker admission.
-            ensure!(
-                !live.is_some_and(|live| live.goal.running() && live.active_prompt.is_none())
-                    || matches!(command, Some(RelayCommand::CancelTurnFor { .. })),
-                "this worker cannot target the current autonomous goal turn; open the session to use its goal controls"
-            );
-            command.unwrap_or(RelayCommand::CancelTurn)
+            turn_interrupt_command(live)?
         };
         self.session_manager
             .session(id)
@@ -567,17 +576,8 @@ mod tests {
     use super::*;
     use mj_core::native_agent::{NativeAgent, NativeAgentCapabilities, NativeAgentSummary};
 
-    #[tokio::test]
-    async fn interrupt_all_offer_and_execution_cover_the_only_cancellable_native_child() {
-        let mut manager = super::super::tests::TestRemoteManager::for_session("parent").await;
-        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
-        let parent =
-            super::super::tests::runtime_test_session("parent", "default", SessionState::Running);
-        let mut capture = RuntimeProjection {
-            records: [("parent".into(), parent)].into_iter().collect(),
-            ..Default::default()
-        };
-        let native = |id: &str, cancellable, state| NativeAgentSummary {
+    fn native(id: &str, cancellable: bool, state: NativeAgentState) -> NativeAgentSummary {
+        NativeAgentSummary {
             agent: NativeAgent {
                 owner_session_id: "parent".into(),
                 session_id: id.into(),
@@ -600,6 +600,18 @@ mod tests {
             pending_input_message: None,
             pending_input_request_id: None,
             pending_input_raised_at_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupt_all_offer_and_execution_cover_the_only_cancellable_native_child() {
+        let mut manager = super::super::tests::TestRemoteManager::for_session("parent").await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let parent =
+            super::super::tests::runtime_test_session("parent", "default", SessionState::Running);
+        let mut capture = RuntimeProjection {
+            records: [("parent".into(), parent)].into_iter().collect(),
+            ..Default::default()
         };
         for summary in [
             native("running", true, NativeAgentState::Running),
@@ -644,12 +656,69 @@ mod tests {
         view.operational = Some(live.into());
         capture.sessions.insert("parent".into(), view);
         project(&mut capture, &before);
+        assert!(capture.verdicts["parent"].active_work);
         assert!(capture.verdicts["parent"].unfinished);
         assert!(!capture.verdicts["parent"].interrupt_all);
 
-        // A harness-owned goal can run without either a prompt or a
-        // materialized active turn. It still adds the owning session.
-        let before = capture.clone();
+        for activity in [
+            mj_core::activity::ActivityState::Expecting { since_ms: 1 },
+            mj_core::activity::ActivityState::Goal,
+        ] {
+            let before = capture.clone();
+            let view = capture.sessions.get_mut("parent").unwrap();
+            view.operational.as_mut().unwrap().activity = Some(activity);
+            project(&mut capture, &before);
+            assert!(!capture.verdicts["parent"].active_work);
+            assert!(!capture.verdicts["parent"].unfinished);
+        }
+    }
+
+    fn insert_running_session(capture: &mut RuntimeProjection, id: &str) {
+        capture.records.insert(
+            id.into(),
+            super::super::tests::runtime_test_session(id, "default", SessionState::Running),
+        );
+        let mut live = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+        live.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        let mut view = RuntimeSessionView::from_managed(id.into(), Default::default());
+        view.operational = Some(live.into());
+        capture.sessions.insert(id.into(), view);
+    }
+
+    fn insert_managed_child(capture: &mut RuntimeProjection) {
+        insert_running_session(capture, "child");
+        capture.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentMetadata {
+                kind: SubagentKind::Worker,
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: String::new(),
+                profile_id: "default".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: String::new(),
+                created_at: String::new(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            },
+        );
+    }
+
+    // Hard-won: f1947384e: single-session Interrupt offered an untargetable autonomous goal.
+    #[tokio::test]
+    async fn single_interrupt_excludes_untargetable_autonomous_goal() {
+        let mut manager =
+            super::super::tests::TestRemoteManager::for_sessions(&["parent", "child"]).await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let parent =
+            super::super::tests::runtime_test_session("parent", "default", SessionState::Running);
+        let mut capture = RuntimeProjection {
+            records: [("parent".into(), parent)].into_iter().collect(),
+            ..Default::default()
+        };
         let mut live = mj_core::relay::RelaySnapshot::new("parent".into()).operational_state();
         live.goal.execution = Some(mj_core::goal::GoalExecution {
             version: 1,
@@ -660,8 +729,20 @@ mod tests {
         let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
         view.operational = Some(live.into());
         capture.sessions.insert("parent".into(), view);
+        project(&mut capture, &Default::default());
+        assert!(!capture.verdicts["parent"].interrupt);
+        assert!(capture.verdicts["parent"].unfinished);
+        assert!(!capture.verdicts["parent"].interrupt_all);
+        assert_eq!(capture.verdicts["parent"].interrupt_count, 0);
+        let result = runtime
+            .interrupt_all_in_capture(&capture, "parent")
+            .await
+            .unwrap();
+        assert_eq!(result.requested, 0);
+
+        let before = capture.clone();
+        insert_managed_child(&mut capture);
         project(&mut capture, &before);
-        assert!(capture.verdicts["parent"].interrupt);
         assert!(capture.verdicts["parent"].interrupt_all);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 1);
         let (outcome, commands) = tokio::join!(
@@ -670,9 +751,88 @@ mod tests {
         );
         let result = outcome.unwrap();
         assert_eq!(result.requested, 1);
-        assert_eq!(result.failures.len(), 1);
-        assert_eq!(result.failures[0].0, "parent");
-        assert!(result.failures[0].1.contains("autonomous goal turn"));
-        assert!(commands.is_empty());
+        assert!(result.failures.is_empty());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "child");
+
+        let before = capture.clone();
+        let exact_interrupt = RelayCommand::CancelTurnFor {
+            active_prompt_id: "goal".into(),
+        };
+        let view = capture.sessions.get_mut("parent").unwrap();
+        view.operational.as_mut().unwrap().turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Ready,
+            primary: None,
+            interrupt: Some(exact_interrupt.clone()),
+            message: None,
+        });
+        project(&mut capture, &before);
+        assert!(capture.verdicts["parent"].interrupt);
+        assert_eq!(capture.verdicts["parent"].interrupt_count, 2);
+        let (outcome, commands) = tokio::join!(
+            runtime.submit_turn_interrupt(&capture, "parent", false),
+            manager.answer_submissions(Vec::new()),
+        );
+        outcome.unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].2, exact_interrupt);
+    }
+
+    // Hard-won: f1947384e: Interrupt All skipped independent children of a parent with a held Move.
+    #[tokio::test]
+    async fn interrupt_all_visits_managed_child_under_held_move() {
+        let mut manager =
+            super::super::tests::TestRemoteManager::for_sessions(&["parent", "child"]).await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let mut capture = RuntimeProjection::default();
+        insert_running_session(&mut capture, "parent");
+        insert_managed_child(&mut capture);
+        let native = native("native", true, NativeAgentState::Running);
+        capture.native_agents.insert(native.agent.view_id(), native);
+        project(&mut capture, &Default::default());
+        assert_eq!(capture.verdicts["parent"].interrupt_count, 3);
+
+        let before = capture.clone();
+        let mut operation =
+            super::super::tests::retained_startup_test_move(&capture.records["parent"]);
+        operation.phase = mj_core::state::MovePhase::Failed;
+        capture.moves.insert("parent".into(), operation);
+        project(&mut capture, &before);
+        let parent = capture.verdicts["parent"];
+        assert!(!parent.interrupt_member);
+        assert!(parent.unfinished);
+        assert!(parent.interrupt_all);
+        assert_eq!(parent.interrupt_count, 1);
+
+        let (outcome, commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        let result = outcome.unwrap();
+        assert_eq!(result.requested, 1);
+        assert!(result.failures.is_empty());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "child");
+        assert!(manager.stopped_tasks.is_empty());
+
+        for activity in [
+            mj_core::activity::ActivityState::Expecting { since_ms: 1 },
+            mj_core::activity::ActivityState::Goal,
+        ] {
+            let before = capture.clone();
+            let live = capture
+                .sessions
+                .get_mut("child")
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap();
+            live.harness_turn = None;
+            live.activity = Some(activity);
+            project(&mut capture, &before);
+            assert!(!capture.verdicts["child"].unfinished);
+            // Only the native child still counts toward lifecycle warnings.
+            assert_eq!(capture.verdicts["parent"].unfinished_children, 1);
+        }
     }
 }
