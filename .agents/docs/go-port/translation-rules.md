@@ -174,7 +174,9 @@ fixed vocabulary and read like ordinary Go: every name is PascalCase, joined
 without underscores, over the path people write in Rust.
 `tokio::sync::mpsc::channel` is `tokio.SyncMpscChannel`,
 `std::fs::read_to_string` is `rsfs.ReadToString`, `serde_json::to_string` is
-`serdejson.ToString`, `Mutex::new` is `rssync.MutexNew`. Look a name up in the
+`serdejson.ToString`, `Mutex::new` is `rssync.MutexNew`. Where PascalCase
+would make two Rust names one (`bytesize::KB` and `bytesize::kb`), a runtime
+package keeps the Rust spelling (`bytesize.KB`). Look a name up in the
 package (its `doc.go` lists what it covers) instead of deriving it. The
 catalogue lists the packages.
 
