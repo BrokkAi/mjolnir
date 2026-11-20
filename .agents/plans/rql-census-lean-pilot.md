@@ -11,11 +11,16 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 ## Progress
 
 - [x] Slices 1 to 6 built and integrated (2026-11-20): selection and freeze (`brief/rql-census/pilot/select_pilot.py`), menu-step semantics (`menu-steps.md`, with worked cases kept apart in `menu-steps-cases.md`), the mock engine (`rql_mock/engine/`), the transport (`rql_mock/server.py`, `client.py`), the launch harness (`pilot_run.py`, `pilot_review.py`) and judging and readout (`pilot_judge.py`, `pilot_readout.py`), plus the fidelity gate (`rql_mock/fidelity*.py`).
-- [ ] Re-freeze the manifest under the plan commit that adds pooled prescience, and commit it before any writer runs.
-- [ ] Deploy the private instance `rql-census-pilot` and run the engine-only smoke on Fable.
+- [x] Re-freeze the manifest under the plan commit that adds pooled prescience (ce86d0cbb; committed in a19cfbfb0, same draw).
+- [x] Deploy the private instance `rql-census-pilot` (claude5, codex3, pinned Podman image, engine bundle on a loopback git daemon).
+- [ ] Engine-only smoke on Fable: launch, attestation, `/clear` acknowledgements, egress record and provider attribution verified on 2026-11-20. Coverage and paging, the R-loc reduction, cache hits, fresh re-asks and the cost of an accepted answer are still unverified; claude5's 5-hour window ran out.
 - [ ] Run the live fidelity gate and commit `fidelity/gate-report.json`'s summary; re-freeze with `--served-steps` if a step fails.
 - [ ] Smoke: one diff end to end, on codex3 just after its reset. codex2 (22%) is below the study's 25% floor.
-- [ ] Launch: on codex3 after its reset (about 2026-11-22 14Z), then codex4 after its reset (about 2026-11-24 15Z), both above the 25% floor, running whole diffs in turn.
+- [ ] Launch on the coordinator's schedule (Decision Log): Codex work from codex3's reset (about 11-22 14Z); Fable work from claude4's reset (about 11-23 05Z); judging through about 11-27.
+- [ ] Before the first judge run (about 11-23): judge preparation snapshots isolation evidence under `pilot.lock` (review override on 7088aaa4a). In progress.
+- [ ] Before the readout (about 11-27): keep the frozen egress source across judge commands, and have live readouts compute isolation from the selected runs directory (review overrides on 7088aaa4a). In progress.
+- [ ] Re-freeze the pilot binaries at the last reviewed mj commit before launch (currently `mj-13c4fc559`).
+- [ ] Tracked, no deadline: the recovery wedge when frozen inputs change while a writer waits for input (override on 546ebd478). Two mj host-only edge cases, also overridden: a Move with sub-agents is refused only after its children stop, and a `--base` outside branches and tags is lost on dissociation (overrides on dfb55808a/2ac06cfcc).
 
 ## Surprises & Discoveries
 

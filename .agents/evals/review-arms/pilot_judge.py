@@ -14,6 +14,8 @@ import subprocess
 import sys
 from tempfile import NamedTemporaryFile
 
+from pilot_lock import pilot_lock
+
 HERE = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = HERE / "brief/rql-census/pilot/manifest.json"
 DEFAULT_ROOT = Path("/mnt/optane/review-arms-pilot")
@@ -267,11 +269,29 @@ def isolation_report(egress=(), evidence=()):
     }
 
 
-def stored_isolation(root, runs, egress_log=None):
-    egress_path = egress_log or root / "egress.jsonl"
-    egress = ([json.loads(line) for line in egress_path.read_bytes().splitlines() if line.strip()]
-              if egress_log is not None or egress_path.is_file() else ())
-    return isolation_report(egress, isolation_evidence(root, runs))
+def read_egress(path, *, required=False):
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        if required:
+            raise
+        return {"path": str(path), "sha256": None}, []
+    records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    return {"path": str(path), "sha256": sha(raw)}, records
+
+
+def freeze_isolation(root, key, egress_log):
+    previous = key.get("egress_source")
+    with pilot_lock(root):
+        if previous is not None and (egress_log is None or str(egress_log.resolve()) == previous["path"]):
+            source, records = previous, key["isolation"]["egress_measurements"]
+        else:
+            path = (egress_log or root / "egress.jsonl").resolve()
+            source, records = read_egress(path, required=egress_log is not None)
+        isolation = isolation_report(records, isolation_evidence(root, root / "runs"))
+    if previous is not None and previous != source:
+        key.setdefault("egress_source_history", []).append(previous)
+    key.update(egress_source=source, isolation=isolation)
 
 
 def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256=None, egress_log=None):
@@ -348,9 +368,9 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
             hand_items = texts.copy()
             random.Random(f"{diff}/{kind}/hand-check").shuffle(hand_items)
             write_task(root / HAND_PATH / batch, {**payload, "items": hand_items})
-    isolation = stored_isolation(root, root / "runs", egress_log)
-    if not key_file.exists() or pin_manifest or key.get("isolation") != isolation:
-        key["isolation"] = isolation
+    previous = key.get("egress_source"), key.get("isolation")
+    freeze_isolation(root, key, egress_log)
+    if not key_file.exists() or pin_manifest or previous != (key["egress_source"], key["isolation"]):
         save(key_file, key)
     return key
 

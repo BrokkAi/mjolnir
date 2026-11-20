@@ -149,5 +149,7 @@ Use `pilot_readout.py --archived` with the judge key, judgments, delivery logs,
 manifest and label snapshot when the original outputs are no longer present.
 Judge preparation freezes the isolation findings and the attempt set in the
 key. If the engine probe wrote outside the run root, pass `--egress-log` to
-the judge commands so they freeze that file. The default readout also checks
-the current outputs for staleness.
+the first judge preparation. Later judge commands reuse the frozen egress
+records. An explicit different path replaces them and records the previous
+source in the key. The default readout checks current outputs for staleness
+and recomputes isolation from the selected runs and the current probe log.

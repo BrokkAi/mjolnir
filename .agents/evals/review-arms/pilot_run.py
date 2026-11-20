@@ -13,6 +13,7 @@ import tomllib
 
 import brief_driver
 import driver
+from pilot_lock import pilot_lock
 import pilot_review
 
 PILOT = Path(__file__).resolve().parent / "brief/rql-census/pilot"
@@ -525,17 +526,17 @@ def main():
     image = preflight(config, args.profile)
     driver.workspace_id()  # discover a missing workspace before touching quota
     args.run_root.mkdir(parents=True, exist_ok=True)
-    with (config_dir / "pilot.lock").open("a") as instance_lock, (args.run_root / "pilot.lock").open("a") as run_lock:
-        for lock in (instance_lock, run_lock):
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as e:
-                raise RuntimeError("another pilot owns the study instance or run root") from e
-        runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
+    with (config_dir / "pilot.lock").open("a") as instance_lock:
         try:
-            return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
-        finally:
-            subprocess.run(driver.mj_invocation("daemon", "stop"), check=True)
+            fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise RuntimeError("another pilot owns the study instance") from e
+        with pilot_lock(args.run_root):
+            runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
+            try:
+                return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
+            finally:
+                subprocess.run(driver.mj_invocation("daemon", "stop"), check=True)
 
 
 if __name__ == "__main__":
