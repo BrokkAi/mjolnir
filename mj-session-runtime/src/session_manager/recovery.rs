@@ -71,12 +71,15 @@ fn dead_worker_startup_failure(
                 .timestamp()
                 .unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64),
         );
-        // A harness that failed to open for lack of space is a disk-full
-        // exit: the storage owner restarts it once space returns. The same
-        // record still holds the marker then, so it must not end recovery.
-        return Ok(None);
     }
-    Ok(record.harness_startup_failure)
+    // A harness that failed to open for lack of space is a disk-full exit:
+    // the storage owner restarts it once space returns, and the same record
+    // still holds the marker then, so it must not end recovery. Judge that by
+    // the failure's own cause. The reason above also carries the bridge's
+    // stderr, which can mention an earlier, unrelated full disk.
+    Ok(record
+        .harness_startup_failure
+        .filter(|failure| !mj_core::targets::storage::reports_no_space(&failure.message)))
 }
 
 fn storage_forbids_restart(
