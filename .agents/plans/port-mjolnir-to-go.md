@@ -22,6 +22,7 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
 - [x] (2026-11-20 10:37Z) Milestone 0, declarations generator: `portmap.py declarations` writes a Go skeleton for all 849 production files (974 Go files, about 181,000 lines) with no syntax errors; about 1,200 places are marked `PORT:` for a person to settle, of which about 400 are ACP types awaiting `acp-mapping.md`.
 - [ ] Milestone 0, remaining: a check that every `rs.Format` string parses and its arguments match (the `rsfmt` vet), the `exhaustruct` and `go-check-sumtype` checks in the Go lane.
 - [x] (2026-11-20 11:41Z) First checkpoint of Milestone 1 pushed (`e641657c7`): fifteen runtime packages as far as they have got, about 114,000 lines, each green as far as it goes. None is finished.
+- [x] (2026-11-20 12:00Z) Moved the work to Opus at the owner's request: stopped the twenty Fable units, committed what was green (`4acea6d11`), wrote the twenty first-wave assignments as files under `.agents/docs/go-port/briefs/`, copied the units' scratch work out of `/tmp` to `~/.cache/mjolnir/build/go-port/wip/`, and restarted all twenty on Opus, each told where its predecessor's work is.
 - [ ] Milestone 1: runtime packages. Started 2026-11-20 10:10Z with twenty parallel units (the harness runs at most twenty at once; eight more assignments wait in `.agents/docs/go-port/briefs/`): the formatter; clone, equality, ordering and counted references; numbers, sorting and slices; `strs`; `collections`; `rspath` and `rsenv`; `rsio` and `rsfs`; `rssync`, `rsthread` and `rstime`; `serde` and `serdejson`; `toml` and `tomledit`; `anyhow`, `tracing`; the `tokio` core; `clap`; `chrono`; `similar`, `linkify`, `semver`, `bytesize`, `base64`; `unicodewidth`, `unicodesegmentation`; `vt100`, `vte`; `pulldowncmark`; `url`, `qrcode`, `regex`; and four analysis documents (`acp-mapping.md`, `counted-arcs.md`, `compressed-bytes.md`, `library-usage.md`). None is merged yet.
 - [ ] Milestone 2: foundation crates (`mj-core`, `mj-review`, `mj-transcript`, `mj-checkpoint`, `mj-build-id`).
 - [ ] Milestone 3: the Go worker (`mj-worker`, `mj-worker-bin`), driven by the Rust daemon.
@@ -49,6 +50,8 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
   Evidence: runs for `63c80bc5a` and `bedb7fcae` fail only in that job.
 - Observation: All twenty parallel units stopped at the same moment, about ninety minutes in, when the account's model usage limit was reached. Nothing they had written was committed, and three packages were mid-edit and did not build.
   Evidence: twenty "You've hit your Fable limit" failures at 11:25Z. Each unit resumed from its own transcript when sent a message once requests were accepted again, so no work was repeated. Since then `go/port/checkpoint.py` commits whatever is green at intervals, so a stop costs at most the work since the last checkpoint.
+- Observation: Some units kept their work outside the repository, in scratch copies under `/tmp` used through the go tool's `-overlay`, so as not to break the shared package build. `/tmp` is cleared on reboot.
+  Evidence: at the switch to Opus the formatter (about 8,000 lines in `/tmp/claude-rsdev`) and the number helpers (`/tmp/claude-rsnum/draft/`) existed only there. They were copied to `~/.cache/mjolnir/build/go-port/wip/`, and the common brief now requires installing into the package at least every hour.
 - Observation: Recorded oracle corpora are large. Fifteen unfinished packages had 22 MB of them.
   Evidence: `git diff --cached` at the first checkpoint. Stored gzip-compressed they are 6.9 MB with all the source.
 - Observation: The owner's `github.com/BrokkAi/acp-go` (v0.14.0, Apache-2.0, no dependencies) already reproduces the Rust ACP crate's JSON exactly and exposes `jsonvalue`, an exact `serde_json::Value`.
@@ -89,6 +92,9 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
 - Decision: Declarations (types, tags, registrations, signatures) are generated from the parsed Rust source; bodies and tests are translated by hand.
   Rationale: About 1,000 serialized types carry 2,100 serde attributes. A retyped attribute or a missing variant compiles and only shows up as a wire incompatibility. The generator also makes every signature of a crate exist before any body is written, which is what lets files inside a module cycle be ported in parallel.
   Date/Author: 2026-11-20, Claude.
+- Decision: Run the port's units on Opus (`claude-opus-5-5`) from 2026-11-20 12:00Z, set explicitly on each unit.
+  Rationale: The owner's instruction: the account's Fable usage is running out. Units already running on Fable were stopped and restarted rather than left to finish, so that no further Fable usage is spent.
+  Date/Author: 2026-11-20, owner; recorded by Claude.
 - Decision: The Go programs build into `target/go/<profile>/`, and a Go build run from there refuses to own the default instance, as a Rust build run from a Cargo target directory does.
   Rationale: AGENTS.md forbids pointing a test build at the default instance. `target*/` is already ignored by Git.
   Date/Author: 2026-11-20, Claude.
@@ -278,6 +284,8 @@ The Go toolchain is the one `mise.toml` pins (Go 1.27). The module path is `gith
 Go modules the port depends on, all pure Go: `github.com/BrokkAi/acp-go` (Agent Client Protocol and `jsonvalue`), `golang.org/x/sys`, `golang.org/x/term`, `golang.org/x/text`, `golang.org/x/crypto`, `modernc.org/sqlite` (SQLite), `github.com/klauspost/compress` (zstd), a BLAKE3 implementation, a WebAssembly runtime for tree-sitter, and a library that loads shared objects without C for ONNX Runtime. Each is recorded in the catalogue when it is added.
 
 The interfaces every product package relies on are fixed by the rulebook and must exist at the end of Milestone 1: `rs.Option[T]`, `rs.Format`, `rs.Clone`, `rs.Eq`, `rs.Cmp`, `rs.Todo`, `rs.RegisterStruct` and `rs.RegisterEnum` in `go/rs`; `collections.BTreeMap[K, V]` and its siblings; `rspath`, `rsfs`, `rsio`, `rssync`, `rstime`, `rsthread`, `rsprocess`; `rstest.AssertEq` and the oracle helper; `serde` and `serdejson`; `anyhow`; `tracing`; and in `go/crates/tokio`: `tokio.Fn[T]`, `tokio.Spawn`, `tokio.Select` with `Arm`, `ArmIf`, `ArmMatch`, `ArmFn`, `ArmElse`, `tokio.Start`, `tokio.Test`, the `Sync*` channel types and the `Time*` functions.
+
+Change note (2026-11-20 12:00Z): recorded the move to Opus, the briefs for the first wave, and where scratch work was preserved.
 
 Change note (2026-11-20): initial version, written after the survey and the first two port tools.
 
