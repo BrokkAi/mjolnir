@@ -59,6 +59,16 @@ It reports:
 
 ## Stage 2: mocked RQL
 
+**Lean pilot (decided by the user 2026-11-20, before any Stage 2 run).** Model quota is nearly out, so the pilot runs in a reduced form. Where this section and the rest of Stage 2 differ, this section governs the pilot. The test phase keeps the full design.
+- No hand check of the Sonnet replication's disagreements. It couldn't change the menu: the menu comes from development labels, and the trial's class and kind disagreements are all in test bugs.
+- The mock engine is independent of today's Bifrost limits. It answers each query completely by the documented semantics of its steps. It doesn't copy Bifrost's 100-row caps, its "results omitted" incompleteness, or any other implementation limit. What a writer sees is one fixed display budget, identical in every arm: the first 50 rows in a stable order, plus the total row count. A writer can narrow a query to see other rows. The EC2 measurement of today's Bifrost feeds only the census readout's "Bifrost today" column.
+- Arms: N (no brief), G (grep writer), R (mocked RQL: documented steps plus the menu steps contract, value_flow and guarded_path) and R-loc (R's workflow with every row reduced to its source locations, as defined under Recovery from a location). R0, H, D and the O and W conditions don't run in the pilot. They stay in the test-phase design, and the pilot readout says which contrasts it can't estimate.
+- Diffs: 35 development relation diffs, chosen by a seeded selection stratified by repo, committed before any writer runs. One brief per diff per writer arm, from Sol/high writers. Two Terra/high reviewers per brief, and two for N.
+- Engine: answers on demand from the post-change tree of the introducing commit (no diff, no `.git`, no network), cached per commit and query text, and shared by R and R-loc, so one query always gets one answer. Its model is Fable/high, from the Fable quota buckets, in place of Opus/high, to keep Opus for other work. Fable is the stronger model. Fidelity is measured on 20 queries per served step: every decisive query up to 10, then random ones. The same precision, recall, stability and prescience bars apply, reported with the wider intervals this sample gives. The full-size gate runs on test.
+- Judging: one Fable/high judge per reviewer output, for catch and per-fact recovery. One Fable/high judge per brief, for containment and the leak audit together. The blinding is unchanged. Hand checks cover only diffs where the arms' judged outcomes differ.
+- Cost: about 105 Sol writer sessions and 280 Terra reviewer sessions, about one Codex week at the measured rates (at most ~0.43% per Sol session and ~0.2% per Terra session). That's beyond codex2's 22%, so the pilot launches after codex3's reset (about 2026-11-22 14Z). Engine and judge calls (about 700 and 385) use the Fable buckets.
+
+
 **Language.**
 - Documented RQL at a pinned Bifrost commit, plus the missing steps that the development census ranks highest (expected: value-flow endpoints, field writes with values, argument values at call sites).
 - Each added step's semantics are written down before any answer is generated: which constructs it crosses and to what depth.
