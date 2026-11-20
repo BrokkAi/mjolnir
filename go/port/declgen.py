@@ -117,6 +117,117 @@ STD_TRAIT_METHODS = {
 }
 
 
+def go_string(text: str) -> str:
+    """A Go string literal for text."""
+    out = ['"']
+    for char in text:
+        code = ord(char)
+        if char == "\\":
+            out.append("\\\\")
+        elif char == '"':
+            out.append('\\"')
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\t":
+            out.append("\\t")
+        elif char == "\r":
+            out.append("\\r")
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\x{code:02x}")
+        elif code in (0x2028, 0x2029, 0xFEFF):
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+CFG_OS = {
+    "macos": "darwin", "linux": "linux", "windows": "windows", "freebsd": "freebsd", "ios": "ios",
+    "android": "android", "netbsd": "netbsd", "openbsd": "openbsd", "dragonfly": "dragonfly",
+}
+CFG_ARCH = {"x86_64": "amd64", "aarch64": "arm64", "x86": "386", "arm": "arm"}
+
+
+def cfg_constraint(text: str) -> str | None:
+    """A Go build constraint for one Rust `cfg` predicate, or None when Go
+    has no build-time equivalent."""
+    tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', text)
+    position = 0
+
+    def parse():
+        nonlocal position
+        if position >= len(tokens):
+            return None
+        token = tokens[position]
+        position += 1
+        if token in ("any", "all", "not") and position < len(tokens) and tokens[position] == "(":
+            position += 1
+            parts = []
+            while position < len(tokens) and tokens[position] != ")":
+                part = parse()
+                if part is None:
+                    return None
+                parts.append(part)
+                if position < len(tokens) and tokens[position] == ",":
+                    position += 1
+            position += 1
+            parts = list(dict.fromkeys(parts))
+            if token == "not":
+                if not parts:
+                    return None
+                inner = parts[0]
+                if " " in inner and not (inner.startswith("(") and inner.endswith(")")):
+                    inner = f"({inner})"
+                return "!" + inner
+            if not parts:
+                return None
+            if len(parts) == 1:
+                return parts[0]
+            joiner = " || " if token == "any" else " && "
+            return "(" + joiner.join(parts) + ")"
+        if position < len(tokens) and tokens[position] == "=":
+            value = tokens[position + 1].strip('"')
+            position += 2
+            if token == "target_os":
+                return CFG_OS.get(value)
+            if token == "target_arch":
+                return CFG_ARCH.get(value)
+            if token == "target_family":
+                return value if value in ("unix", "windows") else None
+            if token == "feature":
+                return "mj_" + value.replace("-", "_")
+            return None
+        if token in ("unix", "windows"):
+            return token
+        if token == "test":
+            # `any(test, feature = "test-support")`: the tests are built with the tag.
+            return "mj_test_support"
+        if token == "debug_assertions":
+            return "mj_debug"
+        return None
+
+    result = parse()
+    if result and result.startswith("(") and result.endswith(")"):
+        result = result[1:-1]
+    return result
+
+
+def cfg_suffix(constraint: str) -> str:
+    """The file name suffix for a build constraint."""
+    if re.fullmatch(r"mj_[a-z_]+", constraint) and constraint != "mj_debug":
+        return "_feat_" + constraint[3:]
+    text = constraint.replace("!", "non").replace("&&", "_and_").replace("||", "_or_")
+    text = re.sub(r"[^A-Za-z0-9_]", "", text)
+    text = re.sub(r"_+", "_", text)
+    suffix = "_cfg_" + text
+    last = suffix.split("_")[-1]
+    if last in portmap.GO_FILE_SUFFIXES and last != constraint:
+        # Go reads a trailing `_darwin` in a file name as a constraint of its own.
+        suffix += "_cfg"
+    return suffix
+
+
 def camel(name: str) -> str:
     text = pascal(name.lstrip("_")) if name.strip("_") else "underscore"
     text = text[:1].lower() + text[1:]
@@ -182,14 +293,114 @@ class Generator:
 
     # --- resolution -------------------------------------------------------
 
-    def _find_item(self, crate, file, name):
+    @staticmethod
+    def _find_item(file, name):
+        fallback = None
         for item in file["items"]:
             if item["name"] == name and item["kind"] in ("struct", "enum", "trait", "type", "union"):
-                return item
+                if not item["test_only"]:
+                    return item
+                fallback = fallback or item
+        return fallback
+
+    def _module_file(self, crate, parts):
+        """The file holding module `parts`, and the path left over."""
+        for length in range(len(parts), -1, -1):
+            module = "::".join(parts[:length])
+            file = crate.modules.get(module) or crate.inline.get(module)
+            if file is not None:
+                return file, parts[length:]
+        return None, parts
+
+    def _lookup_name(self, crate, file, segments, visited):
+        """Resolves a name as it would be seen from inside `file`'s module."""
+        key = (crate.dir, file["path"], tuple(segments))
+        if key in visited or len(visited) > 200:
+            return None
+        visited.add(key)
+        head = segments[0]
+        if len(segments) == 1:
+            item = self._find_item(file, head)
+            if item:
+                return ("item", crate, file, item)
+        globs = []
+        for use in file["uses"]:
+            parts = use["path"].split("::")
+            if use["glob"]:
+                globs.append(parts)
+            elif (use["alias"] or parts[-1]) == head and parts != segments:
+                hit = self._lookup_path(crate, file, parts + segments[1:], visited)
+                if hit:
+                    return hit
+        hit = self._lookup_path(crate, file, segments, visited)
+        if hit:
+            return hit
+        for parts in globs:
+            hit = self._lookup_path(crate, file, parts + segments, visited)
+            # A glob over a workspace module also brings in what that module
+            # imported from outside. A glob over an outside crate
+            # (`rayon::prelude::*`) cannot be checked, so it proves nothing.
+            if hit and (hit[0] == "item" or self._in_workspace(crate, file, parts)):
+                return hit
         return None
 
+    def _in_workspace(self, crate, file, parts) -> bool:
+        head = parts[0] if parts else ""
+        if head in ("crate", "self", "super"):
+            return True
+        if head in self.ws.by_lib:
+            return True
+        name = crate.deps.get(head) or crate.dev_deps.get(head)
+        if name in self.ws.by_package:
+            return True
+        module = [p for p in file["module"].split("::") if p]
+        child = "::".join(module + [head])
+        return child in crate.modules or child in crate.inline
+
+    def _lookup_path(self, crate, file, segments, visited):
+        """Resolves a path written in `file`: `crate::a::B`, `super::B`, `tokio::x::Y`, `child::B`."""
+        segments = [s for s in segments if s]
+        if not segments:
+            return None
+        head = segments[0]
+        own = crate if file["target"] in ("lib", "bin") else None
+        module = [p for p in file["module"].split("::") if p] if own else []
+        if head == "crate":
+            return self._lookup_module(crate, segments[1:], visited) if own else None
+        if head == "self":
+            return self._lookup_module(crate, module + segments[1:], visited)
+        if head == "super":
+            parent = list(module)
+            rest = list(segments)
+            while rest and rest[0] == "super":
+                parent = parent[:-1]
+                rest = rest[1:]
+            return self._lookup_module(crate, parent + rest, visited)
+        ws = self.ws
+        if head in ws.by_lib and (head in crate.deps or head in crate.dev_deps or ws.by_lib[head] is crate):
+            return self._lookup_module(ws.by_lib[head], segments[1:], visited)
+        if head in crate.deps or head in crate.dev_deps:
+            name = crate.deps.get(head) or crate.dev_deps.get(head)
+            if name in ws.by_package:
+                return self._lookup_module(ws.by_package[name], segments[1:], visited)
+            return ("extern", "::".join(segments))
+        if head in ("std", "core", "alloc"):
+            return ("extern", "::".join(segments))
+        if own and len(segments) > 1:
+            child = "::".join(module + [head])
+            if child in crate.modules or child in crate.inline:
+                return self._lookup_module(crate, module + segments, visited)
+        return None
+
+    def _lookup_module(self, crate, parts, visited):
+        file, left = self._module_file(crate, parts)
+        if file is None or not left:
+            return None
+        return self._lookup_name(crate, file, left, visited)
+
     def resolve(self, path_text: str, file=None, crate=None, depth: int = 0):
-        """`("item", crate, file, item)`, `("extern", "a::b::C")`, `("generic", name)` or None."""
+        """`("item", crate, file, item)`, `("extern", "a::b::C")`, `("generic", name)`,
+        `("prim", name)`, `("self", go name)` or None."""
         file = file or self.file
         crate = crate or self.crate
         segments = [s for s in path_text.split("::") if s]
@@ -201,58 +412,12 @@ class Generator:
                 return ("generic", head)
             if head == "Self" and self.self_type:
                 return self.self_type
+        hit = self._lookup_name(crate, file, segments, set())
+        if hit:
+            return hit
+        if len(segments) == 1:
             if head in PRIMITIVES:
                 return ("prim", head)
-        # An item of this file (or one of its inline modules).
-        if len(segments) == 1:
-            item = self._find_item(crate, file, head)
-            if item:
-                return ("item", crate, file, item)
-        ws = self.ws
-        aliases = {}
-        globs = []
-        for use in file["uses"]:
-            parts = use["path"].split("::")
-            if use["glob"]:
-                globs.append(parts)
-            else:
-                aliases[use["alias"] or parts[-1]] = parts
-        expanded = segments
-        if head in aliases and aliases[head] != segments and depth < 8:
-            expanded = aliases[head] + segments[1:]
-        target = ws._absolute(crate, file, expanded)
-        if target is None and len(segments) > 1:
-            # `child_module::Type` relative to this file's module.
-            base = file["module"].split("::") if file["module"] else []
-            target = ("crate", crate, base + segments)
-        if target and target[0] == "extern":
-            return ("extern", "::".join([target[1], *target[2]]))
-        if target and target[0] == "crate":
-            owner_crate, rest = target[1], target[2]
-            found = ws._owner_file(owner_crate, rest)
-            hops = 0
-            while found and found[0] == "foreign" and hops < 4:
-                owner_crate, rest = found[1], found[2]
-                found = ws._owner_file(owner_crate, rest)
-                hops += 1
-            if found and found[0] != "foreign":
-                owner_file, left = found
-                if left:
-                    item = self._find_item(owner_crate, owner_file, left[0])
-                    if item:
-                        return ("item", owner_crate, owner_file, item)
-                    # A re-export of something outside the workspace.
-                    for use in owner_file["uses"]:
-                        exported = use["alias"] or use["path"].split("::")[-1]
-                        if not use["glob"] and exported == left[0] and depth < 8:
-                            return self.resolve("::".join([use["path"], *left[1:]]), owner_file, owner_crate, depth + 1)
-        if len(segments) == 1:
-            for parts in globs:
-                if depth >= 8:
-                    break
-                hit = self.resolve("::".join(parts + [head]), file, crate, depth + 1)
-                if hit and hit[0] == "item":
-                    return hit
             if head in PRELUDE:
                 return ("extern", PRELUDE[head])
         return None
@@ -279,7 +444,16 @@ class Generator:
                 return "cenum"
             return "enum"
         if decl.get("fields_kind") == "tuple" and len(decl.get("fields", [])) == 1 and not decl["generics"]["params"]:
-            return "newtype"
+            inner = decl["fields"][0]["ty"]
+            text = inner.get("text", "")
+            # A Go defined type over a pointer, interface or function cannot
+            # have methods, so those newtypes stay structs with a field F0.
+            if inner.get("k") == "path" and inner["path"].split("::")[-1] in (
+                "String", "PathBuf", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "usize",
+                "isize", "f32", "f64", "bool", "char", "Vec", "Duration", "OsString",
+            ) and not text.startswith(("Arc", "Box", "Rc")):
+                return "newtype"
+            return "struct"
         if "Copy" in item.get("derives", []):
             return "copy"
         return "struct"
@@ -483,6 +657,17 @@ class Generator:
                 go = go % translated if translated else go.replace("[%s]", "")
             self.mark(go)
             return go
+        if rust.startswith("libc::") or rust.startswith("std::ffi::c_") or rust.startswith("std::os::raw::"):
+            scalar = {
+                "c_int": "int32", "c_uint": "uint32", "c_long": "int64", "c_ulong": "uint64", "c_char": "int8",
+                "c_uchar": "uint8", "c_short": "int16", "c_ushort": "uint16", "c_longlong": "int64",
+                "c_ulonglong": "uint64", "pid_t": "int32", "uid_t": "uint32", "gid_t": "uint32",
+                "mode_t": "uint32", "off_t": "int64", "size_t": "uint", "ssize_t": "int", "rlim_t": "uint64",
+                "time_t": "int64", "dev_t": "uint64", "ino_t": "uint64", "nfds_t": "uint64", "socklen_t": "uint32",
+                "c_void": "byte", "c_double": "float64", "c_float": "float32",
+            }.get(last)
+            if scalar:
+                return scalar
         crate_name = rust.split("::")[0]
         if crate_name == "std":
             module = "::".join(rust.split("::")[:-1])
@@ -504,6 +689,7 @@ class Generator:
         return f"{go}[{translated}]" if translated else go
 
     def mark(self, go: str) -> None:
+        go = re.sub(r"/\*.*?\*/", "", go)
         for package in re.findall(r"\b([a-z][a-z0-9]*)\.", go):
             self.used.add(package)
 
@@ -751,7 +937,7 @@ class Generator:
                 out.append(f"var _ = rs.RegisterDefault(func() {name} {{ return {name}_{default['name']} }})")
             self.generic_scope.pop()
             return out + [""]
-        marker = "is" + name[:1].upper() + name[1:]
+        marker = "is" + name[:1].upper() + name[1:].replace("_", "")
         methods = self.enum_methods(item)
         out.append(f"type {name}{params} interface {{")
         out.append(f"\t{marker}()")
@@ -820,11 +1006,24 @@ class Generator:
             for method in methods:
                 if not method["has_self"]:
                     continue
-                name, params, results, _ = other.signature(method, impl)
+                name, params, results, generics = other.signature(method, impl)
+                if generics:
+                    # A method with its own type parameters is a function in Go.
+                    continue
+                if name in self.variant_field_names(enum_item):
+                    name += "Method"
                 signatures.append(f"{name}({params}){results}")
             other.self_type = saved
             self.used |= other.used
         return signatures
+
+    @staticmethod
+    def variant_field_names(enum_item) -> set[str]:
+        names = set()
+        for variant in enum_item["decl"]["variants"]:
+            for index, field in enumerate(variant["fields"]):
+                names.add(pascal(field["name"]) if field["name"] is not None else f"F{index}")
+        return names
 
     def method_go_name(self, method, impl) -> str:
         trait = (impl.get("decl") or {}).get("trait") if impl else None
@@ -834,7 +1033,11 @@ class Generator:
                 return STD_TRAIT_METHODS[key]
             return pascal(method["name"])
         name = pascal(method["name"])
-        return name if method["vis"] == "pub" else lower_first(name)
+        if method["vis"] != "pub":
+            name = lower_first(name)
+            if name in portmap.GO_KEYWORDS:
+                name += "_"
+        return name
 
     def bound_substitutions(self, generics) -> tuple[dict, list[str]]:
         """Generic parameters that Go spells as a plain type.
@@ -928,6 +1131,7 @@ class Generator:
         self.generic_scope.pop()
         self.substitution_scope.pop()
         name = self.method_go_name(item, impl) if item["kind"] in ("method", "trait_fn") else None
+        self.last_param_names = [p.split(" ", 1)[0] for p in params]
         return name, ", ".join(params), text, generics
 
     def todo_body(self, item) -> list[str]:
@@ -958,7 +1162,8 @@ class Generator:
                 out += self.docs(method["docs"])
                 out.append(f"// PORT: impl for {self_ty.get('text', '?')}, a type this crate does not own.")
                 out.append(f"// rust: {method['signature']}")
-                name = pascal((trait["path"].split("::")[-1] if trait else "") + "_" + method["name"])
+                prefix = self.ws.module_go_prefix(self.crate, self.file, method)
+                name = lower_first(prefix) + "_" + (trait["path"].split("::")[-1] + "_" if trait else "") + method["name"]
                 _, params, results, generics = self.signature(method, impl)
                 receiver = self.go_type(self_ty, "param")
                 first = f"self_ {receiver}" + (", " if params else "")
@@ -978,28 +1183,26 @@ class Generator:
         if target_item["kind"] == "struct":
             for index, field in enumerate(target_item["decl"]["fields"]):
                 field_names.add(self.field_name(field, index))
+        elif shape == "enum":
+            field_names = self.variant_field_names(target_item)
         trait_name = trait["path"].split("::")[-1] if trait else None
         for method in methods:
             out += self.docs(method["docs"])
-            if method.get("cfg"):
-                out.append(f"// PORT: #[cfg({'; '.join(method['cfg'])})]")
             out.append(f"// rust: {method['signature']}")
             name, params, results, generics = self.signature(method, impl)
+            param_names = list(self.last_param_names)
             if name in field_names:
                 name += "Method"
-            if trait_name in ("From", "TryFrom", "Default", "FromStr") or not method["has_self"]:
+            if not method["has_self"]:
                 base = go_type.split(".")[-1]
-                if trait_name == "Default":
-                    fn_name = base + "Default"
-                elif trait_name in ("From", "TryFrom") and trait["args"]:
-                    source = re.sub(r"[^A-Za-z0-9]", "", self.go_type(trait["args"][0], "generic").split(".")[-1])
-                    fn_name = base + ("TryFrom" if trait_name == "TryFrom" else "From") + pascal(source)
-                elif trait_name == "FromStr":
-                    fn_name = base + "FromStr"
-                else:
-                    fn_name = base + pascal(method["name"])
-                    if method["vis"] != "pub" and not trait:
-                        fn_name = lower_first(fn_name)
+                fn_name = base + "_" + method["name"]
+                if trait and trait["args"]:
+                    # `impl From<A> for T` and `impl From<B> for T` are two functions.
+                    source = self.go_type(trait["args"][0], "generic").split("/*")[0]
+                    source = re.sub(r"[^A-Za-z0-9_]", "", source.split(".")[-1])
+                    fn_name += "_" + source
+                if (method["vis"] != "pub" and not trait) or not base[:1].isupper():
+                    fn_name = lower_first(fn_name)
                 both = declare
                 if generics:
                     both = "[" + ", ".join(filter(None, [declare.strip("[]"), generics.strip("[]")])) + "]"
@@ -1011,8 +1214,10 @@ class Generator:
                 # own type parameters: the body is a function, and each
                 # variant forwards to it.
                 base = go_type.split(".")[-1]
-                fn_name = base + pascal(method["name"])
-                if method["vis"] != "pub" and not trait:
+                fn_name = base + "_" + method["name"]
+                if trait:
+                    fn_name = base + "_" + trait_name + "_" + method["name"]
+                if (method["vis"] != "pub" and not trait) or not base[:1].isupper():
                     fn_name = lower_first(fn_name)
                 both = declare
                 if generics:
@@ -1022,7 +1227,7 @@ class Generator:
                 out.append(f"func {fn_name}{both}({first}{params}){results} {{")
                 out += self.todo_body(method) + [""]
                 if shape == "enum" and not generics:
-                    call_args = ", ".join(p.split(" ")[0] for p in params.split(", ") if p)
+                    call_args = ", ".join(param_names)
                     ret = "return " if results else ""
                     for variant in target_item["decl"]["variants"]:
                         variant_name = f"{go_type}_{variant['name']}"
@@ -1031,7 +1236,7 @@ class Generator:
                     out.append("")
                 continue
             receiver = "s"
-            taken = {p.split(" ")[0] for p in params.split(", ") if p}
+            taken = set(param_names)
             while receiver in taken:
                 receiver += "_"
             star = "" if shape in ("copy", "cenum", "newtype") and method["decl"]["receiver"]["kind"] != "mut" else "*"
@@ -1069,10 +1274,10 @@ class Generator:
         out.append("}")
         out.append("")
         for method, method_name, method_params, results in defaults:
-            out.append(f"// {name}Default{method_name} is the default body of {item['name']}::{method['name']}.")
+            out.append(f"// {name}_default_{method['name']} is the default body of {item['name']}::{method['name']}.")
             out.append(f"// rust: {method['signature']}")
             first = f"self_ {name}" + (", " if method_params else "")
-            out.append(f"func {name}Default{method_name}({first}{method_params}){results} {{")
+            out.append(f"func {name}_default_{method['name']}({first}{method_params}){results} {{")
             out += self.todo_body(method) + [""]
         self.self_type = saved_self
         self.generic_scope.pop()
@@ -1085,21 +1290,21 @@ class Generator:
             owner = item["owner"].split("::")[-1]
             hit = self.resolve(item["owner"])
             base = self.go_item_name(hit[1], hit[2], hit[3]) if hit and hit[0] == "item" else owner
-            name = base + pascal(item["name"])
-            if item["vis"] != "pub":
+            name = base.split(".")[-1] + "_" + item["name"]
+            if item["vis"] != "pub" or not name[:1].isupper():
                 name = lower_first(name)
         out = self.docs(item["docs"])
         go_type = self.go_type(decl["ty"])
         expr = decl["expr"]
         literal = None
-        if re.fullmatch(r'-?[0-9][0-9_]*', expr):
-            literal = expr.replace("_", "")
-        elif re.fullmatch(r'-?[0-9][0-9_]*(u8|u16|u32|u64|i8|i16|i32|i64|usize|isize)', expr):
-            literal = re.sub(r"(u8|u16|u32|u64|i8|i16|i32|i64|usize|isize)$", "", expr).replace("_", "")
-        elif re.fullmatch(r'"(?:[^"\\]|\\.)*"', expr) and "\\u{" not in expr and "\\x" not in expr:
-            literal = expr
-        elif expr in ("true", "false"):
-            literal = expr
+        value = decl.get("literal")
+        if value:
+            if value["kind"] == "str":
+                literal = go_string(value["value"])
+            elif value["kind"] in ("int", "float", "bool"):
+                literal = value["value"]
+            elif value["kind"] == "char":
+                literal = value["value"]
         keyword = "const" if literal is not None and go_type in (
             "string", "bool", "int", "uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32",
             "int64", "float32", "float64") else "var"
@@ -1121,83 +1326,143 @@ class Generator:
         self.generic_scope.pop()
         return out + [""]
 
-    def generate(self) -> str:
+    def bucket_of(self, cfgs) -> tuple[str, list[str]]:
+        """The build constraint an item's `cfg`s amount to ("" for none), and
+        notes for the predicates Go cannot express at build time."""
+        constraints = []
+        notes = []
+        for cfg in cfgs:
+            constraint = cfg_constraint(cfg)
+            if constraint is None:
+                notes.append(f"// PORT: #[cfg({cfg})] has no build tag; decide it at run time or by hand.")
+                self.notes += 1
+            elif constraint not in constraints:
+                constraints.append(constraint)
+        wrapped = [f"({c})" if "||" in c and len(constraints) > 1 else c for c in constraints]
+        return " && ".join(wrapped), notes
+
+    def generate_files(self) -> dict[str, str]:
+        """Go file path -> text. Items under a `cfg` go to a file of their own
+        with the matching `//go:build` line."""
         items = [i for i in self.file["items"] if not i["test_only"]]
-        body = []
-        index = 0
-        skip_until = 0
+        file_constraint, file_notes = self.bucket_of(self.file["cfg"])
+        buckets: dict[str, list[str]] = {"": list(file_notes)}
+
+        def emit(constraint: str, lines: list[str]) -> None:
+            buckets.setdefault(constraint, []).extend(lines)
+
+        def own_cfg(item) -> tuple[str, list[str]]:
+            return self.bucket_of(item.get("cfg", []))
+
         for position, item in enumerate(items):
-            if item["start"] <= skip_until and item["kind"] in ("method", "trait_fn", "assoc_const") and False:
-                continue
             kind = item["kind"]
-            if item.get("cfg") and kind not in ("method", "trait_fn"):
-                body.append(f"// PORT: #[cfg({'; '.join(item['cfg'])})]: move to a build-tagged file (rule 10).")
+            constraint, notes = own_cfg(item)
             if kind == "struct":
-                body += self.emit_struct(item)
+                emit(constraint, notes + self.emit_struct(item))
             elif kind == "enum":
-                body += self.emit_enum(item)
+                emit(constraint, notes + self.emit_enum(item))
             elif kind == "fn" and not item.get("owner"):
-                body += self.emit_fn(item)
+                if item.get("fn_scope"):
+                    notes.append(f"// Declared inside `{item['fn_scope']}`.")
+                emit(constraint, notes + self.emit_fn(item))
             elif kind == "impl":
-                methods = [
+                members = [
                     m for m in items[position + 1:]
-                    if m["kind"] == "method" and item["start"] <= m["start"] <= item["end"]
+                    if m["kind"] in ("method", "assoc_const") and item["start"] <= m["start"] <= item["end"]
                     and m["inline_module"] == item["inline_module"]
                 ]
-                body += self.emit_impl(item, methods)
-                consts = [
-                    c for c in items[position + 1:]
-                    if c["kind"] == "assoc_const" and item["start"] <= c["start"] <= item["end"]
-                ]
-                for const in consts:
-                    body += self.emit_const(const)
+                by_bucket: dict[str, list] = {}
+                member_notes: dict[str, list[str]] = {}
+                for member in members:
+                    member_constraint, extra = own_cfg(member)
+                    by_bucket.setdefault(member_constraint, []).append(member)
+                    member_notes.setdefault(member_constraint, []).extend(extra)
+                if not members:
+                    by_bucket[constraint] = []
+                for member_constraint, group in by_bucket.items():
+                    methods = [m for m in group if m["kind"] == "method"]
+                    lines = member_notes.get(member_constraint, []) + self.emit_impl(item, methods)
+                    for const in (m for m in group if m["kind"] == "assoc_const"):
+                        lines += self.emit_const(const)
+                    emit(member_constraint, lines)
             elif kind == "trait":
                 methods = [
                     m for m in items[position + 1:]
                     if m["kind"] == "trait_fn" and item["start"] <= m["start"] <= item["end"]
                 ]
-                body += self.emit_trait(item, methods)
+                emit(constraint, notes + self.emit_trait(item, methods))
             elif kind in ("const", "static"):
-                body += self.emit_const(item)
+                emit(constraint, notes + self.emit_const(item))
             elif kind == "type":
-                body += self.emit_alias(item)
+                emit(constraint, notes + self.emit_alias(item))
             elif kind == "macro_rules":
-                body += [f"// PORT: macro_rules! {item['name']}: write the expansion out at each use.", ""]
+                emit(constraint, [f"// PORT: macro_rules! {item['name']}: write the expansion out at each use.", ""])
             elif kind == "union":
-                body += [f"// PORT: union {item['name']}", ""]
+                emit(constraint, [f"// PORT: union {item['name']}", ""])
+
         blob = subprocess.run(
             ["git", "rev-parse", f"HEAD:{self.path}"], cwd=portmap.ROOT, capture_output=True, text=True
         ).stdout.strip()
-        head = [f"// Port of {self.path}", f"// rust-blob: {blob}", ""]
-        module_docs = []
-        head.append(f"package {self.crate.go_package}")
-        head.append("")
-        imports = []
-        for package in sorted(self.used):
-            if package == self.crate.go_package:
-                continue
-            if package in IMPORTS:
-                imports.append(f'\t"{IMPORTS[package]}"')
-            elif package == "io":
-                imports.append('\t"io"')
-            elif package == "acp":
-                imports.append('\tacp "github.com/BrokkAi/acp-go"')
-            elif package in {c.go_package for c in self.ws.crates.values() if c.lib}:
-                imports.append(f'\t"github.com/BrokkAi/mjolnir/go/{package}"')
-            else:
-                imports.append(f'\t"github.com/BrokkAi/mjolnir/go/crates/{package}"')
-        if imports:
-            head += ["import ("] + imports + [")", ""]
+        base = self.ws.go_file(self.crate, self.file)
         target = "::".join([self.crate.lib or self.crate.bins[0], *[p for p in self.file["module"].split("::") if p]])
-        prefix = "".join(pascal(p) for p in self.file["module"].split("::") if p)
-        if any(m.startswith("tracing::") or m in ("warn", "info", "debug", "error", "trace") for m in self.file["macros"]):
-            const = lower_first(prefix) + "Target" if prefix else "logTarget"
-            head += [f"// {const} is the tracing target of this file's events: its Rust module path.",
-                     f'const {const} = "{target}"', ""]
-        return "\n".join(head + body).rstrip() + "\n"
+        prefix = self.ws.module_go_prefix(self.crate, self.file)
+        logs = any(
+            m.startswith("tracing::") or m in ("warn", "info", "debug", "error", "trace") for m in self.file["macros"]
+        )
+        workspace_packages = {c.go_package for c in self.ws.crates.values() if c.lib}
+        files = {}
+        for constraint, body in buckets.items():
+            if constraint and not any(line.strip() for line in body):
+                continue
+            parts = [c for c in dict.fromkeys((file_constraint, constraint)) if c]
+            if len(parts) > 1:
+                parts = [f"({c})" if "||" in c and not c.startswith(("(", "!(")) else c for c in parts]
+            full = " && ".join(parts)
+            path = base if not constraint else base[: -len(".go")] + cfg_suffix(constraint) + ".go"
+            head = []
+            if full:
+                head += [f"//go:build {full}", ""]
+            head += [f"// Port of {self.path}", f"// rust-blob: {blob}", "", f"package {self.crate.go_package}", ""]
+            text = "\n".join(body)
+            code = re.sub(r"/\*.*?\*/", "", text)
+            code = "\n".join(line for line in code.split("\n") if not line.lstrip().startswith("//"))
+            imports = []
+            for package in sorted(self.used):
+                if package == self.crate.go_package or not re.search(rf"\b{re.escape(package)}\.", code):
+                    continue
+                if package in IMPORTS:
+                    imports.append(f'\t"{IMPORTS[package]}"')
+                elif package == "io":
+                    imports.append('\t"io"')
+                elif package == "acp":
+                    imports.append('\tacp "github.com/BrokkAi/acp-go"')
+                elif package in workspace_packages:
+                    imports.append(f'\t"github.com/BrokkAi/mjolnir/go/{package}"')
+                else:
+                    imports.append(f'\t"github.com/BrokkAi/mjolnir/go/crates/{package}"')
+            if imports:
+                head += ["import ("] + imports + [")", ""]
+            if not constraint and logs:
+                const = lower_first(prefix) + "_TARGET"
+                head += [f"// {const} is the tracing target of this file's events: its Rust module path.",
+                         f'const {const} = "{target}"', ""]
+            files[path] = "\n".join(head + body).rstrip() + "\n"
+        return files
+
+    def generate(self) -> str:
+        files = self.generate_files()
+        if len(files) == 1:
+            return next(iter(files.values()))
+        return "".join(f"// ==> {path} <==\n{text}\n" for path, text in files.items())
 
 
 def declarations(ws: portmap.Workspace, path: str) -> tuple[str, int]:
     generator = Generator(ws, path)
     text = generator.generate()
     return text, generator.notes
+
+
+def declaration_files(ws: portmap.Workspace, path: str) -> tuple[dict[str, str], int]:
+    generator = Generator(ws, path)
+    files = generator.generate_files()
+    return files, generator.notes

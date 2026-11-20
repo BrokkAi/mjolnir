@@ -71,6 +71,8 @@ struct ItemIndex {
     /// The declaration in structured form: fields, variants, signature types.
     /// `go/port/portmap.py declarations` turns it into Go.
     decl: Option<serde_json::Value>,
+    /// The function whose body declares this item, for an item nested in one.
+    fn_scope: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -252,6 +254,10 @@ struct Collector {
     inline: Vec<String>,
     test_depth: usize,
     owner: Vec<String>,
+    /// Functions whose bodies are being visited, innermost last.
+    fn_stack: Vec<String>,
+    /// `cfg` predicates of the enclosing inline modules and impl blocks.
+    cfg_stack: Vec<String>,
 }
 
 impl Collector {
@@ -267,7 +273,8 @@ impl Collector {
             vis,
             start: span.start().line,
             end: span.end().line,
-            cfg: attrs.cfg.clone(),
+            cfg: self.cfg_stack.iter().cloned().chain(attrs.cfg.iter().cloned()).collect(),
+            fn_scope: self.fn_stack.last().cloned(),
             test_only: self.test_depth > 0 || attrs.cfg_test,
             test_attr: attrs.test_attr.clone(),
             ignore: attrs.ignore,
@@ -429,6 +436,29 @@ fn type_json(ty: &syn::Type) -> serde_json::Value {
     node
 }
 
+/// A constant's value when it is one literal, as (kind, text): the unescaped
+/// string, the decimal digits, `true`.
+fn literal_json(expr: &syn::Expr) -> serde_json::Value {
+    let (expr, negative) = match expr {
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => (&*unary.expr, true),
+        other => (other, false),
+    };
+    let syn::Expr::Lit(literal) = expr else {
+        return serde_json::Value::Null;
+    };
+    let sign = if negative { "-" } else { "" };
+    match &literal.lit {
+        syn::Lit::Str(text) if !negative => serde_json::json!({"kind": "str", "value": text.value()}),
+        syn::Lit::Int(number) => serde_json::json!({"kind": "int", "value": format!("{sign}{}", number.base10_digits())}),
+        syn::Lit::Float(number) => serde_json::json!({"kind": "float", "value": format!("{sign}{}", number.base10_digits())}),
+        syn::Lit::Bool(flag) if !negative => serde_json::json!({"kind": "bool", "value": flag.value.to_string()}),
+        syn::Lit::Char(character) if !negative => serde_json::json!({"kind": "char", "value": u32::from(character.value()).to_string()}),
+        syn::Lit::Byte(byte) if !negative => serde_json::json!({"kind": "int", "value": byte.value().to_string()}),
+        syn::Lit::ByteStr(bytes) if !negative => serde_json::json!({"kind": "bytes", "value": bytes.value()}),
+        _ => serde_json::Value::Null,
+    }
+}
+
 fn generics_json(generics: &syn::Generics) -> serde_json::Value {
     let params: Vec<_> = generics
         .params
@@ -583,7 +613,10 @@ impl<'ast> Visit<'ast> for Collector {
         if attrs.cfg_test {
             self.test_depth += 1;
         }
+        let pushed = attrs.cfg.len();
+        self.cfg_stack.extend(attrs.cfg.iter().cloned());
         syn::visit::visit_item_mod(self, item);
+        self.cfg_stack.truncate(self.cfg_stack.len() - pushed);
         if attrs.cfg_test {
             self.test_depth -= 1;
         }
@@ -602,7 +635,9 @@ impl<'ast> Visit<'ast> for Collector {
         if test_item {
             self.test_depth += 1;
         }
+        self.fn_stack.push(item.sig.ident.to_string());
         syn::visit::visit_item_fn(self, item);
+        self.fn_stack.pop();
         if test_item {
             self.test_depth -= 1;
         }
@@ -710,7 +745,9 @@ impl<'ast> Visit<'ast> for Collector {
         self.items[index].has_self = item.sig.receiver().is_some();
         self.items[index].signature = Some(signature_text(&item.sig));
         self.items[index].decl = Some(signature_json(&item.sig, item.default.is_some()));
+        self.fn_stack.push(item.sig.ident.to_string());
         syn::visit::visit_trait_item_fn(self, item);
+        self.fn_stack.pop();
     }
 
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
@@ -730,7 +767,10 @@ impl<'ast> Visit<'ast> for Collector {
         if cfg_test {
             self.test_depth += 1;
         }
+        let pushed = attrs.cfg.len();
+        self.cfg_stack.extend(attrs.cfg.iter().cloned());
         syn::visit::visit_item_impl(self, item);
+        self.cfg_stack.truncate(self.cfg_stack.len() - pushed);
         if cfg_test {
             self.test_depth -= 1;
         }
@@ -750,7 +790,9 @@ impl<'ast> Visit<'ast> for Collector {
         if test_item {
             self.test_depth += 1;
         }
+        self.fn_stack.push(item.sig.ident.to_string());
         syn::visit::visit_impl_item_fn(self, item);
+        self.fn_stack.pop();
         if test_item {
             self.test_depth -= 1;
         }
@@ -759,14 +801,18 @@ impl<'ast> Visit<'ast> for Collector {
     fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("assoc_const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
-        self.items[index].decl = Some(serde_json::json!({"ty": type_json(&item.ty), "expr": text_of(&item.expr)}));
+        self.items[index].decl = Some(serde_json::json!({
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr),
+        }));
         syn::visit::visit_impl_item_const(self, item);
     }
 
     fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
-        self.items[index].decl = Some(serde_json::json!({"ty": type_json(&item.ty), "expr": text_of(&item.expr)}));
+        self.items[index].decl = Some(serde_json::json!({
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr),
+        }));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
             self.test_depth += 1;
@@ -781,7 +827,7 @@ impl<'ast> Visit<'ast> for Collector {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("static", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].decl = Some(serde_json::json!({
-            "ty": type_json(&item.ty), "expr": text_of(&item.expr),
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr),
             "mutable": matches!(item.mutability, syn::StaticMutability::Mut(_)),
         }));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
@@ -872,6 +918,8 @@ impl Walker {
             inline: Vec::new(),
             test_depth: usize::from(test_only),
             owner: Vec::new(),
+            fn_stack: Vec::new(),
+            cfg_stack: Vec::new(),
         };
         collector.visit_file(&parsed);
         index.items = collector.items;

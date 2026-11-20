@@ -18,7 +18,8 @@ Usage (from the repository root):
   python3 go/port/portmap.py file <path.rs>       # one file's needs and names
   python3 go/port/portmap.py names <crate-dir>    # Rust path -> Go identifier
   python3 go/port/portmap.py tests <crate-dir>    # every Rust test and its Go name
-  python3 go/port/portmap.py declarations <path.rs>   # the Go declarations for a Rust file
+  python3 go/port/portmap.py declarations <path.rs>...   # the Go declarations for Rust files
+  python3 go/port/portmap.py declarations --write <path.rs>...   # write them where no Go file exists yet
   python3 go/port/portmap.py json                 # the whole resolved map
 """
 
@@ -343,34 +344,55 @@ class Workspace:
         parts += [p for p in item["inline_module"].split("::") if p]
         return parts
 
+    @staticmethod
+    def module_go_prefix(crate: Crate, file: dict, item: dict | None = None) -> str:
+        """`Runtime` for module `runtime`, `RelayProtocol` for `relay::protocol`,
+        `Lib` or `Main` for the crate root."""
+        parts = [p for p in file["module"].split("::") if p]
+        if item is not None:
+            parts += [p for p in item["inline_module"].split("::") if p and p != "tests"]
+        if not parts:
+            return "Lib" if crate.lib else "Main"
+        return "".join(pascal(p) for p in parts)
+
     def go_name(self, crate: Crate, file: dict, item: dict) -> str | None:
+        """The Go identifier of a Rust item (NAMING in translation-rules.md, rule 2).
+
+        Module prefix, underscore, then the Rust name as written:
+        `runtime::ShutdownReport` is `Runtime_ShutdownReport`,
+        `runtime::block_on` is `Runtime_block_on`, `ShutdownState::new` is
+        `Runtime_ShutdownState_new`. The first letter is lower case for an
+        item that is not `pub`. A method with a `self` receiver is the Rust
+        name in PascalCase (camelCase when not `pub`).
+        """
         kind = item["kind"]
         if kind in ("impl", "unsafe_block", "mod", "trait_fn"):
             return None
-        prefix = "".join(pascal(p) for p in self.module_prefix(file, item) if p != "tests")
+        if kind == "method" and item["has_self"]:
+            name = pascal(item["name"])
+            if item["vis"] != "pub":
+                name = name[:1].lower() + name[1:]
+                if name in GO_KEYWORDS:
+                    name += "_"
+            return name
+        name = self.module_go_prefix(crate, file, item)
         owner = item.get("owner")
-        if kind in ("method", "assoc_const"):
-            owner_name = owner.split("::")[-1] if owner else ""
-            if kind == "method" and item["has_self"]:
-                name = pascal(item["name"])
-                return name if item["vis"] == "pub" else name[:1].lower() + name[1:]
-            name = prefix + owner_name + pascal(item["name"])
-        else:
-            name = prefix + pascal(item["name"])
-        exported = item["vis"] == "pub"
-        if kind == "macro_rules":
-            exported = False
+        if kind in ("method", "assoc_const") and owner:
+            name += "_" + owner.split("::")[-1]
+        if item.get("fn_scope"):
+            # An item declared inside a function body is named after the function.
+            name += "_" + item["fn_scope"]
+        name += "_" + item["name"]
+        exported = item["vis"] == "pub" and kind != "macro_rules"
         if not exported:
             name = name[:1].lower() + name[1:]
-            if name in GO_KEYWORDS:
-                name += "_"
         return name
 
     def test_go_name(self, crate: Crate, file: dict, item: dict) -> str:
         parts = [p for p in self.module_prefix(file, item) if p != "tests"]
         if file["target"].startswith("test:"):
             parts = ["It", file["target"].split(":", 1)[1], *parts]
-        prefix = "".join(pascal(p) for p in parts)
+        prefix = "".join(pascal(p) for p in parts) or ("Lib" if crate.lib else "Main")
         return f"Test{prefix}_{item['name']}"
 
 
@@ -627,9 +649,26 @@ def main(argv: list[str]) -> int:
     elif command == "declarations":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import declgen
-        text, notes = declgen.declarations(ws, os.path.relpath(os.path.abspath(argv[2]), ROOT))
-        sys.stdout.write(text)
-        print(f"{argv[2]}: {notes} places marked PORT:", file=sys.stderr)
+        write = "--write" in argv
+        targets = [a for a in argv[2:] if not a.startswith("--")]
+        for target in targets:
+            files, notes = declgen.declaration_files(ws, os.path.relpath(os.path.abspath(target), ROOT))
+            for path, text in files.items():
+                if not write:
+                    if len(files) > 1 or len(targets) > 1:
+                        print(f"// ==> {path} <==")
+                    sys.stdout.write(text)
+                    continue
+                full = os.path.join(ROOT, path)
+                if os.path.exists(full):
+                    # A file that exists may hold ported bodies; never replace it.
+                    print(f"{path}: exists, not written", file=sys.stderr)
+                    continue
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as out:
+                    out.write(text)
+                print(f"{path}: written", file=sys.stderr)
+            print(f"{target}: {notes} places marked PORT:", file=sys.stderr)
     elif command == "json":
         cmd_json(ws)
     else:
