@@ -5,6 +5,9 @@ package transcript
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/acp-go/schema"
@@ -12,12 +15,96 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
+// terminalOutputLimit is the retained bytes of one terminal's output.
+const terminalOutputLimit = 4 * 1024 * 1024
+
 // applyTerminalMetadata folds the ACP v1 display-terminal extension into the
 // same durable records used for client-owned terminals. Metadata on updates
 // is not part of ToolCallUpdateFields, so applying the update alone loses
 // these bytes. A nil meta is Rust's None.
 func applyTerminalMetadata(item *core.TranscriptItem, meta jsonvalue.Object) {
-	panic("unported: mj-transcript/src/projection/terminals.rs apply_terminal_metadata")
+	if meta == nil {
+		return
+	}
+	body, ok := item.Body.(core.TranscriptBodyTool)
+	if !ok {
+		return
+	}
+	var exit *terminalMetadataExit
+	if value, ok := meta.Get("terminal_exit"); ok {
+		var decoded terminalMetadataExit
+		if err := decodeTerminalMetadata(value, &decoded); err != nil {
+			slog.Warn("invalid ACP terminal exit metadata", "error", err)
+		} else {
+			exit = &decoded
+		}
+	}
+	for _, key := range []string{"terminal_output", "terminal_output_delta", "terminal_exit"} {
+		value, ok := meta.Get(key)
+		if !ok {
+			continue
+		}
+		var output *terminalMetadataOutput
+		if key != "terminal_exit" {
+			var decoded terminalMetadataOutput
+			if err := decodeTerminalMetadata(value, &decoded); err != nil {
+				slog.Warn("invalid ACP terminal output metadata", "error", err, "key", key)
+				continue
+			}
+			output = &decoded
+		}
+		var id string
+		switch {
+		case output != nil:
+			id = output.TerminalID
+		case exit != nil:
+			id = exit.TerminalID
+		default:
+			continue
+		}
+		if !slices.Contains(body.TerminalRefs, id) {
+			body.TerminalRefs = append(body.TerminalRefs, id)
+		}
+		position := slices.IndexFunc(body.TerminalOutputs, func(record core.TerminalOutputRecord) bool {
+			return record.TerminalID == id
+		})
+		if position < 0 {
+			body.TerminalOutputs = append(body.TerminalOutputs, core.TerminalOutputRecord{TerminalID: id})
+			position = len(body.TerminalOutputs) - 1
+		}
+		record := &body.TerminalOutputs[position]
+		if output != nil {
+			// Older Codex bridges use terminal_output for streamed chunks,
+			// then send an exit without output. Output accompanying an exit
+			// is a final snapshot; the explicit delta channel always appends.
+			if key == "terminal_output" && exit != nil && exit.TerminalID == record.TerminalID {
+				record.Output = core.PackedTextPlain(output.Data)
+				record.Truncated = false
+			} else {
+				record.Output = core.PackedTextPlain(record.Output.IntoText() + output.Data)
+			}
+			text := record.Output.IntoText()
+			if core.TruncateStringStart(&text, terminalOutputLimit) {
+				record.Truncated = true
+			}
+			record.Output = core.PackedTextPlain(text)
+		} else if exit != nil {
+			record.ExitCode = exit.ExitCode
+			record.Signal = exit.Signal
+			record.Output = core.NewPackedText(record.Output.IntoText())
+		}
+	}
+	item.Body = body
+}
+
+// decodeTerminalMetadata reads one metadata member as serde_json::from_value
+// reads it into the local metadata structs.
+func decodeTerminalMetadata(value any, target any) error {
+	encoded, err := jsonvalue.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(encoded, target)
 }
 
 // terminalMetadataOutput is the terminal_output and terminal_output_delta
@@ -126,11 +213,38 @@ func fallbackToolItem(item *core.TranscriptItem) (bool, error) {
 	return body.Call.IsFallback(), nil
 }
 
+// decodeToolCall is OpaqueToolCall::decode into the stable ACP ToolCall the
+// Rust projection reads.
+func decodeToolCall(call core.OpaqueToolCall) (schema.ToolCall, error) {
+	var decoded schema.ToolCall
+	err := json.Unmarshal(call.Value(), &decoded)
+	return decoded, err
+}
+
 // uniquelyMatchingRawTool is the one provider tool demonstrably owning a
 // result through its raw value. Identical concurrent results are
 // deliberately left with the fallback tool.
 func uniquelyMatchingRawTool(index *ProjectionIndex, record *core.TerminalOutputRecord) *core.TranscriptItem {
-	panic("unported: mj-transcript/src/projection/terminals.rs uniquely_matching_raw_tool")
+	digest := record.RawResultDigest()
+	var match *core.TranscriptItem
+	for _, item := range index.transcript {
+		body, ok := item.Body.(core.TranscriptBodyTool)
+		if !ok {
+			continue
+		}
+		fallback, err := fallbackToolItem(item)
+		if err != nil || fallback {
+			continue
+		}
+		if !body.Call.MatchesRawResult(record, &digest) {
+			continue
+		}
+		if match != nil {
+			return nil
+		}
+		match = item
+	}
+	return match
 }
 
 // fallbackTerminalAlreadyClaimed: a provider may publish its real tool
@@ -138,7 +252,22 @@ func uniquelyMatchingRawTool(index *ProjectionIndex, record *core.TerminalOutput
 // existing call already provides the durable start item, so the
 // compatibility call would only duplicate it.
 func fallbackTerminalAlreadyClaimed(index *ProjectionIndex, call *schema.ToolCall) (bool, error) {
-	panic("unported: mj-transcript/src/projection/terminals.rs fallback_terminal_already_claimed")
+	if !core.IsFallbackTerminalToolCall(call) {
+		return false, nil
+	}
+	value, err := projectionJSON(call)
+	if err != nil {
+		return false, err
+	}
+	for _, terminalID := range toolCallTerminalIDs(value) {
+		for _, item := range index.terminalReferrers(terminalID) {
+			body, ok := item.Body.(core.TranscriptBodyTool)
+			if ok && body.Call.TypedValid() && !body.Call.IsFallback() {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // consumeFallbackTerminalTools replaces Hel's interim terminal tool with the
@@ -147,21 +276,125 @@ func fallbackTerminalAlreadyClaimed(index *ProjectionIndex, call *schema.ToolCal
 // adopt the interim item's start identity; an existing tool keeps its
 // immutable position and timestamp.
 func consumeFallbackTerminalTools(index *ProjectionIndex, mutation *core.MaterializedSessionMutation, item *core.TranscriptItem, mayAdoptIdentity bool) error {
-	panic("unported: mj-transcript/src/projection/terminals.rs consume_fallback_terminal_tools")
+	body, ok := item.Body.(core.TranscriptBodyTool)
+	if !ok {
+		return nil
+	}
+	materialized, err := decodeToolCall(body.Call)
+	if err != nil {
+		return fmt.Errorf("parse ACP tool call while claiming fallback terminal tools: %w", err)
+	}
+	if core.IsFallbackTerminalToolCall(&materialized) {
+		return nil
+	}
+	for _, terminalID := range toolTerminalIDs(&body) {
+		stableID := fallbackTerminalToolItemID(terminalID)
+		if stableID == item.StableID {
+			continue
+		}
+		fallback := index.get(stableID)
+		if fallback == nil {
+			continue
+		}
+		fallbackBody, ok := fallback.Body.(core.TranscriptBodyTool)
+		if !ok {
+			continue
+		}
+		fallbackCall, err := decodeToolCall(fallbackBody.Call)
+		if err != nil {
+			return fmt.Errorf("parse fallback terminal tool call: %w", err)
+		}
+		if !core.IsFallbackTerminalToolCall(&fallbackCall) {
+			continue
+		}
+		for _, record := range fallbackBody.TerminalOutputs {
+			replaceOrPushTerminalRecord(&body.TerminalOutputs, record)
+		}
+		for _, terminalRef := range fallbackBody.TerminalRefs {
+			if !slices.Contains(body.TerminalRefs, terminalRef) {
+				body.TerminalRefs = append(body.TerminalRefs, terminalRef)
+			}
+		}
+		if !slices.Contains(body.TerminalRefs, terminalID) {
+			body.TerminalRefs = append(body.TerminalRefs, terminalID)
+		}
+		item.Body = body
+		if mayAdoptIdentity {
+			item.Position = min(item.Position, fallback.Position)
+			item.CreatedAtMs = min(item.CreatedAtMs, fallback.CreatedAtMs)
+		}
+		item.LastChangedAtMs = max(item.LastChangedAtMs, fallback.LastChangedAtMs)
+		mutation.Transcript = append(mutation.Transcript, core.TranscriptMutationRemove{StableID: stableID})
+	}
+	item.Body = body
+	return nil
 }
 
 // finalizeFallbackTerminalTool: terminal close is a Hel event rather than an
 // ACP tool update. Complete only the interim call Hel created; a
 // provider-owned call keeps its own status.
 func finalizeFallbackTerminalTool(item *core.TranscriptItem) error {
-	panic("unported: mj-transcript/src/projection/terminals.rs finalize_fallback_terminal_tool")
+	body, ok := item.Body.(core.TranscriptBodyTool)
+	if !ok {
+		return nil
+	}
+	if len(body.TerminalOutputs) == 0 {
+		return nil
+	}
+	materialized, err := decodeToolCall(body.Call)
+	if err != nil {
+		return fmt.Errorf("parse ACP tool call while finalizing fallback terminal tool: %w", err)
+	}
+	if !core.IsFallbackTerminalToolCall(&materialized) {
+		return nil
+	}
+	status := schema.ToolCallStatusCompleted
+	for i := range body.TerminalOutputs {
+		if !body.TerminalOutputs[i].ExitedCleanly() {
+			status = schema.ToolCallStatusFailed
+			break
+		}
+	}
+	materialized.Status = &status
+	value, err := projectionJSON(materialized)
+	if err != nil {
+		return err
+	}
+	body.Call = core.OpaqueToolCallFromValue(value)
+	item.Body = body
+	return nil
 }
 
 // uniquelyMatchingRawTerminal is the one parked terminal result an ACP tool
 // demonstrably owns through its raw result. Ambiguous identical results stay
 // standalone rather than being assigned to an arbitrary concurrent tool.
 func uniquelyMatchingRawTerminal(current *core.MaterializedSession, call *core.OpaqueToolCall) (string, bool) {
-	panic("unported: mj-transcript/src/projection/terminals.rs uniquely_matching_raw_terminal")
+	var terminalID string
+	found := false
+	for _, item := range current.Transcript {
+		var record *core.TerminalOutputRecord
+		switch body := item.Body.(type) {
+		case core.TranscriptBodyTerminalOutput:
+			record = &body.Record
+		case core.TranscriptBodyTool:
+			fallback, err := fallbackToolItem(item)
+			if err != nil || !fallback || len(body.TerminalOutputs) == 0 {
+				continue
+			}
+			record = &body.TerminalOutputs[0]
+		default:
+			continue
+		}
+		digest := record.RawResultDigest()
+		if !call.MatchesRawResult(record, &digest) {
+			continue
+		}
+		if found {
+			return "", false
+		}
+		terminalID, found = record.TerminalID, true
+	}
+	return terminalID, found
 }
 
 // attachTerminalOutputs remembers every terminal the current call refers
@@ -173,7 +406,33 @@ func uniquelyMatchingRawTerminal(current *core.MaterializedSession, call *core.O
 // after it does, and a call that drops its terminal reference on a later
 // content update still owns the terminal it started.
 func attachTerminalOutputs(current *core.MaterializedSession, index *ProjectionIndex, mutation *core.MaterializedSessionMutation, item *core.TranscriptItem) {
-	panic("unported: mj-transcript/src/projection/terminals.rs attach_terminal_outputs")
+	body, ok := item.Body.(core.TranscriptBodyTool)
+	if !ok {
+		return
+	}
+	for _, terminalID := range body.Call.TerminalIDs() {
+		if !slices.Contains(body.TerminalRefs, terminalID) {
+			body.TerminalRefs = append(body.TerminalRefs, terminalID)
+		}
+	}
+	if len(body.TerminalRefs) == 0 {
+		if terminalID, ok := uniquelyMatchingRawTerminal(current, &body.Call); ok && !slices.Contains(body.TerminalRefs, terminalID) {
+			body.TerminalRefs = append(body.TerminalRefs, terminalID)
+		}
+	}
+	var consumed []string
+	for _, terminalID := range body.TerminalRefs {
+		record, ok := findTerminalRecord(index, terminalID)
+		if !ok {
+			continue
+		}
+		replaceOrPushTerminalRecord(&body.TerminalOutputs, record)
+		consumed = append(consumed, terminalItemID(terminalID))
+	}
+	for _, stableID := range consumed {
+		mutation.Transcript = append(mutation.Transcript, core.TranscriptMutationRemove{StableID: stableID})
+	}
+	item.Body = body
 }
 
 func canonicalTerminalOutput(record *core.TerminalOutputRecord) core.CanonicalTerminalOutput {
