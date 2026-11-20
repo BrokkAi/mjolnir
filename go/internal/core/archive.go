@@ -82,6 +82,12 @@ const ArchiveSchemaVersionLinkedWorktrees uint32 = 11
 // canonical notification record.
 const ArchiveSchemaVersionNotificationStack uint32 = 12
 
+// ArchiveSchemaVersionMailbox: mail the worker accepted and had not
+// delivered at the cut. Older readers reject the canonical field, so an
+// archive that carries it declares this schema whatever else it carries.
+// (Rust commit 39722ace5, after this file's base.)
+const ArchiveSchemaVersionMailbox uint32 = 13
+
 // MjolnirRefNamespace holds Mjolnir's private Git refs: review baselines,
 // review points and reviewed trees. They are bookkeeping, never pushed, and
 // some name a bare tree.
@@ -468,6 +474,11 @@ type CanonicalSessionSnapshot struct {
 	Session             CanonicalSessionState     `json:"session"`
 	Transcript          []CanonicalTranscriptItem `json:"transcript"`
 	QueuedPrompts       []CanonicalQueuedPrompt   `json:"queued_prompts"`
+	// Mailbox is the worker's mail at the cut, copied from its relay. Absent
+	// when it had none, and in archives from workers that could not report
+	// it. (Rust commit 39722ace5, after this file's base; ported for
+	// mj-worker's checkpoint tests.)
+	Mailbox *CanonicalMailbox `json:"mailbox,omitempty"`
 }
 
 func (s *CanonicalSessionSnapshot) UnmarshalJSON(data []byte) error {
@@ -501,6 +512,7 @@ func (s *CanonicalSessionSnapshot) ContentMatches(other *CanonicalSessionSnapsho
 		transcriptValuesEqual(s.NotificationStack, other.NotificationStack) &&
 		transcriptValuesEqual(s.Transcript, other.Transcript) &&
 		transcriptValuesEqual(s.QueuedPrompts, other.QueuedPrompts) &&
+		transcriptValuesEqual(s.Mailbox, other.Mailbox) &&
 		transcriptValuesEqual(s.Session.withoutActivityWatermark(), other.Session.withoutActivityWatermark())
 }
 
@@ -1372,6 +1384,19 @@ func validateCanonicalSession(snapshot *CanonicalSessionSnapshot) error {
 			var decoded acp.ContentBlock
 			if err := json.Unmarshal(content, &decoded); err != nil {
 				return fmt.Errorf("canonical queued prompt '%s' has invalid ACP content block %d: %w", prompt.CommandID, index, err)
+			}
+		}
+	}
+	if mailbox := snapshot.Mailbox; mailbox != nil {
+		if err := mailbox.Validate(); err != nil {
+			return err
+		}
+		for _, commandID := range slices.Sorted(maps.Keys(mailbox.PromptContexts)) {
+			queued := slices.ContainsFunc(snapshot.QueuedPrompts, func(prompt CanonicalQueuedPrompt) bool {
+				return prompt.CommandID == commandID && prompt.Kind.Kind == CanonicalQueuedCommandKindPrompt
+			})
+			if !queued {
+				return fmt.Errorf("canonical mailbox context belongs to '%s', which is not a queued prompt", commandID)
 			}
 		}
 	}

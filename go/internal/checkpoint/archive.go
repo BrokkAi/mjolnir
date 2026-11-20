@@ -950,6 +950,8 @@ func prepareArchiveViewWithPartSize(input archiveInputView, partBytes int) (core
 	}
 	var schemaVersion uint32
 	switch {
+	case input.canonicalSession.Mailbox != nil:
+		schemaVersion = core.ArchiveSchemaVersionMailbox
 	case input.canonicalSession.NotificationStack != nil:
 		schemaVersion = core.ArchiveSchemaVersionNotificationStack
 	case carriesLinkedWorktrees(repositories):
@@ -1899,6 +1901,10 @@ func readVerifiedZipCancellable(path string, retention payloadRetention, cancell
 				return verifiedZipContents{}, fmt.Errorf("notification stack requires archive schema %d",
 					core.ArchiveSchemaVersionNotificationStack)
 			}
+			if manifest.SchemaVersion < core.ArchiveSchemaVersionMailbox && snapshot.Mailbox != nil {
+				return verifiedZipContents{}, fmt.Errorf("archived mailbox requires archive schema %d",
+					core.ArchiveSchemaVersionMailbox)
+			}
 			if canonicalSession != nil {
 				return verifiedZipContents{}, errors.New("archive contains duplicate canonical session payloads")
 			}
@@ -2070,7 +2076,8 @@ func parseArchiveManifest(manifestBytes []byte) (core.ArchiveManifest, error) {
 		core.ArchiveSchemaVersionMessages,
 		core.ArchiveSchemaVersionReviewRefs,
 		core.ArchiveSchemaVersionLinkedWorktrees,
-		core.ArchiveSchemaVersionNotificationStack:
+		core.ArchiveSchemaVersionNotificationStack,
+		core.ArchiveSchemaVersionMailbox:
 	default:
 		return core.ArchiveManifest{}, fmt.Errorf("incompatible Mjolnir archive schema %d; this build requires schema %d",
 			header.SchemaVersion, core.ArchiveSchemaVersion)
@@ -2164,6 +2171,7 @@ func validateManifest(manifest *core.ArchiveManifest) error {
 	}
 	schema := manifest.SchemaVersion
 	if !(schema == expectedSchema ||
+		schema == core.ArchiveSchemaVersionMailbox ||
 		schema == core.ArchiveSchemaVersionNotificationStack ||
 		schema == core.ArchiveSchemaVersionLinkedWorktrees ||
 		(schema == core.ArchiveSchemaVersionReviewRefs &&
