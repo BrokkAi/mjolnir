@@ -53,22 +53,47 @@ pub fn credential_fingerprint(bytes: &[u8]) -> String {
     lower_hex(Sha256::digest(bytes))
 }
 
-/// The staged OAuth login, excluding setup tokens and API-key/Bedrock launches.
+/// How Claude is configured to authenticate outside its native login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeEnvironmentAuth {
+    Token(&'static str),
+    Bedrock,
+    ExternalProvider,
+}
+
+pub fn claude_environment_auth(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Option<ClaudeEnvironmentAuth> {
+    let enabled = |name| {
+        environment
+            .get(name)
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+    };
+    if enabled("CLAUDE_CODE_USE_BEDROCK") {
+        return Some(ClaudeEnvironmentAuth::Bedrock);
+    }
+    if enabled("CLAUDE_CODE_USE_VERTEX") || enabled("CLAUDE_CODE_USE_FOUNDRY") {
+        return Some(ClaudeEnvironmentAuth::ExternalProvider);
+    }
+    [
+        CLAUDE_OAUTH_TOKEN_ENV,
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ]
+    .into_iter()
+    .find(|&name| {
+        environment
+            .get(name)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+    .map(ClaudeEnvironmentAuth::Token)
+}
+
+/// The staged OAuth login for a launch using native OAuth.
 pub fn claude_oauth_login_path(
     environment: &std::collections::BTreeMap<String, String>,
 ) -> Option<PathBuf> {
-    if [
-        CLAUDE_OAUTH_TOKEN_ENV,
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-    ]
-    .iter()
-    .any(|key| {
-        environment
-            .get(*key)
-            .is_some_and(|value| !value.is_empty() && value != "0")
-    }) {
+    if claude_environment_auth(environment).is_some() {
         return None;
     }
     let home = Path::new(environment.get(HarnessKind::Claude.home_env())?);

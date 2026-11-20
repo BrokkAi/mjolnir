@@ -2010,10 +2010,8 @@ impl HarnessProfile {
             };
         }
         if self.kind == HarnessKind::Claude
-            && self
-                .environment
-                .get("CLAUDE_CODE_USE_BEDROCK")
-                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+            && crate::credentials::claude_environment_auth(self.environment.resolved())
+                == Some(crate::credentials::ClaudeEnvironmentAuth::Bedrock)
         {
             return AuthScheme::AwsCredentialChain;
         }

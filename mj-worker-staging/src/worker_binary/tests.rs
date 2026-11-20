@@ -1355,45 +1355,6 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
 }
 
 #[test]
-fn blank_claude_auth_environment_values_do_not_count_as_logins() {
-    use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
-
-    let mut profile = mj_core::config::HarnessProfile {
-        ..mj_core::config::HarnessProfile::new(
-            HarnessKind::Claude,
-            std::path::PathBuf::from("claude"),
-        )
-    };
-    let mut environment = BTreeMap::from([
-        (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
-        ("ANTHROPIC_API_KEY".to_owned(), " ".to_owned()),
-        ("ANTHROPIC_AUTH_TOKEN".to_owned(), "\t".to_owned()),
-    ]);
-    assert!(!claude_environment_login_present(&profile, &environment));
-
-    // Container target values are merged into the final launch environment
-    // after the profile, so each must be recognized there as well.
-    for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
-        let mut target_environment = environment.clone();
-        target_environment.insert(name.into(), "target-key".into());
-        assert!(claude_environment_login_present(
-            &profile,
-            &target_environment
-        ));
-    }
-
-    environment.insert("ANTHROPIC_API_KEY".into(), "key".into());
-    assert!(claude_environment_login_present(&profile, &environment));
-
-    environment.insert("ANTHROPIC_API_KEY".into(), " ".into());
-    environment.insert(CLAUDE_OAUTH_TOKEN_ENV.into(), "token".into());
-    assert!(claude_environment_login_present(&profile, &environment));
-
-    profile.kind = HarnessKind::Codex;
-    assert!(!claude_environment_login_present(&profile, &environment));
-}
-
-#[test]
 fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token() {
     use mj_accounts::claude_login::fake::FakeKeychain;
     use mj_core::config::HarnessHost;
@@ -1415,21 +1376,43 @@ fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token(
     let keychain = FakeKeychain::holding(KEYCHAIN_LOGIN);
 
     // The Keychain holds the login on a Mac only: nothing else asks it.
-    stage_claude_keychain_login(&profile, HarnessHost::Other, &staged, false, &keychain).unwrap();
+    stage_claude_keychain_login(
+        &profile,
+        HarnessHost::Other,
+        &staged,
+        &BTreeMap::new(),
+        &keychain,
+    )
+    .unwrap();
     assert!(keychain.calls().is_empty());
 
-    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, true, &keychain).unwrap();
+    let token = BTreeMap::from([("CLAUDE_CODE_OAUTH_TOKEN".into(), "token".into())]);
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, &token, &keychain).unwrap();
     assert!(keychain.calls().is_empty());
     assert!(!staged_login.exists());
 
-    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    stage_claude_keychain_login(
+        &profile,
+        HarnessHost::MacOs,
+        &staged,
+        &BTreeMap::new(),
+        &keychain,
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // Freshness cannot distinguish a refreshed grant from another account.
     // The current Keychain login stays authoritative even when an earlier
     // staged copy has a later expiry.
     std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
-    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    stage_claude_keychain_login(
+        &profile,
+        HarnessHost::MacOs,
+        &staged,
+        &BTreeMap::new(),
+        &keychain,
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // With no Keychain item, or a locked one, a leftover profile-home file is
@@ -1439,8 +1422,14 @@ fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token(
         FakeKeychain::holding(KEYCHAIN_LOGIN).locked(),
     ] {
         std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
-        stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain)
-            .unwrap();
+        stage_claude_keychain_login(
+            &profile,
+            HarnessHost::MacOs,
+            &staged,
+            &BTreeMap::new(),
+            &keychain,
+        )
+        .unwrap();
         assert!(!staged_login.exists());
     }
 }
@@ -4585,6 +4574,54 @@ fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
         );
         assert_eq!(launch.environment["CODEX_API_KEY"], "sk-target", "{target}");
         assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+}
+
+#[test]
+fn claude_provider_switches_control_keychain_staging_and_oauth() {
+    use mj_accounts::claude_login::fake::FakeKeychain;
+    use mj_core::config::HarnessHost;
+
+    let home = tempfile::tempdir().unwrap();
+    let profile =
+        mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().join("claude"));
+    let staged = home.path().join("staged");
+    std::fs::create_dir(&staged).unwrap();
+    for (name, value, uses_oauth) in [
+        ("ANTHROPIC_AUTH_TOKEN", "target-key", false),
+        ("ANTHROPIC_API_KEY", "target-key", false),
+        ("ANTHROPIC_API_KEY", " ", true),
+        (mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV, " 	 ", true),
+        ("CLAUDE_CODE_USE_VERTEX", "1", false),
+        ("CLAUDE_CODE_USE_FOUNDRY", "1", false),
+        ("CLAUDE_CODE_USE_BEDROCK", "false", true),
+    ] {
+        let environment = BTreeMap::from([
+            (
+                HarnessKind::Claude.home_env().to_owned(),
+                staged.display().to_string(),
+            ),
+            (name.to_owned(), value.to_owned()),
+        ]);
+        let keychain = FakeKeychain::holding(br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#);
+        stage_claude_keychain_login(
+            &profile,
+            HarnessHost::MacOs,
+            &staged,
+            &environment,
+            &keychain,
+        )
+        .unwrap();
+        assert_eq!(
+            mj_core::credentials::claude_oauth_login_path(&environment).is_some(),
+            uses_oauth,
+            "{name}={value} runtime OAuth"
+        );
+        assert_eq!(
+            !keychain.calls().is_empty(),
+            uses_oauth,
+            "{name}={value} Keychain staging"
+        );
     }
 }
 

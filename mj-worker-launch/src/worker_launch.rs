@@ -266,7 +266,7 @@ pub fn stage_worker_files_for(
         profile,
         mj_core::config::HarnessHost::current(),
         &profile_stage,
-        claude_environment_login_present(profile, &launch.environment),
+        &launch.environment,
         executor,
     )?;
     stage_managed_skills(
