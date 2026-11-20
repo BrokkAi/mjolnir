@@ -2188,6 +2188,59 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     }
 }
 
+// Hard-won: d8947861e: interrupting a mailbox wake left the projected session running.
+#[test]
+fn interrupted_mailbox_wake_with_continuation_returns_to_idle() {
+    use mj_core::event_outcome::OutcomeReason;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+
+    let mut session = MaterializedSession::empty("session");
+    let command_id = "mailbox-wake";
+    let continuation_id = mj_core::continuation::restart_continuation_id(command_id);
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: command_id.into(),
+            command: RelayCommand::MailboxWake {
+                events: vec![MailboxEvent {
+                    key: "parent:message:1".into(),
+                    source: "parent".into(),
+                    wake: true,
+                    created_at_ms: 10,
+                    body: MailboxEventBody::ParentMessage {
+                        text: "Check the review.".into(),
+                    },
+                }],
+            },
+            created_at_ms: 10,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: command_id.into(),
+            started_at_ms: 20,
+        },
+    );
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running { .. }
+    ));
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandInterrupted {
+            continuation_id: Some(continuation_id.clone()),
+            reason: Some(OutcomeReason::WorkerRestarted),
+            command_id: command_id.into(),
+            command: RelayCommandKind::Prompt,
+            message: "worker restarted".into(),
+        },
+    );
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert!(session.active_turn.is_none());
+    assert_eq!(session.queued_prompts[0].command_id, continuation_id);
+}
+
 /// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
 /// reader can tell a cut-off reply from a finished one. A finished turn gets
 /// no such row.
