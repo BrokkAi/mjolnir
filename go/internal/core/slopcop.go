@@ -12,12 +12,16 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // LoginFile is a session's copy of the login, relative to its harness home.
@@ -65,7 +69,21 @@ func agentDebugOption(value *string) string {
 }
 
 func NewSlopcopLogin(token string, serviceURL *string) (SlopcopLogin, error) {
-	panic("unported: mj-core/src/slopcop.rs SlopcopLogin::new")
+	validated, err := validateOpaqueToken("slopcop token", maxTokenBytes, []byte(token))
+	if err != nil {
+		return SlopcopLogin{}, err
+	}
+	login := SlopcopLogin{token: validated}
+	if serviceURL != nil {
+		if url := strings.TrimSpace(*serviceURL); url != "" {
+			checked, err := validateServiceURL(url)
+			if err != nil {
+				return SlopcopLogin{}, err
+			}
+			login.serviceURL = &checked
+		}
+	}
+	return login, nil
 }
 
 // Encode is the two-line form the session wrapper reads with `read -r`: the
@@ -79,7 +97,40 @@ func (l SlopcopLogin) Encode() []byte {
 }
 
 func SlopcopLoginDecode(data []byte) (SlopcopLogin, error) {
-	panic("unported: mj-core/src/slopcop.rs SlopcopLogin::decode")
+	if len(data) > MaxLoginBytes {
+		return SlopcopLogin{}, fmt.Errorf("slopcop login is above the %d byte limit", MaxLoginBytes)
+	}
+	if !utf8.Valid(data) {
+		return SlopcopLogin{}, errors.New("slopcop login is not valid UTF-8")
+	}
+	lines := agentRustLines(string(data))
+	token := ""
+	if len(lines) > 0 {
+		token = lines[0]
+	}
+	var serviceURL *string
+	if len(lines) > 1 {
+		serviceURL = &lines[1]
+	}
+	if len(lines) > 2 {
+		return SlopcopLogin{}, errors.New("slopcop login has more than a token and a service URL")
+	}
+	return NewSlopcopLogin(token, serviceURL)
+}
+
+// agentRustLines splits text as Rust's str::lines does: on `\n`, dropping a
+// `\r` before it and the empty piece after a final newline.
+func agentRustLines(text string) []string {
+	var lines []string
+	for text != "" {
+		line, rest, found := strings.Cut(text, "\n")
+		if found {
+			line = strings.TrimSuffix(line, "\r")
+		}
+		lines = append(lines, line)
+		text = rest
+	}
+	return lines
 }
 
 func (l SlopcopLogin) Snapshot() CredentialSnapshot {
@@ -122,7 +173,48 @@ func HostLogin() (*SlopcopLogin, error) {
 // cannot be read is an error: the login is unknown, and a caller must not
 // treat it as signed out.
 func ResolveLogin(environment func(name string) (string, bool), configDir *string) (*SlopcopLogin, error) {
-	panic("unported: mj-core/src/slopcop.rs resolve_login")
+	set := func(name string) *string {
+		value, ok := environment(name)
+		if !ok {
+			return nil
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil
+		}
+		return &value
+	}
+	token := set(TokenEnv)
+	serviceURL := set(ServiceEnv)
+	if token != nil && serviceURL != nil {
+		login, err := NewSlopcopLogin(*token, serviceURL)
+		if err != nil {
+			return nil, err
+		}
+		return &login, nil
+	}
+	var stored slopcopStoredConfig
+	if configDir != nil {
+		var err error
+		stored, err = readStoredConfig(filepath.Join(*configDir, "slopcop", "config.json"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if token == nil {
+		token = stored.Token
+	}
+	if token == nil {
+		return nil, nil
+	}
+	if serviceURL == nil {
+		serviceURL = stored.ServiceURL
+	}
+	login, err := NewSlopcopLogin(*token, serviceURL)
+	if err != nil {
+		return nil, err
+	}
+	return &login, nil
 }
 
 // slopcopStoredConfig is the fields of slopcop's `config.json` it resolves a
@@ -133,12 +225,55 @@ type slopcopStoredConfig struct {
 }
 
 func readStoredConfig(path string) (slopcopStoredConfig, error) {
-	panic("unported: mj-core/src/slopcop.rs read_stored_config")
+	file, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return slopcopStoredConfig{}, nil
+	}
+	if err != nil {
+		return slopcopStoredConfig{}, fmt.Errorf("read slopcop login %s: %w", path, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
+	if err != nil {
+		return slopcopStoredConfig{}, fmt.Errorf("read slopcop login %s: %w", path, err)
+	}
+	if int64(len(data)) > maxConfigBytes {
+		return slopcopStoredConfig{}, fmt.Errorf("slopcop login %s is above the %d byte limit", path, maxConfigBytes)
+	}
+	var stored slopcopStoredConfig
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return slopcopStoredConfig{}, fmt.Errorf("parse slopcop login %s: %w", path, err)
+	}
+	for _, value := range []**string{&stored.Token, &stored.ServiceURL} {
+		if *value != nil {
+			text := strings.TrimSpace(**value)
+			if text == "" {
+				*value = nil
+			} else {
+				*value = &text
+			}
+		}
+	}
+	return stored, nil
 }
 
 // ReadLogin returns the session copy's state and contents.
 func ReadLogin(path string) (CredentialSnapshot, *SlopcopLogin, error) {
-	panic("unported: mj-core/src/slopcop.rs read_login")
+	if err := refuseSymlinkedToken("slopcop login", path); err != nil {
+		return CredentialSnapshot{}, nil, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return CredentialSnapshotAbsent(), nil, nil
+	}
+	if err != nil {
+		return CredentialSnapshot{}, nil, fmt.Errorf("read slopcop login %s: %w", path, err)
+	}
+	login, err := SlopcopLoginDecode(data)
+	if err != nil {
+		return CredentialSnapshot{}, nil, err
+	}
+	return login.Snapshot(), &login, nil
 }
 
 // WriteLogin installs data, an encoded login, owner-only in an existing

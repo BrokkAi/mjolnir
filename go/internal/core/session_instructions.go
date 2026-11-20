@@ -7,6 +7,7 @@ package core
 import (
 	_ "embed"
 	"fmt"
+	"strings"
 )
 
 //go:embed assets/instructions/review_rubric.md
@@ -30,7 +31,23 @@ const (
 
 // InstructionRoleFromLaunch is the standing role a launch configures, if any.
 func InstructionRoleFromLaunch(config *WorkerLaunchConfig) *InstructionRole {
-	panic("unported: mj-core/src/session_instructions.rs InstructionRole::from_launch")
+	role := func(value InstructionRole) *InstructionRole { return &value }
+	if config.ReviewerLaunch != nil {
+		if config.ReviewerLaunch.Role == ReviewChildRoleBriefWriter {
+			return role(InstructionRoleBriefWriter)
+		}
+		return role(InstructionRoleReviewer)
+	}
+	if config.SubagentKind == nil {
+		return nil
+	}
+	switch *config.SubagentKind {
+	case SubagentKindOracle:
+		return role(InstructionRoleOracle)
+	case SubagentKindReviewer:
+		return role(InstructionRoleReviewer)
+	}
+	return role(InstructionRoleWorker)
 }
 
 type AgentTools struct {
@@ -50,7 +67,19 @@ type InstructionContext struct {
 // InstructionContextFromLaunch: native-file harnesses offer servers from
 // durable launch facts, before ACP starts.
 func InstructionContextFromLaunch(launch *WorkerLaunchConfig) InstructionContext {
-	panic("unported: mj-core/src/session_instructions.rs InstructionContext::from_launch")
+	facts := InstructionContext{
+		Harness:         launch.Harness,
+		Memory:          launch.ProjectMemory,
+		HistoryTools:    launch.ProjectMemory != nil && launch.ProjectMemory.HistorySocket != nil,
+		InstructionRole: InstructionRoleFromLaunch(launch),
+	}
+	if role, ok := launch.SubagentMCPRole(); ok {
+		facts.Agents = &AgentTools{Role: role, ReviewTools: launch.ReviewTools()}
+	}
+	if directory, ok := launch.Environment[ChildReportDirEnv]; ok {
+		facts.ReportDirectory = &directory
+	}
+	return facts
 }
 
 // Compose: index I/O and warnings belong to the delivery owner. All text has
@@ -58,7 +87,62 @@ func InstructionContextFromLaunch(launch *WorkerLaunchConfig) InstructionContext
 // memory index text) when indexFailed is false, or the warning to show in
 // its place when it is true.
 func Compose(facts *InstructionContext, index string, indexFailed bool) string {
-	panic("unported: mj-core/src/session_instructions.rs compose")
+	var sections []string
+	if facts.Harness != HarnessKindClaude && facts.Memory != nil {
+		var unavailable *string
+		if indexFailed {
+			unavailable = &index
+		}
+		sections = append(sections, ComposeStartupPromptContext(facts.Memory.Root, facts.Memory.RepositoryRoots, index, unavailable))
+	}
+	agentSocket := facts.Agents
+	if agentSocket != nil {
+		var reviewRole *ReviewChildRole
+		if facts.InstructionRole != nil {
+			switch *facts.InstructionRole {
+			case InstructionRoleReviewer:
+				role := ReviewChildRoleReviewer
+				reviewRole = &role
+			case InstructionRoleBriefWriter:
+				role := ReviewChildRoleBriefWriter
+				reviewRole = &role
+			}
+		}
+		sections = append(sections, StandingInstructions(agentSocket.Role, facts.Harness, reviewRole))
+		if agentSocket.ReviewTools {
+			sections = append(sections, ReviewInstructions(agentSocket.Role))
+		}
+	}
+	if facts.HistoryTools {
+		sections = append(sections, HistoryGuidance)
+	}
+	isChild := agentSocket != nil && agentSocket.Role == SubagentMcpRoleChild
+	if facts.InstructionRole != nil {
+		switch *facts.InstructionRole {
+		case InstructionRoleWorker:
+			sections = append(sections, "When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.")
+			if !isChild {
+				sections = append(sections, "Finish every task with your full report as your last message. "+HandbackReportRules)
+			}
+		case InstructionRoleOracle:
+			instructions := oracleInstructions
+			if !isChild {
+				instructions = strings.ReplaceAll(instructions,
+					"Send each answer with the handback tool; Mjolnir delivers it to the primary.",
+					"Send each answer as your last message; Mjolnir delivers it to the primary.")
+			}
+			sections = append(sections, fmt.Sprintf("%s Your answer may contain up to %d characters.",
+				instructions, SubagentKindOracle.MaxHandbackChars()))
+		case InstructionRoleReviewer:
+			sections = append(sections, CodexReviewRubric)
+		case InstructionRoleBriefWriter:
+			sections = append(sections, BriefWriterInstructions)
+		}
+	}
+	if facts.ReportDirectory != nil {
+		sections = append(sections, ReportDirectoryNote(*facts.ReportDirectory))
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // DelegationRouting: delegation policy is composed into standing session

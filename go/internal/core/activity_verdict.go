@@ -90,6 +90,16 @@ type TurnEvidence struct {
 	Completion         *CompletionEvidence  `json:"completion,omitempty"`
 }
 
+// MarshalJSON writes ToolsInFlight as a list even when it is nil, as serde
+// writes a Vec.
+func (e TurnEvidence) MarshalJSON() ([]byte, error) {
+	type plain TurnEvidence
+	if e.ToolsInFlight == nil {
+		e.ToolsInFlight = []ToolEvidence{}
+	}
+	return agentMarshalJSON(plain(e))
+}
+
 type CompletionEvidence struct {
 	StopReason string          `json:"stop_reason"`
 	Diagnostic *TurnDiagnostic `json:"diagnostic"`
@@ -98,7 +108,22 @@ type CompletionEvidence struct {
 // CompletionEvidenceBounded keeps the completion within the classifier's
 // evidence budget.
 func CompletionEvidenceBounded(stopReason string, diagnostic *TurnDiagnostic) CompletionEvidence {
-	panic("unported: mj-core/src/activity/verdict.rs CompletionEvidence::bounded")
+	stopReason = stopReason[:agentFloorCharBoundary(stopReason, 128)]
+	var bounded *TurnDiagnostic
+	if diagnostic != nil {
+		copied := *diagnostic
+		if len(copied.Message) > 4096 {
+			copied.Message = "[Provider diagnostic omitted: exceeds 4096 bytes]"
+		}
+		if copied.Code != nil && len(*copied.Code) > 128 {
+			copied.Code = nil
+		}
+		if copied.ResetAt != nil && len(*copied.ResetAt) > 256 {
+			copied.ResetAt = nil
+		}
+		bounded = &copied
+	}
+	return CompletionEvidence{StopReason: stopReason, Diagnostic: bounded}
 }
 
 type Decision string

@@ -8,6 +8,13 @@
 
 package core
 
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
+)
+
 // ClaudeTurnResult is one raw SDK result, retained in runtime journals for
 // diagnostics. Only autonomous turn completion consumes it; foreground
 // replies are authoritative. Keep the historical payload fields for readers
@@ -48,7 +55,81 @@ type ClaudeResultUsage struct {
 // ClaudeTurnResultFromSDKMessage reads an SDK message the adapter forwarded.
 // A nil result with a nil error means the message is not a `result`.
 func ClaudeTurnResultFromSDKMessage(message any) (*ClaudeTurnResult, error) {
-	panic("unported: mj-core/src/acp/claude_result.rs ClaudeTurnResult::from_sdk_message")
+	if kind, ok := agentJSONString(message, "type"); !ok || kind != "result" {
+		return nil, nil
+	}
+	data, err := jsonvalue.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+	if err := agentRequireFields(data, "subtype", "is_error", "num_turns"); err != nil {
+		return nil, err
+	}
+	var payload claudeResultPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	var diagnostic *string
+	if payload.Subtype == "success" {
+		if payload.Result != nil && strings.HasPrefix(*payload.Result, claudeDiagnosticPrefix) {
+			text := *payload.Result
+			diagnostic = &text
+		}
+	} else {
+		for _, text := range payload.Errors {
+			if strings.HasPrefix(text, claudeDiagnosticPrefix) {
+				diagnostic = &text
+				break
+			}
+		}
+	}
+	var usage ClaudeResultUsage
+	if payload.Usage != nil {
+		count := func(value *uint64) uint64 {
+			if value == nil {
+				return 0
+			}
+			return *value
+		}
+		usage = ClaudeResultUsage{
+			InputTokens:      count(payload.Usage.InputTokens),
+			OutputTokens:     count(payload.Usage.OutputTokens),
+			CacheReadTokens:  count(payload.Usage.CacheReadInputTokens),
+			CacheWriteTokens: count(payload.Usage.CacheCreationInputTokens),
+		}
+	}
+	result := &ClaudeTurnResult{
+		Subtype:    payload.Subtype,
+		IsError:    payload.IsError,
+		StopReason: payload.StopReason,
+		NumTurns:   payload.NumTurns,
+		SignedOut: payload.Subtype == "success" && payload.Result != nil &&
+			strings.Contains(*payload.Result, "Please run /login"),
+		Diagnostic: diagnostic,
+		Usage:      usage,
+	}
+	if payload.Origin != nil {
+		kind := payload.Origin.Kind
+		result.OriginKind = &kind
+	}
+	if payload.QueuedTurnCount != nil {
+		result.QueuedTurnCount = *payload.QueuedTurnCount
+	}
+	return result, nil
+}
+
+// UnmarshalJSON requires the fields serde requires.
+func (r *ClaudeTurnResult) UnmarshalJSON(data []byte) error {
+	if err := agentRequireFields(data, "subtype", "is_error", "num_turns"); err != nil {
+		return err
+	}
+	type plain ClaudeTurnResult
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = ClaudeTurnResult(decoded)
+	return nil
 }
 
 const claudeDiagnosticPrefix = "[ede_diagnostic]"
