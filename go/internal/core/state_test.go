@@ -1809,3 +1809,21 @@ func TestRememberedSubagentPolicyReadsLegacyPolicyObjectsAndProfileMaps(t *testi
 		t.Fatal("unknown")
 	}
 }
+
+func TestOperationOwnershipHidesIntermediateMoveStatesButNotOrdinaryLiveWork(t *testing.T) {
+	moving := SessionTransitionKindMoving
+	for _, state := range []SessionState{SessionStateStopped, SessionStateRunning, SessionStateDisconnected} {
+		if kind, ok := SessionTransitionKindForSession(state, &moving); !ok || kind != SessionTransitionKindMoving {
+			t.Errorf("%s with a move: got %q %v", state, kind, ok)
+		}
+		if kind, ok := SessionTransitionKindForSession(state, nil); ok {
+			t.Errorf("%s without an operation: got %q", state, kind)
+		}
+	}
+	if kind, ok := SessionStateCheckpointing.TransitionKind(); ok {
+		t.Errorf("checkpointing: got %q", kind)
+	}
+	if kind, ok := SessionStateClosing.TransitionKind(); !ok || kind != SessionTransitionKindSuspending {
+		t.Errorf("closing: got %q %v", kind, ok)
+	}
+}
