@@ -1965,6 +1965,14 @@ async fn prepare_and_start_harness(
                     .environment
                     .entry("DISABLE_AUTOUPDATER".into())
                     .or_insert_with(|| "1".into());
+                // Claude Code otherwise reminds a child that has gone several
+                // steps without text that "the user hasn't heard from you",
+                // prompting status messages nobody reads; the parent sees
+                // only the child's report.
+                config
+                    .environment
+                    .entry("CLAUDE_CODE_SILENT_TURN_REMINDER".into())
+                    .or_insert_with(|| "false".into());
             }
             // `config.environment` keeps only overrides; the login shell's
             // HOME, which the harness inherits, is in the base environment.
