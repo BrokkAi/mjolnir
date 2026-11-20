@@ -255,7 +255,7 @@ def isolation_report(egress=(), evidence=()):
                     # Turn and retirement audits may cover the same transcript.
                     screened[kind].add((sid, hit["seq"]))
     return {
-        "egress_measurements": list(egress),
+        **({"egress_source": "missing"} if egress is None else {"egress_measurements": list(egress)}),
         "void_sessions": {kind: len(void[kind]) for kind in kinds},
         "void_reasons": {kind: {sid: [reasons[key] for key in sorted(reasons)]
                                for sid, reasons in sorted(void[kind].items())} for kind in kinds},
@@ -269,32 +269,41 @@ def isolation_report(egress=(), evidence=()):
     }
 
 
-def read_egress(path, *, required=False):
+def read_egress(path, *, required=False, expected_sha256=None):
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        if required:
+        if required and expected_sha256 is None:
             raise
-        return {"path": str(path), "sha256": None}, []
+        return {"path": str(path), "sha256": None, "status": "uncaptured"}, None if expected_sha256 else []
+    source = {"path": str(path), "sha256": sha(raw)}
+    if expected_sha256 is not None and source["sha256"] != expected_sha256:
+        return source, None
     records = [json.loads(line) for line in raw.splitlines() if line.strip()]
-    return {"path": str(path), "sha256": sha(raw)}, records
+    return source, records
 
 
 def freeze_isolation(root, key, egress_log):
     previous = key.get("egress_source")
-    with pilot_lock(root):
-        if previous is not None and (egress_log is None or str(egress_log.resolve()) == previous["path"]):
-            source, records = previous, key["isolation"]["egress_measurements"]
-        else:
-            path = (egress_log or root / "egress.jsonl").resolve()
-            source, records = read_egress(path, required=egress_log is not None)
-        isolation = isolation_report(records, isolation_evidence(root, root / "runs"))
-    if previous is not None and previous != source:
+    default_path = Path(previous["path"]) if previous is not None else (root / "egress.jsonl").resolve()
+    path = egress_log.resolve() if egress_log is not None else default_path
+    same_source = previous is not None and str(path) == previous["path"]
+    if same_source and previous["sha256"] is not None:
+        source, records = previous, key["isolation"]["egress_measurements"]
+    else:
+        source, records = read_egress(path)
+    isolation = isolation_report(records, isolation_evidence(root, root / "runs"))
+    if previous is not None and not same_source:
         key.setdefault("egress_source_history", []).append(previous)
     key.update(egress_source=source, isolation=isolation)
 
 
 def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256=None, egress_log=None):
+    with pilot_lock(root):
+        return _prepare_locked(root, manifest, snapshot, defects, selected, manifest_sha256, egress_log)
+
+
+def _prepare_locked(root, manifest, snapshot, defects, selected, manifest_sha256, egress_log):
     key_file = root / KEY_PATH
     key = load(key_file) if key_file.exists() else {"version": 1, "manifest": manifest, "outputs": {}}
     if key["manifest"] != manifest:
@@ -305,6 +314,8 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
     pin_manifest = pinned is None and manifest_sha256 is not None
     if pin_manifest:
         key["manifest_sha256"] = manifest_sha256
+    previous = key.get("egress_source"), key.get("isolation")
+    freeze_isolation(root, key, egress_log)
     outputs = key["outputs"]
     retired = root / KEY_PATH.parent / "retired"
     for batch in {entry["batch"] for entry in outputs.values()}:
@@ -368,8 +379,6 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
             hand_items = texts.copy()
             random.Random(f"{diff}/{kind}/hand-check").shuffle(hand_items)
             write_task(root / HAND_PATH / batch, {**payload, "items": hand_items})
-    previous = key.get("egress_source"), key.get("isolation")
-    freeze_isolation(root, key, egress_log)
     if not key_file.exists() or pin_manifest or previous != (key["egress_source"], key["isolation"]):
         save(key_file, key)
     return key

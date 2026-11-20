@@ -387,9 +387,12 @@ def main():
             raise ValueError("archived readout requires isolation evidence frozen by judge preparation")
         stale, deliveries = set(), load_deliveries(runs, key)
     else:
-        default_egress = key.get("egress_source", {}).get("path", args.root / "egress.jsonl")
+        source = key.get("egress_source", {})
+        default_egress = Path(source.get("path", args.root / "egress.jsonl"))
+        egress_path = args.egress_log.resolve() if args.egress_log is not None else default_egress
+        expected_egress = source.get("sha256") if str(egress_path) == source.get("path") else None
         with pilot_lock(runs.parent):
-            _, egress = read_egress(args.egress_log or Path(default_egress), required=args.egress_log is not None)
+            _, egress = read_egress(egress_path, required=args.egress_log is not None, expected_sha256=expected_egress)
             isolation = isolation_report(egress, isolation_evidence(args.root, runs))
             stale = stale_judged_diffs(runs, key)
             deliveries = load_deliveries(runs, key, stale_diffs=stale)
