@@ -344,8 +344,9 @@ func (o *OwnedMcpApprovals) response(request *schema.RequestPermissionRequest) *
 // Once a human or AFK answer was accepted, cancellation still receives it so
 // its resolution is recorded even when both notifications are ready. A nil
 // cancellation never fires. Returns nil when the question was withdrawn or
-// its answer was dropped.
-func awaitElicitationResponse(ctx context.Context, pending *PendingElicitations, id string, answer <-chan PendingAnswer, cancellation <-chan struct{}) PendingAnswer {
+// its answer was dropped. It consumes answer (Rust takes the oneshot
+// receiver by value), so it closes answer before returning.
+func awaitElicitationResponse(ctx context.Context, pending *PendingElicitations, id string, answer *PendingAnswerReceiver, cancellation <-chan struct{}) PendingAnswer {
 	panic("unported: mj-worker/src/acp/permissions.rs await_elicitation_response")
 }
 

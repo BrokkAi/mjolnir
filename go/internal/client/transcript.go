@@ -101,13 +101,14 @@ func HistoryEntries(page *core.TranscriptHistoryPage) []HistoryEntry {
 	panic("unported: mj-client/src/transcript.rs history_entries")
 }
 
-// TranscriptBrowserTranscript is Rust's browser_transcript (renamed: the
-// BrowserTranscript type of web.rs keeps the name).
-func TranscriptBrowserTranscript(sourceEntries []core.ChatEntry, latestSeq, lastCompactionSeq uint64, afterSeq *uint64) BrowserTranscript {
+// BrowserTranscript is Rust's browser_transcript. It keeps the name by the
+// package's collision rule; web.rs's BrowserTranscript type is
+// WebBrowserTranscript.
+func BrowserTranscript(sourceEntries []core.ChatEntry, latestSeq, lastCompactionSeq uint64, afterSeq *uint64) WebBrowserTranscript {
 	panic("unported: mj-client/src/transcript.rs browser_transcript")
 }
 
-func browserTranscriptCollapsed(sourceEntries []core.ChatEntry, collapse []EntryCollapse, latestSeq, lastCompactionSeq uint64, afterSeq *uint64, restartCollapseWindowStart *uint64) BrowserTranscript {
+func browserTranscriptCollapsed(sourceEntries []core.ChatEntry, collapse []EntryCollapse, latestSeq, lastCompactionSeq uint64, afterSeq *uint64, restartCollapseWindowStart *uint64) WebBrowserTranscript {
 	panic("unported: mj-client/src/transcript.rs browser_transcript_collapsed")
 }
 
@@ -420,8 +421,8 @@ func EntryGlyph(entry *core.ChatEntry) string {
 	panic("unported: mj-client/src/transcript.rs entry_glyph")
 }
 
-func MaterializedBrowserTranscript(session *core.MaterializedSession) BrowserTranscript {
-	return TranscriptBrowserTranscript(MaterializedChatEntries(session), session.AppliedEventOrdinal, 0, nil)
+func MaterializedBrowserTranscript(session *core.MaterializedSession) WebBrowserTranscript {
+	return BrowserTranscript(MaterializedChatEntries(session), session.AppliedEventOrdinal, 0, nil)
 }
 
 // BrowserTranscriptProjector reuses unchanged typed entries while
@@ -458,7 +459,7 @@ func releaseRawViewDetail(entries []core.ChatEntry) {
 // every item kind and for changes the item itself does not record: a tool
 // call marked ended by a later interrupt, or changes to collapse groups as
 // the window slides.
-func (p *BrowserTranscriptProjector) Project(session *core.MaterializedSession) BrowserTranscript {
+func (p *BrowserTranscriptProjector) Project(session *core.MaterializedSession) WebBrowserTranscript {
 	panic("unported: mj-client/src/transcript.rs BrowserTranscriptProjector::project")
 }
 

@@ -109,7 +109,7 @@ func DiscardQueuedPromptsBeforeStart(root, sessionID, commandID string) error {
 	if err != nil {
 		return err
 	}
-	defer owner.Close()
+	defer owner.Release()
 	return durableRelayDiscardQueuedPromptsBeforeStart(root, sessionID, commandID)
 }
 

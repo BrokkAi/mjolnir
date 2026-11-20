@@ -57,7 +57,7 @@ func workerSocket(role core.SubagentMcpRole) SubagentMcpSocket {
 // scriptedBridge answers `initialize` and `session/new`, then fails the
 // first `session/prompt` with a JSON-RPC error and completes the second.
 // Returns how many prompts it received.
-func scriptedBridge(t *testing.T, stream io.ReadWriteCloser, loginPath string, loginIdentity ClaudeLoginIdentity) int {
+func scriptedBridge(t *testing.T, stream io.ReadWriteCloser, loginPath string, loginIdentity *ClaudeLoginIdentity) int {
 	panic("unported: mj-worker/src/acp/tests.rs scripted_bridge")
 }
 

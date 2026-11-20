@@ -13,34 +13,35 @@ import (
 	"strings"
 )
 
-// procStat is Rust's linux::Stat (renamed: locals named stat would shadow
-// it): the fields of /proc/<pid>/stat that follow the command name.
-type procStat struct {
+// workFactsStat is Rust's linux::Stat (renamed: locals named stat would
+// shadow it, and cpu_usage's ProcStat is procStat): the fields of
+// /proc/<pid>/stat that follow the command name.
+type workFactsStat struct {
 	zombie     bool
 	ppid       uint32
 	startTicks uint64
 }
 
-func parseStat(text string) (procStat, bool) {
+func parseStat(text string) (workFactsStat, bool) {
 	cut := strings.LastIndexByte(text, ')')
 	if cut < 0 {
-		return procStat{}, false
+		return workFactsStat{}, false
 	}
 	fields := strings.Fields(text[cut+1:])
 	// State is field 3 of the file and so index 0 here; ppid is field 4 and
 	// the start time, in clock ticks since boot, is field 22.
 	if len(fields) < 20 {
-		return procStat{}, false
+		return workFactsStat{}, false
 	}
 	ppid, err := strconv.ParseUint(fields[1], 10, 32)
 	if err != nil {
-		return procStat{}, false
+		return workFactsStat{}, false
 	}
 	start, err := strconv.ParseUint(fields[19], 10, 64)
 	if err != nil {
-		return procStat{}, false
+		return workFactsStat{}, false
 	}
-	return procStat{zombie: strings.HasPrefix(fields[0], "Z"), ppid: uint32(ppid), startTicks: start}, true
+	return workFactsStat{zombie: strings.HasPrefix(fields[0], "Z"), ppid: uint32(ppid), startTicks: start}, true
 }
 
 // ticksPerSecond is sysconf(_SC_CLK_TCK).

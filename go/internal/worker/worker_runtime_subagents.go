@@ -464,11 +464,11 @@ func (e *SubagentEndpoint) SetMutatingAdmission(open bool) error {
 
 // daemonContact reports whether the daemon has read the queue after the read
 // numbered `mark`, and how long ago it last read it.
-func (e *SubagentEndpoint) daemonContact(mark uint64) daemonContact {
+func (e *SubagentEndpoint) daemonContact(mark uint64) DaemonContact {
 	e.state.mu.Lock()
 	collections := e.state.state.collections
 	e.state.mu.Unlock()
-	contact := daemonContact{PickedUp: collections.count > mark}
+	contact := DaemonContact{PickedUp: collections.count > mark}
 	if collections.last != nil {
 		seconds := uint64(time.Since(*collections.last) / time.Second)
 		contact.LastCollectedSecondsAgo = &seconds
@@ -547,7 +547,7 @@ type socketReply struct {
 	AcknowledgmentRequired bool                     `json:"acknowledgment_required"`
 	Result                 *core.SubagentToolResult `json:"result,omitempty"`
 	// Daemon is set only when Result is absent.
-	Daemon *daemonContact `json:"daemon,omitempty"`
+	Daemon *DaemonContact `json:"daemon,omitempty"`
 }
 
 // UnmarshalJSON requires `accepted` and refuses unknown fields.

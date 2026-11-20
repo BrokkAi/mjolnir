@@ -80,7 +80,7 @@ func incompressibleMemoryText(length int) string {
 
 // projectMemorySocket serves one client connection with endpoint as its
 // project-memory service, returning the client end and the serving task.
-func projectMemorySocket(t *testing.T, relay *RelayCell, endpoint ProjectMemoryEndpoint) (net.Conn, *core.JoinHandle[error]) {
+func projectMemorySocket(t *testing.T, relay *RelayCell, endpoint projectMemoryEndpoint) (net.Conn, *core.JoinHandle[error]) {
 	panic("unported: mj-worker/src/worker_runtime/relay_tests.rs project_memory_socket")
 }
 
@@ -107,8 +107,9 @@ func runtimeEventChannel() (TestRuntimeEventSender, <-chan core.RuntimeEvent) {
 // runtimeRelayTestsRunRelayCoordinator runs the relay coordinator for a
 // protocol fixture (Rust's run_relay_coordinator). Protocol fixtures have no
 // classifier. Verdict fixtures supply their own local HTTP endpoint instead
-// of resolving the host's default service.
-func runtimeRelayTestsRunRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, wakes <-chan struct{}, commands chan<- CommandRequest) error {
+// of resolving the host's default service. The test sends wakes through
+// wakes and reads commands from commands.receiver().
+func runtimeRelayTestsRunRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, wakes *dispatchWakeChannel, commands *commandChannel) error {
 	panic("unported: mj-worker/src/worker_runtime/relay_tests.rs run_relay_coordinator")
 }
 
@@ -450,7 +451,7 @@ func startupStepRecorded(root, step string) bool {
 // coordinatorBehindAReadyBarrier starts a coordinator whose session has a
 // ready checkpoint barrier, fed by a runtime event channel of capacity.
 // Returns the cut the barrier holds.
-func coordinatorBehindAReadyBarrier(t *testing.T, temp string, capacity int) (*RelayCell, chan<- core.RuntimeEvent, chan<- struct{}, *core.JoinHandle[error], core.RelayCursor) {
+func coordinatorBehindAReadyBarrier(t *testing.T, temp string, capacity int) (*RelayCell, chan<- core.RuntimeEvent, *dispatchWakeChannel, *core.JoinHandle[error], core.RelayCursor) {
 	panic("unported: mj-worker/src/worker_runtime/relay_tests.rs coordinator_behind_a_ready_barrier")
 }
 
@@ -460,7 +461,7 @@ func journaledNotices(relay *RelayCell) []string {
 
 // runCapturingCoordinator is a sub-agent's coordinator: it observes its
 // agent's work when a prompt ends.
-func runCapturingCoordinator(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, wakes <-chan struct{}, commands chan<- CommandRequest, observer WorkObserver) error {
+func runCapturingCoordinator(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, wakes *dispatchWakeChannel, commands *commandChannel, observer WorkObserver) error {
 	panic("unported: mj-worker/src/worker_runtime/relay_tests.rs run_capturing_coordinator")
 }
 

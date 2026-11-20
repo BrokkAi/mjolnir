@@ -140,7 +140,7 @@ type scriptedObservedEvents struct {
 // scriptedDriveResult is what the runtime's drive returned (Rust's
 // Result<Option<SessionRestart>>); a nil restart is none.
 type scriptedDriveResult struct {
-	restart sessionRestart
+	restart SessionRestart
 	err     error
 }
 
