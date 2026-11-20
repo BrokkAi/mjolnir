@@ -52,11 +52,11 @@ Terms: an **arm** is one condition (N, G, R, R-loc). A **replicate** is an indep
      "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high", "engine": "fable/high", "judge": "fable/high"},
      "page_rows": 50,
      "diffs": [{"key": "<repo>/<id>", "repo": "...", "id": "...", "intro": "<sha>", "base": "<sha>",
-                "label_line": N, "replicates": {"G": 1|2, "R": 1|2, "R-loc": 1}, "agreement_sample": true|false}],
+                "label_line": N, "replicates": {"G": 1|2, "R": 1|2, "R-loc": 1}, "check_rank": N}],
      "jobs": [{"job": "<key>/<arm>/r<rep>/writer" | "<key>/<arm>/r<rep>/reviewer-<slot>",
                "diff": "<key>", "arm": "N|G|R|R-loc", "replicate": 1|2, "kind": "writer|reviewer", "slot": 1|2|null}]}
 
-Selection: sort eligible keys, seeded shuffle within each repo, take 17 from mjolnir and 18 from bifrost-dev (proportional to 26:28, rounded to 35). Seeded draws, also within repo, pick the 10 replicate diffs (5 and 5) and the agreement sample (25% of 35, rounded up to 9). The script records the eligible pool, its hash and every draw.
+Selection: sort eligible keys, seeded shuffle within each repo, take 17 from mjolnir and 18 from bifrost-dev (proportional to 26:28, rounded to 35). Seeded draws, also within repo, pick the 10 replicate diffs (5 and 5). A separate seeded ordering of all 35 diffs gives each its `check_rank` (1 to 35). After judging, the agreement sample is the first quarter, rounded up, of the agreement diffs taken in `check_rank` order. The script records the eligible pool, its hash and every draw.
 
 **Run layout**: `/mnt/optane/review-arms-pilot/runs/<diff key>/<arm>/r<rep>/`, holding `writer/` (brief.md, usage.json, transcript pointer, query log for R and R-loc) and `reviewers/<slot>/` (handback, usage.json). N has only `reviewers/`.
 
@@ -64,9 +64,9 @@ Selection: sort eligible keys, seeded shuffle within each repo, take 17 from mjo
 
 **Row shape** (Slices 3, 4 and 6): every engine row is `{"kind": "<row kind>", "sites": [{"path": "<repo-relative>", "start_line": N, "end_line": N}], "fields": {...}}`. `sites` lists every source location the row carries (for a flow row, both ends). `fields` holds the row's other content: values copied verbatim, names and signatures. R-loc's reduction keeps `kind` and `sites` and drops `fields`.
 
-**Transport** (Slice 4): one MCP tool, `rql_query(query: string, page: int = 1)`, served over SSH into the sealed writer session as Oz does. The host server looks up the session's assigned diff and arm. It calls the engine (cached, so later pages cost nothing extra), then returns page `page` of `page_rows` rows in the engine's stable order, with `total`, `page` and `pages`. Every row stays reachable by paging. For R-loc it first reduces every row to its source locations (each path and line span the row carries, with snippets, signatures and values removed). Every call is logged with session, diff, arm, query, the requested page, the delivered rows (or their per-row hashes), the answer hash and latency. The readout uses this to tell a decisive fact on a delivered page from one the writer never paged to.
+**Transport** (Slice 4): one MCP tool, `rql_query(query: string, page: int = 1)`, served over SSH into the sealed writer session as Oz does. The host server looks up the session's assigned diff and arm. It calls the engine (cached, so later pages cost nothing extra), then returns page `page` of `page_rows` rows in the engine's stable order, with `total`, `page` and `pages`. Every row stays reachable by paging. For R-loc it first reduces every row to its source locations (each path and line span the row carries, with snippets, signatures and values removed). Every call is logged with session, diff, arm, query, the requested page, the delivered rows in full, the answer hash and latency. The readout uses this to tell a decisive fact on a delivered page from one the writer never paged to.
 
-**Judgments** (Slice 6): `/mnt/optane/review-arms-pilot/judge/<opaque id>.json` holds `{"catch": bool, "recovered_facts": [fact ids], "matched_defects": [...]}` for reviewer outputs and `{"contains_decisive": bool, "contained_facts": [...], "states_defect": bool}` for briefs, with the private ID map kept apart as in `brief_score.py`. The hand-check queue is every diff whose arms' judged outcomes differ, plus the manifest's agreement sample.
+**Judgments** (Slice 6): `/mnt/optane/review-arms-pilot/judge/<opaque id>.json` holds `{"catch": bool, "recovered_facts": [fact ids], "matched_defects": [...]}` for reviewer outputs and `{"contains_decisive": bool, "contained_facts": [...], "states_defect": bool}` for briefs, with the private ID map kept apart as in `brief_score.py`. The hand-check queue is every diff whose arms' judged outcomes differ, plus the first quarter (rounded up) of the remaining agreement diffs in the manifest's `check_rank` order.
 
 ## Plan of Work
 
@@ -89,4 +89,4 @@ Builds are Python only. Tests use hand-written fakes for the engine and the sess
 
 ## Idempotence and Recovery
 
-Every stage skips jobs whose outputs exist and validate, and reruns the others. Admission is per diff: a diff starts only when the profile's remaining weekly quota minus the diff's estimated cost stays above the 25% floor, and an interrupted diff's missing jobs run before any new diff. The readout includes only diffs whose every job finished.
+Every job's output records the hashes of the inputs that produced it: manifest, prompt file, image digest, RQL reference and menu-step semantics. A stage skips a job only when its output exists, validates and carries the current input hashes. A job whose inputs changed (for example a prompt fixed after the smoke run) has its old output moved aside, never deleted, and runs again. That also invalidates its reviews and judgments, which rerun on the new brief. Admission is per diff: a diff starts only when the profile's remaining weekly quota minus the diff's estimated cost stays above the 25% floor, and an interrupted diff's missing jobs run before any new diff. The readout includes only diffs whose every job finished.
