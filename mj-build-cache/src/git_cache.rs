@@ -18,6 +18,10 @@ const CACHE_CONTAINER_ROOT: &str = "/run/hel/git-cache";
 const CACHE_RELATIVE_ROOT: &str = ".cache/mjolnir/git";
 const CACHE_MAX_KIB: u64 = 20 * 1024 * 1024;
 
+// A successful redirection creates the lock file exclusively. Some mkdir
+// implementations report success after the mkdir syscall loses to a peer.
+const CACHE_LOCK_FUNCTION: &str = r#"try_cache_lock() (set -C; : > "$1") 2>/dev/null"#;
+
 use super::cache_host::CacheHost;
 
 impl CacheHost {
@@ -29,8 +33,13 @@ impl CacheHost {
         arguments: impl IntoIterator<Item = String>,
         purpose: impl Into<String>,
     ) -> CommandSpec {
-        self.shell_command(script, "hel-git-cache", arguments, purpose)
-            .stage(ProvisionStage::Cloning)
+        self.shell_command(
+            &format!("{CACHE_LOCK_FUNCTION}\n{script}"),
+            "hel-git-cache",
+            arguments,
+            purpose,
+        )
+        .stage(ProvisionStage::Cloning)
     }
 
     /// The sessions `engine` still has containers for on this host. The
@@ -353,7 +362,7 @@ cutoff_repository="$snapshot.cutoff-$$"
 locked=0
 cleanup() {
     if [ "$locked" -eq 1 ]; then
-        rmdir "$lock"
+        rm -- "$lock"
     fi
     rm -rf -- "$preparation" "$snapshot_partial" "$cutoff_repository"
 }
@@ -362,7 +371,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 attempt=0
-while ! mkdir "$lock" 2>/dev/null; do
+while ! try_cache_lock "$lock"; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 1500 ]; then
         echo "timed out waiting for clone-cache lock $key" >&2
@@ -420,7 +429,7 @@ fi
 # while packing a cutoff bundle or making the mounted snapshot readable.
 git clone --mirror --local -- "$mirror" "$pinned"
 locked=0
-rmdir "$lock"
+rm -- "$lock"
 rm -rf -- "$snapshot" "$snapshot_partial"
 if [ "$#" -eq 0 ]; then
     if [ -n "$exact_ref" ]; then
@@ -539,11 +548,15 @@ marker="$root/last-gc"
 if [ -f "$marker" ] && find "$marker" -mmin -1440 -print | grep -q .; then
     exit 0
 fi
-find "$root/locks" -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} \;
+# Reap old lock files and stale lock directories from earlier builds.
+find "$root/locks" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -mmin +1440 -exec rm -rf {} \;
 gc_lock="$root/locks/gc"
-mkdir "$gc_lock" 2>/dev/null || exit 0
+try_cache_lock "$gc_lock" || exit 0
 candidates="$root/gc-candidates-$$"
-trap 'rm -f -- "$candidates"; rm -rf -- "$gc_lock"' EXIT HUP INT TERM
+trap 'rm -f -- "$candidates" "$gc_lock"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 for snapshot in "$root"/sessions/*; do
     [ -d "$snapshot" ] || continue
     session=${snapshot##*/}
@@ -565,7 +578,7 @@ for entry in "$root"/mirrors/*; do
     [ -d "$entry" ] || continue
     key=${entry##*/}
     [ -f "$entry/last-used" ] || continue
-    if find "$entry/last-used" -mmin +43200 -print | grep -q . && mkdir "$root/locks/$key" 2>/dev/null; then
+    if find "$entry/last-used" -mmin +43200 -print | grep -q . && try_cache_lock "$root/locks/$key"; then
         rm -rf -- "$entry" "$root/locks/$key"
     fi
 done
@@ -576,7 +589,7 @@ if [ "$size" -gt "$limit_kib" ]; then
         [ -n "$used" ] || continue
         entry=${used%/last-used}
         key=${entry##*/}
-        if mkdir "$root/locks/$key" 2>/dev/null; then
+        if try_cache_lock "$root/locks/$key"; then
             rm -rf -- "$entry" "$root/locks/$key"
             size=$(du -sk "$root/mirrors" | awk '{print $1}')
             [ "$size" -le "$limit_kib" ] && break
@@ -1328,6 +1341,7 @@ mod tests {
     }
 
     // Hard-won: #1388: packing one session's history blocked every clone of the same repository.
+    // Hard-won: 1bd051d40: a mkdir lock was acquired twice under uutils.
     #[cfg(unix)]
     #[test]
     fn concurrent_snapshots_share_a_refresh_and_survive_mirror_eviction() {
@@ -1374,6 +1388,7 @@ mod tests {
         };
         let real_git = executable("git");
         let real_mkdir = executable("mkdir");
+        let real_sleep = executable("sleep");
         let git_wrapper = r#"#!/bin/sh
 set -eu
 wait_for() {
@@ -1408,12 +1423,25 @@ exec "$CACHE_TEST_GIT" "$@"
         let mkdir_wrapper = r#"#!/bin/sh
 set -eu
 if [ "$#" -eq 1 ] && [ "$1" = "$CACHE_TEST_ROOT/cache/locks/repository" ] &&
-   [ "${CACHE_TEST_WAITER:-0}" = 1 ]; then
+   [ "${CACHE_TEST_WAITER:-0}" = 1 ] && [ -d "$1" ]; then
+    # Simulate uutils treating a competing mkdir's EEXIST as success.
     : > "$CACHE_TEST_ROOT/waiter-started"
+    exit 0
 fi
 exec "$CACHE_TEST_MKDIR" "$@"
 "#;
-        for (name, script) in [("git", git_wrapper), ("mkdir", mkdir_wrapper)] {
+        let sleep_wrapper = r#"#!/bin/sh
+set -eu
+if [ "${CACHE_TEST_WAITER:-0}" = 1 ] && [ "$1" = "0.2" ]; then
+    : > "$CACHE_TEST_ROOT/waiter-started"
+fi
+exec "$CACHE_TEST_SLEEP" "$@"
+"#;
+        for (name, script) in [
+            ("git", git_wrapper),
+            ("mkdir", mkdir_wrapper),
+            ("sleep", sleep_wrapper),
+        ] {
             let path = wrappers.join(name);
             std::fs::write(&path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1426,6 +1454,7 @@ exec "$CACHE_TEST_MKDIR" "$@"
             ("CACHE_TEST_ROOT".into(), root.display().to_string()),
             ("CACHE_TEST_GIT".into(), real_git),
             ("CACHE_TEST_MKDIR".into(), real_mkdir),
+            ("CACHE_TEST_SLEEP".into(), real_sleep),
         ]);
         let mut first = GitExecutor(environment.clone());
         first.0.insert("CACHE_TEST_PAUSE_FETCH".into(), "1".into());
