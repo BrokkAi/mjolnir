@@ -525,6 +525,18 @@ mod tests {
         );
         drop(relay);
 
+        // Legacy claims had no durable use marker. Keep the opening and
+        // in-flight dispatch so upgrade must recover that evidence before
+        // interrupting the old command and compacting its payload.
+        let path = temp.path().join(RELAY_STATE_FILE);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved["format_version"] = serde_json::json!(27);
+        saved.as_object_mut().unwrap().remove("native_session_used");
+        saved.as_object_mut().unwrap().remove("native_use_evidence");
+        assert_eq!(saved["dispatches"]["sent-work"]["state"], "in_flight");
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+
         // First open interrupts the claim, and the second loads the compacted snapshot.
         for _ in 0..2 {
             let relay = DurableRelay::open(temp.path(), SESSION, "restarted").unwrap();
