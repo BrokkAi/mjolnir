@@ -495,19 +495,23 @@ impl Controller {
             .sessions
             .get_mut(session_id)
             .context("session disappeared during container upgrade")?;
-        if plan.replaces_settings() {
-            let applied = mj_core::state::ContainerSettings::applied(record, &plan.target_image);
-            let mut runtime = record.target_runtime_settings(&self.config)?.into_owned();
-            runtime.container_settings = Some(applied);
-            record.target_runtime = Some(std::sync::Arc::new(runtime));
-        } else if let Some(settings) = record
+        if let Some(settings) = record
             .target_runtime
             .as_mut()
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
-            settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(
-                &plan.target_image,
-            ));
+            if plan.replaces_settings() {
+                settings
+                    .resource_allocation
+                    .clone_from(&record.resource_allocation);
+                settings
+                    .additional_mounts
+                    .clone_from(&record.additional_mounts);
+            } else if plan.image_changed() {
+                settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(
+                    &plan.target_image,
+                ));
+            }
         }
         self.persist_session_state(session_id)
     }

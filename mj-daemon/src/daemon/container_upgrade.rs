@@ -26,10 +26,9 @@ impl RuntimeState {
         session_id: String,
         settings: ContainerSettingsChange,
     ) -> Result<Option<ContainerUpgradePreview>> {
-        let _admission = mj_controller::upgrade::activity("container settings request")?;
         self.validate_container_settings_size(&session_id, settings.resource_allocation.as_ref())
             .await?;
-        let preview = blocking(move || {
+        let preview = mj_core::runtime::spawn_blocking(move || {
             ensure!(
                 !mj_controller::controller::move_session::move_owns_session(&session_id),
                 "session is moving; change container settings after Move finishes"
@@ -52,7 +51,8 @@ impl RuntimeState {
             )?;
             Ok(None)
         })
-        .await?;
+        .await
+        .context("container settings task panicked")??;
         if preview.is_none() {
             self.reload_controller().await?;
         }

@@ -1519,6 +1519,10 @@ impl Controller {
             &additional_mounts,
             executor,
         )?;
+        // The host checks above can be abandoned during handoff. Only the
+        // deferred save takes admission, once it is ready to write.
+        let _admission =
+            crate::upgrade::activity_unless_draining("save deferred container settings")?;
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,

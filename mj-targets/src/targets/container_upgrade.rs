@@ -472,6 +472,12 @@ impl RetainedContainer {
         })
     }
 
+    pub fn image_changed(&self) -> bool {
+        self.prepared_image.as_deref().is_some_and(|id| {
+            id.trim_start_matches("sha256:") != self.current_image_id.trim_start_matches("sha256:")
+        })
+    }
+
     pub fn apply_settings(
         &mut self,
         applied: &[AdditionalMount],
@@ -1022,11 +1028,29 @@ impl RetainedContainer {
         }
         let result = executor.execute(&command)?;
         drop(environment_file);
-        ensure!(
-            result.status == 0,
-            "replacement start failed; source and all storage retained: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        if result.status != 0 {
+            let detail = String::from_utf8_lossy(&result.stderr);
+            let failure = anyhow::anyhow!(
+                "replacement start failed; source and all storage retained: {}",
+                detail.trim_end()
+            );
+            if let Some(mount) = self.mounts.iter().find(|mount| {
+                mount.kind == "bind"
+                    && (detail.contains(&format!(
+                        "statfs {}: no such file or directory",
+                        mount.source
+                    )) || detail.contains(&format!(
+                        "bind source path does not exist: {}",
+                        mount.source
+                    )))
+            }) {
+                return Err(failure.context(mj_core::refusal::Refusal::precondition(format!(
+                    "The bind source for {} is missing. Recreate the source to retry this replacement, or remove the mount before the next container creation.",
+                    mount.destination
+                ))));
+            }
+            return Err(failure);
+        }
         initialize_container_home(&self.locator, executor)?;
         Ok(())
     }
