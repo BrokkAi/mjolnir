@@ -327,6 +327,8 @@ mod harness_launch;
 #[cfg(unix)]
 mod json_gh_rules;
 #[cfg(unix)]
+pub(crate) use json_gh_rules::opencode_reviewer_environment;
+#[cfg(unix)]
 mod project_tools;
 #[cfg(unix)]
 mod shell_environment;

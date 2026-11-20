@@ -1,19 +1,25 @@
 OpenAI Codex guardian policy and review rules
 =============================================
 
-Mjolnir's guardian (mj-worker/src/acp/guardian.rs and
-mj-worker/src/acp/guardian/) is ported from OpenAI Codex,
-https://github.com/openai/codex, at commit
-076ac7856b1235947f271930bd7437bae54a0dfc:
+Mjolnir's guardian is ported from OpenAI Codex, https://github.com/openai/codex,
+at commit 076ac7856b1235947f271930bd7437bae54a0dfc:
 
 - mj-worker/src/acp/guardian/policy.md is
   codex-rs/prompts/templates/guardian/policy.md, unchanged.
 - mj-worker/src/acp/guardian/policy_template.md is
-  codex-rs/prompts/templates/guardian/policy_template.md, with the passages
-  about Codex's sandbox, tools, and truncation markers rewritten for Mjolnir.
-- The review prompt framing, output contract, verdict parser, outcome
-  thresholds, review deadline, attempt budget, and denial circuit breaker
-  follow codex-rs/guardian-context and codex-rs/ext/guardian-reviewer.
+  codex-rs/prompts/templates/guardian/policy_template.md, changed by Mjolnir:
+  its evidence-handling, investigation and execution-environment passages
+  describe Mjolnir's sessions and reviewer instead of Codex's sandbox and
+  tools. The file says so in its header.
+- mj-worker/src/acp/guardian.rs and mj-worker/src/acp/guardian/reviewer.rs
+  follow the prompt framing of codex-rs/guardian-context and the output
+  contract, verdict parser, outcome thresholds, review deadline and attempt
+  budget of codex-rs/ext/guardian-reviewer.
+- The per-turn denial breaker in mj-transcript/src/turn_context.rs follows
+  codex-rs/ext/guardian-reviewer/src/circuit_breaker.rs.
+
+A copy of this notice ships inside the brokk-mj-worker-runtime crate as
+mj-worker/src/acp/guardian/OPENAI_CODEX_NOTICE.txt.
 
 Codex's NOTICE file:
 

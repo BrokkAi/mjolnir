@@ -1,25 +1,28 @@
 //! The reviewer side of the Mjolnir guardian.
 //!
-//! A [`Guardian`] belongs to one bridge connection. On its first review it
-//! starts a second process from the session's own launch (same command,
-//! environment, staged home, and therefore the same credentials and harness
-//! configuration) and keeps an ACP connection to it. Each review opens a
-//! fresh session there, so no review inherits another's history.
+//! A [`Guardian`] belongs to one bridge, and `run_bridge` stops its reviewer
+//! after that bridge's own teardown on every exit path. On its first review it
+//! starts a second process from the session's own launch: the same harness,
+//! staged home and credentials, so the same harness configuration and model.
+//! Each review opens a fresh session there, so no review inherits another's
+//! history.
 //!
-//! The reviewer is contained without relying on anything harness specific:
-//! its sessions run under the same harness configuration and execution
-//! enforcement as the reviewed session, the connection advertises no client
-//! terminal, file system, or elicitation, the sessions get no MCP servers,
-//! and every permission request the reviewer raises is refused. It therefore
-//! can never do anything the reviewed agent could not already do without
-//! review, and has fewer tools than that agent.
+//! The reviewer's launch is narrowed for it (see [`reviewer_launch`]): an
+//! OpenCode reviewer gets none of the session's Mjolnir plugins, so it can
+//! never drain the session's mailbox, and its hook and rules let it read and
+//! nothing else. Every harness's reviewer runs under the session's execution
+//! enforcement, its connection advertises no client terminal, file system, or
+//! elicitation, Mjolnir passes it no MCP servers, and every permission request
+//! it raises is refused once.
 
 use super::*;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
 /// Codex's `REVIEW_TIMEOUT`: one deadline for a whole review, including
-/// starting the reviewer and every attempt.
+/// starting the reviewer and every attempt. Waiting while another review
+/// starts the shared reviewer is a queue for it, not this review's own work,
+/// so the deadline starts after that.
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// Codex's `MAX_REVIEW_ATTEMPTS`: reviewer prompts per review, counting a
 /// retry on a fresh reviewer and a reminder for a reply without a verdict.
@@ -27,9 +30,14 @@ const MAX_REVIEW_ATTEMPTS: usize = 3;
 /// How long a retiring reviewer bridge gets to reap its process group after
 /// its stdin closes, the grace `run_bridge` gives the session's own bridge.
 const REVIEWER_EXIT_GRACE: Duration = Duration::from_secs(5);
+/// The reviewer's supervisor spec, beside the session's.
+#[cfg(unix)]
+const REVIEWER_SUPERVISOR_SPEC: &str = "acp-supervisor-guardian.json";
 
-/// The guardian for one bridge connection: the reviewer host it starts on
-/// demand and the launch it reviews for.
+type HostSlot<'a> = tokio::sync::MutexGuard<'a, Option<Arc<ReviewerHost>>>;
+
+/// The guardian for one bridge: the reviewer host it starts on demand and the
+/// launch it reviews for.
 pub(in crate::acp) struct Guardian {
     spec: LaunchSpec,
     host: tokio::sync::Mutex<Option<Arc<ReviewerHost>>>,
@@ -66,7 +74,6 @@ impl Guardian {
                 reason: "it denied several actions in this turn".into(),
             };
         }
-        let started = std::time::Instant::now();
         let action = planned_action(
             self.spec.harness,
             request,
@@ -74,41 +81,39 @@ impl Guardian {
             &self.spec.cwd,
             native_child,
         );
-        let evidence = ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, &action);
-        let prompt = vec![
-            ContentBlock::Text(TextContent::new(reviewer_instructions())),
-            ContentBlock::Text(TextContent::new(evidence.request_text())),
-        ];
-        let assessment = match tokio::time::timeout(REVIEW_TIMEOUT, self.assess(prompt)).await {
-            Ok(Ok(assessment)) => assessment,
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    target: "mj_guardian",
-                    harness = %self.spec.harness.display_name(),
-                    tool_call_id = %request.tool_call.tool_call_id,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    error = %format!("{error:#}"),
-                    "guardian review failed; asking the person"
-                );
-                return GuardianDecision::AskPerson {
-                    reason: format!("its review failed: {error:#}"),
-                };
-            }
-            Err(_) => {
-                tracing::warn!(
-                    target: "mj_guardian",
-                    harness = %self.spec.harness.display_name(),
-                    tool_call_id = %request.tool_call.tool_call_id,
-                    "guardian review timed out; asking the person"
-                );
-                return GuardianDecision::AskPerson {
-                    reason: format!(
-                        "its review did not finish within {} seconds",
-                        REVIEW_TIMEOUT.as_secs()
-                    ),
-                };
-            }
-        };
+        let slot = self.host.lock().await;
+        let started = std::time::Instant::now();
+        let assessment =
+            match tokio::time::timeout(REVIEW_TIMEOUT, self.decide(slot, &action)).await {
+                Ok(Ok(assessment)) => assessment,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        target: "mj_guardian",
+                        harness = %self.spec.harness.display_name(),
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        error = %format!("{error:#}"),
+                        "guardian review failed; asking the person"
+                    );
+                    return GuardianDecision::AskPerson {
+                        reason: format!("its review failed: {error:#}"),
+                    };
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "mj_guardian",
+                        harness = %self.spec.harness.display_name(),
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        "guardian review timed out; asking the person"
+                    );
+                    return GuardianDecision::AskPerson {
+                        reason: format!(
+                            "its review did not finish within {} seconds",
+                            REVIEW_TIMEOUT.as_secs()
+                        ),
+                    };
+                }
+            };
         let outcome = assessment.enforced_outcome();
         // Never the rationale or the reviewer's text: both can quote
         // workspace content. The transcript carries a denial's rationale.
@@ -137,22 +142,65 @@ impl Guardian {
         GuardianDecision::Deny { rationale }
     }
 
+    /// Review `action` against the evidence as it stands. If the person's
+    /// messages changed while it was reviewed, the verdict may rest on stale
+    /// authorization, so it is reviewed once more on the new evidence, as
+    /// Codex discards a stale verdict (`review_request.rs`).
+    async fn decide(&self, first: HostSlot<'_>, action: &serde_json::Value) -> Result<Assessment> {
+        let mut slot = Some(first);
+        let mut attempts = 0;
+        let mut reviewed_again = false;
+        loop {
+            let evidence =
+                ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
+            let prompt = vec![
+                ContentBlock::Text(TextContent::new(reviewer_instructions())),
+                ContentBlock::Text(TextContent::new(evidence.request_text())),
+            ];
+            let assessment = self.assess(&mut slot, &prompt, &mut attempts).await?;
+            let current =
+                ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
+            if current.same_authorization(&evidence) {
+                return Ok(assessment);
+            }
+            ensure!(
+                !reviewed_again,
+                "your messages changed again while it was reviewing"
+            );
+            reviewed_again = true;
+            tracing::info!(
+                target: "mj_guardian",
+                "the person's messages changed during a guardian review; reviewing again"
+            );
+        }
+    }
+
     /// Run the review's attempts and return the first verdict. Every retry
     /// follows a change: a reviewer whose process died is replaced, and a
     /// reply without a verdict is asked for only the verdict. Any other
     /// failure would repeat, so it ends the review.
-    async fn assess(&self, prompt: Vec<ContentBlock>) -> Result<Assessment> {
-        let mut attempts = 0;
+    async fn assess(
+        &self,
+        slot: &mut Option<HostSlot<'_>>,
+        prompt: &[ContentBlock],
+        attempts: &mut usize,
+    ) -> Result<Assessment> {
         loop {
-            let host = self.host().await?;
+            let host = {
+                let mut guard = match slot.take() {
+                    Some(guard) => guard,
+                    None => self.host.lock().await,
+                };
+                self.current_host(&mut guard).await?
+            };
             let attempt = host
-                .until_exit(self.assess_on(&host, &prompt, &mut attempts))
+                .until_exit(self.assess_on(&host, prompt, attempts))
                 .await;
             let failure = match attempt {
                 Ok(assessment) => return Ok(assessment),
                 Err(failure) => failure,
             };
-            if host.alive() || attempts >= MAX_REVIEW_ATTEMPTS {
+            if host.alive() || *attempts >= MAX_REVIEW_ATTEMPTS {
                 return Err(failure);
             }
             tracing::debug!(
@@ -175,13 +223,10 @@ impl Guardian {
         *attempts += 1;
         let session = host.open_session(&self.spec).await?;
         let mut blocks = prompt.to_vec();
-        let verdict = loop {
-            let reply = match session.prompt(blocks).await {
-                Ok(reply) => reply,
-                Err(error) => break Err(error),
-            };
+        loop {
+            let reply = session.prompt(blocks).await?;
             match parse_assessment(&reply) {
-                Ok(assessment) => break Ok(assessment),
+                Ok(assessment) => return Ok(assessment),
                 Err(error) if *attempts < MAX_REVIEW_ATTEMPTS => {
                     *attempts += 1;
                     tracing::debug!(
@@ -193,19 +238,20 @@ impl Guardian {
                     blocks = vec![ContentBlock::Text(TextContent::new(VERDICT_REMINDER))];
                 }
                 Err(error) => {
-                    break Err(error.context(format!(
+                    return Err(error.context(format!(
                         "the reviewer replied {} bytes without a verdict",
                         reply.len()
                     )));
                 }
             }
-        };
-        session.close().await;
-        verdict
+        }
     }
 
-    async fn host(&self) -> Result<Arc<ReviewerHost>> {
-        let mut slot = self.host.lock().await;
+    /// The live reviewer in `slot`, started now if there is none.
+    async fn current_host(
+        &self,
+        slot: &mut Option<Arc<ReviewerHost>>,
+    ) -> Result<Arc<ReviewerHost>> {
         if let Some(host) = slot.as_ref().filter(|host| host.alive()) {
             return Ok(host.clone());
         }
@@ -232,9 +278,65 @@ impl Guardian {
 
     /// Stop the reviewer with the bridge it belongs to.
     pub(in crate::acp) async fn shutdown(&self) {
-        if let Some(host) = self.host.lock().await.take() {
+        let host = self.host.lock().await.take();
+        if let Some(host) = host {
             host.shutdown().await;
         }
+    }
+}
+
+/// How the reviewer's bridge is started.
+struct ReviewerLaunch {
+    command: PathBuf,
+    args: Vec<String>,
+    environment: BTreeMap<String, String>,
+}
+
+/// The session's launch, narrowed for a reviewer. A production bridge is the
+/// worker's ACP supervisor, which takes the harness environment from its spec
+/// file, so the reviewer gets a spec of its own beside the session's.
+fn reviewer_launch(spec: &LaunchSpec) -> Result<ReviewerLaunch> {
+    #[cfg(unix)]
+    if let Some(path) = &spec.bridge_spec_path {
+        let mut supervisor = crate::worker_runtime::AcpSupervisorSpec::read(path)?;
+        supervisor.environment = reviewer_environment(spec.harness, &supervisor.environment)?;
+        let reviewer_path = path.with_file_name(REVIEWER_SUPERVISOR_SPEC);
+        supervisor.write_spec(&reviewer_path)?;
+        let mut args = spec.args.clone();
+        let value = args
+            .iter()
+            .position(|arg| arg == "--spec")
+            .map(|flag| flag + 1)
+            .filter(|value| *value < args.len())
+            .context("the session's bridge command names no supervisor spec")?;
+        args[value] = reviewer_path
+            .to_str()
+            .context("reviewer supervisor spec path is not UTF-8")?
+            .to_owned();
+        return Ok(ReviewerLaunch {
+            command: spec.command.clone(),
+            args,
+            environment: spec.environment.clone(),
+        });
+    }
+    Ok(ReviewerLaunch {
+        command: spec.command.clone(),
+        args: spec.args.clone(),
+        environment: reviewer_environment(spec.harness, &spec.environment)?,
+    })
+}
+
+/// The harness environment a reviewer runs with.
+fn reviewer_environment(
+    harness: HarnessKind,
+    environment: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    match harness {
+        #[cfg(unix)]
+        HarnessKind::OpenCode => crate::worker_runtime::opencode_reviewer_environment(environment),
+        #[cfg(not(unix))]
+        HarnessKind::OpenCode => bail!("an OpenCode reviewer needs a Unix worker"),
+        _ => Ok(environment.clone()),
     }
 }
 
@@ -331,10 +433,16 @@ struct ReviewerHost {
 
 impl ReviewerHost {
     async fn start(spec: &LaunchSpec) -> Result<Arc<Self>> {
-        let mut child = Command::new(&spec.command)
-            .args(&spec.args)
+        let launch = {
+            let spec = spec.clone();
+            mj_core::runtime::spawn_blocking(move || reviewer_launch(&spec))
+                .await
+                .context("prepare the reviewer's launch task failed")??
+        };
+        let mut child = Command::new(&launch.command)
+            .args(&launch.args)
             .env_clear()
-            .envs(&spec.environment)
+            .envs(&launch.environment)
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -345,7 +453,7 @@ impl ReviewerHost {
                 format!(
                     "start the reviewer's {} bridge {}",
                     spec.harness.display_name(),
-                    spec.command.display()
+                    launch.command.display()
                 )
             })?;
         let stdin = child
@@ -365,9 +473,14 @@ impl ReviewerHost {
         let replies = Arc::new(Replies::default());
         let notification_replies = replies.clone();
         let stop = CancellationToken::new();
+        // Until the host exists, a start that is dropped (its review was
+        // cancelled or timed out) must still stop the bridge it spawned.
+        let stop_on_drop = stop.clone().drop_guard();
         let connection_stop = stop.clone();
+        let task_stop = stop.clone();
         let gone = CancellationToken::new();
         let task_gone = gone.clone();
+        let harness = spec.harness;
         let (connection_tx, connection_rx) = oneshot::channel();
         let task = mj_core::runtime::spawn(async move {
             let stderr_tail = mj_core::runtime::spawn(read_stderr_tail(stderr));
@@ -384,6 +497,7 @@ impl ReviewerHost {
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, _cx| {
                         tracing::debug!(
+                            target: "mj_guardian",
                             tool_call_id = %request.tool_call.tool_call_id,
                             "refused a guardian reviewer's tool request"
                         );
@@ -409,17 +523,12 @@ impl ReviewerHost {
                     }
                     Ok(())
                 });
-            let reaped = tokio::select! {
-                result = run => {
-                    if let Err(error) = result {
-                        tracing::debug!(%error, "guardian reviewer connection ended");
-                    }
-                    false
-                }
-                status = child.wait() => {
-                    tracing::debug!(?status, "guardian reviewer bridge exited");
-                    true
-                }
+            let (reaped, ended) = tokio::select! {
+                result = run => (false, result.err().map(|error| error.to_string())),
+                status = child.wait() => (true, Some(match status {
+                    Ok(status) => format!("exited with {status}"),
+                    Err(error) => format!("could not be waited for: {error}"),
+                })),
             };
             task_gone.cancel();
             // The transport is gone, so the supervisor's stdin is closed: give
@@ -431,25 +540,34 @@ impl ReviewerHost {
                     .is_err()
             {
                 if let Err(error) = child.kill().await {
-                    tracing::warn!(%error, "could not kill the guardian reviewer bridge");
+                    tracing::warn!(target: "mj_guardian", %error, "could not kill the guardian reviewer bridge");
                 }
                 if let Err(error) = child.wait().await {
-                    tracing::warn!(%error, "could not reap the guardian reviewer bridge");
+                    tracing::warn!(target: "mj_guardian", %error, "could not reap the guardian reviewer bridge");
                 }
             }
-            match stderr_tail.await {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    tracing::debug!(%error, "could not read the guardian reviewer's stderr")
-                }
-                Err(error) => tracing::warn!(%error, "guardian reviewer stderr task failed"),
+            let tail = match stderr_tail.await {
+                Ok(Ok(tail)) => tail,
+                Ok(Err(error)) => format!("(stderr unreadable: {error:#})"),
+                Err(error) => format!("(stderr task failed: {error})"),
+            };
+            // An exit nobody asked for is a reviewer failure; its stderr says
+            // why (a login that lapsed, a harness that would not start).
+            if !task_stop.is_cancelled() {
+                tracing::warn!(
+                    target: "mj_guardian",
+                    harness = %harness.display_name(),
+                    ended = ended.as_deref().unwrap_or("connection closed"),
+                    stderr = %actionable_stderr_tail(&tail).unwrap_or_default(),
+                    "guardian reviewer bridge stopped unexpectedly"
+                );
             }
         });
         let connection = match connection_rx.await {
             Ok(connection) => connection,
             Err(_) => {
                 if let Err(error) = task.await {
-                    tracing::warn!(%error, "guardian reviewer task failed");
+                    tracing::warn!(target: "mj_guardian", %error, "guardian reviewer task failed");
                 }
                 bail!("the reviewer's bridge closed its connection before it opened");
             }
@@ -461,13 +579,14 @@ impl ReviewerHost {
         let supports_close = match initialized {
             Ok(supports_close) => supports_close,
             Err(error) => {
-                stop.cancel();
+                drop(stop_on_drop);
                 if let Err(join_error) = task.await {
-                    tracing::warn!(error = %join_error, "guardian reviewer task failed");
+                    tracing::warn!(target: "mj_guardian", error = %join_error, "guardian reviewer task failed");
                 }
                 return Err(error);
             }
         };
+        stop_on_drop.disarm();
         Ok(Arc::new(Self {
             connection,
             supports_close,
@@ -517,7 +636,7 @@ impl ReviewerHost {
         let session = ReviewerSession {
             host: self.clone(),
             id: created.session_id,
-            closed: false,
+            prompting: AtomicBool::new(false),
         };
         self.replies.open(&session.id.to_string());
         let mut options = created.config_options.unwrap_or_default();
@@ -539,20 +658,40 @@ impl ReviewerHost {
                 .error
                 .context("the reviewer session refused the session's execution policy"));
         }
-        if let Some(model) = spec.startup_model()
-            && find_session_config_option(&options, "model").is_some()
-            && session_model(&options).as_deref() != Some(model.as_str())
-        {
-            set_session_config(
-                &self.connection,
-                &session.id,
-                &mut options,
-                spec.harness,
-                "model",
-                &model,
-            )
-            .await
-            .with_context(|| format!("select the session's model {model:?} for the reviewer"))?;
+        // The session's model reviews, never silently another one: a session
+        // whose harness accepted a model selection must find that model here.
+        let selectable = find_session_config_option(&options, "model").is_some();
+        match spec.startup_model() {
+            Some(model) if selectable => {
+                if session_model(&options).as_deref() != Some(model.as_str()) {
+                    set_session_config(
+                        &self.connection,
+                        &session.id,
+                        &mut options,
+                        spec.harness,
+                        "model",
+                        &model,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("select the session's model {model:?} for the reviewer")
+                    })?;
+                }
+            }
+            Some(model)
+                if spec
+                    .accepted_config
+                    .lock()
+                    .expect("accepted session configuration lock poisoned")
+                    .model
+                    .is_some() =>
+            {
+                bail!(
+                    "the reviewer's {} session offers no model selector, so it cannot run on the session's model {model:?}",
+                    spec.harness.display_name()
+                );
+            }
+            _ => {}
         }
         // A review is a bounded judgement: Codex and muse-acp both run their
         // reviewer at low effort where the model offers it.
@@ -581,7 +720,7 @@ impl ReviewerHost {
         if let Some(task) = task
             && let Err(error) = task.await
         {
-            tracing::warn!(%error, "guardian reviewer task failed");
+            tracing::warn!(target: "mj_guardian", %error, "guardian reviewer task failed");
         }
     }
 }
@@ -619,25 +758,26 @@ async fn initialize_reviewer(connection: &ConnectionTo<Agent>, spec: &LaunchSpec
 }
 
 impl Drop for ReviewerHost {
-    /// A host dropped without [`ReviewerHost::shutdown`] (its bridge failed
-    /// first) still stops: its task closes the transport and reaps the
-    /// bridge, logging what fails.
+    /// A host dropped without [`ReviewerHost::shutdown`] still stops: its
+    /// task closes the transport and reaps the bridge, logging what fails.
     fn drop(&mut self) {
         self.stop.cancel();
     }
 }
 
-/// One review's session on the reviewer bridge. Dropping it mid-prompt, as
-/// a cancelled review does, cancels the reviewer's turn.
+/// One review's session on the reviewer bridge. Dropping it cancels a turn
+/// still running, as a cancelled or timed-out review leaves one, and closes
+/// the session in the background, outside any review's deadline.
 struct ReviewerSession {
     host: Arc<ReviewerHost>,
     id: SessionId,
-    closed: bool,
+    prompting: AtomicBool,
 }
 
 impl ReviewerSession {
     /// Send one prompt and return the reviewer's latest message.
     async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<String> {
+        self.prompting.store(true, Ordering::Release);
         let response = self
             .host
             .connection
@@ -645,6 +785,7 @@ impl ReviewerSession {
             .block_task()
             .await
             .context("run the reviewer's turn")?;
+        self.prompting.store(false, Ordering::Release);
         let reply = self.host.replies.take(&self.id.to_string());
         ensure!(
             response.stop_reason == StopReason::EndTurn,
@@ -653,35 +794,36 @@ impl ReviewerSession {
         );
         Ok(reply)
     }
-
-    async fn close(mut self) {
-        self.closed = true;
-        self.host.replies.close(&self.id.to_string());
-        if self.host.supports_close
-            && let Err(error) = self
-                .host
-                .connection
-                .send_request(CloseSessionRequest::new(self.id.clone()))
-                .block_task()
-                .await
-        {
-            tracing::debug!(%error, "could not close a guardian reviewer session");
-        }
-    }
 }
 
 impl Drop for ReviewerSession {
     fn drop(&mut self) {
-        if self.closed {
+        self.host.replies.close(&self.id.to_string());
+        if !self.host.alive() {
             return;
         }
-        self.host.replies.close(&self.id.to_string());
-        if let Err(error) = self
-            .host
-            .connection
-            .send_notification(CancelNotification::new(self.id.clone()))
+        if self.prompting.load(Ordering::Acquire)
+            && let Err(error) = self
+                .host
+                .connection
+                .send_notification(CancelNotification::new(self.id.clone()))
         {
-            tracing::debug!(%error, "could not cancel an abandoned guardian review");
+            tracing::debug!(target: "mj_guardian", %error, "could not cancel an abandoned guardian review");
+        }
+        if self.host.supports_close
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let connection = self.host.connection.clone();
+            let id = self.id.clone();
+            runtime.spawn(async move {
+                if let Err(error) = connection
+                    .send_request(CloseSessionRequest::new(id))
+                    .block_task()
+                    .await
+                {
+                    tracing::debug!(target: "mj_guardian", %error, "could not close a guardian reviewer session");
+                }
+            });
         }
     }
 }

@@ -2028,6 +2028,15 @@ async fn prepare_and_start_harness(
             .await?;
             let root = root.to_owned();
             let mut environment = config.environment.clone();
+            // Under configured approvals the Mjolnir guardian answers
+            // OpenCode's permission requests, and its hook makes OpenCode ask.
+            let guardian_roots = (config.execution_policy
+                == mj_core::config::ExecutionPolicy::ConfiguredApprovals)
+                .then(|| {
+                    std::iter::once(config.cwd.clone())
+                        .chain(config.additional_directories.iter().cloned())
+                        .collect::<Vec<_>>()
+                });
             config.environment =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -2036,6 +2045,13 @@ async fn prepare_and_start_harness(
                         );
                     }
                     super::subagents::configure_opencode_mailbox_hook(&root, &mut environment)?;
+                    if let Some(roots) = &guardian_roots {
+                        super::json_gh_rules::configure_opencode_guardian(
+                            &root,
+                            roots,
+                            &mut environment,
+                        )?;
+                    }
                     Ok(environment)
                 })
                 .await?;

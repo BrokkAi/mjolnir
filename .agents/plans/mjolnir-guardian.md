@@ -68,6 +68,28 @@ To see it working: start a Kimi Code, OpenCode, or DSH session on `localhost`, a
   Rationale: The decision trail must be in `worker.log` to diagnose a session, as Jev's is; the reviewer's words can quote workspace content, and the transcript already carries a denial's rationale.
   Date/Author: 2026-11-20, agent.
 
+- Decision: OpenCode is made to ask by a plugin hook (`permission.evaluate`, which runs after OpenCode's rules and after its deny check), not by rules appended last. The hook turns `allow` into `ask` unless the action is a read or search, a planning tool, `subagent`, `external_directory`, or an edit whose real path is inside a workspace root and not under `.git`, `.agents`, `.codex`, `.aws`, `.opencode`, `opencode.json(c)` or `AGENTS.md`. Tools that never consult permissions are denied by rule.
+  Rationale: Appended rules win by last match, so they overrode every earlier deny (Plan, Explore, the person's). A hook after the rules can only narrow an allow. The protected names follow Codex's `PROTECTED_METADATA_PATH_NAMES` plus OpenCode's own configuration and the instruction files the reviewer trusts; real-path resolution stops symlinks from carrying edits out.
+  Date/Author: 2026-11-20, agent (review round).
+- Decision: The reviewer starts from a launch narrowed for it: its own supervisor spec beside the session's, whose OpenCode environment has every Mjolnir plugin replaced by the reviewer-mode hook and deny-all-but-read rules appended.
+  Rationale: The session's launch carried the mailbox plugin, which drained the session's mailbox into the reviewer. A reviewer-mode deny (not ask) is a tool error OpenCode reports to the model; a rejected ask ends an OpenCode turn.
+  Date/Author: 2026-11-20, agent (review round).
+- Decision: Kimi Code's reviewer keeps loading the staged `mcp.json`; no Kimi-specific isolation is shipped.
+  Rationale: Whether Kimi asks before MCP calls could not be verified without a Kimi login, and an untested home-mirroring workaround could break every Kimi review. The docs state the limitation.
+  Date/Author: 2026-11-20, agent (review round).
+- Decision: `run_bridge` owns the guardian, like the terminal registry, and stops its reviewer after the bridge's own teardown on every exit path; a reviewer start dropped mid-way stops its bridge through a drop guard.
+  Rationale: Waiting for the reviewer inside the protocol driver let the session bridge exit first, which `run_bridge` reads as a crash, and a dropped start kept its bridge alive.
+  Date/Author: 2026-11-20, agent (review round).
+- Decision: Reviews are registered in `PendingElicitations` beside the forms; one lock decides what is outstanding, `withdraw_tool_permissions` withdraws both and marks the turn withdrawn until its prompt answers or the next prompt starts, and a tool permission request or review in a withdrawn turn is answered `cancelled`.
+  Rationale: Two withdrawal mechanisms let a request that crossed the cancel be reviewed and allowed, and a hand-over to the form land on a cancelled turn; `is_empty` ignored reviews.
+  Date/Author: 2026-11-20, agent (review round).
+- Decision: The guardian allows only with the request's allow-once option; a verdict is the JSON object a reply ends with; a verdict reached while the person's messages changed is reviewed again once; the review deadline starts after waiting for another review to start the shared reviewer; reviewer sessions close in the background.
+  Rationale: Allow-always would let later calls skip review; Codex's first-to-last-brace span relies on an output schema ACP cannot enforce; Codex discards stale verdicts; AGENTS.md keeps queue time out of a timeout.
+  Date/Author: 2026-11-20, agent (review round).
+- Decision: Deviations kept: the policy is the reviewer's first user message, not its system prompt (ACP has no portable system role); Antigravity is classified as having its own guardian (its Auto mode) and lost the dashboard warning; the breaker resets on any new delivered request, steering and mailbox deliveries included; a review in progress shows nothing in the UI; the `gh` pre-approval (any literal `gh` invocation) is the existing Mjolnir policy and is not narrowed here.
+  Rationale: Each was weighed in review and left for a separate change if wanted.
+  Date/Author: 2026-11-20, agent (review round).
+
 ## Outcomes & Retrospective
 
 Kimi Code, OpenCode, and DSH sessions on raw targets now have a guardian: each permission request is reviewed with Codex's policy by a fresh session of the same harness on the session's model, allowed or denied without a form, and handed to the person when the review cannot decide or keeps denying. The scripted tests cover allow, deny, the policy clamp, the verdict reminder, the reviewer's own tool request being refused, the breaker, turn cancellation, and a reviewer crash. A live run on real OpenCode with its free model reviewed and allowed real shell commands end to end.
@@ -80,7 +102,9 @@ The Mjolnir worker (`mj-worker`) runs one harness per session. It starts the har
 
 `drive_bridge` in `mj-worker/src/acp/drive.rs` registers the ACP handlers. Its `RequestPermissionRequest` handler is where a harness's tool approval arrives. Today it: approves everything under the unconstrained policy; approves calls to Mjolnir's own MCP tools (`OwnedMcpApprovals`) and literal `gh` invocations (`gh_permission_response`); sends plan approvals to plan review; and otherwise builds a permission form (an elicitation) for the person through `PendingElicitations`, answering the harness with the chosen option. Helpers live in `mj-worker/src/acp/permissions.rs` (`allow_permission_response`, `permission_choices`, `is_plan_permission`).
 
-`ExecutionPolicy::ConfiguredApprovals` is the policy for raw targets; `HarnessKind::execution_enforcement` and `resolve_execution_enforcement` (`mj-core/src/config/harness.rs`) translate it into harness controls (for DSH, the ACP setting `permission_mode` `ask`). `mj-worker/src/acp/session_config.rs` applies them to an open session (`reassert_execution_policy`, `set_session_config`). `HarnessKind::supports_guardian_approvals` decides the dashboard's "DANGER" warning (`mj-tui/src/wizards/picker.rs`, `render.rs`).
+`ExecutionPolicy::ConfiguredApprovals` is the policy for raw targets; `HarnessKind::execution_enforcement` and `resolve_execution_enforcement` (`mj-core/src/config/harness.rs`) translate it into harness controls (for DSH, the ACP setting `permission_mode` `ask`). `mj-worker/src/acp/session_config.rs` applies them to an open session (`reassert_execution_policy`, `set_session_config`). Before this work, `HarnessKind::supports_guardian_approvals` decided the dashboard's "DANGER" warning (`mj-tui/src/wizards/picker.rs`, `render.rs`); this plan replaces it with `HarnessKind::guardian()`.
+
+The session bridge is started by `run_bridge` as the worker's ACP supervisor (`worker acp-supervisor --spec acp-supervisor.json`, see `mj-worker/src/worker_runtime/unix.rs`), which takes the harness environment from that spec file. OpenCode's harness configuration includes `OPENCODE_CONFIG_CONTENT`, the configuration document Mjolnir supplies last, built in `mj-worker/src/worker_runtime/json_gh_rules.rs`, which also registers Mjolnir's OpenCode plugins (the mailbox plugin from `mj-worker/assets/opencode-mailbox.js`).
 
 `mj_transcript::turn_context::TurnContext` (`mj-transcript/src/turn_context.rs`) is the worker's process-local evidence about the conversation: a `TranscriptSummary` of user, assistant, and tool entries (`mj-transcript/src/summary.rs`, rendered as `<user>…</user>`, `<assistant>…</assistant>`, `<tool NAME>…</tool>` with head-and-tail excerpts), and the durable authorization history (`authorization_context()`, a `mj_core::assessment::ContextHistory` holding whole recent messages the person wrote, filtered by `mj_core::continuation::is_user_authored_message`, plus assistant replies). Mjolnir-submitted prompts (mailbox wakes, child reports) appear in the summary as user entries but are not in the authorization history.
 
@@ -94,7 +118,7 @@ Milestone 2 adds the reviewer host. On the first review of a bridge's life the w
 
 Milestone 3 calls the guardian from the permission handler for non-plan requests under configured approvals when `spec.harness.guardian()` is the Mjolnir guardian, after the existing owned-MCP and `gh` approvals. Allow selects `allow_permission_response`; deny selects the request's `reject_once` option and emits a notice; an undecided review or a tripped breaker continues into the existing form code with the reason prefixed to the form message. A scripted harness test drives the whole path.
 
-Milestone 4 introduces `HarnessKind::guardian()` returning who reviews approvals under configured approvals (the harness itself for Codex, Claude Code, Grok Build, Muse Code, and Antigravity; Mjolnir for Kimi Code, OpenCode, and DSH), makes `supports_guardian_approvals` true for every harness, removes the dashboard warning that no longer applies, and updates `docs/src/content/docs/security.md`, `targets.md`, `profiles.md`, `overview.md`, and `containers.md`.
+Milestone 4 introduces `HarnessKind::guardian()` returning who reviews approvals under configured approvals (the harness itself for Codex, Claude Code, Grok Build, Muse Code, and Antigravity; Mjolnir for Kimi Code, OpenCode, and DSH), removes `supports_guardian_approvals` and the dashboard warning that no longer applies, and updates `docs/src/content/docs/security.md`, `targets.md`, `profiles.md`, `overview.md`, and `containers.md`.
 
 ## Concrete Steps
 
@@ -125,8 +149,20 @@ In `mj-core/src/config/harness.rs`:
     pub enum GuardianReviewer { Harness, Mjolnir }
     impl HarnessKind { pub const fn guardian(self) -> GuardianReviewer }
 
-In `mj-worker/src/acp/guardian.rs`:
+In `mj-worker/src/acp/guardian.rs` (prompt, action, verdict) and `mj-worker/src/acp/guardian/reviewer.rs` (reviewer process):
 
-    pub(super) struct Guardian  // shared per bridge; owns the reviewer host and the breaker
+    pub(in crate::acp) struct Guardian  // owned by run_bridge; owns the reviewer host
+    impl Guardian {
+        fn for_launch(spec: &LaunchSpec) -> Option<Arc<Self>>
+        async fn review(&self, request: &RequestPermissionRequest, input: Option<&Value>, native_child: bool) -> GuardianDecision
+        async fn shutdown(&self)
+    }
     pub(super) enum GuardianDecision { Allow, Deny { rationale: String }, AskPerson { reason: String } }
-    impl Guardian { pub(super) async fn review(&self, request: &RequestPermissionRequest, input: Option<&serde_json::Value>, native_child: bool, cancelled: impl Future<Output = ()>) -> GuardianDecision }
+
+The denial breaker lives in `mj_transcript::turn_context::TurnContext` (`guardian_tripped`, `record_guardian_review`), which owns turn boundaries. Outstanding permission requests, forms and reviews alike, are owned by `PendingElicitations` in `mj-worker/src/acp/operator_away.rs` (`begin_review`, `withdraw_tool_permissions`, `end_withdrawal`).
+
+In `mj-worker/src/worker_runtime/json_gh_rules.rs`: `configure_opencode_guardian` stages the OpenCode plugin from `mj-worker/assets/opencode-guardian.js` in two modes and registers the session one; `opencode_reviewer_environment` derives a reviewer's environment from the session's.
+
+## Revision notes
+
+- 2026-11-20, after the first push: three independent reviews found that appending OpenCode rules last overrode Plan mode's, the read-only agents' and the person's denies; that the OpenCode reviewer inherited the session's mailbox plugin and drained its mailbox; that unreviewed in-workspace edits could reach `.git` hooks, `.opencode` agent files and `AGENTS.md`; that several OpenCode tools never consult permissions; that the reviewer bridge's lifetime was not tied to the session bridge's (a normal end looked like a crash, a cancelled start leaked a process); that forms and reviews were withdrawn by two mechanisms; that an allow could become allow-always; and that verdicts could be stale or taken from a quoted object. The Decision Log and Interfaces sections record the fixes.

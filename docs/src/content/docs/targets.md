@@ -107,14 +107,14 @@ Codex, Claude Code, Grok Build, Muse Code, and Antigravity bring their own
 guardian to raw targets. Claude Code's guardian is its Auto mode unless the
 profile sets [`claude_permission_mode`](/profiles/#choose-claudes-permission-mode)
 to Accept edits or Manual. Kimi Code asks before tools according to its
-permission rules, OpenCode asks before every tool but reads, searches,
-planning, and edits inside the workspace (Mjolnir's rules; OpenCode's own
-default asks for nothing), and DSH, with dsh-acp's `permission_mode` `ask`,
-asks before every write, command, and MCP tool call. None of the three has a
+permission rules, OpenCode asks before every tool call that can reach outside
+the workspace (a hook Mjolnir adds; OpenCode's own default asks for nothing),
+and DSH, with dsh-acp's `permission_mode` `ask`, asks before every write,
+command, and MCP tool call. None of the three has a
 sandbox or a reviewer of its own, so the
 [Mjolnir guardian](/security/#the-mjolnir-guardian) reviews each of those
-requests on a read-only session of the same harness and model, and hands the
-request to you when it cannot decide. Read [Security boundaries](/security/)
+requests on a session of the same harness and model that may only read, and
+hands the request to you when it cannot decide. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
 ## Bare runtimes

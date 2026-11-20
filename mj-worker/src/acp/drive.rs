@@ -53,16 +53,33 @@ pub(super) async fn drive_bridge<T>(
 where
     T: ConnectTo<Client>,
 {
-    drive_with_terminals(
+    let guardian = guardian::Guardian::for_launch(&spec);
+    let result = drive_with_terminals(
         transport,
         spec,
         requests,
         events,
         opened,
         session_open,
-        TerminalRegistry::new()?,
+        BridgeOwned {
+            terminals: TerminalRegistry::new()?,
+            guardian: guardian.clone(),
+        },
     )
-    .await
+    .await;
+    if let Some(guardian) = guardian {
+        guardian.shutdown().await;
+    }
+    result
+}
+
+/// What a bridge's protocol driver uses but `run_bridge` owns, because it
+/// must outlive the driver until the bridge's process teardown: the
+/// connection's terminals, and the guardian whose reviewer is stopped after
+/// the bridge on every exit path.
+pub(super) struct BridgeOwned {
+    pub(super) terminals: TerminalRegistry,
+    pub(super) guardian: Option<Arc<guardian::Guardian>>,
 }
 
 pub(super) async fn drive_with_terminals<T>(
@@ -72,11 +89,15 @@ pub(super) async fn drive_with_terminals<T>(
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_open: BridgeSessionOpen<'_>,
-    terminals: TerminalRegistry,
+    owned: BridgeOwned,
 ) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
 {
+    let BridgeOwned {
+        terminals,
+        guardian,
+    } = owned;
     // How many updates the agent produced by working, over the whole
     // connection. A turn reads it before and after to learn whether the
     // harness answered the prompt at all (#970).
@@ -204,8 +225,7 @@ where
     let kill_parent_router = native_agents.clone();
     let release_parent_router = native_agents.clone();
     let ext_parent_router = native_agents.clone();
-    let guardian = guardian::Guardian::for_launch(&spec);
-    let permission_guardian = guardian.clone();
+    let permission_guardian = guardian;
     let connected = Client
         .v1()
         .on_receive_notification(
@@ -477,14 +497,20 @@ where
                         let input = permission_tool_input(&request.tool_call, &permission_tool_content);
                         let native_child = permission_native_agents.lock().expect("native agent router poisoned")
                             .is_child(&request.session_id.to_string());
-                        let withdrawn = permission_elicitations.review_cancellation();
+                        // Registered like an open form, so withdrawing the turn
+                        // reaches the review too; a turn already withdrawn
+                        // answers `cancelled` without one.
+                        let Some(ticket) = permission_elicitations.begin_review() else {
+                            return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                        };
                         let cancellation = responder.cancellation();
                         let decision = tokio::select! {
                             biased;
-                            () = withdrawn.cancelled() => None,
+                            () = ticket.withdrawn() => None,
                             () = cancellation.cancelled() => None,
                             decision = guardian.review(&request, input.as_ref(), native_child) => Some(decision),
                         };
+                        drop(ticket);
                         let title = request.tool_call.fields.title.as_deref().map(str::trim)
                             .filter(|title| !title.is_empty()).unwrap_or("a tool call");
                         let subject = permission_title_with_command(title, input.as_ref());
@@ -492,7 +518,9 @@ where
                             None => {
                                 return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                             }
-                            Some(guardian::GuardianDecision::Allow) => match allow_permission_response(&request) {
+                            // Once only: an allow the harness remembers would let
+                            // later calls skip review.
+                            Some(guardian::GuardianDecision::Allow) => match guardian::allow_once_response(&request) {
                                 Some(response) => return responder.respond(response),
                                 None => guardian_preface = Some(guardian::ask_person_preface(
                                     "the guardian allowed it, but the harness offered no way to allow it once",
@@ -1153,9 +1181,6 @@ where
             }
         })
         .await;
-    if let Some(guardian) = &guardian {
-        guardian.shutdown().await;
-    }
     connected.map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
     Ok(restart
         .lock()
@@ -1301,13 +1326,12 @@ pub(super) fn cancel_prompt_turn(
     sent
 }
 
-/// Drops the answer channel of every pending tool permission request. Each
-/// request's task then answers the agent with `cancelled` and reports the
-/// elicitation resolved, which closes its form. A request the Mjolnir
-/// guardian is still reviewing is answered `cancelled` the same way.
+/// Withdraws the turn's tool permission requests: every open form and every
+/// Mjolnir guardian review in flight is answered `cancelled`, and so is one
+/// that arrives later in the same turn (see
+/// [`PendingElicitations::withdraw_tool_permissions`]).
 pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
-    pending.retain(|id| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
-    pending.withdraw_reviews();
+    pending.withdraw_tool_permissions();
 }
 
 /// The id prefix of a permission request shown as a form.

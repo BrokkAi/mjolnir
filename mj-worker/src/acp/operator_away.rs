@@ -12,7 +12,23 @@ struct OperatorAwayState {
     next_bridge: u64,
     bridges: BTreeSet<u64>,
     pending: Vec<PendingElicitation>,
+    /// Mjolnir guardian reviews in flight. They are outstanding tool
+    /// permission requests like the forms in `pending`, so the same lock
+    /// decides what is outstanding and withdraws both at once.
+    reviews: Vec<PendingReview>,
+    next_review: u64,
+    /// Bridges whose current turn's tool permission requests were withdrawn.
+    /// A request that arrives later in that turn is answered `cancelled` too,
+    /// until the turn ends.
+    withdrawn_turns: BTreeSet<u64>,
     changed: tokio::sync::watch::Sender<()>,
+}
+
+#[derive(Debug)]
+struct PendingReview {
+    bridge: u64,
+    id: u64,
+    withdrawn: tokio_util::sync::CancellationToken,
 }
 
 impl Default for OperatorAwayState {
@@ -23,6 +39,9 @@ impl Default for OperatorAwayState {
             next_bridge: 0,
             bridges: Default::default(),
             pending: Default::default(),
+            reviews: Default::default(),
+            next_review: 0,
+            withdrawn_turns: Default::default(),
             changed: tokio::sync::watch::channel(()).0,
         }
     }
@@ -157,7 +176,6 @@ impl OperatorAway {
             id,
             source,
             turn_context,
-            reviews: Mutex::new(tokio_util::sync::CancellationToken::new()),
         }))
     }
 }
@@ -172,9 +190,6 @@ struct PendingBridge {
     source: Option<VerdictSource>,
     /// Owns the session id and the decision log the AFK check records into.
     turn_context: Option<mj_transcript::turn_context::TurnContext>,
-    /// Cancelled with the turn's tool permission forms, so a Mjolnir guardian
-    /// review in flight answers its request `cancelled` too.
-    reviews: Mutex<tokio_util::sync::CancellationToken>,
 }
 
 impl Drop for PendingBridge {
@@ -186,6 +201,47 @@ impl Drop for PendingBridge {
             .expect("operator-away state lock poisoned");
         state.bridges.remove(&self.id);
         state.pending.retain(|entry| entry.bridge != self.id);
+        state.forget_reviews(self.id);
+    }
+}
+
+impl OperatorAwayState {
+    /// Withdraw a bridge's reviews in flight and forget its turn.
+    fn forget_reviews(&mut self, bridge: u64) {
+        self.reviews.retain(|review| {
+            let keep = review.bridge != bridge;
+            if !keep {
+                review.withdrawn.cancel();
+            }
+            keep
+        });
+        self.withdrawn_turns.remove(&bridge);
+    }
+}
+
+/// A Mjolnir guardian review registered as an outstanding tool permission
+/// request. Dropping it, when the review ends, unregisters it.
+pub(super) struct PendingReviewTicket {
+    owner: OperatorAway,
+    id: u64,
+    withdrawn: tokio_util::sync::CancellationToken,
+}
+
+impl PendingReviewTicket {
+    /// Resolves when the turn's tool permission requests are withdrawn.
+    pub(super) async fn withdrawn(&self) {
+        self.withdrawn.cancelled().await;
+    }
+}
+
+impl Drop for PendingReviewTicket {
+    fn drop(&mut self) {
+        self.owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .reviews
+            .retain(|review| review.id != self.id);
     }
 }
 
@@ -243,7 +299,11 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        if !state.bridges.contains(&self.0.id) {
+        if !state.bridges.contains(&self.0.id)
+            || (state.withdrawn_turns.contains(&self.0.id)
+                && question.id.starts_with(TOOL_PERMISSION_ID_PREFIX))
+        {
+            // Dropping the answer channel answers the request `cancelled`.
             return received;
         }
         let identity = (agent, request);
@@ -404,24 +464,71 @@ impl PendingElicitations {
         self.remove(id)
     }
 
-    /// What a guardian review started now watches for its turn's withdrawal.
-    pub(super) fn review_cancellation(&self) -> tokio_util::sync::CancellationToken {
-        self.0
-            .reviews
+    /// Register a Mjolnir guardian review of a tool permission request, so the
+    /// turn's withdrawal reaches it as it reaches an open form. `None` when the
+    /// bridge is gone or its turn was already withdrawn: answer `cancelled`.
+    pub(super) fn begin_review(&self) -> Option<PendingReviewTicket> {
+        let mut state = self
+            .0
+            .owner
+            .0
             .lock()
-            .expect("guardian review token lock poisoned")
-            .clone()
+            .expect("operator-away state lock poisoned");
+        if !state.bridges.contains(&self.0.id) || state.withdrawn_turns.contains(&self.0.id) {
+            return None;
+        }
+        let id = state.next_review;
+        state.next_review = id
+            .checked_add(1)
+            .expect("guardian review identity exhausted");
+        let withdrawn = tokio_util::sync::CancellationToken::new();
+        state.reviews.push(PendingReview {
+            bridge: self.0.id,
+            id,
+            withdrawn: withdrawn.clone(),
+        });
+        Some(PendingReviewTicket {
+            owner: self.0.owner.clone(),
+            id,
+            withdrawn,
+        })
     }
 
-    /// Withdraw every guardian review in flight; later reviews get a new token.
-    pub(super) fn withdraw_reviews(&self) {
-        let mut reviews = self
+    /// Withdraw the turn's tool permission requests in one decision: drop the
+    /// answer channel of every open form (its task answers the agent
+    /// `cancelled` and closes the form), cancel every guardian review in
+    /// flight, and answer any that arrives later in this turn `cancelled`.
+    pub(super) fn withdraw_tool_permissions(&self) {
+        let mut state = self
             .0
-            .reviews
+            .owner
+            .0
             .lock()
-            .expect("guardian review token lock poisoned");
-        reviews.cancel();
-        *reviews = tokio_util::sync::CancellationToken::new();
+            .expect("operator-away state lock poisoned");
+        state.pending.retain(|entry| {
+            entry.bridge != self.0.id
+                || entry.responder.acp_identity().is_none()
+                || !entry.question.id.starts_with(TOOL_PERMISSION_ID_PREFIX)
+        });
+        state.reviews.retain(|review| {
+            let keep = review.bridge != self.0.id;
+            if !keep {
+                review.withdrawn.cancel();
+            }
+            keep
+        });
+        state.withdrawn_turns.insert(self.0.id);
+    }
+
+    /// The withdrawn turn is over: its prompt answered, or a new one began.
+    pub(super) fn end_withdrawal(&self) {
+        self.0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .withdrawn_turns
+            .remove(&self.0.id);
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -435,6 +542,10 @@ impl PendingElicitations {
             .pending
             .iter()
             .any(|entry| entry.bridge == self.0.id && entry.responder.acp_identity().is_some())
+            && !state
+                .reviews
+                .iter()
+                .any(|review| review.bridge == self.0.id)
     }
 
     pub(super) fn close(&self) {
@@ -446,20 +557,7 @@ impl PendingElicitations {
             .expect("operator-away state lock poisoned");
         state.bridges.remove(&self.0.id);
         state.pending.retain(|entry| entry.bridge != self.0.id);
-    }
-
-    pub(super) fn retain(&self, keep: impl Fn(&str) -> bool) {
-        let mut state = self
-            .0
-            .owner
-            .0
-            .lock()
-            .expect("operator-away state lock poisoned");
-        state.pending.retain(|entry| {
-            entry.bridge != self.0.id
-                || entry.responder.acp_identity().is_none()
-                || keep(&entry.question.id)
-        });
+        state.forget_reviews(self.0.id);
     }
 
     pub(super) fn resolve(

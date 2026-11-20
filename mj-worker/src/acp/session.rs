@@ -1044,6 +1044,7 @@ pub(super) async fn serve_session(
                     .collect::<Vec<_>>()
                     .join("\n");
                 spec.turn_context.reset(Some(&request_id), &prompt_text);
+                pending_elicitations.end_withdrawal();
                 spec.step_clock.begin_turn();
                 if spec.harness == HarnessKind::Grok {
                     grok_usage.begin(session_id.to_string());
@@ -1095,6 +1096,8 @@ pub(super) async fn serve_session(
                         response = &mut prompt, if prompt_running => {
                             spec.acp_activity.mark();
                             spec.step_clock.end_turn();
+                            // A cancelled turn is over once its prompt answers.
+                            pending_elicitations.end_withdrawal();
                             if approved_plan.is_some() && cancel_deadline.is_none() {
                                 if matches!(&response, Ok(response) if matches!(response.stop_reason, StopReason::EndTurn | StopReason::Cancelled)) {
                                     prompt_running = false;
