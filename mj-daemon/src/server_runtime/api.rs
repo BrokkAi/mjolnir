@@ -72,6 +72,7 @@ pub trait ExportRuntime: Send + Sync {
     fn override_review(
         &self,
         _session_id: String,
+        _path: Option<String>,
         _overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
@@ -333,11 +334,12 @@ impl ExportRuntime for RuntimeState {
     fn override_review(
         &self,
         session_id: String,
+        path: Option<String>,
         overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, overrides)
+                .override_push(&session_id, path, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
         })
@@ -1211,9 +1213,13 @@ impl ApiBackend {
                 self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
-            SubagentToolAction::OverrideReview { overrides } => {
+            SubagentToolAction::OverrideReview { overrides, path } => {
                 self.exports
-                    .override_review(parent_session_id.to_owned(), overrides.clone())
+                    .override_review(
+                        parent_session_id.to_owned(),
+                        path.clone(),
+                        overrides.clone(),
+                    )
                     .await
             }
             SubagentToolAction::SetReviewBaseline { commit, path } => {

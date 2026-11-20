@@ -1724,6 +1724,9 @@ pub async fn drive_reviewer(
                 changed,
             }
         }
+        ReviewerAction::ResolveRepositories { paths } => ReviewerOutcome::Repositories {
+            roots: client.resolve_repositories(role, paths).await?,
+        },
     })
 }
 

@@ -512,6 +512,10 @@ pub enum ReviewerRequest {
         path: Option<std::path::PathBuf>,
         commit: String,
     },
+    /// Name the repository root each of `paths` selects, as a scoped capture
+    /// resolves them (a relative path is read against the working directory),
+    /// and change nothing: no ref is written and no capture is taken.
+    ResolveRepositories { paths: Vec<std::path::PathBuf> },
 }
 
 /// What one repository contributed to a cumulative review delta.
@@ -587,6 +591,7 @@ impl ReviewerRequest {
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
             Self::RecordOverridden { .. } => "reviewer_record_overridden",
             Self::SetReviewBase { .. } => "reviewer_set_review_base",
+            Self::ResolveRepositories { .. } => "reviewer_resolve_repositories",
         }
     }
 }
@@ -707,6 +712,10 @@ impl RelayRequest {
                     ReviewerRequest::RecordOverridden { .. } | ReviewerRequest::SetReviewBase { .. },
                 ..
             } => super::RELAY_REVIEW_BASE_PROTOCOL,
+            Self::Reviewer {
+                request: ReviewerRequest::ResolveRepositories { .. },
+                ..
+            } => super::RELAY_CONCURRENT_REVIEW_PROTOCOL,
             Self::Reviewer {
                 request:
                     ReviewerRequest::RecordReviewed { .. }
@@ -1115,6 +1124,11 @@ pub enum RelayResponsePayload {
         tree: String,
         #[serde(default = "review_base_changed_default")]
         changed: bool,
+    },
+    /// The repository roots `ResolveRepositories` selected, in request order
+    /// with duplicates removed.
+    ReviewRepositories {
+        roots: Vec<std::path::PathBuf>,
     },
 }
 

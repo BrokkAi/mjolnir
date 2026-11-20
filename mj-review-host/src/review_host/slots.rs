@@ -2,7 +2,7 @@ use super::*;
 
 impl ReviewSlot {
     pub fn sync_group(&mut self) {
-        if let Some(group) = self.state.active_group.as_mut() {
+        if let Some(group) = self.open.active_group.as_mut() {
             group.driver = self.driver.snapshot();
         }
     }
@@ -22,7 +22,7 @@ impl ReviewSlot {
             allowed: Vec::new(),
         });
         let mut roles = self.driver.roles();
-        if let Some(group) = &self.state.active_group {
+        if let Some(group) = &self.open.active_group {
             for role in &mut roles {
                 role.child_session_id = group
                     .registrations
@@ -60,12 +60,11 @@ impl ReviewSlot {
     }
 }
 
-pub fn answer(
-    reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    result: Result<(), StartRefusal>,
-) {
-    if let Some(reply) = reply {
-        let _ = reply.send(result);
+/// Tells the caller of `request_review` how its review went: what was
+/// accepted, or why not.
+pub fn answer(reply: Option<OpenReply>, result: Result<(), StartRefusal>) {
+    if let Some(OpenReply { reply, accepted }) = reply {
+        let _ = reply.send(result.map(|()| accepted));
     }
 }
 

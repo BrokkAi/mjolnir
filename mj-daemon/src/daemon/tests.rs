@@ -10962,16 +10962,19 @@ async fn exercise_child_close_with_a_nested_workspace(
         mj_controller::database::save_turn_review_state(
             parent_id,
             &mj_controller::database::TurnReviewState {
-                active_group: Some(mj_core::storage::ActiveReviewGroup {
-                    brief_writer: None,
-                    driver: driver.snapshot(),
-                    reviewers: vec![Default::default()],
-                    registrations: vec![mj_core::storage::ReviewerRegistration {
-                        role: "reviewer-1".into(),
-                        request_key: relation.request_key.clone(),
-                        child_session_id: Some(LATCH_RELAY_SESSION.into()),
-                    }],
-                }),
+                open_reviews: vec![mj_core::storage::OpenReview {
+                    active_group: Some(mj_core::storage::ActiveReviewGroup {
+                        brief_writer: None,
+                        driver: driver.snapshot(),
+                        reviewers: vec![Default::default()],
+                        registrations: vec![mj_core::storage::ReviewerRegistration {
+                            role: "reviewer-1".into(),
+                            request_key: relation.request_key.clone(),
+                            child_session_id: Some(LATCH_RELAY_SESSION.into()),
+                        }],
+                    }),
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         )
@@ -11058,7 +11061,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             mj_controller::database::turn_review_state(parent_id)
                 .unwrap()
                 .push_findings
-                .is_none()
+                .is_empty()
         );
         state.review_host.shutdown().await.unwrap();
     } else {

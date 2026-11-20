@@ -80,6 +80,9 @@ impl ReviewCapture {
             mj_core::relay::ReviewerRequest::SetReviewBase { path, commit } => {
                 self.set_review_base(path, commit).await
             }
+            mj_core::relay::ReviewerRequest::ResolveRepositories { paths } => {
+                self.resolve_repositories(paths).await
+            }
         }
     }
     fn roots(&self) -> Vec<PathBuf> {
@@ -133,6 +136,25 @@ impl ReviewCapture {
         .map_err(|error| anyhow::anyhow!("the review capture stopped: {error}"))??;
         Ok(RelayResponseBody::Ok {
             payload: RelayResponsePayload::ReviewDelta { repositories },
+        })
+    }
+
+    /// Names the repository root each path selects and changes nothing: the
+    /// resolution half of a scoped capture, without its start ref or its diff.
+    async fn resolve_repositories(&self, paths: Vec<PathBuf>) -> Result<RelayResponseBody> {
+        let roots = self.roots();
+        let cwd = self.cwd.clone();
+        let roots = mj_core::runtime::spawn_blocking(move || {
+            let discovered = crate::review::capture::discover_repositories(
+                &mj_checkpoint::archive::SystemGit,
+                &roots,
+            );
+            scoped_repositories(&cwd, &discovered, &paths).map(|(roots, _)| roots)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("the repository resolution stopped: {error}"))??;
+        Ok(RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewRepositories { roots },
         })
     }
 
@@ -249,6 +271,70 @@ mod tests {
     use mj_core::relay::{
         RELAY_PROTOCOL_VERSION, RelayRequest, RelayRequestEnvelope, ReviewerRequest,
     };
+
+    // The review host reserves a root before it changes refs, so resolving a
+    // path must name the same root a capture does, without capturing: no start
+    // ref is written, and uncommitted tracked edits do not refuse it.
+    #[tokio::test]
+    async fn resolving_repositories_names_roots_and_writes_no_refs() {
+        use crate::test_support::git;
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let root = temp_root.join("root");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Review Test"]);
+        git(&root, &["config", "user.email", "review@example.invalid"]);
+        std::fs::write(root.join("tracked.rs"), "base\n").unwrap();
+        git(&root, &["add", "tracked.rs"]);
+        git(&root, &["commit", "-qm", "base"]);
+        let worktree = temp_root.join("linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(root.join("tracked.rs"), "dirty\n").unwrap();
+        let refs_before = git(&root, &["for-each-ref"]);
+        let relay_dir = temp_root.join("relay");
+        std::fs::create_dir(&relay_dir).unwrap();
+        let capture = Arc::new(ReviewCapture {
+            session_id: "resolve-test".into(),
+            cwd: root.clone(),
+            additional_directories: Vec::new(),
+            primary_relay: Arc::new(RelayCell::new(
+                DurableRelay::open(&relay_dir, "resolve-test", "1.0.0").unwrap(),
+            )),
+            operation: tokio::sync::Mutex::new(()),
+        });
+        let result = capture
+            .handle(ReviewerRequest::ResolveRepositories {
+                paths: vec![
+                    PathBuf::from("../linked"),
+                    PathBuf::from("."),
+                    worktree.clone(),
+                ],
+            })
+            .await
+            .unwrap();
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewRepositories { roots },
+        } = result
+        else {
+            panic!("missing roots")
+        };
+        assert_eq!(roots, vec![worktree, root.clone()]);
+        assert_eq!(
+            git(&root, &["for-each-ref"]),
+            refs_before,
+            "resolving writes no ref"
+        );
+    }
 
     // Hard-won: 10e9fd277: explicit commit reviews were refused on child workers without turn baselines.
     #[tokio::test]

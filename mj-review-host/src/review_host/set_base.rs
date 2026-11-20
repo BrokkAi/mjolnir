@@ -16,47 +16,41 @@ impl HostState {
             session_id,
             reply,
             "baseline update",
-            |control, persistence, _events, owner| {
-                run_set_base(control, persistence, owner, commit, path)
-            },
+            |control, link, owner| run_set_base(control, link, owner, commit, path),
         );
     }
 }
 
 async fn run_set_base(
     control: SessionManagerControl,
-    persistence: mpsc::UnboundedSender<PersistenceRequest>,
+    link: OperationLink,
     session_id: String,
     commit: String,
     path: Option<String>,
 ) -> Result<serde_json::Value, StartRefusal> {
-    let mut state = async {
-        let protocol = control
-            .session(session_id.clone())
-            .await
-            .map_err(|error| StartRefusal(format!("{error:#}")))?
-            .view()
-            .snapshot
-            .and_then(|snapshot| snapshot.operational.relay_protocol_version)
-            .unwrap_or(0);
-        if protocol < mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL {
-            return Err(StartRefusal(
-                "this session's worker is older than set_baseline; restart the session, then call it again"
-                    .into(),
-            ));
-        }
-        let (reply, loaded) = oneshot::channel();
-        persistence
-            .send(PersistenceRequest::Load {
-                session_id: session_id.clone(),
-                reply,
-            })
-            .map_err(|_| StartRefusal("review persistence stopped".into()))?;
-        loaded
-            .await
-            .map_err(|_| StartRefusal("review persistence stopped".into()))?
-            .map_err(StartRefusal)
-    }.await?;
+    let protocol = session_protocol(&control, &session_id).await?;
+    if protocol < mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL {
+        return Err(StartRefusal(
+            "this session's worker is older than set_baseline; restart the session, then call it again"
+                .into(),
+        ));
+    }
+    // The worker names the repository the way it resolves it for the move, so
+    // the roots the host reserves are the ones the move changes. A worker that
+    // cannot resolve without a capture runs the move alone.
+    let root = if concurrent_reviews(protocol) {
+        let named = path
+            .as_deref()
+            .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+        resolve_roots(&control, &session_id, vec![named])
+            .await?
+            .into_iter()
+            .next()
+    } else {
+        None
+    };
+    link.ask(OperationRequest::ReserveBase { protocol, root })
+        .await?;
 
     let outcome = resolve::push_action(
         &control,
@@ -79,28 +73,16 @@ async fn run_set_base(
             "the worker did not confirm the review base".into(),
         ));
     };
+    link.ask_saved(OperationRequest::FinishBase {
+        root: root.clone(),
+        changed,
+    })
+    .await?;
     if !changed {
         return Ok(
             serde_json::json!({"accepted": true, "repository": root, "commit": commit, "tree": tree, "message": format!("The review base already includes later reviewed commit {commit}; the base and declined findings are unchanged.")}),
         );
     }
-    // Only this repository starts a new range; other declined ranges remain.
-    state.advance_review_bases(std::slice::from_ref(&root));
-    let (reply, saved) = oneshot::channel();
-    persistence
-        .send(PersistenceRequest::SaveAcknowledged {
-            operation: "push review baseline state",
-            session_id,
-            state: Box::new(state),
-            reply,
-        })
-        .map_err(|_| {
-            StartRefusal("review persistence stopped after the review base moved".into())
-        })?;
-    saved
-        .await
-        .map_err(|_| StartRefusal("review persistence stopped after the review base moved".into()))?
-        .map_err(StartRefusal)?;
     Ok(serde_json::json!({
         "accepted": true,
         "repository": root,

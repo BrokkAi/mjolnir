@@ -452,8 +452,12 @@ pub enum SubagentToolAction {
     AskOracle {
         message: String,
     },
+    /// Decline findings of the outstanding verdict that covers `path`, or of
+    /// the only outstanding verdict when no path is given.
     OverrideReview {
         overrides: Vec<ReviewOverride>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// Mark commits through `commit` as reviewed, so later reviews start there.
     SetReviewBaseline {
@@ -544,6 +548,8 @@ enum SubagentToolActionWire {
         /// verdict with one reason.
         #[serde(default)]
         reason: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
     },
     SetReviewBaseline {
         commit: String,
@@ -668,6 +674,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             SubagentToolActionWire::OverrideReview {
                 mut overrides,
                 reason,
+                path,
             } => {
                 if let Some(reason) = reason {
                     overrides.push(ReviewOverride {
@@ -675,7 +682,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                         reason,
                     });
                 }
-                Self::OverrideReview { overrides }
+                Self::OverrideReview { overrides, path }
             }
             SubagentToolActionWire::SetReviewBaseline { commit, path } => {
                 Self::SetReviewBaseline { commit, path }
@@ -2051,15 +2058,18 @@ mod tests {
                     finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
                     reason: "wrong premise".into(),
                 }],
+                path: None,
             }
         );
-        let pairs =
-            r#"{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}]}}"#;
+        let pairs = r#"{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}],"path":"/other"}}"#;
         let action: SubagentToolAction = serde_json::from_str(pairs).unwrap();
         assert_eq!(
             serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&action).unwrap())
                 .unwrap(),
             action
+        );
+        assert!(
+            matches!(&action, SubagentToolAction::OverrideReview { path: Some(path), .. } if path == "/other")
         );
     }
 
@@ -2095,6 +2105,7 @@ mod tests {
                     finding: "finding".into(),
                     reason: "reason".into(),
                 }],
+                path: None,
             },
             SubagentToolAction::SetReviewBaseline {
                 commit: "abc123".into(),

@@ -311,10 +311,11 @@ impl ReviewEnvironment for ControllerEnvironment {
     fn close_review(
         &self,
         session_id: &str,
+        review_id: &str,
         state: &TurnReviewState,
         resolution: mj_controller::database::FinishedReviewResolution,
     ) -> Result<(), String> {
-        mj_controller::database::close_turn_review_state(session_id, state, resolution)
+        mj_controller::database::close_turn_review_state(session_id, review_id, state, resolution)
             .map_err(|error| format!("{error:#}"))
     }
 
