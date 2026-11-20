@@ -333,9 +333,12 @@ pub struct MaterializedTurnOutcome {
 impl MaterializedTurnOutcome {
     /// Whether this command carries out the request again, including provider
     /// retries and any generation of worker restart continuation.
-    pub fn is_resubmitted_by(&self, command_id: &str) -> bool {
+    pub fn is_resubmitted_by(&self, command_id: &str, subagent: bool) -> bool {
         let carried = crate::continuation::carried_command(command_id);
         crate::relay::retried_turn(carried) == Some(self.completed_ordinal)
+            || (subagent
+                && crate::continuation::GeneratedPrompt::QuotaRetry.retry_ordinal(carried)
+                    == Some(self.completed_ordinal))
             || (carried != command_id
                 && carried == crate::continuation::carried_command(&self.command_id))
     }
@@ -2259,7 +2262,7 @@ impl SessionRecord {
             ));
         }
         (!issues.is_empty()).then(|| format!(
-            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Use Detect profiles and Detect runtimes in Settings to rediscover installed agents and runtimes.",
             self.id, issues.join("; ")
         ))
     }

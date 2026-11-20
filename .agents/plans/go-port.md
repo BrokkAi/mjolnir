@@ -43,6 +43,8 @@ User-visible output must match the Rust build. Prove it with golden files captur
 - [x] (2026-11-20) mj-core declarations phase (ten groups) merged and compiling (823be3abb).
 - [x] (2026-11-20) mj-core bodies and tests phase merged: no unported bodies left, 678 of mj-core's 683 Rust tests ported, `go test ./...` passes, `go vet` passes for linux, windows and darwin. The five not ported: four test the Rust build's `worker_build_inputs.py` worker identity (the Go build needs its own; port with mj-worker-bin), plus one missed state test now added.
 - [ ] Milestone 1 rest: all of `mj-core` (config, state, relay protocol, transcript, subprocess, targets, credentials, harness install/runtime, acp on acp-go).
+- [x] (2026-11-20) Layer 1: mj-transcript, mj-checkpoint, mj-review, mj-build-id ported (323 tests; 2 benchmark tests skip as in Rust), merged d98013ebf.
+- [ ] Sync pass: port the Rust changes made since each crate's base in `go/PORTED_FROM`.
 - [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
 - [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).
 - [ ] Milestone 4: `mj-store` and the crates on it (`mj-accounts`, `mj-import`, `mj-sessionwiki`, `mj-build-cache`, `mj-worker-staging`, `mj-worker-launch`, `mj-profile-catalog`, `mj-session-runtime`, `mj-review-host`, `mj-github-relevance`).
@@ -74,6 +76,14 @@ User-visible output must match the Rust build. Prove it with golden files captur
 
 - Decision: mj-core is ported in two fan-out phases over ten module groups: declarations (every type, constant and signature) so the package compiles, then bodies and tests against those declarations. Each agent works in its own git worktree and the results are merged.
   Rationale: parallel agents in one package need each other's signatures; declaring first means the bodies phase compiles against the real shapes instead of guesses.
+  Date/Author: 2026-11-20, agent.
+
+- Decision: keep tree-sitter-bash through cgo (`github.com/tree-sitter/go-tree-sitter`) for mj-transcript's shell command summaries.
+  Rationale: Rust uses the same C parser, including its error recovery on broken shell text, which the summaries and their tests depend on; a pure-Go shell parser (mvdan.cc/sh) fails on such input instead. The cost is a C cross-compiler for Windows/macOS cross builds and for static Linux workers, which the Rust build also needs for this parser.
+  Date/Author: 2026-11-20, agent.
+
+- Decision: the Go tree records, per crate, the Rust commit it was translated from (`go/PORTED_FROM`); `go/scripts/rust-changes.sh <crate>` shows what Rust changed since. Sync passes port those diffs.
+  Rationale: Rust development continues during the port (about 30 commits touched ported crates within hours); without a recorded base the Go port silently falls behind.
   Date/Author: 2026-11-20, agent.
 
 - Decision: parse with cobra but render help and usage errors with a small clap-layout renderer.

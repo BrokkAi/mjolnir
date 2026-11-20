@@ -128,7 +128,6 @@ pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
     action: ControllerAction,
-    executor: &(impl CommandExecutor + Sync),
     action_id: u64,
     started: &tokio::sync::mpsc::UnboundedSender<PhoneActionStarted>,
     control: &PhoneActionControl,
@@ -536,41 +535,8 @@ pub(super) async fn apply_phone_action(
             controller.set_session_workspace(&session_id, &workspace_id)?;
             Ok(())
         }
-        ControllerAction::SetContainerSettings {
-            session_id,
-            resource_allocation,
-            mounts,
-        } => {
-            services
-                .daemon_runtime
-                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
-                .await?;
-            // The dialog that edits these owns the suggestion list, so the
-            // remembered sources pass through unchanged: the update persists
-            // them again beside the new mounts.
-            let mount_history = {
-                let record = controller
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .with_context(|| format!("unknown session {session_id}"))?;
-                controller
-                    .config
-                    .targets
-                    .get(&record.target_template_id)
-                    .and_then(mj_core::config::mount_history_host)
-                    .and_then(|host| controller.state.mount_history.get(host))
-                    .cloned()
-                    .unwrap_or_default()
-            };
-            controller.update_session_container_settings(
-                &session_id,
-                resource_allocation,
-                mounts,
-                mount_history,
-                executor,
-            )?;
-            Ok(())
+        ControllerAction::SetContainerSettings { .. } => {
+            bail!("container settings requests use the settings confirmation handler")
         }
         ControllerAction::UpgradeContainer { request } => {
             services.daemon_runtime.upgrade_container(request).await

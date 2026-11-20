@@ -10,7 +10,7 @@
 │  │ No messages                                                                                                       │
 │  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
 │                 │Session: ACP pretty name                                                          │                 │
-│                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
+│                 │Replace the container where supported, or save for its next creation.             │                 │
 │                 │                                                                                  │                 │
 │                 │CPUs: 4                                                                           │                 │
 │                 │Memory (GiB): 8                                                                   │                 │
@@ -52,7 +52,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages                                                                                                       │
 │  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
 │                 │Session: ACP pretty name                                                          │                 │
-│                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
+│                 │Replace the container where supported, or save for its next creation.             │                 │
 │                 │                                                                                  │                 │
 │                 │CPUs: 1.5                                                                         │                 │
 │                 │Memory (GiB): 8                                                                   │                 │
@@ -94,7 +94,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages                                                                                                       │
 │  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
 │                 │Session: ACP pretty name                                                          │                 │
-│                 │Applies when a new environment is explicitly created; Restart keeps current settin│                 │
+│                 │Replace the container where supported, or save for its next creation.             │                 │
 │                 │                                                                                  │                 │
 │                 │CPUs:                                                                             │                 │
 │                 │Memory (GiB):                                                                     │                 │
@@ -124,7 +124,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
-=== mount change applies to a new environment (100x40) ===
+=== container settings can replace the container (100x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
@@ -135,7 +135,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podm                                                                                      │
 │  │ No messa  ╭ × Edit container size and mounts ──────────────────────────────────╮              │
 │  │           │Session: ACP pretty name                                            │              │
-│              │Applies when a new environment is explicitly created; Restart keeps │  ion.        │
+│              │Replace the container where supported, or save for its next creation│  ion.        │
 │              │                                                                    │              │
 │              │CPUs:                                                               │              │
 │              │Memory (GiB):                                                       │              │

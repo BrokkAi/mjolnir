@@ -449,6 +449,7 @@ fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
         },
         transcript,
         queued_prompts: Vec::new(),
+        mailbox: None,
     }
 }
 

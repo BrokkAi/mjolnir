@@ -222,24 +222,26 @@ impl RuntimeState {
         tracing::warn!(%session_id, "{cause}");
         let applied = blocking({
             let session_id = session_id.clone();
-            let cause = cause.clone();
             let activity = _activity.clone();
             move || {
                 let _activity = activity;
                 let mut controller = Controller::load()?;
-                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
+                if !controller.fail_unready_session(&session_id, &cause, &observed_updated_at)? {
+                    return Ok::<_, anyhow::Error>(None);
+                }
+                Ok(controller.state.sessions[&session_id].last_error.clone())
             }
         })
         .await;
-        let applied = applied?;
-        if applied {
-            if let Err(error) = self.reload_controller().await {
-                tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
-            }
-            self.push_notice(&session_id, cause);
-            self.publish_revision();
+        let Some(cause) = applied? else {
+            return Ok(false);
+        };
+        if let Err(error) = self.reload_controller().await {
+            tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
         }
-        Ok(applied)
+        self.push_notice(&session_id, cause);
+        self.publish_revision();
+        Ok(true)
     }
 
     pub(super) async fn publish_session(

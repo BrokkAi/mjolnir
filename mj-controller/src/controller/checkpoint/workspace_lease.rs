@@ -133,7 +133,13 @@ impl IdleWorkspaceLease {
     }
 
     pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {
-        Self::verify_reserved_connection(
+        Ok(self.reserved_snapshot().await?.is_some())
+    }
+
+    pub(in crate::controller) async fn reserved_snapshot(
+        &mut self,
+    ) -> Result<Option<ManagedSessionSnapshot>> {
+        Self::verify_reserved_snapshot(
             self.lease.connection_mut(),
             self.harness,
             &self.command_id,
@@ -148,22 +154,38 @@ impl IdleWorkspaceLease {
         command_id: &str,
         ready_cursor: &RelayCursor,
     ) -> Result<bool> {
+        Ok(
+            Self::verify_reserved_snapshot(connection, harness, command_id, ready_cursor)
+                .await?
+                .is_some(),
+        )
+    }
+
+    async fn verify_reserved_snapshot(
+        connection: &mut StandaloneSession,
+        harness: HarnessKind,
+        command_id: &str,
+        ready_cursor: &RelayCursor,
+    ) -> Result<Option<ManagedSessionSnapshot>> {
         let mut snapshot = connection.sync().await?;
         if !checkpoint_barrier_is_ready(&snapshot, command_id)
             || snapshot.operational.checkpoint_ready.as_ref() != Some(ready_cursor)
         {
-            return Ok(false);
+            return Ok(None);
         }
         if let Err(error) =
             validate_checkpoint_barrier_snapshot(&snapshot, command_id, ready_cursor)
         {
             if error.is::<CheckpointDeferred>() {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(error);
         }
         snapshot.operational.checkpoint_barrier = None;
-        Ok(snapshot.operational.safe_to_replace(harness))
+        Ok(snapshot
+            .operational
+            .safe_to_replace(harness)
+            .then_some(snapshot))
     }
 
     pub(in crate::controller) fn finish_replacement(mut self, connection: StandaloneSession) {

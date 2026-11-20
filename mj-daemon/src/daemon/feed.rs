@@ -14,6 +14,7 @@ type NativeOwners = SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
     capacity: super::capacity::ContainerCapacityProjection,
+    host_capacity: Option<super::capacity::HostCapacityProjection>,
     installed_engines: super::availability::InstalledEngines,
     incarnation: String,
     sequence: u64,
@@ -335,7 +336,14 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
-        full.metadata.storage = mj_controller::target_storage::views_snapshot();
+        if let Some(feed) = self.capacity_feed() {
+            (full.metadata.host_capacities, full.metadata.storage) = history
+                .host_capacity
+                .get_or_insert_with(|| super::capacity::HostCapacityProjection::new(feed))
+                .project();
+        } else {
+            full.metadata.storage = mj_controller::target_storage::views_snapshot();
+        }
         full.metadata.profile_capabilities = self
             .profile_catalog
             .get()

@@ -34,12 +34,13 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         !host.starts_with('-'),
         "[daemon] host cannot be an SSH option"
     );
-    let instance = placement.instance.clone().unwrap_or_else(|| {
-        mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned())
-    });
+    let instance = placement.remote_instance();
     if args == ["daemon", "status"] {
         println!("Daemon host: {host}");
-        println!("Daemon instance: {instance}");
+        println!(
+            "Daemon instance: {}",
+            instance.as_deref().unwrap_or("the remote's own")
+        );
         println!(
             "Client config: {}",
             mj_core::config::config_path().display()
@@ -48,7 +49,7 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         println!("Client build: {}", client.published());
         match mj_client::daemon::ssh::discover(
             &placement,
-            &instance,
+            instance.as_deref(),
             mj_client::daemon::ssh::DiscoveryIntent::Existing,
         )
         .await
@@ -61,11 +62,10 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
             Err(error) => eprintln!("Daemon build unavailable: {error:#}"),
         }
     }
-    let mut argv = vec![
-        placement.remote_command().to_owned(),
-        "--instance".into(),
-        instance,
-    ];
+    let mut argv = vec![placement.remote_command().to_owned()];
+    if let Some(instance) = instance {
+        argv.extend(["--instance".into(), instance]);
+    }
     argv.extend_from_slice(args);
     let mut command = std::process::Command::new("ssh");
     if interactive {
@@ -91,6 +91,7 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
     Ok(true)
 }
 
+pub(crate) mod choice;
 pub(crate) mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};

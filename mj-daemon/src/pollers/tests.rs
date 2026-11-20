@@ -1536,37 +1536,35 @@ struct PendingCapacityProbe {
 }
 
 struct CapacityPollerFixture {
-    targets: tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    targets: tokio::sync::watch::Sender<CapacityProbeSet>,
     triggers: tokio::sync::mpsc::Sender<()>,
     updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
     started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
-    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityPollerFixture {
     fn new() -> Self {
         let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
-        let requested = Arc::<std::sync::atomic::AtomicU64>::default();
-        let (targets, triggers, updates) = spawn_capacity_poller_with(
-            move |target| {
-                let started_tx = started_tx.clone();
-                async move {
-                    let (finish, result) = tokio::sync::oneshot::channel();
-                    started_tx
-                        .send(PendingCapacityProbe { target, finish })
-                        .unwrap();
-                    result.await.context("test probe completion dropped")?
-                }
-            },
-            requested.clone(),
-        );
+        let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
+            let started_tx = started_tx.clone();
+            async move {
+                let (finish, result) = tokio::sync::oneshot::channel();
+                started_tx
+                    .send(PendingCapacityProbe { target, finish })
+                    .unwrap();
+                result.await.context("test probe completion dropped")?
+            }
+        });
         Self {
             targets,
             triggers,
             updates,
             started,
-            requested,
         }
+    }
+
+    fn publish_targets(&self, targets: Vec<DeploymentCapacityTarget>) {
+        self.targets.send_modify(|inputs| inputs.targets = targets);
     }
 
     async fn assert_no_start(&mut self) {
@@ -1594,17 +1592,29 @@ fn capacity_target(id: &str) -> DeploymentCapacityTarget {
 #[tokio::test(start_paused = true)]
 async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
     let mut fixture = CapacityPollerFixture::new();
-    fixture.targets.send_replace(vec![capacity_target("local")]);
-    // A scheduled probe is already running when the request arrives.
+    let mut target = capacity_target("local");
+    fixture.publish_targets(vec![target.clone()]);
+    // A scheduled probe is already running when Refresh rebuilds the paths.
     let running = fixture.started.recv().await.unwrap();
-    fixture
-        .requested
-        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    fixture.triggers.send(()).await.unwrap();
+    target.local_storage_paths = vec!["new-cache-filesystem".into()];
+    fixture.targets.send_replace(CapacityProbeSet {
+        targets: vec![target.clone()],
+        refresh_generation: 1,
+    });
+    fixture.assert_no_start().await;
     running.finish.send(Ok(None)).unwrap();
-    // Its result began before the request, so it does not answer it.
-    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
-    // The poller probes again at once, and that probe answers the request.
+    // A result for obsolete paths cannot answer the request. The poller
+    // starts the follow-up immediately, with the new paths.
+    let follow_up = fixture.started.recv().await.unwrap();
+    assert_eq!(follow_up.target, target);
+    assert!(fixture.updates.try_recv().is_err());
+    // A second refresh keeps the same paths but still requires a new sample.
+    fixture
+        .targets
+        .send_modify(|inputs| inputs.refresh_generation = 2);
+    fixture.assert_no_start().await;
+    follow_up.finish.send(Ok(None)).unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
     fixture
         .started
         .recv()
@@ -1613,15 +1623,47 @@ async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
         .finish
         .send(Ok(None))
         .unwrap();
-    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 2);
     fixture.assert_no_start().await;
+}
+
+// Hard-won: 2d2476348: a disk-full wake could start a probe with obsolete inputs.
+#[tokio::test(start_paused = true)]
+async fn capacity_co_ready_disk_wake_and_refresh_use_the_latest_paths() {
+    // Let Tokio choose either ready branch. The first probe must use the new
+    // definitions regardless of which branch wins.
+    for _ in 0..32 {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut target = capacity_target("local");
+        fixture.publish_targets(vec![target.clone()]);
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        fixture.updates.recv().await.unwrap();
+
+        target.local_storage_paths = vec!["new-cache-filesystem".into()];
+        fixture.targets.send_replace(CapacityProbeSet {
+            targets: vec![target.clone()],
+            refresh_generation: 1,
+        });
+        fixture.triggers.try_send(()).unwrap();
+        let refreshed = fixture.started.recv().await.unwrap();
+        assert_eq!(refreshed.target, target);
+        refreshed.finish.send(Ok(None)).unwrap();
+        assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    }
 }
 
 #[tokio::test(start_paused = true)]
 async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publications() {
     let mut fixture = CapacityPollerFixture::new();
     let targets = vec![capacity_target("local")];
-    fixture.targets.send_replace(targets.clone());
+    fixture.publish_targets(targets.clone());
     fixture
         .started
         .recv()
@@ -1632,7 +1674,7 @@ async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publicat
         .unwrap();
     assert!(fixture.updates.recv().await.unwrap().result.is_ok());
 
-    fixture.targets.send_replace(targets);
+    fixture.publish_targets(targets);
     fixture.assert_no_start().await;
     tokio::time::advance(Duration::from_secs(29)).await;
     fixture.assert_no_start().await;
@@ -1647,7 +1689,9 @@ async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publicat
         .unwrap();
     assert!(fixture.updates.recv().await.unwrap().result.is_ok());
 
-    fixture.triggers.send(()).await.unwrap();
+    fixture
+        .targets
+        .send_modify(|inputs| inputs.refresh_generation = 1);
     fixture
         .started
         .recv()
@@ -1664,11 +1708,9 @@ async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publicat
 async fn capacity_busy_targets_coalesce_requests_without_blocking_other_targets() {
     let mut fixture = CapacityPollerFixture::new();
     let first_target = capacity_target("first");
-    fixture.targets.send_replace(vec![first_target.clone()]);
+    fixture.publish_targets(vec![first_target.clone()]);
     let first = fixture.started.recv().await.unwrap();
-    fixture
-        .targets
-        .send_replace(vec![first_target, capacity_target("second")]);
+    fixture.publish_targets(vec![first_target, capacity_target("second")]);
     let second = fixture.started.recv().await.unwrap();
     assert_eq!(second.target.id, "second");
 
@@ -1687,10 +1729,10 @@ async fn capacity_busy_targets_coalesce_requests_without_blocking_other_targets(
 async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_discarded() {
     let mut fixture = CapacityPollerFixture::new();
     let mut target = capacity_target("local");
-    fixture.targets.send_replace(vec![target.clone()]);
+    fixture.publish_targets(vec![target.clone()]);
     let first = fixture.started.recv().await.unwrap();
     target.host = "new-host".into();
-    fixture.targets.send_replace(vec![target.clone()]);
+    fixture.publish_targets(vec![target.clone()]);
     fixture.assert_no_start().await;
     first.finish.send(Ok(None)).unwrap();
     let changed = fixture.started.recv().await.unwrap();
@@ -1716,7 +1758,7 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
 
     fixture.triggers.send(()).await.unwrap();
     let removed = fixture.started.recv().await.unwrap();
-    fixture.targets.send_replace(Vec::new());
+    fixture.publish_targets(Vec::new());
     fixture.assert_no_start().await;
     removed.finish.send(Ok(None)).unwrap();
     assert!(
@@ -1724,7 +1766,7 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
             .await
             .is_err()
     );
-    fixture.targets.send_replace(vec![target]);
+    fixture.publish_targets(vec![target]);
     let mut last = fixture.started.recv().await.unwrap();
     drop(fixture.updates);
     last.finish.closed().await;
@@ -1733,18 +1775,15 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
 #[tokio::test]
 async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
     let first = AtomicBool::new(true);
-    let (targets, triggers, mut updates) = spawn_capacity_poller_with(
-        move |_| {
-            if first.swap(false, Ordering::SeqCst) {
-                panic!("test capacity probe panic");
-            }
-            async { Ok(None) }
-        },
-        Arc::default(),
-    );
-    targets.send_replace(vec![capacity_target("local")]);
+    let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
+        if first.swap(false, Ordering::SeqCst) {
+            panic!("test capacity probe panic");
+        }
+        async { Ok(None) }
+    });
+    targets.send_modify(|inputs| inputs.targets = vec![capacity_target("local")]);
     let failure = updates.recv().await.unwrap();
-    assert_eq!(failure.target_id, "local");
+    assert_eq!(failure.target.id, "local");
     assert!(
         failure
             .result
@@ -1759,7 +1798,7 @@ async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
 async fn capacity_results_are_revalidated_after_output_backpressure() {
     let mut fixture = CapacityPollerFixture::new();
     let mut targets: Vec<_> = (0..65).map(|id| capacity_target(&id.to_string())).collect();
-    fixture.targets.send_replace(targets.clone());
+    fixture.publish_targets(targets.clone());
     let mut pending = Vec::new();
     for _ in 0..65 {
         pending.push(fixture.started.recv().await.unwrap());
@@ -1779,10 +1818,10 @@ async fn capacity_results_are_revalidated_after_output_backpressure() {
         .find(|target| target.id == last_id)
         .unwrap()
         .host = "changed".into();
-    fixture.targets.send_replace(targets);
+    fixture.publish_targets(targets);
     for _ in 0..64 {
         let update = fixture.updates.recv().await.unwrap();
-        assert_ne!(update.target_id, last_id);
+        assert_ne!(update.target.id, last_id);
     }
     let changed = fixture.started.recv().await.unwrap();
     assert_eq!(changed.target.id, last_id);
@@ -1792,7 +1831,7 @@ async fn capacity_results_are_revalidated_after_output_backpressure() {
         "stale blocked result escaped"
     );
     changed.finish.send(Ok(None)).unwrap();
-    assert_eq!(fixture.updates.recv().await.unwrap().target_id, last_id);
+    assert_eq!(fixture.updates.recv().await.unwrap().target.id, last_id);
     fixture.assert_no_start().await;
 }
 
@@ -1994,6 +2033,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 legacy_muse_auto_review: None,
                 load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
+                mjolnir_guardian: true,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
@@ -2092,6 +2132,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 legacy_muse_auto_review: None,
                 load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
+                mjolnir_guardian: true,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },

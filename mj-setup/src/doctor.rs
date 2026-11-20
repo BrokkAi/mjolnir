@@ -53,7 +53,7 @@ pub const APPLE_CONTAINER_INSTALL_URL: &str = "https://github.com/apple/containe
 /// or a credential helper waiting on something that will never arrive.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The executor `mj doctor` and `mj setup` run their prerequisite probes
+/// The executor `mj doctor` and first-run setup run their prerequisite probes
 /// through: one deadline per probe, so a wedged runtime cannot hang the run.
 pub const fn probe_executor() -> BoundedProcessExecutor {
     BoundedProcessExecutor::new(PROBE_TIMEOUT)
@@ -190,7 +190,7 @@ pub fn run_with(
 
 /// The same checks as [`run_with`], against an explicit configuration file.
 ///
-/// `mj setup` uses this to report on the configuration it just wrote, so a
+/// First-run setup uses this to report on the configuration it just wrote, so a
 /// first run ends with exactly the summary and remediations `mj doctor`
 /// would print.
 pub fn run_with_config_path(
@@ -689,22 +689,20 @@ GitHub can ignore them.\n\n\
         InstructionsPlatform::Macos => format!(
             "# Mjolnir setup instructions for macOS\n\n\
 Run these commands as the user who will run `mj`:\n\n\
-1. Install and sign in to a supported coding agent, then run `mj setup`; or\n\
+1. Install and sign in to a supported coding agent, then run `mj`; or\n\
    add a profile in Settings → Agent Profiles and choose Sign in.\n\
-   Setup discovers agent homes and local runtimes, offers AWS when the AWS CLI\n\
-   has credentials, and offers SSH hosts from `~/.ssh/config`. Review its\n\
-   proposed configuration and confirm writing `config.toml`. It runs smoke\n\
-   tests for newly added container targets and ends with a doctor report.\n\
+   The first launch discovers agent homes and local runtimes, writes\n\
+   `config.toml`, and shows prerequisite errors.\n\
 2. Run `mj doctor --json` and follow every `fixable` remediation. Repeat until\n\
    no check is `fixable`. Review warnings for any target you intend to use;\n\
    `unsupported` runtimes are unavailable, not ready.\n\
 3. If you intend to use containers, start the runtime and run\n\
    `mj doctor --json --smoke`. Do this for Podman, Docker Desktop, and Apple\n\
    container. Resolve failures for the target you intend to use.\n\
-4. Run `mj`, then press n in the Sessions pane to start your first session.\n\
+4. Run `mj` and choose Create session (Ctrl-B then c by default).\n\
    If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
    to add one first.\n\n\
-You can also configure profiles and targets in Settings instead of `mj setup`.\n\
+Profiles and targets can also be configured in Settings.\n\
 For a named instance, use the same `--instance <name>` on every command above.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
@@ -782,8 +780,7 @@ Podman prerequisites. Resolve every `fixable` status before starting a session.\
 enum ConfigGap {
     /// A newer Mjolnir wrote the file; the value is the version it carries.
     NewerVersion(u32),
-    /// There is no file yet. The first `mj` that adds an agent profile, or
-    /// `mj setup`, writes it.
+    /// There is no file yet. The first `mj` that adds an agent profile writes it.
     Missing,
     /// The file is not valid Mjolnir TOML.
     Unreadable,
@@ -811,7 +808,7 @@ impl ConfigGap {
                 "Update Mjolnir to the build that wrote config.toml or newer, then rerun `mj doctor`."
             }
             ConfigGap::Missing => {
-                "Run `mj` and add an agent profile, or run `mj setup`; either one writes config.toml. Then rerun `mj doctor`."
+                "Run `mj` and add an agent profile; that writes config.toml. Then rerun `mj doctor`."
             }
             ConfigGap::Unreadable => "Fix config.toml, then rerun `mj doctor`.",
         }
@@ -852,8 +849,8 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
             )],
         );
     }
-    // A config a newer build wrote is not broken TOML: replacing it with
-    // `mj setup` would discard that build's settings. Say what is actually
+    // A config a newer build wrote is not broken TOML: replacing it
+    // would discard that build's settings. Say what is actually
     // wrong before the load below reports it as invalid.
     if let Some(found) = mj_core::config::newer_version_on_disk(path) {
         return (
@@ -911,7 +908,7 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "config",
                 "Mjolnir configuration",
                 format!("{} is invalid: {error:#}", path.display()),
-                "Fix the reported error in config.toml, then rerun `mj doctor`. `mj setup` does not replace an existing config.toml.",
+                "Fix the reported error in config.toml, then rerun `mj doctor`.",
             )],
         ),
     }
@@ -2726,7 +2723,7 @@ fn machine_runtime_check(probe: &crate::setup::MachineProbe) -> DoctorCheck {
                     check_id,
                     title,
                     format!("{missing}. It can run these runtimes: {kinds}."),
-                    "Start `mj` or run `mj setup` to add them.",
+                    "Start `mj` to add them.",
                 )
             }
         }

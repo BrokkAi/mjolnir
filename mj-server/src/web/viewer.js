@@ -3789,7 +3789,7 @@ function renderProjectChooser(body) {
   for (const [mode, title, detail] of [
     ['github', 'GitHub', 'Your repositories and search'],
     ['directory', 'Browse folders', 'On your Mjolnir computer'],
-    ['url', 'Paste URL', 'GitHub URL or owner/repository'],
+    ['url', 'Paste URL', 'Git URL or GitHub owner/repository'],
   ]) {
     const button = projectButton('', () => setProjectMode(mode), `new-project-${mode}`);
     button.setAttribute('aria-pressed', String(picker.mode === mode));
@@ -3826,10 +3826,10 @@ function renderProjectChooser(body) {
   } else if (!home) {
     body.append(projectButton('Recent & saved projects', () => setProjectMode('home'), 'new-project-saved'));
     if (picker.mode === 'url') {
-      body.append(pathField('GitHub URL or owner/repository', 'new-project-source', newDraft.bundleSource, value => {
+      body.append(pathField('Git URL or GitHub owner/repository', 'new-project-source', newDraft.bundleSource, value => {
         newDraft.bundleSource = value;
       }));
-      body.append(el('p', 'dim', 'You can also enter a repository path on the computer running Mjolnir.'));
+      body.append(el('p', 'dim', 'HTTP credentials are removed. You can also enter a repository path on the computer running Mjolnir.'));
       const use = projectButton(newDraft.projectMultiple ? 'Add repository' : newDraft.creatingBundle ? 'Opening project…' : 'Use repository', () => selectProjectRepository(), 'new-project-use');
       body.append(use);
     } else {
@@ -3871,7 +3871,7 @@ function selectProjectRepository(selectedSource) {
   if (!draft || draft.creatingBundle) return;
   const source = (selectedSource ?? draft.bundleSource).trim();
   if (!source) {
-    newError.textContent = 'Paste a GitHub URL, owner/repository, or repository path.';
+    newError.textContent = 'Paste a Git URL, GitHub owner/repository, or repository path.';
     return;
   }
   if (!draft.projectMultiple) return createNewProject([source]);
@@ -3994,7 +3994,7 @@ function renderProjectBrowser(body) {
   }, 'new-project-cancel'));
   if (picker.error) browser.append(projectButton('Retry', () => discoverProjects(), 'new-project-retry'));
   if (github && !picker.error && picker.loaded && !picker.entries.length && !picker.loading) {
-    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a GitHub URL.'));
+    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a Git URL.'));
   }
   if (!picker.loading && !picker.error) {
     if (targetDirectory && picker.loaded) browser.append(projectButton('Use this folder', () => {
@@ -5824,6 +5824,17 @@ async function prepareMove() {
         oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
       }),
     });
+    if (draft.preparation.container_upgrade) {
+      const preview = draft.preparation.container_upgrade;
+      draft.preparation = null;
+      if (await confirmContainerUpgrade(preview, true)) {
+        await applyContainerSettingsReplacement(preview);
+        await refresh();
+        announce('Container settings replacement pending');
+        navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
+      }
+      return;
+    }
     if (draft.preparation.workspace && !draft.filesReviewed) {
       const assessment = draft.preparation.workspace;
       draft.fileExpanded = new Set((assessment.initially_expanded || []).map(moveFileKey));
@@ -6618,10 +6629,17 @@ function reconcileLifecycleActions() {
   }
 }
 
+function applyContainerSettingsReplacement(preview) {
+  return request('/api/actions', { method: 'POST', body: JSON.stringify({
+    action: 'upgrade-container',
+    request: { selection: preview, acknowledge_writable_layer_loss: true },
+  }) });
+}
+
 function confirmContainerUpgrade(preview, upgradeOnly) {
   return new Promise(resolve => {
     const dialog = openSessionDialog('container-upgrade-dialog', 'Upgrade container and restart');
-    dialog.append(el('h2', '', upgradeOnly ? 'Upgrade container and restart?' : 'Restart agent'));
+    dialog.append(el('h2', '', preview.settings ? 'Apply container settings and restart?' : upgradeOnly ? 'Upgrade container and restart?' : 'Restart agent'));
     dialog.append(el('p', '', `Current image: ${preview.current_image} (${preview.current_image_id})`), el('p', '', `Target image: ${preview.target_image} (${preview.target_image_id || 'not cached'})`));
     dialog.append(el('p', '', 'Restart agent keeps the existing container and its filesystem; any running turn is interrupted. A container upgrade reattaches the existing workspace and build cache mounts.'));
     dialog.append(el('p', 'warning', 'State in the writable layer, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.'));
@@ -6632,7 +6650,7 @@ function confirmContainerUpgrade(preview, upgradeOnly) {
     cancel.onclick = () => finish(null);
     controls.append(cancel);
     if (!upgradeOnly) { const restart = button('Restart agent', 'secondary'); restart.onclick = () => finish('restart'); controls.append(restart); }
-    const upgrade = button('Upgrade container and restart…');
+    const upgrade = button(preview.settings ? 'Apply settings and restart…' : 'Upgrade container and restart…');
     upgrade.onclick = () => finish('upgrade');
     controls.append(upgrade);
     dialog.oncancel = event => { event.preventDefault(); finish(null); };
@@ -6956,7 +6974,7 @@ function openContainerSettings(session) {
     memoryField,
     renderMountEditor(editor, 'container', session.target_id),
     error,
-    el('p', 'dim', 'Saved settings apply when a new environment is explicitly created. Restart and container upgrade retain the existing mounts and limits.'),
+    el('p', 'dim', 'When the workspace can be retained, applying changed settings requires replacing the container. Otherwise settings apply the next time a new environment is created.'),
     controls,
   );
   confirm.onclick = async () => {
@@ -6967,7 +6985,7 @@ function openContainerSettings(session) {
     confirm.disabled = true;
     error.textContent = '';
     try {
-      await request('/api/actions', {
+      const preview = await request('/api/actions', {
         method: 'POST',
         body: JSON.stringify({
           action: 'set-container-settings',
@@ -6976,6 +6994,13 @@ function openContainerSettings(session) {
           mounts: mountEditorWire(editor),
         }),
       });
+      if (preview) {
+        if (!await confirmContainerUpgrade(preview, true)) { confirm.disabled = false; return; }
+        await applyContainerSettingsReplacement(preview);
+        announce('Container settings replacement pending');
+      } else {
+        announce('Container settings saved for next creation');
+      }
       dialog.close();
       await refresh();
     } catch (failure) {

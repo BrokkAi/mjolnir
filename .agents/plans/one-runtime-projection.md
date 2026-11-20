@@ -10,7 +10,7 @@ Mjolnir's daemon (the background control process started as `mj daemon-run`; its
 
 The result is that the two surfaces can disagree about the same session at the same moment. Issue #1372 is one known case: with Docker stopped, an unreachable SSH host, or a profile whose agent was uninstalled, the terminal's new-session picker correctly leaves the entry out while the web viewer still offers it. Issue #1596 is another: the terminal's Refresh button re-samples disks in the terminal process, while the Disks view shows the daemon's readings, so Refresh appears to do nothing. The repository's engineering rules (`AGENTS.md`, "Concurrency") treat two predicates for the same question as a bug even while they agree, because they eventually drift.
 
-After this plan, one daemon-owned projection decides every session, target and profile fact and every action verdict. The terminal and the web viewer read that projection through one history mechanism and shape it only for presentation. A user can see this working by putting a session, a target or a profile into an awkward state (Docker stopped, a host unreachable, a sub-agent waiting on a question, a failed Move) and checking that the terminal and the web viewer offer exactly the same actions and list exactly the same entries, with the same reasons.
+After this plan, one daemon-owned projection decides every session, target and profile fact and every action verdict. The terminal and the web viewer read that projection through one history mechanism and shape it only for presentation. A user can see this working by putting a session, a target or a profile into an awkward state (Docker stopped, a host unreachable, a sub-agent waiting on a question, a failed Move) and checking that the terminal and the web viewer offer exactly the same actions and list exactly the same entries. The browser and API explanations omit private probe details.
 
 This plan does not add a new public API. A later plan will publish this projection as a versioned `/api/v1` stream for non-browser clients such as a desktop app; that work depends on this one and is recorded under Outcomes.
 
@@ -20,7 +20,8 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - [x] (2026-11-20 16:40Z) Reconnaissance: compared both pipelines and listed every fact computed twice. Findings are folded into Context and Orientation and the Decision Log. The full report, with file and line references at commit 818e11d0e, is in the parent session's report directory `.mj/agents/08c56cb5893e5e88dd4ff2d329501203/report.md` (not checked in; everything needed is restated here).
 - [x] (2026-11-20 17:09Z) Milestone 1: the daemon publishes launch availability for the terminal, web viewer and options API (#1372). Targeted tests, all 34 terminal goldens and Clippy passed. Live validation used an isolated Docker command fixture for a stopped service, and a second daemon with Docker absent from PATH.
-- [ ] Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
+- [x] (2026-11-20) Implement Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
+- [x] (2026-11-20) Verify Milestone 2 in `feeds-m2` with an isolated mbx config.
 - [ ] Milestone 3: web rows built only from the runtime capture.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
@@ -44,6 +45,10 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: the probe must retain the same target definitions that the daemon installs, including built-in runtime candidates. Automatic machine-runtime additions return their inserted definitions from the configuration transaction, so a later edit of a new target cannot inherit its probe result.
   Evidence: `mj-setup/src/setup/availability.rs` and `mj-setup/src/setup/machines.rs`.
+
+
+- Observation: before Milestone 2, both capacity samplers used `Controller::deployment_capacity_targets`. Its host list comes from configured targets, and its session-dependent paths and EC2 instance probes use active records. The daemon already supplies those records. The existing daemon refresh triggered sampling of the old target definitions.
+  Evidence: `mj-controller/src/controller/backend.rs`, `mj-daemon/src/daemon/views.rs`, and the pre-change `CapacityFeed::request_refresh` at acd73e9d9.
 
 
 ## Decision Log
@@ -86,10 +91,19 @@ This plan does not add a new public API. A later plan will publish this projecti
   Date/Author: 2026-11-20, parent session.
 
 
+- Decision: publish the existing `HostCapacityRow` with daemon-owned refresh status in runtime metadata. Both surfaces read the capacity service and storage board. The service publishes each requested generation together with its newly derived probe definitions.
+  Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request. Each capture uses one storage snapshot for the Targets row and session warnings. Unchanged host rows share their allocation across retained revisions. The capture reuses the rows while the target, reading and storage publications are unchanged. Both surfaces read the daemon's pending refresh generation, and every wake of the sampler uses its latest inputs.
+  Date/Author: 2026-11-20, Milestone 2 implementation.
+
+
 ## Outcomes & Retrospective
 
 
-Milestone 1 is implemented and validated in its detached worktree. Both pickers showed unchecked profiles and targets, then hid the same missing entries reported by the options API. A configuration edit restored the unchecked choice in both pickers. The running check accepted demand from both surfaces and repeated once. Without the Docker command, both pickers hid the target immediately and the API returned HTTP 400 on explicit create. The host has no installed Docker command, so the stopped-service case used a command fixture with the actual Docker preflight and daemon. Both isolated daemons were stopped. Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
+Milestone 1 is implemented and validated in its detached worktree. Both pickers showed unchecked profiles and targets, then hid the same missing entries reported by the options API. A configuration edit restored the unchecked choice in both pickers. The running check accepted demand from both surfaces and repeated once. Without the Docker command, both pickers hid the target immediately and the API returned HTTP 400 on explicit create. The host has no installed Docker command, so the stopped-service case used a command fixture with the actual Docker preflight and daemon. Both isolated daemons were stopped.
+
+Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page showed the pending refresh and then displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
+
+Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream with "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
 
 
 ## Context and Orientation
@@ -201,3 +215,6 @@ None yet.
 
 
 No new crates or external libraries. The shared types live where the current ones do: runtime feed types in `mj-client/src/runtime_feed.rs`, availability types in `mj-client/src/availability.rs`, web snapshot types in `mj-server/src/server/viewer_types.rs`. At the end of Milestone 1 a per-entry availability verdict type with three cases (available, missing with a reason string, unknown) must exist in `mj-client` and be what both `mj-tui` and the web snapshot read. At the end of Milestone 4 a per-session verdict record must exist in `mj-client/src/runtime_feed.rs`, published in `RuntimeProjection` and copied into `ViewerSession`.
+
+
+Milestone 2 update, 2026-11-20. The plan now records the shared target coverage, why the refresh request must rebuild targets, how in-flight probes answer a refresh, and the named-instance outcome.

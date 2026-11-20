@@ -1,76 +1,42 @@
 //! One serialized setup transaction per instance, including interruption recovery.
 
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::{
-    DiscoveredHome, GithubRepository, add_machine_runtimes, build_config,
-    discover_github_repository, discover_profiles, probe_machines, reference_secret_api_keys,
-};
-use crate::doctor::{
-    CheckStatus, DoctorCheck, DoctorOptions, current_apple_platform, probe_executor,
-    run_with_config_path,
-};
+use super::{DiscoveredHome, build_config, discover_profiles, reference_secret_api_keys};
+use crate::doctor::{CheckStatus, DoctorCheck};
 use crate::targets::CommandExecutor;
-use mj_core::config::{Config, HarnessKind, atomic_write, data_dir};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetupReport {
-    pub agents: Vec<HarnessKind>,
-    pub repository: Option<String>,
-}
-
-impl SetupReport {
-    pub fn summary(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if !self.agents.is_empty() {
-            lines.push(format!(
-                "Agents: {}.",
-                self.agents
-                    .iter()
-                    .map(|kind| kind.display_name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        } else {
-            lines.push(
-                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
-                    .into(),
-            );
-        }
-        if let Some(repository) = &self.repository {
-            lines.push(format!("Project: {repository}."));
-        }
-        lines
-    }
-}
+use mj_client::daemon::FirstRunSetupReport;
+use mj_core::config::{Config, atomic_write};
 
 /// Returns `None` when automatic setup belongs to an existing installation.
 /// The accepted callback runs under the setup lock, before discovery starts.
 pub fn run_setup(
     config_path: &Path,
     instance_data: &Path,
-    force: bool,
+    project_directory: Option<&Path>,
     executor: &impl CommandExecutor,
     cancelled: &dyn Fn() -> bool,
     accepted: impl FnOnce(),
-) -> Result<Option<SetupReport>> {
-    run_setup_with_discovery(
-        config_path,
-        instance_data,
-        force,
-        cancelled,
-        accepted,
-        || {
-            let homes = discover_profiles(executor);
-            let cwd = std::env::current_dir().context("read current project directory")?;
-            let repository = discover_github_repository(executor, &cwd);
-            Ok((homes, repository))
-        },
-    )
+) -> Result<Option<FirstRunSetupReport>> {
+    run_setup_with_discovery(config_path, instance_data, cancelled, accepted, || {
+        let homes = discover_profiles(executor);
+        let cwd = project_directory
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
+        let repository = cwd.and_then(|cwd| {
+            let (source, stripped) =
+                mj_core::local_git::discover_project_source(&cwd, executor).ok()?;
+            if stripped {
+                tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+            }
+            Some(source)
+        });
+        Ok((homes, repository))
+    })
 }
 
 /// Whether automatic setup has work to do: a new installation, or one whose
@@ -100,16 +66,14 @@ fn automatic_setup_is_due(marker: &Path, config_path: &Path) -> Result<bool> {
 fn run_setup_with_discovery(
     config_path: &Path,
     instance_data: &Path,
-    force: bool,
     cancelled: &dyn Fn() -> bool,
     accepted: impl FnOnce(),
-    discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<GithubRepository>)>,
-) -> Result<Option<SetupReport>> {
+    discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<String>)>,
+) -> Result<Option<FirstRunSetupReport>> {
     std::fs::create_dir_all(instance_data).context("create setup state directory")?;
     let _owner = acquire_setup_lock(&instance_data.join("setup.lock"), cancelled)?;
     let marker = instance_data.join("setup-state");
-    let due = automatic_setup_is_due(&marker, config_path)?;
-    if !force && !due {
+    if !automatic_setup_is_due(&marker, config_path)? {
         return Ok(None);
     }
     ensure!(!cancelled(), "setup cancelled");
@@ -124,7 +88,7 @@ fn run_setup_with_discovery(
         // This preserves simultaneous Settings edits and makes reruns additive.
         let mut discovered = build_config(
             &super::without_conventional_duplicates(latest, &homes),
-            repository.as_ref(),
+            repository.as_deref(),
         );
         reference_secret_api_keys(&mut discovered, config_path);
         let additions = latest.setup_additions(&discovered);
@@ -134,14 +98,14 @@ fn run_setup_with_discovery(
         Ok(())
     })?;
     atomic_write(&marker, b"complete\n")?;
-    Ok(Some(SetupReport {
+    Ok(Some(FirstRunSetupReport {
         agents: homes
             .iter()
             .map(|home| home.kind)
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect(),
-        repository: repository.map(|repository| repository.source()),
+        repository,
     }))
 }
 
@@ -204,9 +168,16 @@ fn acquire_setup_lock(
 
 /// Welcome displays errors and concrete remedies, without successful checks
 /// or warnings about optional built-in runtimes and background image downloads.
-pub fn actionable_errors(checks: &[DoctorCheck]) -> Vec<String> {
+pub fn welcome_errors(checks: &[DoctorCheck]) -> Vec<String> {
     checks
         .iter()
+        // Welcome reports agent discovery and offers setup itself.
+        .filter(|check| {
+            !matches!(
+                check.id.as_str(),
+                "config.session-prerequisites" | "harness.discovery" | "harness.profiles"
+            )
+        })
         .filter(|check| check.status == CheckStatus::Fixable)
         .map(|check| {
             match &check.remediation {
@@ -217,52 +188,6 @@ pub fn actionable_errors(checks: &[DoctorCheck]) -> Vec<String> {
             }
         })
         .collect()
-}
-
-pub fn run_setup_command(config_path: &Path) -> Result<()> {
-    let probes = probe_executor();
-    let report = run_setup(config_path, &data_dir(), true, &probes, &|| false, || {})?
-        .context("explicit setup was skipped")?;
-    let mut output = io::stdout().lock();
-    writeln!(output, "Welcome to Mjolnir")?;
-    for line in report.summary() {
-        writeln!(output, "{line}")?;
-    }
-    // A machine is a session target only through its runtimes, so setup adds
-    // every runtime kind each machine newly runs, as the dashboard's check does.
-    let machines: Vec<_> = Config::load_from(config_path)?
-        .machines
-        .into_iter()
-        .filter(|(_, machine)| !matches!(machine, mj_core::config::Machine::Local { .. }))
-        .collect();
-    let found = probe_machines(&machines, &probes);
-    for (machine, runtimes) in add_machine_runtimes(config_path, &found, &|| false)? {
-        writeln!(
-            output,
-            "Runtimes for {machine}: {}.",
-            runtimes.into_keys().collect::<Vec<_>>().join(", ")
-        )?;
-    }
-    let checks = run_with_config_path(
-        config_path,
-        &probes,
-        current_apple_platform(&probes),
-        DoctorOptions { smoke: false },
-    );
-    for error in actionable_errors(&checks) {
-        writeln!(output, "\n{error}")?;
-    }
-    writeln!(
-        output,
-        "\nRun `mj` and press {} to create a session.",
-        Config::load_from(config_path)?
-            .keybinds()
-            .labels(mj_core::config::KeyAction::NewSession)
-            .first()
-            .map(String::as_str)
-            .unwrap_or("the New session command")
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]

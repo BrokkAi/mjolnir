@@ -1013,6 +1013,18 @@ fn queued_prompt(command_id: &str) -> MaterializedQueuedPrompt {
 }
 
 #[cfg(unix)]
+fn move_queue_waiting_message() -> mj_core::mailbox::MailboxEvent {
+    mj_core::mailbox::MailboxEvent {
+        key: "waiting-message".into(),
+        source: "parent".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "read this with your next prompt".into(),
+        },
+    }
+}
+
 fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetadata {
     let archive_path = directory.join("move-queue.hel.zip");
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));
@@ -1084,6 +1096,12 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
                 queued_at_ms: 2,
             },
         ],
+        // A message the source accepted and never handed to its agent. The
+        // daemon will not send it again, so the Move admits it.
+        mailbox: Some(mj_core::archive::CanonicalMailbox {
+            pending_events: vec![move_queue_waiting_message()],
+            ..Default::default()
+        }),
     };
     let verified = write_archive_atomic(
         &archive_path,
@@ -1391,12 +1409,14 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     );
     assert!(operation.queue_admission_finished);
     assert!(!move_owns_session(MOVE_QUEUE_SESSION_ID));
+    let mail_id = crate::mailbox_outbox::mailbox_command_id(&move_queue_waiting_message().key);
     let accepted_commands = |log: &str| {
         log.lines()
             .filter(|line| {
                 line.starts_with(&format!("{retry_id} "))
                     || line.starts_with("queued-image ")
                     || line.starts_with("queued-config ")
+                    || line.starts_with(&format!("{mail_id} "))
             })
             .count()
     };
@@ -1413,6 +1433,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     let observed = fs::read_to_string(marker.with_extension("observed")).unwrap();
     assert!(observed.contains("queued-image"));
     assert!(observed.contains("queued-config"));
+    // The archived message arrived behind the ownership commit, once.
+    assert!(observed.contains(&mail_id));
     let image_line = observed
         .lines()
         .find(|line| line.starts_with("queued-image "))
@@ -1484,6 +1506,21 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .iter()
         .map(|(id, receipt)| (id.clone(), receipt.accepted_ordinal))
         .collect();
+    let waiting = move_queue_waiting_message();
+    assert_eq!(
+        receipts
+            .pending_mailbox_events
+            .iter()
+            .filter(|event| **event == waiting)
+            .count()
+            + usize::from(
+                receipts
+                    .delivered_mailbox_event_keys
+                    .contains_key(&waiting.key)
+            ),
+        1,
+        "the archived message must reach the destination exactly once"
+    );
     let retried: Vec<_> = accepted.iter().filter(|(id, _)| id == &retry_id).collect();
     assert_eq!(
         retried.len(),
@@ -5769,6 +5806,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     };
     let sealed_preparation = |sealed: mj_core::state::MoveSelection, sized_by_default: bool| {
         mj_core::state::MovePreparation {
+            container_upgrade: None,
             destination_checks: Default::default(),
             workspace: None,
             in_place: false,

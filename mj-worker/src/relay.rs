@@ -315,6 +315,7 @@ pub struct DurableRelay {
     #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
     pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
+    pub(crate) recovers_child_quota: bool,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
     /// Work facts the coordinator observed for the runtime event it is about to
@@ -899,6 +900,15 @@ impl DurableRelay {
                         created_at_ms: queued.queued_at_ms,
                     });
                 }
+                // The archived worker's mail, as the restore policy selected
+                // it. A claimed context may name a prompt the controller
+                // admits later under the same command ID; dispatch finds it
+                // there before that prompt starts.
+                if let Some(mailbox) = restored.mailbox {
+                    snapshot.pending_mailbox_events = mailbox.pending_events;
+                    snapshot.delivered_mailbox_event_keys = mailbox.delivered_event_keys;
+                    snapshot.mailbox_prompt_contexts = mailbox.prompt_contexts;
+                }
             }
             snapshot
         };
@@ -1028,6 +1038,7 @@ impl DurableRelay {
             authentication_login_path: None,
             login_identity: Default::default(),
             replied_verdict: Default::default(),
+            recovers_child_quota: false,
             air_tasks: BTreeMap::new(),
             pending_settle_facts: None,
             claude_pending_stops: BTreeMap::new(),
@@ -1403,6 +1414,7 @@ impl DurableRelay {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
+        state.jev_rate_limit = mj_core::jev::current_rate_limit();
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;

@@ -16,14 +16,21 @@ if [[ "${1:-}" == --inside ]]; then
   tmux -L mj-compat -f /dev/null new-session -d -s smoke -x 140 -y 40 '/artifact/mj; echo $? > /tmp/mj-exit'
   trap 'tmux -L mj-compat kill-server 2>/dev/null || true' EXIT
   ready=0
+  asked=0
   for ((i=0; i<120; i++)); do
     screen="$(tmux -L mj-compat capture-pane -p -t smoke 2>/dev/null || true)"
+    # A computer that has never run a daemon asks where it should run.
+    if [[ "$asked" == 0 && "$screen" == *'Choose 1 or 2'* ]]; then
+      tmux -L mj-compat send-keys -t smoke 1 Enter
+      asked=1
+    fi
     if [[ "$screen" == *Sessions* || "$screen" == *Workspaces* ]]; then ready=1; break; fi
     if [[ -f /tmp/mj-exit ]]; then break; fi
     sleep 0.5
   done
   printf '%s\n' "$screen"
   [[ "$ready" == 1 ]] || { echo 'CLI did not render its dashboard' >&2; exit 1; }
+  [[ "$asked" == 1 ]] || { echo 'CLI did not ask where the daemon runs on a fresh machine' >&2; exit 1; }
   tmux -L mj-compat send-keys -t smoke C-b q
   for ((i=0; i<40; i++)); do
     if [[ -f /tmp/mj-exit ]]; then

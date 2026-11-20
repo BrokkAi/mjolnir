@@ -1045,6 +1045,26 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
     let text = next_event_frame(&mut body).await;
     assert!(text.contains("\"last_activity_at_ms\":124"), "{text}");
     assert!(text.contains("\"seq\":3"), "{text}");
+    // Hard-won: 4b10e3633: old v1 stream clients reject a permission's call ID.
+    backend
+        .events
+        .lock()
+        .unwrap()
+        .push(mj_controller::database::ApiEvent {
+            seq: 4,
+            session_id: "session-1".into(),
+            recorded_at_ms: 10,
+            event: mj_controller::database::ApiEventData::InputRequired {
+                request: Some(permission_request()),
+                turn_id: None,
+            },
+        });
+    let text = next_event_frame(&mut body).await;
+    assert!(text.contains("event: input_required"), "{text}");
+    assert!(
+        text.contains("\"tool_permission\":{\"skip\":true}"),
+        "{text}"
+    );
     let queries = backend.event_queries.lock().unwrap();
     assert_eq!(queries[0].0.workspace_id.as_deref(), Some("default"));
     assert_eq!(queries[0].1, Some(1));
@@ -2942,7 +2962,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             no_later_history: false,
             subagents: None,
             create_managed_worktree: None,
-            workspace_id: String::new(),
+            workspace_id: FakeWorkspaces::record("existing").id,
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             target_id: "podman".into(),
@@ -5562,6 +5582,16 @@ async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
         "checkpoint storage failed"
     );
 }
+
+fn permission_request() -> mj_core::elicitation::ElicitationRequest {
+    let mut request = input_request();
+    request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+        skip: true,
+        tool_call_id: Some("call-1".into()),
+    });
+    request
+}
+
 fn input_request() -> mj_core::elicitation::ElicitationRequest {
     mj_core::elicitation::ElicitationRequest::from_acp_params("question-1", serde_json::json!({
         "sessionId": "session-1", "mode": "form", "message": "Choose a name", "requestedSchema": {
@@ -5733,8 +5763,26 @@ fn input_aware_wait_is_opt_in_and_respects_completed_turns_and_stopping() {
 #[tokio::test]
 async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |s| {
-        s.sessions[0].pending_elicitations = vec![input_request()]
+        s.sessions[0].pending_elicitations = vec![permission_request()]
     });
+    // Hard-won: 45ec5bc42: old v1 clients reject a permission's call ID.
+    for (path, field) in [
+        ("/api/v1/sessions/session-1", Some("pending_elicitations")),
+        ("/api/v1/sessions/session-1/elicitations", None),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let requests = field.map_or(&body, |field| &body[field]);
+        assert_eq!(
+            requests[0]["tool_permission"],
+            serde_json::json!({"skip": true})
+        );
+    }
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/wait"))
@@ -5748,6 +5796,10 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     let body = json_body(response).await;
     assert_eq!(body["outcome"], "input_required");
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
+    assert_eq!(
+        body["pending_elicitations"][0]["tool_permission"],
+        serde_json::json!({"skip": true})
+    );
 }
 
 /// A backend whose store holds the fixture session's workspace, which is
@@ -6169,6 +6221,29 @@ async fn only_the_session_wait_follows_the_quota_check() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let backend = summarizing_backend();
+    let quota_stop = completed(7, "quota_limit");
+    let queued = WaitObservation {
+        queued: vec![format!("quota-retry-{}", quota_stop.completed_ordinal)],
+        last_turn_outcome: Some(quota_stop),
+        ..observation.clone()
+    };
+    assert_eq!(
+        resolve_wait(&queued, &request)
+            .expect("primary turn ended")
+            .outcome,
+        WaitOutcome::QuotaLimit,
+    );
+    assert!(
+        resolve_wait(
+            &WaitObservation {
+                subagent: true,
+                ..queued
+            },
+            &request,
+        )
+        .is_none()
+    );
+
     let response = finish_wait(
         &backend,
         "session-1",
@@ -6551,6 +6626,78 @@ async fn options_report_the_saved_default_and_publish_only_its_two_identifiers()
     // per-project choices and must not travel as part of the default.
     assert_eq!(body["default"].as_object().unwrap().len(), 2);
     assert!(!body.to_string().contains("/private/project"));
+}
+
+// Integration: the API chooses the controller-side fetch remote, then uses
+// the canonical project identifier returned by the controller.
+#[tokio::test]
+async fn isolated_directory_start_uses_the_discovered_project_and_reports_removed_credentials() {
+    use mj_core::targets::{CommandExecutor, CommandSpec, ProcessExecutor};
+
+    let repository = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let mut command = CommandSpec::new("git", args.iter().copied());
+        command.cwd = Some(repository.path().to_owned());
+        let result = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(result.status, 0, "{result:?}");
+    };
+    git(&["init", "--quiet"]);
+    git(&[
+        "remote",
+        "add",
+        "upstream",
+        "https://user:secret@gitlab.example/team/hel.git",
+    ]);
+    git(&[
+        "remote",
+        "set-url",
+        "--push",
+        "upstream",
+        "https://gitlab.example/fork/hel.git",
+    ]);
+    let (app, mut actions, _snapshot, mut bundles) =
+        api_app(Arc::new(FakeBackend::default()), |_| {});
+    let body = serde_json::json!({
+        "profile_id": "codex-1",
+        "target_id": "podman",
+        "project_directory": repository.path(),
+    });
+    let mut invalid = body.clone();
+    invalid["create_managed_worktree"] = true.into();
+    let refused = tokio::select! {
+        response = app.clone().oneshot(start_request(invalid.to_string())) => response.unwrap(),
+        _ = bundles.recv() => panic!("an invalid directory launch tried to save a project"),
+    };
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(body.to_string())));
+    let request = bundles.recv().await.unwrap();
+    assert!(request.discovered);
+    assert_eq!(request.source, "https://gitlab.example/team/hel.git");
+    request.reply.send(Ok("hel".into())).unwrap();
+    let ControllerRequest { action, reply } = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        bundle_id,
+        project_directory,
+        ..
+    } = action
+    else {
+        panic!("expected a new session");
+    };
+    assert_eq!(bundle_id, "hel");
+    assert!(project_directory.is_none());
+    reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("s1".into()),
+            notice: None,
+        })
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        json_body(response).await["notice"],
+        mj_core::remote_git::HTTP_USERINFO_REMOVED
+    );
 }
 
 /// Save a fast-start default the way `mj go --global-default` does.

@@ -311,7 +311,7 @@ are found without editing shell startup files.
 
 ## AWS EC2
 
-Create a persistent Podman host with `mj ec2 create c8id.4xlarge --zone us-east-1a`.
+Create a persistent Podman host with `mj ec2 create <instance-type> --zone us-east-1a`.
 It adds an SSH machine and Podman target. Sessions share that host and its build
 cache; closing a session removes its container. `mj ec2 list --region us-east-1`
 lists managed hosts and `mj ec2 destroy <name> --region us-east-1` terminates one.

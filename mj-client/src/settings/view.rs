@@ -276,7 +276,9 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
         .pointer(&pointer(path))
         .ok_or_else(|| "This settings page no longer exists.".to_owned())?;
     let mut groups: Vec<SettingsGroup> = Vec::new();
-    if (current.is_object() && !hidden::is_marker(current)) || current.is_array() {
+    if path != ["jev", "fastino_key"]
+        && ((current.is_object() && !hidden::is_marker(current)) || current.is_array())
+    {
         let paths = page::visible_paths(path, current);
         for entry in page::page_plan(path, &paths) {
             match entry {
@@ -350,7 +352,8 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
             Vec::new()
         },
         add,
-        removable: edit::removable(draft, path),
+        removable: edit::removable(draft, path)
+            || (path == ["jev", "fastino_key"] && !current.is_null()),
         notices: {
             let mut notices = notices(path);
             if path == ["review"] && draft["review"].get("reviewers").is_none() {
@@ -430,10 +433,15 @@ pub fn apply(
             if path != page || !rendered.removable {
                 return Err("This entry cannot be removed.".into());
             }
-            let removal = edit::remove_entry(draft, &path)?;
+            let notice = if path == ["jev", "fastino_key"] {
+                edit::apply_value(draft, &path, SettingInput::Text(String::new()))?;
+                None
+            } else {
+                edit::remove_entry(draft, &path)?.notice
+            };
             Ok(EditResult {
                 page: path[..path.len() - 1].to_vec(),
-                notice: removal.notice,
+                notice,
             })
         }
     }

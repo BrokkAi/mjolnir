@@ -701,7 +701,7 @@ where
                         None => serde_json::to_string_pretty(&request.tool_call)
                             .map_err(|_| agent_client_protocol::Error::internal_error())?,
                     };
-                    if permission_native_agents.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    if native_child {
                         message = format!("Native agent {}: {message}", request.session_id);
                     }
                     let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
@@ -715,7 +715,12 @@ where
                             "choice":{"type":"string", "title":"Permission", "oneOf":options}
                         }}
                     })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
-                    form.tool_permission = Some(ToolPermissionForm { skip: skip.is_some() });
+                    // ACP call IDs are session-local. A native child's calls
+                    // are absent from the transcript that carries this form.
+                    form.tool_permission = Some(ToolPermissionForm {
+                        skip: skip.is_some(),
+                        tool_call_id: (!native_child).then(|| request.tool_call.tool_call_id.to_string()),
+                    });
                     let identity = if plan_permission || claude_plan_approval {
                         AwayRequest::Plan
                     } else {

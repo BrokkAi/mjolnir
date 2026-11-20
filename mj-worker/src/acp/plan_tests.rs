@@ -714,7 +714,7 @@ impl PlanProbe {
             initial_model: None,
             harness,
             execution_policy: policy,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -1938,7 +1938,10 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     let form = ask(&mut probe, "skip-ask", &codex_options).await;
     assert_eq!(
         form.tool_permission,
-        Some(ToolPermissionForm { skip: true })
+        Some(ToolPermissionForm {
+            skip: true,
+            tool_call_id: Some("skip-ask".into())
+        })
     );
     probe
         .answer_with(&form.id, ElicitationResponse::Decline)
@@ -1955,7 +1958,10 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     let form = ask(&mut probe, "network-ask", &network_options).await;
     assert_eq!(
         form.tool_permission,
-        Some(ToolPermissionForm { skip: false })
+        Some(ToolPermissionForm {
+            skip: false,
+            tool_call_id: Some("network-ask".into())
+        })
     );
     assert!(
         probe

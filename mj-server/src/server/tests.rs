@@ -3477,6 +3477,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         resource_allocation: None,
     };
     let preparation = MovePreparation {
+        container_upgrade: None,
         destination_checks: Default::default(),
         workspace: None,
         in_place: false,

@@ -1,7 +1,7 @@
 //! Writing a settings draft to the configuration file. Every surface saves
 //! through here, so a save means the same thing wherever it was made.
 use anyhow::{Context, Result};
-use mj_core::config::Config;
+use mj_core::config::{Config, JevConfig, SecretResolver, with_secret_resolver};
 use mj_core::state::State;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -51,6 +51,20 @@ pub fn save_at(
         let merged = merge_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
             .context("setup cannot remove the configuration")?;
         let mut next: Config = serde_json::from_value(merged)?;
+        if next.jev != config.jev
+            && (next.jev.enabled || next.jev.fastino_key != config.jev.fastino_key)
+        {
+            match next.jev.fastino_key.as_ref() {
+                Some(mj_core::config::EnvironmentValue::Literal(key)) => {
+                    JevConfig::validate_fastino_key(key)?;
+                }
+                _ => {
+                    with_secret_resolver(SecretResolver::beside(path), || {
+                        next.jev.resolve_fastino_key()
+                    })?;
+                }
+            }
+        }
         state.validate_setup_update(config, &next)?;
         // The defaults were only the merge base. A built-in target the edit
         // left as it was stays out of the file, as `Config::update` does, so

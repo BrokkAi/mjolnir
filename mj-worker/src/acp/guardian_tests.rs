@@ -91,6 +91,13 @@ while True:
     send({'jsonrpc':'2.0','id':ident,'result':result})
 "#;
 
+type ScriptedSession = (
+    mpsc::Sender<CommandRequest>,
+    mpsc::Receiver<RuntimeEvent>,
+    tokio::task::JoinHandle<Result<()>>,
+    mj_transcript::turn_context::TurnContext,
+);
+
 /// Start the scripted harness as a Kimi session under configured approvals,
 /// whose person wrote `instructions`, and send it one prompt. Returns the
 /// session's turn context, where the relay would publish what the person
@@ -100,12 +107,24 @@ fn start_scripted_kimi(
     commands: &[&str],
     replies: &[&str],
     instructions: &[&str],
-) -> (
-    mpsc::Sender<CommandRequest>,
-    mpsc::Receiver<RuntimeEvent>,
-    tokio::task::JoinHandle<Result<()>>,
-    mj_transcript::turn_context::TurnContext,
-) {
+) -> ScriptedSession {
+    start_scripted_kimi_with(
+        root,
+        commands,
+        replies,
+        instructions,
+        mj_core::config::ApprovalChoices::default(),
+    )
+}
+
+/// [`start_scripted_kimi`] for a profile with its own `approval_choices`.
+fn start_scripted_kimi_with(
+    root: &Path,
+    commands: &[&str],
+    replies: &[&str],
+    instructions: &[&str],
+    approval_choices: mj_core::config::ApprovalChoices,
+) -> ScriptedSession {
     let script = root.join("harness.py");
     std::fs::write(&script, SCRIPTED_HARNESS).unwrap();
     let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
@@ -122,6 +141,7 @@ fn start_scripted_kimi(
     spec.cwd = root.to_path_buf();
     spec.harness = HarnessKind::Kimi;
     spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    spec.approval_choices = approval_choices;
     let context = spec.turn_context.clone();
     context.set_authorization_context(Some(person_wrote(instructions)));
     let (request_tx, request_rx) = mpsc::channel(4);
@@ -304,6 +324,38 @@ async fn kimi_permission_requests_are_reviewed_by_the_mjolnir_guardian() {
             .contains("\"command\": \"rm -rf ~\"")
     );
 
+    runtime.abort();
+}
+
+/// A profile that turns the Mjolnir guardian off keeps configured approvals
+/// without a reviewer: the request goes straight to the person's form, and no
+/// reviewer process starts.
+#[tokio::test]
+async fn a_profile_with_the_mjolnir_guardian_off_asks_the_person() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_requests, mut events, runtime, _context) = start_scripted_kimi_with(
+        temp.path(),
+        &["rm -rf target"],
+        &[r#"{"outcome":"allow"}"#],
+        &["Tidy up the repository."],
+        mj_core::config::ApprovalChoices {
+            mjolnir_guardian: false,
+            ..Default::default()
+        },
+    );
+    let form = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+            break request;
+        }
+    };
+    assert!(
+        form.message
+            .starts_with("Kimi Code requests permission:\nBash"),
+        "{}",
+        form.message
+    );
+    assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+    assert!(recorded(temp.path(), "session_outcomes").is_empty());
     runtime.abort();
 }
 

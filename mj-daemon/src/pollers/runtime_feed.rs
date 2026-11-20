@@ -72,6 +72,7 @@ pub struct RuntimeStateUpdate {
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
     pub failed_launch_retries: std::collections::BTreeSet<String>,
+    pub host_capacities: Vec<mj_client::runtime_feed::RuntimeHostCapacity>,
     /// The daemon storage owner's verdict per target host.
     pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
     /// The daemon's reservation-adjusted container headroom per deployment

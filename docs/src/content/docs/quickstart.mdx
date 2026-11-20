@@ -42,12 +42,9 @@ ready, type a prompt and press `Enter`. Container images download in the
 background without blocking the dashboard or sessions on this machine.
 Use **prefix+s Settings** to add SSH or EC2 connections and change runtime options.
 
-`mj setup` reruns agent and repository discovery from the shell. It adds new
-profiles and bundles automatically, preserves your existing settings, and
-reports prerequisite errors. Use it after installing another agent or to
-discover another repository. It does not ask configuration questions or wait
-for container images. `mj doctor --smoke` remains available for explicit
-container smoke tests.
+A plain `mj` launch adds profiles for newly installed agents and preserves your
+settings. `mj doctor` reports prerequisite errors from the shell, and
+`mj doctor --smoke` runs explicit container smoke tests.
 
 `mj go` is a shortcut for later. Run it in a project directory: the first time
 it asks which profile and target to use, and after that it returns to that
@@ -76,7 +73,7 @@ therefore run in a container even when you do not want it running directly on
 the host.
 
 Alternatively, install an agent and sign in with its own CLI, then choose
-**Detect profiles** (or run `mj setup`). That is also the path for a profile
+**Detect profiles**. That is also the path for a profile
 pointed at your own agent home; `mj login --cli` always uses the command on
 `PATH`.
 

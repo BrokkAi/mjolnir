@@ -35,6 +35,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }

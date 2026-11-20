@@ -194,6 +194,7 @@ fn runtime_state_update(
         recent_launch: metadata.recent_launch,
         container_upgrade_sessions: metadata.container_upgrade_sessions,
         failed_launch_retries: metadata.failed_launch_retries,
+        host_capacities: metadata.host_capacities.into_inner(),
         storage: metadata.storage.into_inner(),
         container_capacities: metadata.container_capacities.into_inner(),
     }

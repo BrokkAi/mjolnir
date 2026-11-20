@@ -99,7 +99,7 @@ impl ImportControl<'_> {
 /// Resolve a harness's configuration home without ever modifying it.
 ///
 /// The environment override wins; otherwise the harness's default directory
-/// beneath the user's home is used, the same pair `mj setup` discovers.
+/// beneath the user's home is used, the same pair first-run setup discovers.
 pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
     let name = kind.display_name();
     let home = std::env::var_os(kind.home_env())

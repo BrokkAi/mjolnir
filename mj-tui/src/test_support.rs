@@ -24,6 +24,86 @@ use crate::ingest::SessionOperationDisplay;
 use crate::keybinds::{KeyRoute, combo_key_event};
 use crate::{CommandId, DashboardAction, DashboardState, SessionOperationKind};
 
+// Existing dashboard fixtures describe probe inputs and outcomes. Adapt them
+// to the same host rows the daemon publishes to the dashboard.
+impl DashboardState {
+    pub(crate) fn set_deployment_capacity_targets(
+        &mut self,
+        targets: Vec<DeploymentCapacityTarget>,
+    ) {
+        use mj_client::runtime_feed::RuntimeHostCapacity;
+        use mj_core::targets::HostCapacityRow;
+        self.set_host_capacities(
+            targets
+                .into_iter()
+                .map(|target| RuntimeHostCapacity {
+                    reading: HostCapacityRow::new(&target, &Default::default(), &[]),
+                    refreshing: false,
+                })
+                .collect(),
+        );
+    }
+
+    pub(crate) fn apply_deployment_capacity(
+        &mut self,
+        target_id: &str,
+        result: Result<Option<mj_core::targets::DeploymentCapacityUsage>, String>,
+        sampled_at: u64,
+    ) {
+        let mut capacities = self.capacity_details.values().cloned().collect::<Vec<_>>();
+        let detail = capacities
+            .iter_mut()
+            .find(|detail| detail.reading.id == target_id)
+            .unwrap();
+        detail.refreshing = false;
+        let reading = &mut detail.reading;
+        match result {
+            Ok(usage) => {
+                reading.sampled_at_epoch_seconds = Some(sampled_at);
+                reading.probe_error = None;
+                reading.has_reading = usage.is_some();
+                reading.on_demand = usage.is_none();
+                reading.cpu_percent = usage.as_ref().and_then(|usage| usage.cpu_percent);
+                reading.memory_used_bytes =
+                    usage.as_ref().map_or(0, |usage| usage.memory_used_bytes);
+                reading.memory_total_bytes =
+                    usage.as_ref().map_or(0, |usage| usage.memory_total_bytes);
+                reading.logical_cores = usage.as_ref().map_or(0, |usage| usage.logical_cores);
+            }
+            Err(error) => {
+                reading.on_demand = false;
+                reading.probe_error = Some(error);
+            }
+        }
+        self.set_host_capacities(capacities);
+    }
+
+    pub(crate) fn set_test_capacity_storage(
+        &mut self,
+        views: Vec<mj_core::targets::storage::TargetStorageView>,
+    ) {
+        use mj_core::targets::HostFilesystemRow;
+        let mut capacities = self.capacity_details.values().cloned().collect::<Vec<_>>();
+        for detail in &mut capacities {
+            detail.reading.filesystems = views
+                .iter()
+                .filter(|view| view.host == detail.reading.host)
+                .flat_map(|view| {
+                    view.filesystems.iter().map(|filesystem| HostFilesystemRow {
+                        host: view.host.clone(),
+                        mount: filesystem.space.mount.clone(),
+                        available_bytes: filesystem.space.available_bytes,
+                        total_bytes: filesystem.space.total_bytes,
+                        condition: filesystem.condition,
+                    })
+                })
+                .collect();
+        }
+        self.set_target_storage(views);
+        self.set_host_capacities(capacities);
+    }
+}
+
 pub(crate) fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }

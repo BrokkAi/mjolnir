@@ -35,9 +35,9 @@ For a self-contained handoff to another coding agent, generate the platform
 instructions and include the latest JSON report:
 
 ```console
-mj setup instructions --platform linux
+mj doctor instructions --platform linux
 # or
-mj setup instructions --platform macos
+mj doctor instructions --platform macos
 ```
 
 The human-readable `mj doctor` output is convenient at a terminal; JSON is
