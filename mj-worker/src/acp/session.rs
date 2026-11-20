@@ -18,7 +18,6 @@ async fn record_prompt_use(
         .expect("opened session lock poisoned")
         .as_mut()
     {
-        opened.resume_required.store(true, Ordering::Release);
         first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
     }
     // Persist the same fact durably, once, so a restart after this
@@ -135,9 +134,8 @@ pub(super) async fn serve_session(
     agent_output_count: &AgentOutputCount,
     last_agent_message: &LastAgentMessage,
     live_history_enabled: &Arc<AtomicBool>,
-    resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     grok_usage: &grok_usage::Collector,
 ) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
@@ -329,12 +327,38 @@ pub(super) async fn serve_session(
     // Kept on the wire for older workers; no harness can lose native
     // continuity this way any more.
     let native_continuity_lost = false;
-    // Set when the recorded native session is replaced because it was never
-    // used; `session_opened` carries it so a resume can accept the new one.
-    let mut replaced_unused_native_session_id = None;
     // The MCP servers the request that opened the session carried.
     let mut offered_mcp_servers = 0;
-    let loaded_session = if let Some(existing) = &spec.resume_session {
+    let has_goal = codex_has_goal(spec);
+    let loaded_session = if let Some(existing) = &spec.resume_session
+        && session_open.replace_unused_codex_thread
+    {
+        // This bridge starts a new app-server. Codex keeps an unused thread
+        // in the old process until its first turn writes a rollout. The
+        // history evidence proves no turn reached this thread, so there is no history
+        // to recover and no need to ask Codex to load it.
+        emit_runtime_event(
+            events,
+            RuntimeEvent::Warning {
+                message: format!(
+                    "Codex session {existing} was never used; continuing in a new empty session"
+                ),
+            },
+        )
+        .await?;
+        if native_children_supported {
+            // Publish the empty replay the missing-thread fallback publishes,
+            // so staging left by an abandoned load cannot hide the
+            // replacement's native children.
+            for event in [
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+            ] {
+                emit_runtime_event(events, RuntimeEvent::NativeAgent { event }).await?;
+            }
+        }
+        None
+    } else if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // Native children require replay to recover identity and transcripts.
         // Other adapters can resume without replaying the parent's history.
@@ -391,14 +415,8 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("load ACP session {existing}"))
                 .map(|loaded| (loaded.meta, loaded.config_options, loaded.modes))
         };
-        // A failed reload normally means state a checkpoint restored would be
-        // discarded by starting fresh, so it fails the worker. The one
-        // exception is a native session that both sides agree is empty: Codex
-        // writes a thread's rollout, and Claude Code a session's transcript,
-        // at the first user message, so a session created and never prompted
-        // does not exist to resume, and failing over it forever would strand
-        // the session. Replace such a native session only when Mjolnir's own
-        // durable state also shows it was never used.
+        // For threads that must be loaded first, a typed missing-session
+        // error can confirm that the harness has no record of an unused thread.
         let reloaded = match reloaded {
             // The replay boundary, including its `ReplayCommit`, was already
             // decided where the load response arrived.
@@ -408,12 +426,10 @@ pub(super) async fn serve_session(
                     return Err(error);
                 }
                 let harness = spec.harness.display_name();
-                if spec.native_session_may_have_history {
-                    // The native session was used, so a new one would silently
-                    // drop the conversation. Say what is missing instead.
+                if spec.native_session_history == NativeSessionHistory::MayHaveHistory || has_goal {
                     return Err(error.context(format!(
-                        "{harness} has no native history for session {existing}, which this \
-                         session has already used, so the conversation cannot be resumed"
+                        "{harness} has no native history for session {existing}; the existing \
+                         conversation or goal cannot be resumed"
                     )));
                 }
                 emit_runtime_event(
@@ -437,7 +453,6 @@ pub(super) async fn serve_session(
                     )
                     .await?;
                 }
-                replaced_unused_native_session_id = Some(existing.clone());
                 None
             }
         };
@@ -749,7 +764,7 @@ pub(super) async fn serve_session(
     *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
         native_session_id: session_id.to_string(),
         started_at: tokio::time::Instant::now(),
-        resume_required,
+        resumed,
         native_session_used,
     });
     // Drop anything the worker queued for the bridge this one replaced. The
@@ -764,7 +779,7 @@ pub(super) async fn serve_session(
     // compaction are not gated on the session being configured, so a request
     // that arrives while the very first bridge is still handshaking is a live
     // request for this session, not a leftover.
-    if replacing_previous_bridge {
+    if session_open.replacing_previous_bridge {
         drain_requests_from_the_previous_bridge(requests);
     }
 
@@ -779,6 +794,18 @@ pub(super) async fn serve_session(
         )
         .await?;
     } else {
+        // A failed load or the Codex shortcut can replace a recorded thread.
+        // Each replacement reports the first ID so restore can match its archive.
+        let replaced_unused_native_session_id = spec
+            .resume_session
+            .as_ref()
+            .filter(|_| !resumed)
+            .map(|existing| {
+                session_open
+                    .first_replaced_unused_native_session_id
+                    .get_or_insert_with(|| existing.clone())
+                    .clone()
+            });
         emit_runtime_event(
             events,
             RuntimeEvent::SessionStarted {
@@ -1943,4 +1970,22 @@ pub(super) async fn serve_session(
         }
     }
     Ok(None)
+}
+
+pub(super) fn should_replace_unused_codex_thread(spec: &LaunchSpec) -> bool {
+    spec.harness == HarnessKind::Codex
+        && spec.resume_session.is_some()
+        && spec.native_session_history == NativeSessionHistory::CreatedHereUnused
+        && !codex_has_goal(spec)
+}
+
+fn codex_has_goal(spec: &LaunchSpec) -> bool {
+    spec.harness == HarnessKind::Codex
+        && spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .snapshot
+            .is_some()
 }

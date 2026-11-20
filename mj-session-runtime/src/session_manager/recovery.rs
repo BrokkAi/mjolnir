@@ -28,46 +28,64 @@ pub enum WorkerRecoveryOutcome {
         host: String,
         problem: String,
     },
+    HarnessStartupFailed,
     RestartedDead,
     RestartedUnresponsive,
 }
 
-/// Whether a full disk forbids restarting this worker. A dead worker's own
-/// exit record is read first: if it stopped for lack of space, the storage
-/// owner learns that before anything is written, and the record is read
-/// before a restart would replace it.
-fn storage_forbids_restart(
+/// Read the exit record before restarting would replace it. A full-disk
+/// exit updates the storage owner; an ACP startup failure ends recovery.
+fn dead_worker_startup_failure(
     plan: &WorkerRecoveryPlan,
     session_id: Option<&str>,
     executor: &impl CommandExecutor,
-    dead: bool,
-) -> Option<WorkerRecoveryOutcome> {
+) -> Result<Option<mj_core::relay::WorkerHarnessStartupFailure>> {
+    let Some(command) = &plan.exit_record else {
+        return Ok(None);
+    };
     let (host, worker_root) =
         crate::target_storage::session_worker_root(&plan.source_target, session_id.unwrap_or(""));
-    if dead && let Some(command) = &plan.exit_record {
-        match executor.execute(command) {
-            Ok(output) => {
-                if let Some((reason, at)) =
-                    mj_worker_staging::worker_binary::recorded_exit_reason(&output.stdout)
-                    && mj_core::targets::storage::reports_no_space(&reason)
-                {
-                    // The worker stops when it cannot write its journal,
-                    // which lives in the worker root.
-                    crate::target_storage::observe_no_space_at(
-                        &host,
-                        Some(&worker_root),
-                        &format!("the worker stopped: {reason}"),
-                        at.unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64),
-                    );
-                }
-            }
-            Err(error) => tracing::warn!(
-                %host,
-                error = format!("{error:#}"),
-                "could not read the dead worker's exit record"
-            ),
+    let output = executor
+        .execute(command)
+        .and_then(|output| mj_core::targets::checked_command_output(command, output))
+        .with_context(|| format!("read the dead worker's exit record on {host}"))?;
+    let record = match mj_worker_staging::worker_binary::read_worker_exit_record(&output.stdout) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            // The read succeeded and the owner proved the worker dead. An
+            // interrupted in-place write cannot be repaired by retrying it.
+            tracing::warn!(%host, root = %worker_root, error = format!("{error:#}"),
+                "dead worker left an unreadable exit record; continuing without its exit diagnostic");
+            return Ok(None);
         }
+    };
+    if mj_core::targets::storage::reports_no_space(&record.reason) {
+        // The worker stops when it cannot write its journal, which lives in
+        // the worker root.
+        crate::target_storage::observe_no_space_at(
+            &host,
+            Some(&worker_root),
+            &format!("the worker stopped: {}", record.reason),
+            record
+                .timestamp()
+                .unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64),
+        );
     }
+    // A harness that failed to open for lack of space is a disk-full exit:
+    // the storage owner restarts it once space returns, and the same record
+    // still holds the marker then, so it must not end recovery. Judge that by
+    // the failure's own cause. The reason above also carries the bridge's
+    // stderr, which can mention an earlier, unrelated full disk.
+    Ok(record
+        .harness_startup_failure
+        .filter(|failure| !mj_core::targets::storage::reports_no_space(&failure.message)))
+}
+
+fn storage_forbids_restart(
+    plan: &WorkerRecoveryPlan,
+    session_id: Option<&str>,
+) -> Option<WorkerRecoveryOutcome> {
     crate::target_storage::worker_root_problem(&plan.source_target, session_id.unwrap_or(""))
         .map(|(host, problem)| WorkerRecoveryOutcome::StorageFull { host, problem })
 }
@@ -186,7 +204,7 @@ pub fn recover_worker_admitted(
         }
     };
     let mut work = || -> Result<WorkerRecoveryOutcome> {
-        if let Some(id) = session_id {
+        let observed_state = if let Some(id) = session_id {
             let session = crate::database::read_durable_session_record(id)
                 .context("read durable session before worker recovery")?;
             let eligible = session.as_ref().is_some_and(|session| {
@@ -199,7 +217,10 @@ pub fn recover_worker_admitted(
             {
                 return Ok(WorkerRecoveryOutcome::Suppressed);
             }
-        }
+            session.map(|session| (session.state, session.updated_at))
+        } else {
+            None
+        };
         // A failed Move can leave this actor with a plan from before recovery.
         // Never overwrite the durable checkpoint-only launch with that old plan.
         if let Some(id) = session_id
@@ -241,7 +262,7 @@ pub fn recover_worker_admitted(
             "starting" => Ok(WorkerRecoveryOutcome::Starting),
             "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
             "alive" => {
-                if let Some(full) = storage_forbids_restart(&plan, session_id, executor, false) {
+                if let Some(full) = storage_forbids_restart(&plan, session_id) {
                     return Ok(full);
                 }
                 if let Some(workspace) = plan.workspace.as_ref()
@@ -259,8 +280,37 @@ pub fn recover_worker_admitted(
                 Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
             }
             "dead" => {
-                if let Some(full) = storage_forbids_restart(&plan, session_id, executor, true) {
+                // Reading the exit record tells the storage owner about a
+                // full disk. Check that first: a harness that failed to open
+                // for lack of space waits and restarts once space returns, as
+                // any other no-space exit does. A marked failure on a target
+                // with space ends recovery.
+                let startup_failure = dead_worker_startup_failure(&plan, session_id, executor)?;
+                if let Some(full) = storage_forbids_restart(&plan, session_id) {
                     return Ok(full);
+                }
+                if let Some(failure) = startup_failure {
+                    if let (Some(id), Some((state, revision))) =
+                        (session_id, observed_state.as_ref())
+                    {
+                        let _settling = crate::upgrade::activity_unless_draining(
+                            "worker startup failure settlement",
+                        )?;
+                        let owner = crate::worker_lifecycle::require(id)?;
+                        owner.settle_dead_restart(&plan.source_target)?;
+                        if crate::database::fail_unready_session(
+                            id,
+                            &failure.message,
+                            *state,
+                            revision,
+                        )?
+                        .is_none()
+                        {
+                            return Ok(WorkerRecoveryOutcome::Suppressed);
+                        }
+                        tracing::warn!(session_id = id, %failure, "worker failed before configuring its harness");
+                    }
+                    return Ok(WorkerRecoveryOutcome::HarnessStartupFailed);
                 }
                 if let Some(workspace) = plan.workspace.as_ref()
                     && !crate::targets::path_exists_on_managed_target(

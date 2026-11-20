@@ -6671,6 +6671,93 @@ async fn a_new_codex_session_launches_its_bridge_on_its_creation_model() {
     assert_eq!(pinned_model(Some("gpt-6-astra")).await, "gpt-6-astra");
 }
 
+// Hard-won: ac93f8ce9: the managed-child marker was re-read after the environment filter removed it, so no override applied
+#[tokio::test]
+async fn a_worker_launch_applies_profile_overrides_only_to_managed_subagents() {
+    use mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV;
+
+    let codex_features = [
+        "apps",
+        "plugins",
+        "remote_plugin",
+        "tool_suggest",
+        "image_generation",
+    ];
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+        for managed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("worker");
+            let home = root.join("profile");
+            std::fs::create_dir_all(&home).unwrap();
+            let claude_settings = home.join("settings.json");
+            let codex_config = home.join("config.toml");
+            if harness == HarnessKind::Codex {
+                let mut contents = String::from("[features]\n");
+                for feature in codex_features {
+                    contents.push_str(&format!("{feature} = true\n"));
+                }
+                std::fs::write(&codex_config, contents).unwrap();
+            } else {
+                std::fs::write(
+                    &claude_settings,
+                    r#"{"promptSuggestionEnabled":true,"disableClaudeAiConnectors":false}"#,
+                )
+                .unwrap();
+            }
+
+            let mut config = launch_config(home.to_str().unwrap());
+            config.harness = harness;
+            config.cwd = temp.path().to_owned();
+            config.bridge_command = stub_runtime_bridge(temp.path());
+            config.no_github_credentials = true;
+            config.environment.clear();
+            config
+                .environment
+                .insert("HOME".into(), temp.path().to_str().unwrap().into());
+            harness.configure_staged_home_environment(&home, &mut config.environment);
+            if managed {
+                config
+                    .environment
+                    .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
+            }
+            expect_daemon_launch_failure(&root, config).await;
+
+            let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
+            assert_eq!(spec.environment[harness.home_env()], home.to_str().unwrap());
+            assert!(!spec.environment.contains_key(SESSION_MANAGED_SUBAGENT_ENV));
+            if harness == HarnessKind::Codex {
+                let body = std::fs::read_to_string(&codex_config).unwrap();
+                let config: toml::Table = toml::from_str(&body).unwrap();
+                for feature in codex_features {
+                    assert_eq!(
+                        config["features"][feature].as_bool(),
+                        Some(!managed),
+                        "Codex {feature}, managed={managed}",
+                    );
+                }
+            } else {
+                let body = std::fs::read(&claude_settings).unwrap();
+                let settings: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    settings["promptSuggestionEnabled"].as_bool(),
+                    Some(!managed)
+                );
+                assert_eq!(
+                    settings["disableClaudeAiConnectors"].as_bool(),
+                    Some(managed)
+                );
+                assert_eq!(
+                    spec.environment
+                        .get("DISABLE_AUTOUPDATER")
+                        .map(String::as_str),
+                    managed.then_some("1"),
+                    "Claude bridge, managed={managed}",
+                );
+            }
+        }
+    }
+}
+
 /// #1160: the controller leaves a ChatGPT Codex profile's API key settings out
 /// of the launch, but the worker adds the target's own login environment, which
 /// only it can see. The bridge's spec names the variables so the supervisor
@@ -7120,7 +7207,7 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
 }
 
 #[test]
-fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
+fn a_queued_prompt_keeps_the_unused_codex_thread_eligible_for_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     relay
@@ -7138,15 +7225,15 @@ fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
     );
     let mut config = launch_config("/profile");
     config.native_session_id = Some("unused".into());
-    // Resuming is always attempted; only the harness's answer decides what
-    // happens next.
+    // ACP still needs the original identity so it can name the thread it replaces.
     assert_eq!(
         unix::select_resume_session(&config, &relay).as_deref(),
         Some("unused")
     );
-    // A queued prompt that never reached the agent is not history, so the
-    // thread may be replaced if Codex says it does not exist.
-    assert!(!relay.native_session_may_have_history());
+    assert_eq!(
+        relay.native_session_history(),
+        crate::relay::NativeSessionHistory::CreatedHereUnused
+    );
     assert_eq!(
         relay.operational_state().active_prompt.unwrap().command_id,
         "first-prompt"

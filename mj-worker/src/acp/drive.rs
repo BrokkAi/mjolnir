@@ -15,16 +15,40 @@ pub(super) const RAPID_BRIDGE_RESTART_LIMIT: u32 = 3;
 
 pub(super) const RAPID_BRIDGE_WINDOW: Duration = Duration::from_secs(5);
 
-// Tests that drive a connection directly own its registry here; production
-// keeps it in run_bridge through process teardown and retirement publication.
+// Tests own their connection registry here; production holds it through process teardown.
 #[cfg(test)]
-pub(super) async fn drive<T>(
+pub(super) async fn drive<T: ConnectTo<Client>>(
     transport: T,
     spec: LaunchSpec,
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     replacing_previous_bridge: bool,
+) -> Result<Option<SessionRestart>> {
+    let replace_unused_codex_thread = should_replace_unused_codex_thread(&spec);
+    drive_bridge(
+        transport,
+        spec,
+        requests,
+        events,
+        opened,
+        BridgeSessionOpen {
+            replacing_previous_bridge,
+            replace_unused_codex_thread,
+            first_replaced_unused_native_session_id: &mut None,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(super) async fn drive_bridge<T>(
+    transport: T,
+    spec: LaunchSpec,
+    requests: &mut mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    opened: Arc<Mutex<Option<OpenedSession>>>,
+    session_open: BridgeSessionOpen<'_>,
 ) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
@@ -35,7 +59,7 @@ where
         requests,
         events,
         opened,
-        replacing_previous_bridge,
+        session_open,
         TerminalRegistry::new()?,
     )
     .await
@@ -47,7 +71,7 @@ pub(super) async fn drive_with_terminals<T>(
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     terminals: TerminalRegistry,
 ) -> Result<Option<SessionRestart>>
 where
@@ -69,15 +93,9 @@ where
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
     let notification_agent_output_count = agent_output_count.clone();
-    let resume_required = Arc::new(AtomicBool::new(
-        spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
-    ));
-    let notification_resume_required = resume_required.clone();
-    // Evidence about the thread itself, as opposed to `resume_required`'s
-    // policy about reloading it: false until this thread holds something only
-    // it can replay. Codex writes a thread's rollout, and Claude Code a
-    // session's transcript, only when a model turn runs, so the evidence is a
-    // prompt sent (`session.rs`) or a Claude Code result. Agent output alone
+    // Codex writes a thread's rollout, and Claude Code a session's transcript,
+    // only when a model turn runs, so the evidence is a prompt sent
+    // (`session.rs`) or a Claude Code result. Agent output alone
     // is not: the Claude adapter publishes notices as agent text while it
     // answers a configuration request, and no turn runs for them (R4-3).
     let native_session_used = Arc::new(AtomicBool::new(false));
@@ -276,9 +294,6 @@ where
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
-                if !session_update_is_session_state(&update) {
-                    notification_resume_required.store(true, Ordering::Release);
-                }
                 notification_tool_content.observe(&update);
                 if !session_update_is_relay_visible(
                     &update,
@@ -1072,9 +1087,8 @@ where
                 agent_output_count,
                 last_agent_message,
                 live_history_enabled,
-                resume_required,
                 native_session_used,
-                replacing_previous_bridge,
+                session_open,
                 grok_usage,
             )
             .await
@@ -1665,9 +1679,8 @@ pub(super) async fn drive_connection(
     agent_output_count: AgentOutputCount,
     last_agent_message: LastAgentMessage,
     live_history_enabled: Arc<AtomicBool>,
-    resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     grok_usage: grok_usage::Collector,
 ) -> Result<Option<SessionRestart>> {
     // Terminals belong to the connection. However the session ends — closed,
@@ -1685,9 +1698,8 @@ pub(super) async fn drive_connection(
         &agent_output_count,
         &last_agent_message,
         &live_history_enabled,
-        resume_required,
         native_session_used,
-        replacing_previous_bridge,
+        session_open,
         &grok_usage,
     )
     .await;

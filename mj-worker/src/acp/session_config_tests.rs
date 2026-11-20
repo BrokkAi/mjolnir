@@ -219,7 +219,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         project_memory: None,
         extra_mcp_servers: Vec::new(),
         resume_session: Some("native".into()),
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Arc::new(Mutex::new(saved)),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -1051,6 +1051,7 @@ for line in sys.stdin:
         AcceptedSessionConfig::default(),
     );
     spec.harness = HarnessKind::Codex;
+    spec.native_session_history = NativeSessionHistory::MayHaveHistory;
     spec.bridge_spec_path = Some(spec_path.clone());
     spec.args = vec![
         script.to_string_lossy().into_owned(),
@@ -1478,7 +1479,7 @@ async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> Haik
     );
     spec.harness = HarnessKind::Claude;
     spec.resume_session = Some("missing-session".into());
-    spec.native_session_may_have_history = false;
+    spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     prompt(&commands, "queued-before-startup").await;

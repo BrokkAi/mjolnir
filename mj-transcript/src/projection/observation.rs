@@ -616,7 +616,7 @@ pub(super) fn project_observation(
                     ..
                 }
             );
-            if prompt_was_started
+            if (active.is_some() || (current.active_turn.is_none() && prompt_was_started))
                 && (bridge_stopped
                     || !current
                         .configuration

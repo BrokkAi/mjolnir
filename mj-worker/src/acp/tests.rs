@@ -71,7 +71,7 @@ for line in sys.stdin:
                 extra_mcp_servers: Vec::new(),
                 project_memory: None,
                 resume_session: Some("native".into()),
-                native_session_may_have_history: true,
+                native_session_history: NativeSessionHistory::MayHaveHistory,
                 accepted_config: Default::default(),
                 initial_model: None,
                 harness: HarnessKind::Claude,
@@ -199,7 +199,7 @@ for line in sys.stdin:
                 extra_mcp_servers: Vec::new(),
                 project_memory: None,
                 resume_session: Some("native".into()),
-                native_session_may_have_history: true,
+                native_session_history: NativeSessionHistory::MayHaveHistory,
                 accepted_config: Default::default(),
                 initial_model: None,
                 harness,
@@ -352,7 +352,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
@@ -1305,7 +1305,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Claude,
@@ -1409,7 +1409,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
@@ -1511,7 +1511,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
@@ -1662,7 +1662,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness,
@@ -2164,7 +2164,7 @@ async fn answer_to_ext_request(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Grok,
@@ -2371,7 +2371,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness,
@@ -2893,7 +2893,11 @@ async fn policy_is_enforced_before_session_is_reported(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: resume_session.map(str::to_owned),
-        native_session_may_have_history: false,
+        native_session_history: if resume_session.is_some() {
+            NativeSessionHistory::MayHaveHistory
+        } else {
+            NativeSessionHistory::LoadBeforeReplace
+        },
         accepted_config: Default::default(),
         initial_model: None,
         harness,
@@ -3178,7 +3182,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Muse,
@@ -3248,7 +3252,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Claude,
@@ -3535,7 +3539,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Claude,
@@ -3955,7 +3959,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         // Muse marks no turn end of its own, so the watchdog covers it.
@@ -4546,7 +4550,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
@@ -4882,7 +4886,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -5026,7 +5030,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -5124,7 +5128,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Kimi,
@@ -5498,7 +5502,7 @@ mod terminals {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Kimi,
@@ -6004,6 +6008,7 @@ mod terminals {
 }
 
 #[cfg(unix)]
+// Hard-won: 14b4b00de: a replacement bridge exiting before its first prompt reloaded the unwritten thread and aborted
 #[tokio::test]
 async fn unused_codex_bridge_restarts_with_a_new_thread() {
     codex_bridge_restart_preserves_only_used_threads(false).await;
@@ -6018,13 +6023,17 @@ async fn codex_bridge_restarts_with_the_used_thread_even_if_the_prompt_reply_was
 #[cfg(unix)]
 async fn codex_bridge_restart_preserves_only_used_threads(send_prompt: bool) {
     let temp = tempfile::tempdir().unwrap();
-    let marker = temp.path().join("restarted");
+    let launches = temp.path().join("launches");
+    let exit_requested = temp.path().join("exit-requested");
     let script = temp.path().join("codex_persistence.py");
     std::fs::write(&script, format!(r#"
 import json, os, sys, time
-marker = {marker:?}
+launches = {launches:?}
+exit_requested = {exit_requested:?}
 used = {send_prompt}
-second = os.path.exists(marker)
+launch = int(open(launches).read()) + 1 if os.path.exists(launches) else 1
+with open(launches, "w") as counter:
+    counter.write(str(launch))
 
 def write(payload):
     print(json.dumps(payload), flush=True)
@@ -6036,26 +6045,34 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}, "_meta": {{"jetbrains": {{"air": {{"version": 1, "capabilities": ["nativeSubagentSessions"]}}}}}}}}
     elif method in ("session/new", "session/load", "session/resume"):
-        if second and not used and method != "session/new":
-            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "no rollout found for thread id unused"}}}})
+        if not used and method != "session/new":
+            thread = request["params"]["sessionId"]
+            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "Internal error", "data": {{"details": f"thread not loaded: {{thread}}"}}}}}})
             continue
-        assert method == ("session/load" if second and used else "session/new"), request
-        result = {{"sessionId": "original" if not second or used else "replacement",
+        assert method == ("session/load" if launch > 1 and used else "session/new"), request
+        result = {{"sessionId": "original" if used else f"thread-{{launch}}",
                    "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Guardian"}}]}}}}
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
         continue
     elif method == "session/prompt":
-        assert not second and used
-        open(marker, "w").close()
-        # Crash after consuming the prompt, before replying.
-        break
+        if used:
+            assert launch == 1
+            # Crash after consuming the prompt, before replying.
+            break
+        assert launch == 2 and request["params"]["sessionId"] == "thread-2", request
+        write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+            "sessionId": request["params"]["sessionId"],
+            "update": {{"sessionUpdate": "agent_message_chunk",
+                       "content": {{"type": "text", "text": "recovered reply"}}}}}}}})
+        result = {{"stopReason": "end_turn"}}
     else:
         result = {{}}
     if ident is not None:
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
-    if method == "session/set_mode" and not second and not used:
-        open(marker, "w").close()
-        time.sleep(0.2)
+    if method == "session/set_mode" and not used and launch == 1:
+        # Wait until the runtime has published this open before exiting.
+        while not os.path.exists(exit_requested):
+            time.sleep(0.01)
         break
 "#, send_prompt = if send_prompt { "True" } else { "False" })).unwrap();
     let (request_tx, request_rx) = mpsc::channel(4);
@@ -6080,8 +6097,12 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             extra_mcp_servers: Vec::new(),
             project_memory: None,
-            resume_session: None,
-            native_session_may_have_history: false,
+            resume_session: (!send_prompt).then(|| "unused".into()),
+            native_session_history: if send_prompt {
+                NativeSessionHistory::LoadBeforeReplace
+            } else {
+                NativeSessionHistory::CreatedHereUnused
+            },
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Codex,
@@ -6101,6 +6122,7 @@ for line in sys.stdin:
     let mut opened = Vec::new();
     let mut prompt_sent = false;
     let mut replay = Vec::new();
+    let mut restart_messages = Vec::new();
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv())
             .await
@@ -6108,18 +6130,26 @@ for line in sys.stdin:
             .expect("the runtime must survive the first bridge's death");
         match event {
             RuntimeEvent::NativeAgent { event } => replay.push(event),
+            RuntimeEvent::HarnessRestarting { message } => restart_messages.push(message),
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
+                replaced_unused_native_session_id,
                 ..
             } => {
-                opened.push((native_session_id, resumed));
+                opened.push((
+                    native_session_id,
+                    resumed,
+                    replaced_unused_native_session_id,
+                ));
             }
             RuntimeEvent::SessionConfigured { .. } => {
-                if opened.len() == 2 {
+                if send_prompt && opened.len() == 2 {
                     break;
                 }
-                if send_prompt && !prompt_sent {
+                if !send_prompt && opened.len() == 1 {
+                    std::fs::write(&exit_requested, "").unwrap();
+                } else if !prompt_sent {
                     request_tx
                         .send(CommandRequest::Prompt {
                             request_id: "prompt-1".into(),
@@ -6130,6 +6160,14 @@ for line in sys.stdin:
                     prompt_sent = true;
                 }
             }
+            RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason,
+                ..
+            } if request_id == "prompt-1" && !send_prompt => {
+                assert_eq!(stop_reason, "EndTurn");
+                break;
+            }
             RuntimeEvent::Stopped => {
                 panic!("runtime stopped instead of recovering: {:?}", runtime.await)
             }
@@ -6138,18 +6176,25 @@ for line in sys.stdin:
     }
     assert_eq!(
         opened,
-        vec![
-            ("original".into(), false),
-            (
-                if send_prompt {
-                    "original"
-                } else {
-                    "replacement"
-                }
-                .into(),
-                send_prompt
-            ),
-        ]
+        if send_prompt {
+            vec![
+                ("original".into(), false, None),
+                ("original".into(), true, None),
+            ]
+        } else {
+            vec![
+                ("thread-1".into(), false, Some("unused".into())),
+                ("thread-2".into(), false, Some("unused".into())),
+            ]
+        }
+    );
+    assert_eq!(
+        restart_messages,
+        [if send_prompt {
+            "ACP bridge exited; reloading the native session"
+        } else {
+            "The agent stopped before its first prompt; restarting with a new empty thread."
+        }]
     );
     assert_eq!(
         replay,
@@ -6159,7 +6204,12 @@ for line in sys.stdin:
                 mj_core::native_agent::NativeAgentEvent::ReplayCommit,
             ]
         } else {
-            Vec::new()
+            vec![
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+            ]
         }
     );
     drop(request_tx);
@@ -6278,7 +6328,7 @@ for line in sys.stdin:
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
@@ -6443,7 +6493,7 @@ while True:
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -6588,7 +6638,7 @@ while True:
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -6703,7 +6753,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -6785,7 +6835,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Kimi,
@@ -7035,7 +7085,11 @@ pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: Some("gone".into()),
-        native_session_may_have_history: false,
+        native_session_history: if harness == HarnessKind::Codex {
+            NativeSessionHistory::MayHaveHistory
+        } else {
+            NativeSessionHistory::LoadBeforeReplace
+        },
         accepted_config: Default::default(),
         initial_model: None,
         harness,
@@ -7122,7 +7176,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: Some("native".into()),
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness,
@@ -7259,7 +7313,7 @@ fn missing_native_session_spec(
     directory: &Path,
     script: &Path,
     harness: HarnessKind,
-    native_session_may_have_history: bool,
+    native_session_history: NativeSessionHistory,
 ) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
@@ -7281,7 +7335,7 @@ fn missing_native_session_spec(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: Some("missing-thread".into()),
-        native_session_may_have_history,
+        native_session_history,
         accepted_config: Default::default(),
         initial_model: None,
         harness,
@@ -7346,7 +7400,7 @@ async fn assert_unused_native_session_is_replaced(
             temp.path(),
             &script,
             harness,
-            relay.native_session_may_have_history(),
+            relay.native_session_history(),
         ),
         request_rx,
         event_tx,
@@ -7365,8 +7419,15 @@ async fn assert_unused_native_session_is_replaced(
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
+                replaced_unused_native_session_id,
                 ..
-            } => opened = Some((native_session_id, resumed)),
+            } => {
+                assert_eq!(
+                    replaced_unused_native_session_id.as_deref(),
+                    Some("missing-thread")
+                );
+                opened = Some((native_session_id, resumed));
+            }
             RuntimeEvent::PromptFinished { request_id, .. } => finished = Some(request_id),
             RuntimeEvent::Stopped => {
                 panic!("the runtime stopped instead of replacing the session: {warnings:?}")
@@ -7393,10 +7454,18 @@ async fn assert_unused_native_session_is_replaced(
 }
 
 #[cfg(unix)]
+// Hard-won: 710ffb643: Codex could still refuse to reload a never-prompted thread after an idle worker upgrade.
 #[tokio::test]
 async fn an_unused_codex_thread_is_replaced_in_the_same_session_after_upgrade() {
-    assert_unused_native_session_is_replaced(HarnessKind::Codex, missing_codex_thread_error())
-        .await;
+    assert_unused_native_session_is_replaced(
+        HarnessKind::Codex,
+        serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"details": "thread not loaded: missing-thread"}
+        }),
+    )
+    .await;
 }
 
 #[cfg(unix)]
@@ -7414,7 +7483,12 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = mj_core::runtime::spawn(run(
-        missing_native_session_spec(temp.path(), &script, HarnessKind::Codex, true),
+        missing_native_session_spec(
+            temp.path(),
+            &script,
+            HarnessKind::Codex,
+            NativeSessionHistory::MayHaveHistory,
+        ),
         request_rx,
         event_tx,
     ));
@@ -7597,15 +7671,15 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
                     }
-                    "session/load" if missing => {
-                        let response = serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":"no rollout found for thread id root"}});
-                        write
-                            .write_all(format!("{response}\n").as_bytes())
-                            .await
-                            .unwrap();
-                        continue;
-                    }
                     "session/load" | "session/new" => {
+                        assert_eq!(
+                            method,
+                            if missing {
+                                "session/new"
+                            } else {
+                                "session/load"
+                            }
+                        );
                         // Exceed the pipe capacity so the driver must drain history
                         // concurrently with the load response.
                         for (address, update) in [
@@ -7672,7 +7746,11 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: Some("root".into()),
-            native_session_may_have_history: false,
+            native_session_history: if missing {
+                NativeSessionHistory::CreatedHereUnused
+            } else {
+                NativeSessionHistory::MayHaveHistory
+            },
             accepted_config: Default::default(),
             initial_model: None,
             harness,
@@ -7721,12 +7799,15 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             missing_background_capability,
             harness == HarnessKind::Claude
         );
-        assert_eq!(children.len(), 5);
-        assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
         let spawn_index = if missing {
+            // Hard-won: 14b4b00de: replacing an unused thread skipped the replay boundary, so staging from an abandoned load hid later native children.
+            assert_eq!(children.len(), 5);
+            assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
             assert!(matches!(children[1], NativeAgentEvent::ReplayCommit));
             2
         } else {
+            assert_eq!(children.len(), 5);
+            assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
             assert!(matches!(children[4], NativeAgentEvent::ReplayCommit));
             1
         };
@@ -7923,7 +8004,14 @@ for line in sys.stdin:
     .await;
     if fail_replacement {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message , ..} if request_id == "clear-request" && message.contains("replacement refused"))).await;
-        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+        if harness == HarnessKind::Codex {
+            // Codex keeps a never-prompted thread only in the app-server that
+            // created it, and the rollback runs in a new bridge, so the
+            // unused original is replaced rather than reloaded.
+            wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: false, replaced_unused_native_session_id: Some(previous), .. } if native_session_id == "replacement" && previous == "original")).await;
+        } else {
+            wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+        }
     } else {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
     }
@@ -7977,14 +8065,18 @@ for line in sys.stdin:
             .iter()
             .filter(|method| method.as_str() == "session/new")
             .count(),
-        2
+        if fail_replacement && harness == HarnessKind::Codex {
+            3
+        } else {
+            2
+        }
     );
     assert_eq!(
         methods
             .iter()
             .filter(|method| method.as_str() == "session/load")
             .count(),
-        usize::from(fail_replacement)
+        usize::from(fail_replacement && harness != HarnessKind::Codex)
     );
 }
 
@@ -8137,7 +8229,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         extra_mcp_servers: vec![],
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -8547,7 +8639,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
@@ -8614,6 +8706,18 @@ fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
     );
     assert_eq!(lines.next(), Some(BRIDGE_STDERR_CONTEXT));
     assert!(reason.ends_with("[session/create] phase=register durationMs=1"));
+
+    // The marker supplies the first line even when cleanup also reported
+    // an error. The bridge stderr remains available below that cause.
+    let error = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+        message: "load ACP session failed".to_owned(),
+    })
+    .context(format!("{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic"))
+    .context("ACP cleanup also failed");
+    assert_eq!(
+        worker_exit_reason(&error),
+        format!("load ACP session failed\n{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic")
+    );
 
     // A failure with no stderr is the chain on one line.
     let error = anyhow::anyhow!("durable relay open failed").context("start worker");

@@ -204,6 +204,17 @@ impl Drop for RelayGuard<'_> {
     }
 }
 
+/// Relay evidence about the native thread named at launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeSessionHistory {
+    /// The thread may contain history and must not be replaced.
+    MayHaveHistory,
+    /// The thread may be replaced only if the harness reports it missing.
+    LoadBeforeReplace,
+    /// Durable evidence proves this relay created the thread and never used it.
+    CreatedHereUnused,
+}
+
 /// Durable, session-side ACP store-and-forward relay.
 ///
 /// `RelaySnapshot` is the canonical operational state. Journal spans retain
@@ -1789,58 +1800,49 @@ impl DurableRelay {
             .map(|page| page.events)
     }
 
-    /// Whether this session's native thread may hold conversation history
-    /// Mjolnir cannot see. Computed from snapshot state alone, with no journal
-    /// replay, and deliberately conservative: it answers `false` only for a
-    /// thread this journal created and that nothing has used yet.
-    ///
-    /// A `false` answer is what allows Mjolnir to replace a native session the
-    /// harness says it has no record of. Codex writes a thread's rollout, and
-    /// Claude Code a session's transcript, only at the first user message, so
-    /// a session that was opened and never prompted can be missing on disk.
     pub fn native_session_may_have_history(&self) -> bool {
-        // Set when a prompt was transmitted, when Claude Code reported the
-        // result of a model cycle, when the session was resumed rather than
-        // created here, or when its identity arrived from outside this
-        // journal. Agent output alone does not set it: an adapter can send
-        // text with no model turn behind it (R4-3).
+        self.native_session_history() == NativeSessionHistory::MayHaveHistory
+    }
+
+    /// Classify native history using the durable evidence, including after ACK pruning.
+    pub fn native_session_history(&self) -> NativeSessionHistory {
+        let dispatched = self
+            .snapshot
+            .dispatches
+            .values()
+            .any(native_history::prompt_may_have_reached_agent);
         if let Some(evidence) = &self.snapshot.native_use_evidence {
             if evidence.version != 1
                 || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()
+                || evidence.usage != NativeSessionUse::Unused
+                || dispatched
             {
-                return true;
+                return NativeSessionHistory::MayHaveHistory;
             }
-            return evidence.usage != NativeSessionUse::Unused
-                || self
-                    .snapshot
-                    .dispatches
-                    .values()
-                    .any(native_history::prompt_may_have_reached_agent);
+            return match evidence.opened_ordinal {
+                Some(_) => NativeSessionHistory::CreatedHereUnused,
+                None if self.snapshot.restored_native_session_unused => {
+                    NativeSessionHistory::LoadBeforeReplace
+                }
+                None => NativeSessionHistory::MayHaveHistory,
+            };
         }
-        if self.snapshot.native_session_used {
-            return true;
+        if self.snapshot.native_session_used || dispatched {
+            return NativeSessionHistory::MayHaveHistory;
         }
-        // History before the recovery floor was released to an archive, so the
-        // snapshot no longer describes everything this session did. That only
-        // hides history belonging to the *current* native session if that
-        // session could have existed then. A session this journal opened above
-        // the floor has every event about it above the floor too, so the
-        // archive cannot hold any of its content. An unknown opening ordinal —
-        // an older snapshot, or no session opened yet — cannot be placed
-        // against the floor, so it counts as history. The exception is a relay
-        // restored from a checkpoint that shows the session it continues was
-        // never prompted: everything below the floor is that archive.
         match self.snapshot.native_session_opened_ordinal {
-            Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {}
-            None if self.snapshot.restored_native_session_unused => {}
-            _ => return true,
+            // History below the recovery floor was archived. A thread opened
+            // above it could never have contributed to that history.
+            Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {
+                NativeSessionHistory::CreatedHereUnused
+            }
+            // The checkpoint hint only reflects visible user prompts. The
+            // harness can still have history from a mailbox wake.
+            None if self.snapshot.restored_native_session_unused => {
+                NativeSessionHistory::LoadBeforeReplace
+            }
+            _ => NativeSessionHistory::MayHaveHistory,
         }
-        // A prompt that only waits in the durable queue never reached the
-        // agent. Anything past admission may have.
-        self.snapshot
-            .dispatches
-            .values()
-            .any(native_history::prompt_may_have_reached_agent)
     }
 
     /// Whether the checkpoint this relay was restored from shows that the

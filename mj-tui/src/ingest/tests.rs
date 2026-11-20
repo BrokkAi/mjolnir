@@ -594,6 +594,21 @@ fn incremental_projection_matches_a_full_rescan_through_transcript_changes() {
     updates.push(transcript.clone());
     transcript.push(work_interruption(7));
     updates.push(transcript.clone());
+    // `/clear` starts a new conversation; the earlier messages stay in the
+    // transcript but leave the dashboard preview.
+    let mut boundary = transcript_item(
+        8,
+        TranscriptBody::System {
+            text: "Context cleared".into(),
+        },
+    );
+    Arc::make_mut(&mut boundary).stable_id =
+        format!("{}clear-1", mj_core::archive::CONTEXT_BOUNDARY_PREFIX);
+    transcript.push(boundary);
+    let cleared_update = updates.len();
+    updates.push(transcript.clone());
+    transcript.push(agent_message(9, "fresh start"));
+    updates.push(transcript.clone());
     // A restore rebuilds every item, sharing no handles.
     transcript = vec![agent_message(1, "restored"), agent_message(2, "and again")];
     updates.push(transcript.clone());
@@ -635,6 +650,17 @@ fn incremental_projection_matches_a_full_rescan_through_transcript_changes() {
             incremental.unread_interruptions, rescanned.unread_interruptions,
             "unread interruption count after update {index}"
         );
+        if index == cleared_update {
+            assert_eq!(incremental.last_agent_message, None);
+            assert_eq!(incremental.last_user_message, None);
+            assert_eq!(incremental.latest_agent_activity_after_last_user, None);
+        }
+        if index == cleared_update + 1 {
+            assert_eq!(
+                incremental.last_agent_message.as_deref(),
+                Some("fresh start")
+            );
+        }
         cache = incremental.projection;
     }
 }

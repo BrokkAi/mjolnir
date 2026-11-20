@@ -9756,6 +9756,11 @@ fn unused_native_evidence_survives_ack_pruning_and_worker_restart() {
     drop(relay);
     let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
     assert!(!relay.native_session_may_have_history());
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::CreatedHereUnused
+    );
+
     let evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
     assert_eq!(evidence.native_session_id, "empty-native");
     assert_eq!(evidence.opened_ordinal, Some(ordinal));

@@ -1276,6 +1276,14 @@ impl DurableRelay {
                 )?;
                 continue;
             }
+            if super::native_history::prompt_may_have_reached_agent(
+                &self.snapshot.dispatches[&command_id],
+            ) {
+                // The prompt may have reached ACP before the runtime's use
+                // notification was persisted. Save that evidence before the
+                // interruption is journaled and discards the dispatch claim.
+                self.mark_native_session_used()?;
+            }
             self.record_command_interrupted(
                 &command_id,
                 mj_core::event_outcome::OutcomeReason::WorkerRestarted,

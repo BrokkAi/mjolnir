@@ -2241,6 +2241,30 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
     assert!(summary.interruption_event_ordinals.is_empty());
     assert_eq!(summary.execution, materialized.execution);
     assert!(load_materialized_session_from(&database, "session-1").is_err());
+
+    // `/clear` starts a new conversation: the dashboard preview must not
+    // carry the earlier conversation's messages past the boundary.
+    open(&database)
+        .unwrap()
+        .execute(
+            "INSERT INTO materialized_transcript_items(session_id, stable_id, position,
+                 created_at_ms, last_changed_at_ms, body_json)
+             VALUES ('session-1', ?1, 8, 1900, 1900, ?2)",
+            params![
+                format!("{}clear-1", mj_core::archive::CONTEXT_BOUNDARY_PREFIX),
+                serde_json::to_string(&TranscriptBody::System {
+                    text: "Context cleared".into()
+                })
+                .unwrap()
+            ],
+        )
+        .unwrap();
+    let summary = load_materialized_session_summary_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.last_user_message, None);
+    assert_eq!(summary.last_agent_message, None);
+    assert!(!summary.last_agent_message_follows_last_user);
 }
 
 #[test]

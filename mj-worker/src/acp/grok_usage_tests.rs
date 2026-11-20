@@ -27,7 +27,7 @@ pub(super) fn spec(
         extra_mcp_servers: vec![],
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Grok,

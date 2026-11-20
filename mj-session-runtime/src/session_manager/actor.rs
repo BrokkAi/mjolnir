@@ -602,6 +602,7 @@ pub async fn run_session_actor(
                                         | WorkerRecoveryOutcome::TargetMissing
                                         | WorkerRecoveryOutcome::Suppressed
                                         | WorkerRecoveryOutcome::AdmissionRefused(_)
+                                        | WorkerRecoveryOutcome::HarnessStartupFailed
                                         | WorkerRecoveryOutcome::StorageFull { .. }
                                         | WorkerRecoveryOutcome::WorkspaceMissing(_) => {
                                             unreachable!()
@@ -621,6 +622,10 @@ pub async fn run_session_actor(
                                         &updates,
                                     );
                                     schedule.after(RECONNECT_INTERVAL);
+                                }
+                                Ok(WorkerRecoveryOutcome::HarnessStartupFailed) => {
+                                    // Committed Error removes this actor from the desired targets.
+                                    schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::StorageFull { host, problem }) => {
                                     tracing::warn!(

@@ -163,14 +163,8 @@ pub struct LaunchSpec {
     /// one it held when the worker started.
     pub bridge_spec_path: Option<PathBuf>,
     pub resume_session: Option<String>,
-    /// Whether Mjolnir's durable state shows the native session named by
-    /// `resume_session` may already hold conversation history. Codex writes a
-    /// thread's rollout, and Claude Code a session's transcript, only at the
-    /// first user message, so a native session that was created and never
-    /// prompted is missing on disk; when this is false, a resume that fails
-    /// because the harness has no such session is answered with a fresh
-    /// session in the same Mjolnir session instead of a dead worker.
-    pub native_session_may_have_history: bool,
+    /// History evidence for the native thread named by `resume_session`.
+    pub native_session_history: NativeSessionHistory,
     /// Accepted selectors for this logical session, shared across native
     /// bridge replacements. Workers seed this from their durable relay.
     pub accepted_config: Arc<Mutex<AcceptedSessionConfig>>,

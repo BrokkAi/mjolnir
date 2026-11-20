@@ -1,0 +1,130 @@
+# The oracle runs the real Rust libraries (and, later, Mjolnir's own Rust
+# crates) on inputs a Go test supplies, so the Go port can be compared with
+# Rust instead of with someone's reading of Rust. See "The oracle" in
+# .agents/docs/go-port/runtime-packages.md.
+#
+# It is a standalone package, not a workspace member: the empty [workspace]
+# table keeps it out of the product workspace, its lockfile and its checks.
+#
+# Each module is behind a feature of the same name and is built on its own
+# (`cargo build --release --features <name> --target-dir target/<name>`), so a
+# module that does not compile never blocks another. Dependency versions are
+# the ones the product's Cargo.lock pins.
+[package]
+name = "mj-go-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order", "float_roundtrip", "raw_value"] }
+serde_ignored = { version = "=0.1.14", optional = true }
+toml = { version = "=0.8.2", optional = true }
+toml_edit = { version = "=0.20.2", features = ["serde"], optional = true }
+yaml-rust2 = { version = "=0.13.0", default-features = false, optional = true }
+jsonc-parser = { version = "=0.34.0", features = ["cst", "serde"], optional = true }
+anyhow = { version = "=1.0.102", optional = true }
+tracing = { version = "=0.1.44", optional = true }
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"], optional = true }
+clap = { version = "=4.6.1", features = ["derive", "env"], optional = true }
+similar = { version = "=2.7.0", optional = true }
+chrono = { version = "=0.4.44", default-features = false, features = ["clock", "serde"], optional = true }
+chrono-tz = { version = "=0.10.4", optional = true }
+url = { version = "=2.5.8", features = ["serde"], optional = true }
+semver = { version = "=1.0.28", optional = true }
+bytesize = { version = "=2.7.0", optional = true }
+base64 = { version = "=0.22.1", optional = true }
+indexmap = { version = "=2.14.0", features = ["serde"], optional = true }
+imbl = { version = "=7.0.2", features = ["serde"], optional = true }
+tar = { version = "=0.4.46", optional = true }
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"], optional = true }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate", "zstd"], optional = true }
+zstd = { version = "=0.13.3", default-features = false, optional = true }
+ruzstd = { version = "=0.9.1", optional = true }
+sha2 = { version = "=0.11.0", optional = true }
+hmac = { version = "=0.13.0", optional = true }
+blake3 = { version = "=1.8.6", default-features = false, features = ["std"], optional = true }
+tempfile = { version = "=3.27.0", optional = true }
+dirs = { version = "=6.0.0", optional = true }
+regex = { version = "=1.12.3", optional = true }
+aho-corasick = { version = "=1.1.4", optional = true }
+unicode-width = { version = "=0.2.2", optional = true }
+unicode-segmentation = { version = "=1.13.3", optional = true }
+pulldown-cmark = { version = "=0.10.3", default-features = false, optional = true }
+linkify = { version = "=0.11.0", optional = true }
+qrcode = { version = "=0.14.1", default-features = false, optional = true }
+vt100 = { version = "=0.16.2", optional = true }
+vte = { version = "=0.15.0", default-features = false, optional = true }
+ratatui = { version = "=0.30.0", features = ["unstable-rendered-line-info"], optional = true }
+tui-term = { version = "=0.3.4", optional = true }
+rat-focus = { version = "=2.1.1", optional = true }
+crossterm = { version = "=0.29.0", features = ["event-stream", "osc52"], optional = true }
+tokio = { version = "=1.52.3", features = ["full", "test-util"], optional = true }
+tokio-util = { version = "=0.7.18", features = ["rt", "compat", "io"], optional = true }
+tokio-stream = { version = "=0.1.19", optional = true }
+futures = { version = "=0.3.32", optional = true }
+rusqlite = { version = "=0.41.1", features = ["backup", "bundled", "fallible_uint", "functions"], optional = true }
+tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy-regex"], optional = true }
+tree-sitter = { version = "=0.25.10", optional = true }
+tree-sitter-bash = { version = "=0.25.1", optional = true }
+sysinfo = { version = "=0.32.1", default-features = false, features = ["system"], optional = true }
+agent-client-protocol = { version = "=5.0.0", features = ["unstable_session_fork", "unstable_session_system_prompt", "unstable_end_turn_token_usage"], optional = true }
+
+[features]
+# One feature for each module; a module is built on its own.
+std_fmt = []
+std_str = []
+std_collections = []
+std_path = []
+std_io = []
+std_time = []
+std_process = []
+std_sort = []
+std_num = []
+serde_derive = ["dep:serde_ignored"]
+serde_json = []
+toml = ["dep:toml", "dep:toml_edit"]
+yaml = ["dep:yaml-rust2"]
+jsonc = ["dep:jsonc-parser"]
+anyhow = ["dep:anyhow"]
+tracing = ["dep:tracing", "dep:tracing-subscriber"]
+clap = ["dep:clap"]
+similar = ["dep:similar"]
+chrono = ["dep:chrono", "dep:chrono-tz"]
+url = ["dep:url"]
+semver = ["dep:semver"]
+bytesize = ["dep:bytesize"]
+base64 = ["dep:base64"]
+indexmap = ["dep:indexmap", "dep:imbl"]
+tar = ["dep:tar"]
+flate2 = ["dep:flate2"]
+zip = ["dep:zip"]
+zstd = ["dep:zstd", "dep:ruzstd"]
+hash = ["dep:sha2", "dep:hmac", "dep:blake3"]
+tempfile = ["dep:tempfile"]
+dirs = ["dep:dirs"]
+regex = ["dep:regex", "dep:aho-corasick"]
+unicode = ["dep:unicode-width", "dep:unicode-segmentation"]
+pulldown_cmark = ["dep:pulldown-cmark"]
+linkify = ["dep:linkify"]
+qrcode = ["dep:qrcode"]
+vt100 = ["dep:vt100", "dep:vte"]
+ratatui = ["dep:ratatui", "dep:tui-term", "dep:rat-focus"]
+crossterm = ["dep:crossterm"]
+tokio = ["dep:tokio", "dep:tokio-util", "dep:tokio-stream", "dep:futures"]
+rusqlite = ["dep:rusqlite"]
+tokenizers = ["dep:tokenizers"]
+tree_sitter = ["dep:tree-sitter", "dep:tree-sitter-bash"]
+sysinfo = ["dep:sysinfo"]
+acp = ["dep:agent-client-protocol"]
+
+[profile.release]
+opt-level = 1
+debug = false

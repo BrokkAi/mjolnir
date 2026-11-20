@@ -506,6 +506,36 @@ mod tests {
         }
     }
 
+    // Hard-won: 14b4b00de: restart recovery discarded the only evidence that a prompt reached the agent.
+    #[test]
+    fn restart_preserves_native_history_evidence_from_an_in_flight_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+        open_session(&mut relay, false);
+        submit_relay(&mut relay, "sent-work", prompt("possibly delivered"));
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        assert_eq!(
+            relay.snapshot.dispatches["sent-work"].state,
+            RelayDispatchState::InFlight
+        );
+        // Claim-time durable uncertainty already protects the thread here.
+        assert_eq!(
+            relay.native_session_history(),
+            NativeSessionHistory::MayHaveHistory
+        );
+        drop(relay);
+
+        // First open interrupts the claim, and the second loads the compacted snapshot.
+        for _ in 0..2 {
+            let relay = DurableRelay::open(temp.path(), SESSION, "restarted").unwrap();
+            assert!(!relay.snapshot.dispatches.contains_key("sent-work"));
+            assert_eq!(
+                relay.native_session_history(),
+                NativeSessionHistory::MayHaveHistory
+            );
+        }
+    }
+
     #[test]
     fn upgrade_does_not_replace_native_history_after_a_prompt_or_agent_content() {
         for prompt_was_sent in [false, true] {
