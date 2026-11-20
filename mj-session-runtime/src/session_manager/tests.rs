@@ -563,6 +563,7 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
 /// Recovery now reads the dead worker's exit record, tells the storage owner,
 /// and restarts nothing until a later measurement finds room.
 // Hard-won: 540c9202: Full-disk recovery must not upload another worker onto the same full filesystem.
+// Hard-won: e579584b9: a harness that failed to open on a full disk went to Error once space returned.
 #[tokio::test]
 #[cfg_attr(
     windows,
@@ -575,7 +576,9 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     let restarted = directory.path().join("worker-restarted");
     let stopped_at = chrono::Utc::now() - chrono::Duration::seconds(60);
     let exit_record = format!(
-        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test","recent_log":["failed diagnostic\n"]}}    "#,
+        // The marker says the harness never opened; the full disk is why,
+        // so space returning must restart it rather than end in Error.
+        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test","recent_log":["failed diagnostic\n"],"harness_startup_failure":{{"message":"ACP runtime failed: No space left on device (os error 28)"}}}}    "#,
         stopped_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
     let plan = WorkerRecoveryPlan {
