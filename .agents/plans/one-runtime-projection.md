@@ -23,6 +23,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20 17:35Z) Revalidated Milestone 1 with Milestone 2 on protocol 114. The merged tree passed the targeted Rust tests, all 35 terminal goldens, 97 web unit tests, 70 Chromium picker tests, Clippy, and both named-instance cases. The browser and API reports omitted private probe diagnostics.
 - [x] (2026-11-20 17:46Z) Rechecked Move selection after review. The browser requires an explicit replacement when an unlocked draft loses a choice, and public engine failures name the engine and what to check. Targeted Move tests, daemon tests and the protocol 114 live cases passed.
 - [x] (2026-11-20 17:57Z) Verified that a strict v1 client can still read profile entries. Revalidated saved launch retry, sharing of unchanged availability snapshots, and the adjusted target-only curl checks on protocol 114.
+- [x] (2026-11-20 18:06Z) Verified that a terminal Move starts a fresh preparation if a feed update removes its selected account, whether the old preparation is pending or complete.
 - [x] (2026-11-20) Implement Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
 - [x] (2026-11-20) Verify Milestone 2 in `feeds-m2` with an isolated mbx config.
 - [ ] Milestone 3: web rows built only from the runtime capture.
@@ -110,7 +111,7 @@ Milestone 1 is implemented and validated in its detached worktree. Both pickers 
 
 Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page showed the pending refresh and then displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
 
-Follow-ups recorded at the start: publish the unified projection as a versioned `/api/v1` stream including profile availability and "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache.
+Follow-ups: publish the unified projection as a versioned `/api/v1` stream including profile availability and "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache; revisit the browser Move picker’s implicit destination when all compatible destinations have a missing verdict. The existing profile-only Move can omit a destination and relies on execution preflight to check the implicit one.
 
 
 ## Context and Orientation

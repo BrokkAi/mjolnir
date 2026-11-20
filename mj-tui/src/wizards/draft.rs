@@ -817,17 +817,15 @@ impl WizardDraft for ResumeWizard {
     /// A move preparation describes one exact destination draft, so every
     /// edit but a bundle choice (which resume has no step for) discards it.
     fn note_draft_change(&mut self, _dashboard: &mut DashboardState, change: DraftChange) {
-        if change != DraftChange::BundleSelected {
-            invalidate_move_preparation(self);
-        }
         if matches!(
             change,
             DraftChange::TargetSelected
                 | DraftChange::ProfileSelected
                 | DraftChange::ResourcesAdjusted
         ) {
-            self.files.reviewed = false;
-            self.files.selection.acknowledge_large_transfer = false;
+            self.note_destination_change();
+        } else if change != DraftChange::BundleSelected {
+            invalidate_move_preparation(self);
         }
     }
 
@@ -1028,6 +1026,12 @@ impl WizardDraft for ResumeWizard {
 }
 
 impl ResumeWizard {
+    pub(crate) fn note_destination_change(&mut self) {
+        invalidate_move_preparation(self);
+        self.files.reviewed = false;
+        self.files.selection.acknowledge_large_transfer = false;
+    }
+
     /// The profile this resume or move lands on.
     pub(crate) fn destination_profile(&self, dashboard: &DashboardState) -> String {
         dashboard

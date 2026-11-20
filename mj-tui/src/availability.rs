@@ -251,7 +251,10 @@ impl DashboardState {
         match &mut self.mode {
             Mode::New(wizard) => place(&mut wizard.step, &mut wizard.profile, &mut wizard.target),
             Mode::Resume(wizard) => {
-                place(&mut wizard.step, &mut wizard.profile, &mut wizard.target)
+                if !launching && (profile.is_none() || target.is_none()) {
+                    wizard.note_destination_change();
+                }
+                place(&mut wizard.step, &mut wizard.profile, &mut wizard.target);
             }
             _ => {}
         }

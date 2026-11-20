@@ -3018,6 +3018,47 @@ fn failed_move_preparation_stays_visible_and_retry_requests_preparation() {
     assert!(dashboard.apply_move_preparation(retry_id, preparation));
 }
 
+// Hard-won: #1372: a feed update could leave Move prepared for a discarded account.
+#[test]
+fn move_reprepares_after_feed_disables_selected_profile() {
+    for already_prepared in [false, true] {
+        let mut dashboard = dashboard_with_session(running_session());
+        let request_id = open_move_review(&mut dashboard);
+        let stale = move_preparation();
+        let selected = resume_wizard(&dashboard).destination_profile(&dashboard);
+        assert_eq!(
+            stale.selection.profile_id.as_deref(),
+            Some(selected.as_str())
+        );
+        if already_prepared {
+            assert!(dashboard.apply_move_preparation(request_id, stale.clone()));
+        }
+
+        let mut config = (*dashboard.config).clone();
+        config.profiles.get_mut(&selected).unwrap().enabled = false;
+        dashboard.set_runtime_config(config, Default::default());
+        assert_eq!(resume_wizard(&dashboard).step, WizardStep::Profile);
+        let replacement = resume_wizard(&dashboard).destination_profile(&dashboard);
+        assert_ne!(replacement, selected);
+
+        assert_eq!(
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        let DashboardAction::MoveSession {
+            profile_id,
+            preparation_request_id: Some(new_request_id),
+            ..
+        } = ready_key(&mut dashboard, key(KeyCode::Enter))
+        else {
+            panic!("the replacement destination must start a new preparation");
+        };
+        assert_eq!(profile_id, replacement);
+        assert_ne!(new_request_id, request_id);
+        assert!(!dashboard.apply_move_preparation(request_id, stale));
+    }
+}
+
 #[test]
 fn stale_move_preparation_is_ignored_after_cancel_and_reopen() {
     let mut dashboard = dashboard_with_session(running_session());
