@@ -11,6 +11,8 @@ use super::*;
 use crate::pollers::CapacityProbeSet;
 use mj_client::runtime_feed::RuntimeHostCapacity;
 use mj_controller::targets::HostCapacityRow;
+use mj_core::snapshot_map::SharedSnapshot;
+use mj_core::targets::storage::TargetStorageView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityInput {
@@ -135,18 +137,24 @@ impl CapacityFeed {
 
     /// Every host and fleet with its latest reading and storage verdicts.
     pub(crate) fn host_rows(&self) -> Vec<HostCapacityRow> {
-        self.runtime_rows()
-            .into_iter()
-            .map(|row| row.reading)
-            .collect()
+        let (rows, _) = self.runtime_snapshot();
+        rows.into_iter().map(|row| row.reading).collect()
     }
 
-    pub(crate) fn runtime_rows(&self) -> Vec<RuntimeHostCapacity> {
+    /// Capture the host rows and the session storage verdicts from the same
+    /// board publication. Hold the readings while taking the storage snapshot
+    /// so a sample cannot publish its disks and CPU/RAM independently here.
+    pub(super) fn runtime_snapshot(
+        &self,
+    ) -> (
+        Vec<RuntimeHostCapacity>,
+        SharedSnapshot<Vec<TargetStorageView>>,
+    ) {
         let states = self.states.borrow();
         let storage = mj_controller::target_storage::views_snapshot();
         let inputs = self.targets.borrow();
         let empty = mj_controller::targets::TargetCapacityState::default();
-        inputs
+        let rows = inputs
             .targets
             .iter()
             .map(|target| {
@@ -156,7 +164,8 @@ impl CapacityFeed {
                     refreshing: state.answered_refresh < inputs.refresh_generation,
                 }
             })
-            .collect()
+            .collect();
+        (rows, storage)
     }
 
     /// Ask for a new reading of every host. The service coalesces requests
@@ -1550,12 +1559,14 @@ mod tests {
 
     // Hard-won: d27eb9f56: the terminal feed omitted daemon-only reservations.
     // Hard-won: 8c88175f7: every update scanned historical sessions for each host.
+    // Hard-won: 2d2476348: retained revisions duplicated unchanged host rows.
     #[tokio::test]
     async fn runtime_capacity_projection_includes_the_move_reservation() {
+        const HOST: &str = "runtime-capacity-sharing";
         let state = crate::daemon::tests::test_runtime_state();
         let target = mj_controller::targets::DeploymentCapacityTarget {
             id: "local".into(),
-            host: "local".into(),
+            host: HOST.into(),
             target_ids: vec!["podman".into()],
             kind: mj_controller::targets::DeploymentCapacityKind::Host,
             local: true,
@@ -1594,6 +1605,35 @@ mod tests {
                 })
                 .is_ok()
         );
+        // The same storage publication supplies the session warnings and the
+        // host rows. Retained revisions should share unchanged host rows.
+        let storage_sample =
+            |free| mj_controller::target_storage::test_storage_sample(HOST, free, 30 << 30);
+        mj_controller::target_storage::record_samples(&[storage_sample(20 << 30)], 100);
+        let before = state.runtime_publication().unwrap().metadata;
+        state.publish_revision();
+        let unchanged = state.runtime_publication().unwrap().metadata;
+        assert!(before.host_capacities.ptr_eq(&unchanged.host_capacities));
+        assert_eq!(
+            before.host_capacities[0].reading.filesystems[0].available_bytes,
+            20 << 30
+        );
+        mj_controller::target_storage::record_samples(&[storage_sample(0)], 101);
+        let changed = state.runtime_publication().unwrap().metadata;
+        assert!(!before.host_capacities.ptr_eq(&changed.host_capacities));
+        let storage = changed
+            .storage
+            .iter()
+            .find(|view| view.host == HOST)
+            .unwrap();
+        let row = &changed.host_capacities[0].reading.filesystems[0];
+        assert_eq!(row.available_bytes, 0);
+        assert_eq!(row.condition, storage.filesystems[0].condition);
+        assert_eq!(
+            before.host_capacities[0].reading.filesystems[0].available_bytes,
+            20 << 30
+        );
+
         let input = ContainerCapacityInput {
             memory_is_pool: false,
             target_ids: vec!["podman".into()],

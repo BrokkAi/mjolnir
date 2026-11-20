@@ -77,7 +77,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 
 - Decision: publish the existing `HostCapacityRow` with daemon-owned refresh status in runtime metadata. Both surfaces read the capacity service and storage board. The service publishes each requested generation together with its newly derived probe definitions.
-  Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request.
+  Rationale: the existing row carries the sample clock, failure, and last good reading used to render staleness. Pairing probe definitions with their refresh generation ensures an in-flight probe for the old mbx paths cannot complete the new request. Each capture uses one storage snapshot for the Targets row and session warnings. Unchanged host rows share their allocation across retained revisions.
   Date/Author: 2026-11-20, Milestone 2 implementation.
 
 

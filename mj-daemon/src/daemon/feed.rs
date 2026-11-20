@@ -324,12 +324,17 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
-        full.metadata.host_capacities = self
-            .capacity_feed()
-            .map(|feed| feed.runtime_rows())
-            .unwrap_or_default()
-            .into();
-        full.metadata.storage = mj_controller::target_storage::views_snapshot();
+        let (host_capacities, storage) = self.capacity_feed().map_or_else(
+            || (Vec::new(), mj_controller::target_storage::views_snapshot()),
+            super::capacity::CapacityFeed::runtime_snapshot,
+        );
+        let previous = &history.full.metadata.host_capacities;
+        full.metadata.host_capacities = if **previous == host_capacities {
+            previous.clone()
+        } else {
+            host_capacities.into()
+        };
+        full.metadata.storage = storage;
         full.metadata.profile_capabilities = self
             .profile_catalog
             .get()
