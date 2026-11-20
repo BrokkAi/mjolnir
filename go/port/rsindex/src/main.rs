@@ -459,6 +459,65 @@ fn literal_json(expr: &syn::Expr) -> serde_json::Value {
     }
 }
 
+/// A constant's initializer as a tree `portmap.py` can translate. Anything
+/// outside the small language constants are written in is kept as text.
+fn expr_json(expr: &syn::Expr) -> serde_json::Value {
+    let text = text_of(expr);
+    let mut node = match expr {
+        syn::Expr::Lit(_) => {
+            let mut literal = literal_json(expr);
+            if literal.is_null() {
+                serde_json::json!({"k": "other"})
+            } else {
+                literal["k"] = "lit".into();
+                literal
+            }
+        }
+        syn::Expr::Path(path) => serde_json::json!({"k": "path", "path": path_text(&path.path)}),
+        syn::Expr::Binary(binary) => serde_json::json!({
+            "k": "bin", "op": text_of(&binary.op), "l": expr_json(&binary.left), "r": expr_json(&binary.right),
+        }),
+        syn::Expr::Unary(unary) => serde_json::json!({"k": "un", "op": text_of(&unary.op), "e": expr_json(&unary.expr)}),
+        syn::Expr::Paren(inner) => serde_json::json!({"k": "paren", "e": expr_json(&inner.expr)}),
+        syn::Expr::Group(inner) => return expr_json(&inner.expr),
+        syn::Expr::Call(call) => serde_json::json!({
+            "k": "call", "f": expr_json(&call.func), "args": call.args.iter().map(expr_json).collect::<Vec<_>>(),
+        }),
+        syn::Expr::MethodCall(call) => serde_json::json!({
+            "k": "method", "recv": expr_json(&call.receiver), "name": call.method.to_string(),
+            "args": call.args.iter().map(expr_json).collect::<Vec<_>>(),
+        }),
+        syn::Expr::Cast(cast) => serde_json::json!({"k": "cast", "e": expr_json(&cast.expr), "ty": type_json(&cast.ty)}),
+        syn::Expr::Array(array) => serde_json::json!({"k": "array", "elems": array.elems.iter().map(expr_json).collect::<Vec<_>>()}),
+        syn::Expr::Repeat(repeat) => serde_json::json!({"k": "repeat", "e": expr_json(&repeat.expr), "len": expr_json(&repeat.len)}),
+        syn::Expr::Reference(reference) => serde_json::json!({"k": "ref", "e": expr_json(&reference.expr)}),
+        syn::Expr::Tuple(tuple) => serde_json::json!({"k": "tuple", "elems": tuple.elems.iter().map(expr_json).collect::<Vec<_>>()}),
+        syn::Expr::Struct(literal) => {
+            let fields: Vec<_> = literal
+                .fields
+                .iter()
+                .map(|field| serde_json::json!([text_of(&field.member), expr_json(&field.expr)]))
+                .collect();
+            serde_json::json!({
+                "k": "struct", "path": path_text(&literal.path), "fields": fields,
+                "rest": literal.rest.as_ref().map(|rest| expr_json(rest)),
+            })
+        }
+        syn::Expr::Macro(invocation) => {
+            let name = path_text(&invocation.mac.path);
+            let args = invocation
+                .mac
+                .parse_body_with(syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
+                .map(|args| args.iter().map(expr_json).collect::<Vec<_>>())
+                .ok();
+            serde_json::json!({"k": "macro", "name": name, "args": args})
+        }
+        _ => serde_json::json!({"k": "other"}),
+    };
+    node["text"] = text.into();
+    node
+}
+
 fn generics_json(generics: &syn::Generics) -> serde_json::Value {
     let params: Vec<_> = generics
         .params
@@ -802,7 +861,7 @@ impl<'ast> Visit<'ast> for Collector {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("assoc_const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].decl = Some(serde_json::json!({
-            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr),
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr), "tree": expr_json(&item.expr),
         }));
         syn::visit::visit_impl_item_const(self, item);
     }
@@ -811,7 +870,7 @@ impl<'ast> Visit<'ast> for Collector {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].decl = Some(serde_json::json!({
-            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr),
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr), "tree": expr_json(&item.expr),
         }));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
@@ -827,7 +886,7 @@ impl<'ast> Visit<'ast> for Collector {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("static", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].decl = Some(serde_json::json!({
-            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr),
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr), "literal": literal_json(&item.expr), "tree": expr_json(&item.expr),
             "mutable": matches!(item.mutability, syn::StaticMutability::Mut(_)),
         }));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
