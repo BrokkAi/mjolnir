@@ -328,6 +328,12 @@ type WorkerLaunchConfig struct {
 	// it is not Auto, so launches that keep the default stay readable by
 	// older workers.
 	ClaudePermissionMode ClaudePermissionMode
+	// MjolnirGuardian is the profile's `mjolnir_guardian`, which decides
+	// whether the worker reviews a Kimi Code, OpenCode, or DSH session's
+	// approvals under configured approvals. Written only when off, so
+	// launches that keep the default stay readable by older workers.
+	// Defaults to true.
+	MjolnirGuardian bool
 	// ObservePolicy is non-nil when an older daemon launch file carried Brokk
 	// Observe guardrail settings here; no longer used or written. This struct
 	// rejects unknown fields, so dropping the name would make a new worker
@@ -368,6 +374,7 @@ type workerLaunchConfigWireOut struct {
 	ProjectMemory         *ProjectMemoryLaunchConfig `json:"project_memory,omitempty"`
 	ExecutionPolicy       ExecutionPolicy            `json:"execution_policy"`
 	ClaudePermissionMode  *ClaudePermissionMode      `json:"claude_permission_mode,omitempty"`
+	MjolnirGuardian       *bool                      `json:"mjolnir_guardian,omitempty"`
 }
 
 func (c WorkerLaunchConfig) MarshalJSON() ([]byte, error) {
@@ -413,6 +420,10 @@ func (c WorkerLaunchConfig) MarshalJSON() ([]byte, error) {
 		mode := c.ClaudePermissionMode
 		out.ClaudePermissionMode = &mode
 	}
+	if !c.MjolnirGuardian {
+		guardian := c.MjolnirGuardian
+		out.MjolnirGuardian = &guardian
+	}
 	return json.Marshal(out)
 }
 
@@ -451,6 +462,7 @@ type workerLaunchConfigWireIn struct {
 	ExecutionPolicy       json.RawMessage            `json:"execution_policy"`
 	ForceUnrestrictedMode json.RawMessage            `json:"force_unrestricted_mode"`
 	ClaudePermissionMode  *ClaudePermissionMode      `json:"claude_permission_mode"`
+	MjolnirGuardian       *bool                      `json:"mjolnir_guardian"`
 	ObservePolicy         json.RawMessage            `json:"observe_policy"`
 }
 
@@ -536,6 +548,7 @@ func (c *WorkerLaunchConfig) UnmarshalJSON(data []byte) error {
 		ProjectMemory:         in.ProjectMemory,
 		ExecutionPolicy:       policy,
 		ClaudePermissionMode:  ClaudePermissionModeAuto,
+		MjolnirGuardian:       true,
 	}
 	if in.CPUAccounting != nil {
 		out.CPUAccounting = *in.CPUAccounting
@@ -551,6 +564,9 @@ func (c *WorkerLaunchConfig) UnmarshalJSON(data []byte) error {
 	}
 	if in.ClaudePermissionMode != nil {
 		out.ClaudePermissionMode = *in.ClaudePermissionMode
+	}
+	if in.MjolnirGuardian != nil {
+		out.MjolnirGuardian = *in.MjolnirGuardian
 	}
 	if in.ObservePolicy != nil && string(bytes.TrimSpace(in.ObservePolicy)) != "null" {
 		out.ObservePolicy = &struct{}{}
