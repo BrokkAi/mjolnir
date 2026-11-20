@@ -655,7 +655,9 @@ impl Controller {
             if let Some(before_close) = before_close {
                 before_close.await?;
             }
-            return self.destroy_after_verified_checkpoint(session_id, &verified, executor);
+            return self
+                .destroy_after_verified_checkpoint(session_id, &verified, executor)
+                .context(LifecycleFailureReason::Cleanup);
         }
         ensure!(
             state == SessionState::Closing,

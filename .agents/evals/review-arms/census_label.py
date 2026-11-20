@@ -21,19 +21,38 @@ from label_facts import HERE, batches, indexed, save
 CENSUS = HERE / "brief/rql-census"
 LABELS = CENSUS / "labels"
 RUST = Path("/mnt/optane/tmp/rust10")
-# HEAD of the Mjolnir development batches launched by census runner 95af720f8,
-# verified in census-label-work/development-primary-6cq5biub/repo and the following batch.
-MJOLNIR_REVISION = "fb0a4c0ac5cfe0396e1bce2740b6a1148c47fdb9"
+# The Mjolnir checkout's HEAD: the parent of 03838e0d2c, which added .agents/evals/review-arms.
+# Later trees hold this study's own earlier answers for the Mjolnir bugs (their missing facts,
+# briefs and labels), so a labeller could read them. This tree mentions no census bug, and every
+# Mjolnir bug's base, introducing and fix commit is reachable from it (latest fix 2026-11-06).
+MJOLNIR_REVISION = "259fada3e1c39f022a47c3640c37359e9f3848d0"
 # Missing-step kinds from label-SPEC.md; the menu ranks these.
 MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
                  "keyed_matching", "contract", "other")
-# Default profile, model and quota scope per labeller. --profile overrides the profile, for
-# example to run replication on a Claude profile the coordinator allots (claude7's week ran out).
-ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude7", "opus", "opus")}
+# Default profile, model and quota scope per labeller; --profile runs a labeller on another
+# profile the coordinator allots (codex2 for the primary, claude3/claude5/claude6 for
+# replication). Moving to another profile is the operator's decision. The user chose Sonnet/high
+# on a 10% sample for replication (2026-11-20), as a trial before deciding on more.
+ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": ("claude5", "sonnet", "sonnet")}
+# The replication sample: within each split and repo, the items ranked first by a salted hash of
+# their id, round(10%) of them and at least one. Fixed before any replication label exists.
+REPLICATION_SHARE = 0.10
+REPLICATION_SALT = "rql-census-replication-sample-v1"
+# Replication must not reach the host that holds the primary labels. The coordinator approved this
+# container target on another machine; it is the only one replication accepts, since a target's
+# name says nothing about where it runs. Approving another one means changing this line.
+REPLICATION_TARGET = "s50-max-a"
+
+
+# The plan reserves codex4 for other sessions (PLAN-rql-census.md, Cost and quota).
+EXCLUDED_PROFILES = {"codex4"}
 
 
 def role_profile(args, role):
-    return getattr(args, "profile", None) or ROLES[role][0]
+    profile = getattr(args, "profile", None) or ROLES[role][0]
+    if profile in EXCLUDED_PROFILES:
+        raise SystemExit(f"--profile {profile} is excluded from the census by the plan")
+    return profile
 INPUTS = ("id", "repo", "intro_commit", "base_commit", "fix_commit", "defect", "trigger", "location")
 
 LABELLER_EFFORT = "high"
@@ -688,10 +707,10 @@ def quota(args, role):
             log(args.labels_dir, "quota-held", role=role, profile=profile, reason=hold)
             previous = hold
         if args.check_quota:
-            return False
+            return None
         time.sleep(60)
     log(args.labels_dir, "quota-cleared", role=role, profile=profile)
-    return True
+    return profile
 
 
 def checkout_revision(repo, pins):
@@ -702,13 +721,43 @@ def checkout_revision(repo, pins):
     return pins[repo]
 
 
-def checkout(args, repo, revision, unit):
+def replication_sample(rows):
+    by_repo = defaultdict(list)
+    for row in rows:
+        by_repo[row["repo"]].append(row)
+    chosen = set()
+    for repo, members in by_repo.items():
+        ranked = sorted(members, key=lambda row: hashlib.sha256(
+            f"{REPLICATION_SALT}\0{repo}\0{row['id']}".encode()).hexdigest())
+        count = max(1, int(len(members) * REPLICATION_SHARE + 0.5))
+        chosen.update((repo, row["id"]) for row in ranked[:count])
+    return [row for row in rows if (row["repo"], row["id"]) in chosen]
+
+
+def source_clone(args, repo):
     if repo == "mjolnir":
-        source = args.mjolnir_clone
-    elif repo == "bifrost-dev":
-        source = args.bifrost_clone
-    else:
-        source = args.check_clones / repo.replace("/", "_")
+        return args.mjolnir_clone
+    if repo == "bifrost-dev":
+        return args.bifrost_clone
+    return args.check_clones / repo.replace("/", "_")
+
+
+# mj resolves a bundle's local repository to that clone's remote and drops a bundle that
+# duplicates an existing project's remote, so these repos launch from the project bundles that
+# already existed for BrokkAi/mjolnir and BrokkAi/bifrost-dev (one GitHub repository each).
+EXISTING_BUNDLES = {"mjolnir": "mjolnir", "bifrost-dev": "bifrost-history"}
+
+
+def census_bundle(repo):
+    """The mj bundle a container session of this repo starts from: one repository, started with
+    --at <pin> --no-later-history so the session gets only the pinned history. Outside repos use
+    the rql-census-* entries added to config.toml with the user's approval (mj has no command that
+    creates a bundle), each naming the clone source_clone gives."""
+    return EXISTING_BUNDLES.get(repo) or f"rql-census-{repo.replace('/', '-')}"
+
+
+def checkout(args, repo, revision, unit):
+    source = source_clone(args, repo)
     if git(source, "rev-parse", "--is-shallow-repository").strip() != b"false":
         raise ValueError(f"{source}: full Git history is required")
 
@@ -738,13 +787,22 @@ def run_turn(sid, prompt, phase, title):
     while True:
         # mj wait exits nonzero with a structured "timeout" outcome when its poll expires, and
         # driver.mj raises on any nonzero exit, so decode the JSON here before deciding.
-        result = subprocess.run([str(driver.MJX), "wait", "--session", sid, "--turn", str(response["turn_id"]),
-                                 "--return-on-input", "--timeout", "1200", "--json"],
-                                capture_output=True, timeout=1230)
+        try:
+            result = subprocess.run([str(driver.MJX), "wait", "--session", sid, "--turn", str(response["turn_id"]),
+                                     "--return-on-input", "--timeout", "1200", "--json"],
+                                    capture_output=True, timeout=1230)
+        except subprocess.TimeoutExpired:
+            # The wait process itself hung: the outcome is unknown, not a failure of the accepted
+            # turn, so read the same turn again after a pause.
+            print(f"{title}: mj wait gave no answer; waiting again", file=sys.stderr)
+            time.sleep(60)
+            continue
         try:
             waited = json.loads(result.stdout)
         except ValueError:
-            raise RuntimeError(f"{title}: mj wait: {result.stderr.decode(errors='replace')[-1500:]}") from None
+            # No structured answer: a definitive CLI error (destroyed session, refused request).
+            # Surface it instead of retrying.
+            raise RuntimeError(f"{title}: mj wait failed: {result.stderr.decode(errors='replace')[-1500:]}") from None
         if waited.get("outcome") == "timeout":
             continue
         if result.returncode:
@@ -779,9 +837,33 @@ def fetch_output(sid, path):
     raise RuntimeError(problem)
 
 
+def suspend_session(sid):
+    """Ask mj to suspend the session and wait for it to confirm. Returns None once it is
+    suspended, or what went wrong. There is no retry: mj gives the same "retry suspension"
+    guidance for transient and persistent causes, so run_batch leaves a failed suspension for the
+    operator and the run goes on, rather than blocking later batches on it."""
+    try:
+        driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+        deadline, delay = time.monotonic() + 900, 1
+        while True:
+            session = driver.session(sid)
+            # mj can report a session suspended while its deferred target cleanup failed, so the
+            # error is read first: a suspension counts only when it is also error-free.
+            if session.get("error") is not None:
+                return session["error"]
+            if session["lifecycle"] == "suspended":
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return f"suspension did not complete in 15 minutes: lifecycle is {session['lifecycle']}"
+            time.sleep(min(delay, remaining))
+            delay = min(2 * delay, 30)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+        return str(error)
+
+
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     _, model, _ = ROLES[role]
-    profile = role_profile(args, role)
     ids = [item["id"] for item in batch]
     if not args.work_dir.is_absolute():
         raise ValueError("--work-dir must be absolute")
@@ -806,17 +888,24 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         save(inputs / "batch.json", {"labeller": role, "output": "labels.jsonl", "items": batch})
         prompt = unit / "prompt.txt"
         prompt.write_text(LABEL_PROMPT.format(role=role), encoding="utf-8")
-        quota(args, role)
+        profile = quota(args, role)
         tag = hashlib.sha256(unit.name.encode()).hexdigest()[:8]
         title = f"RQL census {role} {repo} {tag}"
         log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
             ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
         launch_requested = True
-        sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
-                        "--project-directory", work,
+        if args.target == "localhost":
+            project = ("--project-directory", work)
+        else:
+            # A container target takes a bundle. --no-later-history gives the session the
+            # history up to the pin and nothing later: no later commits, branches, tags or origin.
+            project = ("--bundle", census_bundle(repo), "--at", revision,
+                       "--no-later-history", "--base", revision)
+        sid = driver.mj("new", "--workspace", args.workspace, "--target", args.target, *project,
                         "--profile", profile, "--effort", "high",
                         "--review", "off", "--no-project-memory", "--no-github-events",
-                        "--no-github-credentials", "--subagents", "none", "--title", title,
+                        "--no-github-credentials", "--subagents", "none", "--oracle", "disabled",
+                        "--title", title,
                         timeout=900)["session_id"]
     except BaseException as error:
         if launch_requested:
@@ -900,20 +989,19 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     finally:
         if not recover_output:
             # The host unit retains the input and output evidence after suspension.
-            try:
-                driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
-                waited = driver.mj("wait", "--session", sid, "--timeout", 900, timeout=930)
-                session = waited["session"]
-                if (waited["outcome"] != "stopped" or session["lifecycle"] != "suspended"
-                        or session.get("error") is not None):
-                    raise RuntimeError(f"{title}: suspension did not complete: {waited}")
-            except Exception as error:
-                log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
-                raise
-            # Suspension is confirmed, whether the batch succeeded or failed, so no worker can
-            # still need the checkout. Keep the evidence beside it and release the full clone.
-            # A session left for fetch recovery keeps its checkout.
-            shutil.rmtree(unit / "repo")
+            problem = suspend_session(sid)
+            if problem is None:
+                # Suspension is confirmed, whether the batch succeeded or failed, so no worker can
+                # still need the checkout. Keep the evidence beside it and release the full clone.
+                # A session left for fetch recovery keeps its checkout.
+                shutil.rmtree(unit / "repo")
+            else:
+                # The batch's labels are already saved. The operator owns this session from here:
+                # suspend it by hand, then remove the checkout. Later batches still run.
+                log(args.labels_dir, "suspend-failed", title=title, session=sid, unit=str(unit), error=problem)
+                print(f"suspension of {sid} ({title}) did not finish: {problem}. Suspend it by hand, "
+                      f"then remove {unit / 'repo'}.", file=sys.stderr, flush=True)
+                args.suspend_failures.append(sid)
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
@@ -921,7 +1009,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=("test", "development"))
     parser.add_argument("--labeller", choices=ROLES, required=False)
-    parser.add_argument("--profile", help="run this labeller on another profile of the same model family")
+    parser.add_argument("--profile", help="run this labeller on another allotted profile of the same model family")
+    parser.add_argument("--target", help="mj target (primary: localhost; replication: only "
+                        f"{REPLICATION_TARGET}); a container target starts each session from the "
+                        "repo's census bundle")
     parser.add_argument("--repo", help="run only this repo, e.g. 1jehuang/jcode")
     parser.add_argument("--limit", type=int, help="take only the first N selected items, before applying resume")
     parser.add_argument("--batch-size", type=int, default=5)
@@ -934,12 +1025,19 @@ def main():
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=RUST / "bifrost-src")
     args = parser.parse_args()
+    args.suspend_failures = []
     # Git runs these clones from other working directories, so make every clone path absolute.
     for name in ("check_clones", "mjolnir_clone", "bifrost_clone", "work_dir"):
         if getattr(args, name, None) is not None:
             setattr(args, name, getattr(args, name).resolve())
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
+    if args.labeller == "replication":
+        args.target = args.target or REPLICATION_TARGET
+        if args.target != REPLICATION_TARGET:
+            parser.error(f"replication runs only on the approved isolated target {REPLICATION_TARGET}")
+    else:
+        args.target = args.target or "localhost"
     if not args.inspect and (not args.labeller or (not args.split and not args.check_quota)):
         parser.error("choose --labeller and --split, or use --inspect")
     items, pins, unconfirmed_dev = item_sets()
@@ -966,7 +1064,10 @@ def main():
         log(args.labels_dir, "cohort", **summary)
         if args.check_quota:
             return 0 if quota(args, args.labeller) else 1
-        selected = [labeller_item(row, args.split) for row in items[args.split]
+        rows = items[args.split]
+        if args.labeller == "replication":
+            rows = replication_sample(rows)
+        selected = [labeller_item(row, args.split) for row in rows
                     if args.repo is None or args.repo == row["repo"]][:args.limit]
         if not selected:
             parser.error("no items match this selection")
@@ -995,8 +1096,11 @@ def main():
         if unresolved:
             print(f"{len(unresolved)} selected items have no valid label: {', '.join(unresolved[:20])}",
                   file=sys.stderr)
-            return 1
-        return 0
+        # Each failed suspension was reported when it happened; the run's status reflects them too.
+        if args.suspend_failures:
+            print(f"{len(args.suspend_failures)} sessions need suspending by hand: "
+                  f"{', '.join(args.suspend_failures)}", file=sys.stderr)
+        return 1 if unresolved or args.suspend_failures else 0
 
 
 if __name__ == "__main__":

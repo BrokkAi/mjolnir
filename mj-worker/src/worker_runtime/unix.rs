@@ -1919,6 +1919,7 @@ async fn prepare_and_start_harness(
                             subtle_subagents,
                         },
                         review_tools,
+                        managed_subagent,
                     )?;
                     // The staged home holds the configuration Codex runs
                     // with, overlay included. An unreadable one fails startup
@@ -1954,6 +1955,17 @@ async fn prepare_and_start_harness(
             let role = subagent_role;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
+            if managed_subagent {
+                // Marketplace refreshes on every child start fetch from Git or
+                // HTTP sources; the child's staged plugins are copied from
+                // the person's profile, which keeps refreshing them. The same
+                // switch stops Claude Code's own updater, which the pinned
+                // managed install does not use.
+                config
+                    .environment
+                    .entry("DISABLE_AUTOUPDATER".into())
+                    .or_insert_with(|| "1".into());
+            }
             // `config.environment` keeps only overrides; the login shell's
             // HOME, which the harness inherits, is in the base environment.
             let user_home = config
@@ -1983,6 +1995,13 @@ async fn prepare_and_start_harness(
                         &home,
                         user_home.as_deref(),
                     )?;
+                    if managed_subagent {
+                        super::subagents::configure_claude_subagent_settings(
+                            &root,
+                            &session_id,
+                            &home,
+                        )?;
+                    }
                     Ok((registered, mailbox_hook_available))
                 })
                 .await?;
