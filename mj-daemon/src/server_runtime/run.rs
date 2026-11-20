@@ -367,8 +367,15 @@ pub(crate) async fn run_server(
                 }
             };
         }
+        let mut publish_startup_capture = true;
         'control: loop {
             project_sources.synchronize(&controller);
+            // Project tails from the startup capture before the phone task can
+            // wait on an unrelated runtime or quota update.
+            if publish_startup_capture {
+                publish_startup_capture = false;
+                publish_snapshot!('control, revision);
+            }
             tokio::select! {
                 _ = termination.cancelled() => break,
                 request = background_task_stop_rx.recv(), if background_task_stop_open => {
