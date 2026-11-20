@@ -7157,9 +7157,18 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     let relay = DurableRelay::open(temp.path(), SESSION, "after-ack").unwrap();
     let recovered = evidence(&relay);
     assert_eq!(recovered.user_prompt_tail, expected.user_prompt_tail);
-    assert_eq!(recovered.assistant_text_tail, expected.assistant_text_tail);
+    assert!(recovered.assistant_text_tail.is_empty());
     assert!(!recovered.user_prompt_tail.is_empty());
-    assert!(!recovered.assistant_text_tail.is_empty());
+    assert!(
+        relay
+            .snapshot
+            .authorization_context()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant"
+                && message.text == expected.assistant_text_tail)
+    );
     assert!(
         !relay
             .turn_context()
@@ -7324,11 +7333,15 @@ fn mailbox_reopen_keeps_latest_instructions_without_the_previous_reply() {
     assert!(matches!(wake[0].command, RelayCommand::MailboxWake { .. }));
     assert!(evidence(&relay).assistant_text_tail.is_empty());
     drop(relay);
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-before-output").unwrap();
+    let relay = DurableRelay::open(temp.path(), SESSION, "mailbox-before-output").unwrap();
     assert_eq!(
         evidence(&relay).user_prompt_tail,
         "Keep working under these instructions"
     );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    // Hard-won: 32f7cb9: reopening with recovery still queued revived the old answer.
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-recovery-queued").unwrap();
     assert!(evidence(&relay).assistant_text_tail.is_empty());
     relay
         .record_observation(RelayObservation::SessionConfigured {
@@ -7365,6 +7378,26 @@ fn mailbox_reopen_keeps_latest_instructions_without_the_previous_reply() {
         evidence(&relay).user_prompt_tail,
         "Keep working under these instructions"
     );
+    // Hard-won: 32f7cb9: authorization history reopened narration closed by a thought.
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_thought_chunk", "content":{"type":"text","text":"thinking"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-after-thought").unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"new reply"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(evidence(&relay).assistant_text_tail, "new reply");
 }
 
 // Hard-won: 31d6d4489: ACK and a second running restart lost the confirmed correction.
@@ -7467,9 +7500,16 @@ fn restart_continuation_preserves_confirmed_steering_context() {
         drop(relay);
         relay = DurableRelay::open(temp.path(), SESSION, "repeated-after-ack").unwrap();
         assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
-        assert_eq!(
-            evidence(&relay).assistant_text_tail,
-            "Work under the correction"
+        assert!(evidence(&relay).assistant_text_tail.is_empty());
+        assert!(
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant"
+                    && message.text == "Work under the correction")
         );
         relay
             .record_observation(RelayObservation::SessionConfigured {
@@ -7482,9 +7522,16 @@ fn restart_continuation_preserves_confirmed_steering_context() {
             &recovery[0].command_id
         ));
         assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
-        assert_eq!(
-            evidence(&relay).assistant_text_tail,
-            "Work under the correction"
+        assert!(evidence(&relay).assistant_text_tail.is_empty());
+        assert!(
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant"
+                    && message.text == "Work under the correction")
         );
     }
 }
