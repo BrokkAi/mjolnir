@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -30,7 +31,7 @@ def draw(rows, count, label):
     return rows[:count]
 
 
-def refresh_eligible(eligible_path):
+def refresh_eligible():
     """Write every eligible label (confirmed relation bugs in the pilot repos) from ONE read of the
     live label file, parsed with the shared reader's record-boundary rules, so labels, line numbers
     and the digest all describe the same bytes."""
@@ -59,7 +60,7 @@ def refresh_eligible(eligible_path):
         rows.append({"repo": repo, "id": str(item_id), "intro": item["intro_commit"], "base": item["base_commit"],
                      "label_line": line_numbers[(repo, item_id)], "label": label,
                      "source_sha256": hashlib.sha256(data).hexdigest()})
-    eligible_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
 
 
 def enumerate_records(path):
@@ -82,11 +83,21 @@ def main():
                              "working copy of the plan must match it, so later commits don't change the output")
     args = parser.parse_args()
 
+    # Validate the plan revision before anything is computed or written, so a failed re-freeze
+    # can't leave new inputs beside an old manifest.
+    plan_path = "brief/PLAN-rql-census.md"
+    plan_commit = subprocess.check_output(["git", "rev-parse", "--verify", args.plan_commit + "^{commit}"],
+                                          cwd=ROOT, text=True).strip()
+    frozen_plan = subprocess.check_output(["git", "show", f"{plan_commit}:.agents/evals/review-arms/{plan_path}"],
+                                          cwd=ROOT)
+    if frozen_plan != (REVIEW_ARMS / plan_path).read_bytes():
+        raise SystemExit(f"{plan_path} differs from its version at {plan_commit}: re-freeze under the new plan")
+
     eligible_path = Path(__file__).resolve().parent / "eligible-labels.jsonl"
-    if args.refresh_eligible:
-        refresh_eligible(eligible_path)
-    # The draw reads only this committed file, so it reproduces from a clean checkout.
-    eligible = [json.loads(line) for line in eligible_path.read_text().splitlines() if line.strip()]
+    # The draw reads only the committed eligible file, so it reproduces from a clean checkout;
+    # --refresh-eligible rebuilds that file's text in memory, published only if the freeze succeeds.
+    eligible_text = refresh_eligible() if args.refresh_eligible else eligible_path.read_text()
+    eligible = [json.loads(line) for line in eligible_text.splitlines() if line.strip()]
     labels = {(row["label"]["repo"], row["label"]["id"]): row["label"] for row in eligible}
     candidates = [{key: row[key] for key in ("repo", "id", "intro", "base", "label_line")} for row in eligible]
 
@@ -130,26 +141,18 @@ def main():
     # The readout reads census facts and sites only from this frozen copy of the chosen diffs'
     # current labels, so a later repair of the label file can't change a replayed readout.
     snapshot_path = args.out.parent / "labels-snapshot.jsonl"
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text("".join(
+    snapshot_text = ("".join(
         json.dumps(labels[(row["repo"], row["id"])], sort_keys=True) + "\n"
         for row in sorted(chosen, key=lambda r: (r["repo"], r["id"]))))
 
     census_root = census.CENSUS
     steps_path = census_root / "menu-steps.md"
-    plan_path = "brief/PLAN-rql-census.md"
-    plan_commit = subprocess.check_output(["git", "rev-parse", "--verify", args.plan_commit + "^{commit}"],
-                                          cwd=ROOT, text=True).strip()
-    frozen_plan = subprocess.check_output(["git", "show", f"{plan_commit}:.agents/evals/review-arms/{plan_path}"],
-                                          cwd=ROOT)
-    if frozen_plan != (REVIEW_ARMS / plan_path).read_bytes():
-        raise SystemExit(f"{plan_path} differs from its version at {plan_commit}: re-freeze under the new plan")
     pool_bytes = json.dumps(pool, sort_keys=True, separators=(",", ":")).encode()
     manifest = {"version": 1, "seed": SEED, "plan_commit": plan_commit,
-                "inputs": {"eligible_labels_sha256": sha(eligible_path), "menu_sha256": sha(census_root / "menu.json"),
+                "inputs": {"eligible_labels_sha256": hashlib.sha256(eligible_text.encode()).hexdigest(), "menu_sha256": sha(census_root / "menu.json"),
                            "catalogue_sha256": sha(census_root / "rql-documented-steps.md"),
                            "steps_sha256": sha(steps_path) if steps_path.exists() else None,
-                           "labels_snapshot_sha256": sha(snapshot_path),
+                           "labels_snapshot_sha256": hashlib.sha256(snapshot_text.encode()).hexdigest(),
                            "plan_sha256": hashlib.sha256(frozen_plan).hexdigest()},
                 "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high",
                            "engine": "fable/high", "judge": "fable/high"},
@@ -158,8 +161,14 @@ def main():
                 "duplicates": duplicates, "diffs": diffs, "jobs": jobs}
     if args.frozen_at:
         manifest["frozen_at"] = args.frozen_at
+    # Publish the freeze only now that everything validated: each file goes to a temp name and is
+    # renamed into place, so no reader sees a half-written file.
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+    for path, text in ((eligible_path, eligible_text), (snapshot_path, snapshot_text),
+                       (args.out, json.dumps(manifest, sort_keys=True, indent=2) + "\n")):
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(text)
+        os.replace(temp, path)
     print(json.dumps({"diffs": len(diffs), "writer_jobs": sum(j["kind"] == "writer" for j in jobs),
                       "reviewer_jobs": sum(j["kind"] == "reviewer" for j in jobs),
                       "chosen": {repo: [r["id"] for r in sorted(chosen, key=lambda x: (x["repo"], x["id"])) if r["repo"] == repo]
