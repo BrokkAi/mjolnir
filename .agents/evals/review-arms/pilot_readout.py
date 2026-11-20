@@ -11,7 +11,6 @@ from pilot_judge import (DEFAULT_MANIFEST, DEFAULT_ROOT, JUDGMENT_FIELDS, KEY_PA
                          group_jobs, isolation_evidence, isolation_report, load, load_snapshot, read_egress, records,
                          run_artifact, save, sha)
 from pilot_lock import pilot_lock
-from rql_mock.engine.evidence import reset_retirement_summary
 
 ARMS = ("N", "G", "R", "R-loc")
 CONTRASTS = (("R", "G"), ("R-loc", "R"))
@@ -289,8 +288,6 @@ def readout(manifest, judgments, deliveries, snapshot, *, isolation=None, stale_
         "hand_checked": checked_summary,
         "judge_hand_check_agreement": agreement(entries, judged, checked, ids, facts),
         "isolation": isolation if isolation is not None else isolation_report(),
-        "reset_retirements": reset_retirement_summary(
-            event.get("provenance") or {} for events in deliveries.values() for event in events),
         "paired_contrasts": contrasts,
         "contrasts_not_estimated": {
             "ceiling_review": ["O-fact - O-loc", "O-fact - O-base", "O-loc - O-base"],

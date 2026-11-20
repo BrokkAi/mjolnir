@@ -78,8 +78,6 @@ def setup(root, manifest, snapshot_bytes, defects):
             event = {"session": session_id, "status": "ok", "delivered": True, "page": 2, "latency_ms": 3, "payload": {"rows": [
                 {"sites": [{"path": "out.rs", "start_line": 2, "end_line": 2}]},
                 {"sites": [{"path": "out.rs", "start_line": 3, "end_line": 3}]},
-            ]}, "provenance": {"steps": ["contract-cases"], "reset_retirements": [
-                {"session": "engine-evidence", "reasons": ["entry remains after cleanup: /tmp/leftover"]},
             ]}}
             (path.parent / f"queries-{session_id}.jsonl").write_text(json.dumps(event) + "\n")
     return j.prepare(root, manifest, snapshot, defects, manifest_sha256=j.sha(manifest_path.read_bytes()))
@@ -436,9 +434,6 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(agreement["reviewer"]["recovered_facts"]["rate"], 39 / 40)
         self.assertEqual(agreement["writer"]["whole_record"]["rate"], 1)
         self.assertEqual(result["stale_diffs"], [])
-        self.assertEqual(result["reset_retirements"], {"by_step": {
-            "contract-cases": {"count": 1, "reasons": {"entry remains after cleanup: /tmp/leftover": 1}},
-        }})
         alternate_runs = self.root / "alternate" / "runs"
         copytree(self.root / "runs", alternate_runs)
 

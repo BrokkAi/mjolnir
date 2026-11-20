@@ -10,7 +10,6 @@ from random import Random
 
 from census_label import CENSUS
 from .engine import parse
-from .engine.evidence import reset_retirement_summary
 from .engine.grammar import MENU
 from .engine.validation import canonical
 
@@ -417,9 +416,6 @@ def gate_report(manifest_hash, served, queries, records, seed):
              for step in served}
     return {"manifest_sha256": manifest_hash, "served_steps": served,
             "steps": steps, "prescience_pooled": pooled,
-            "reset_retirements": reset_retirement_summary(
-                answer.get("provenance", {}) for record in records.values()
-                for answer in (record.get("engine_answer"), record.get("fresh_answer")) if answer),
             "documented": {"reported_only": True, "random_n": len(documented), "metrics": docs,
                            "reasons": bar_failures("documented pooled random", docs),
                            "prescience": "not_estimable",

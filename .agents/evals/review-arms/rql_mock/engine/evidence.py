@@ -1,5 +1,4 @@
 """Host-side evidence that must survive destruction of the engine workspace."""
-from collections import Counter, defaultdict
 import hashlib
 import json
 import os
@@ -26,19 +25,6 @@ def save_bytes(path, data):
 
 def save_json(path, value):
     save_bytes(path, (json.dumps(value, sort_keys=True, allow_nan=False) + "\n").encode("utf-8"))
-
-
-def reset_retirement_summary(provenances):
-    by_step = defaultdict(dict)
-    for provenance in provenances:
-        for failure in provenance.get("reset_retirements", ()):
-            for step in provenance.get("steps") or ("documented",):
-                by_step[step][failure["session"]] = set(failure["reasons"])
-    return {"by_step": {
-        step: {"count": len(sessions),
-               "reasons": dict(sorted(Counter(reason for reasons in sessions.values() for reason in reasons).items()))}
-        for step, sessions in sorted(by_step.items())
-    }}
 
 
 def file_digests(directory):

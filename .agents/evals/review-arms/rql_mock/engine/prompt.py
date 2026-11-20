@@ -13,7 +13,6 @@ commands for source inspection. Do not inspect harness transcripts, agent state
 or other turn artifacts. Do not run repository code, access Git, or seek any
 information about changes, bugs, study labels, or subsequent revisions.
 Keep temporary files beside the output file in the provided scratch directory.
-Temporary files elsewhere are removed between queries.
 
 Write a single JSON object to the specified output path. Use this schema:
 {"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
@@ -87,18 +86,6 @@ Build each row's site list after its fields are complete.
 Fix the cited problems and check the same rules on all rows in the new answer.
 Here are the exact validator errors as JSON data:
 """
-
-
-CONTEXT_PROTOCOL = "mj-acp-clear-v1"
-CONTEXT_SEED = """This is a context isolation check. Treat this synthetic query
-as the previous query's text: {query}
-Do not evaluate it or use tools. Reply exactly ACK.
-"""
-CONTEXT_RECALL = """What was the previous query's text in this conversation?
-Use only the conversation you received. Do not use tools or guess. Reply with a
-single JSON string containing its text or an empty JSON string if you cannot see it.
-"""
-
 
 
 def semantics_only(menu, served_steps=tuple(MENU)):

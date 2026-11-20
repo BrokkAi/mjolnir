@@ -51,11 +51,6 @@ class Sampling(unittest.TestCase):
         served = ["value-transfers"]
         queries, fresh = sample(self.manifest, served, self.documents, self.eligible, lambda _: [("src/lib.rs", "definition", "s")])
         results = {q.key: BAD if q.step == "documented" else GOOD for q in queries}
-        query = next(q for q in queries if q.step == "value-transfers")
-        provenance = {"steps": ["value-transfers"], "reset_retirements": [
-            {"session": "evidence", "reasons": ["modified pre-existing entry: /tmp/baseline"]},
-        ]}
-        results[query.key] = {**GOOD, "engine_answer": {"provenance": provenance}}
         result = gate_report(self.digest, served, queries, results, self.manifest["seed"])
         self.assertEqual(result["manifest_sha256"], self.digest)
         self.assertEqual(result["served_steps"], served)
@@ -64,9 +59,6 @@ class Sampling(unittest.TestCase):
         self.assertEqual(result["documented"]["random_n"], 20)
         self.assertTrue(result["documented"]["reasons"])
         self.assertEqual(len(fresh), 20)
-        self.assertEqual(result["reset_retirements"], {"by_step": {
-            "value-transfers": {"count": 1, "reasons": {"modified pre-existing entry: /tmp/baseline": 1}},
-        }})
 
     def test_pooled_failure_keeps_the_independent_step_accuracy_verdicts(self):
         queries, _ = sample(self.manifest, self.served, self.documents, self.eligible,

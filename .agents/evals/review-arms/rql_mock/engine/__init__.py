@@ -10,10 +10,9 @@ import subprocess
 
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
-from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, PROMPT, REPAIR, semantics_only
-from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, TMP_ISOLATION_PROTOCOL, TMP_RESET_FAILURE,
-                     IsolationFailure, LaunchHeld,
-                     QuotaTurnFailure, SealedRunner, TurnFailure, has_tmp_baseline)
+from .prompt import PROMPT, REPAIR, semantics_only
+from .runner import (EFFORT, MODEL, QUERY_SESSION_PROTOCOL, RUN_ERRORS, SESSION_ID, DestroyUncertain,
+                     IsolationFailure, LaunchHeld, QuotaTurnFailure, SealedRunner, TurnFailure)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
 from .validation import canonical, ordered_rows, validate
 
@@ -65,7 +64,7 @@ def cache_key(commit, query, inputs):
 def input_hash(catalogue, menu, model_version, served_steps, menu_sha256):
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
                   canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, REPAIR,
-                  CONTEXT_PROTOCOL, CONTEXT_SEED, CONTEXT_RECALL, TMP_ISOLATION_PROTOCOL)
+                  QUERY_SESSION_PROTOCOL)
 
 
 def load(path):
@@ -101,10 +100,15 @@ def move_to_retired(directory):
     return retired, record
 
 
-def retire_active(directory, runner):
-    active = directory / "active"
-    runner.retire(active, load(active / "session.json"))
-    move_to_retired(directory)
+def finish_session(directory, runner, *, accept_answer=False):
+    retired, record = move_to_retired(directory)
+    try:
+        runner.retire(retired, record, require_clean_audit=accept_answer)
+    except RUN_ERRORS as error:
+        save_json(retired / "retirement-failure.json", {"session_id": record["session_id"], "reason": str(error)})
+        # A missing acknowledgement after capture and audit cannot invalidate the answer.
+        if accept_answer and not isinstance(error, DestroyUncertain):
+            raise
 
 
 def teardown(cache, runner):
@@ -147,43 +151,28 @@ class Engine:
                                                             served_steps, menu_sha256)}
 
     def session(self, commit, snapshot, record_path):
-        identity = {"commit": commit, **snapshot}
         runner = self.runner()
-        record = load(record_path) if record_path.exists() else None
-        if record is not None:
-            if any(record.get(key) != value for key, value in identity.items()):
-                raise RuntimeError(f"existing engine session belongs to a different snapshot: {record_path}")
-            if not record.get("session_id"):
-                raise RuntimeError(f"uncertain launch for {commit}; reconcile {record_path} before retrying")
-            active = record_path.parent
-            baseline = has_tmp_baseline(active, record["session_id"])
-            if baseline and not (active / TMP_RESET_FAILURE).exists():
-                runner.capture_pending(record["session_id"], active)
-            if not baseline or (active / TMP_RESET_FAILURE).exists():
-                retire_active(active.parent, runner)
-                record = None
-        if record is None:
-            record_path.parent.mkdir(parents=True, exist_ok=True)
-            # An interrupted launch can leave a live engine even if mj never
-            # returned its ID. Refuse duplicate engines until it is reconciled.
-            save(record_path, identity)
-            try:
-                sid = runner.start(snapshot, commit)
-            except LaunchHeld:
-                record_path.unlink()
-                raise
-            record = {**identity, "session_id": sid, "instance": runner.instance,
-                      "model_version": self.model_version}
-            save(record_path, record)
-        if not record.get("prepared"):
-            runner.prepare(record["session_id"], snapshot, record_path.parent)
-            save(record_path, {**record, "prepared": True})
-        return runner, record["session_id"]
+        if record_path.exists():
+            # An interrupted query or a session left by the old protocol is never reused.
+            finish_session(record_path.parent.parent, runner)
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        identity = {"commit": commit, **snapshot}
+        # An interrupted launch may leave an engine without a recorded ID.
+        # Keep the intent until it can be reconciled.
+        save_json(record_path, identity)
+        try:
+            sid = runner.start(snapshot, commit)
+        except LaunchHeld:
+            record_path.unlink()
+            raise
+        save_json(record_path, {**identity, "session_id": sid, "instance": runner.instance,
+                                "model_version": self.model_version})
+        return runner, sid
 
     def answer(self, commit, query_text, *, fresh=False, expected_inputs=None):
         provenance = {"model": MODEL, "effort": EFFORT, "steps": [], "turns": [],
                       "validation_retries": 0, "session": None, "turn": None, "tokens": {},
-                      "fresh": fresh, "context_id": None, "context_probe": None}
+                      "fresh": fresh, "context_id": None}
 
         def response(status, rows=(), coverage=None, message=None):
             result = {"status": status, "rows": list(rows), "total": len(rows), "provenance": provenance,
@@ -226,64 +215,46 @@ class Engine:
                         provenance["tokens"][counter] = previous + tokens
 
                 provenance["retired_sessions"] = []
-                provenance["reset_retirements"] = []
-                errors = []
-                while True:
+                for attempt in range(2):
                     runner, sid = self.session(commit, snapshot, active / "session.json")
                     provenance["session"] = sid
-                    probe = runner.context_probe(sid, active)
-                    provenance["context_probe"] = probe
-                    if probe["status"] != "passed":
-                        raise RuntimeError(probe["message"])
-                    while True:
-                        try:
+                    valid = False
+                    try:
+                        runner.prepare(sid, snapshot, active)
+                        errors = []
+                        while True:
                             output, record, errors = runner.turn(
                                 sid, query, self.catalogue, self.menu, errors, active)
-                        except IsolationFailure as error:
-                            add_turn(error.record)
-                            save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
-                            retired, session_record = move_to_retired(directory)
-                            provenance["retired_sessions"].append({"session": sid, "context_probe": probe})
-                            runner.retire(retired, session_record)
-                            if len(provenance["retired_sessions"]) > 1:
-                                raise
-                            errors = []
-                            break
-                        except TurnFailure as error:
-                            add_turn(error.record)
+                            add_turn(record)
+                            if not errors:
+                                rows, coverage, errors = validate(output, read_blob)
+                            evidence = active / "answers" / record["context_id"]
+                            save_json(evidence / "validation.json", {"errors": errors})
+                            if not errors:
+                                result = response("ok", ordered_rows(rows), coverage)
+                                save_json(evidence / "result.json", result)
+                                valid = True
+                                break
+                            if provenance["validation_retries"]:
+                                return response("engine_error", message="; ".join(errors))
+                            provenance["validation_retries"] += 1
+                    except IsolationFailure as error:
+                        add_turn(error.record)
+                        save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
+                        provenance["retired_sessions"].append({"session": sid, "reason": str(error)})
+                        if attempt:
                             raise
-                        add_turn(record)
-                        if not errors:
-                            rows, coverage, errors = validate(output, read_blob)
-                        evidence = active / "answers" / record["context_id"]
-                        save_json(evidence / "validation.json", {"errors": errors})
-                        reset_failed = (active / TMP_RESET_FAILURE).is_file()
-                        if reset_failed:
-                            provenance["reset_retirements"].append(load(active / TMP_RESET_FAILURE))
-                        if not errors:
-                            result = response("ok", ordered_rows(rows), coverage)
-                            save_json(evidence / "result.json", result)
-                        if reset_failed:
-                            try:
-                                retire_active(directory, runner)
-                            except RUN_ERRORS as error:
-                                save_json(active / "tmp-retirement-error.json", {"reason": str(error)})
-                                if errors:
-                                    raise
-                        if not errors:
-                            if fresh:
-                                context = provenance["context_id"]
-                                if not context:
-                                    raise RuntimeError("fresh engine answer lacks a confirmed context id")
-                                entry = directory / "stability" / key / (context + ".json")
-                                entry.parent.mkdir(parents=True, exist_ok=True)
-                            save(entry, result)
-                            return result
-                        if provenance["validation_retries"]:
-                            return response("engine_error", message="; ".join(errors))
-                        provenance["validation_retries"] += 1
-                        if reset_failed:
-                            break
+                    except TurnFailure as error:
+                        add_turn(error.record)
+                        raise
+                    finally:
+                        finish_session(directory, runner, accept_answer=valid)
+                    if valid:
+                        if fresh:
+                            entry = directory / "stability" / key / (record["context_id"] + ".json")
+                            entry.parent.mkdir(parents=True, exist_ok=True)
+                        save(entry, result)
+                        return result
         except (LaunchHeld, QuotaTurnFailure) as error:
             return response("quota_hold", message=str(error))
         except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
