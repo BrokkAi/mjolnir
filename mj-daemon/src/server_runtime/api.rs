@@ -430,7 +430,7 @@ impl ExportRuntime for RuntimeState {
         &self,
         session_id: String,
     ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { self.checkpoint_session_now(&session_id).await })
+        Box::pin(async move { self.checkpoint_for_bundle_export(&session_id).await })
     }
 
     fn spawn_subagent(

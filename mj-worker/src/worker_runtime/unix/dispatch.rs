@@ -1030,7 +1030,16 @@ pub(crate) fn record_runtime_event_with_facts(
                 message: "ACP initialized without capability metadata".into(),
             })?;
         }
-        RuntimeEvent::ContextClearing { .. } => {}
+        RuntimeEvent::BridgeRetired {
+            terminal_connection_id,
+        } => {
+            relay.retire_agent_terminal_connection(&terminal_connection_id)?;
+        }
+        RuntimeEvent::ContextClearing { .. } => {
+            // The previous bridge has exited, including when opening the new
+            // conversation fails and /clear rolls back to its native session.
+            relay.retire_harness_process_state()?;
+        }
         RuntimeEvent::ContextCleared {
             request_id,
             native_session_id,
@@ -1071,6 +1080,12 @@ pub(crate) fn record_runtime_event_with_facts(
         }
         RuntimeEvent::NativeAgent { event } => {
             relay.record_observation(RelayObservation::NativeAgent { event })?;
+        }
+        RuntimeEvent::NativeGoalResumeSent { resume_id, goal } => {
+            relay.native_goal_resume_sent(resume_id, goal);
+        }
+        RuntimeEvent::NativeGoalResumeRejected { resume_id } => {
+            relay.native_goal_resume_rejected(resume_id);
         }
         RuntimeEvent::SessionUpdate { update } => {
             let typed = serde_json::from_value::<SessionUpdate>(update).map_err(|error| {
@@ -1240,7 +1255,7 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::NativeAgent {
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
             relay.record_observation(RelayObservation::Warning {
                 message: message.clone(),
             })?;
@@ -1266,7 +1281,6 @@ pub(crate) fn record_runtime_event_with_facts(
             exit_code,
             signal,
         } => {
-            relay.agent_terminal_closed(&terminal_id)?;
             // Cap here rather than letting `clamp_observation` fire: that
             // keeps the head of a string, and a terminal's tail is what
             // says how the command ended.
@@ -1275,26 +1289,27 @@ pub(crate) fn record_runtime_event_with_facts(
                 mj_core::relay::TERMINAL_JOURNAL_OUTPUT_BYTES,
             );
             relay.record_observation(RelayObservation::TerminalOutput {
-                terminal_id,
+                terminal_id: terminal_id.clone(),
                 output,
                 truncated,
                 exit_code,
                 signal,
             })?;
+            relay.agent_terminal_closed(&terminal_id)?;
+        }
+        RuntimeEvent::TerminalStartFailed { terminal_id } => {
+            relay.agent_terminal_start_failed(&terminal_id)?;
         }
         RuntimeEvent::TerminalStarted {
             terminal_id,
             command,
             started_at_ms,
         } => {
-            relay.agent_terminal_started(mj_core::relay::ActiveAgentTerminal {
-                terminal_id: terminal_id.clone(),
-                command: command.clone(),
+            relay.admit_agent_terminal(mj_core::relay::ActiveAgentTerminal {
+                terminal_id,
+                command,
                 started_at_ms,
             })?;
-            relay.record_session_update(SessionUpdate::ToolCall(
-                crate::acp::fallback_terminal_tool_call(&terminal_id, command),
-            ))?;
         }
         RuntimeEvent::UserShellOutput {
             request_id,
@@ -1322,7 +1337,7 @@ pub(crate) fn record_runtime_event_with_facts(
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
             relay.clear_acp_readiness();
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
             relay.record_observation(RelayObservation::ElicitationsCleared)?;
             if relay.operational_state().execution != mj_core::relay::RelayExecutionState::Closed {
                 relay.record_observation(RelayObservation::Warning {

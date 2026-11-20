@@ -175,7 +175,7 @@ impl SubagentDispatch {
                 let report = entry.last_failure.as_ref() != Some(&cause);
                 entry.failures = entry.failures.saturating_add(1);
                 entry.last_failure = Some(cause);
-                let delay = crate::recovery::backoff_delay(
+                let delay = mj_controller::backoff::backoff_delay(
                     super::COMPLETION_RETRY_BASE,
                     super::COMPLETION_FAILURE_CAP,
                     entry.failures,
@@ -197,7 +197,7 @@ impl SubagentDispatch {
                 let report = entry.last_failure.as_ref() != Some(&cause);
                 entry.failures = entry.failures.saturating_add(1);
                 entry.last_failure = Some(cause);
-                let delay = crate::recovery::backoff_delay(
+                let delay = mj_controller::backoff::backoff_delay(
                     super::COMPLETION_RETRY_BASE,
                     super::COMPLETION_FAILURE_CAP,
                     entry.failures,
@@ -418,7 +418,7 @@ mod tests {
             let Phase::Delivery(_, at) = queue.entries[&id].phase else {
                 panic!("a failed delivery keeps its result for retry");
             };
-            let expected = crate::recovery::backoff_delay(
+            let expected = mj_controller::backoff::backoff_delay(
                 super::super::COMPLETION_RETRY_BASE,
                 super::super::COMPLETION_FAILURE_CAP,
                 failure,

@@ -843,6 +843,225 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Claim the worker and install its optional cut as Disconnected
+/// in one writer transaction. Ordinary attachment later owns all post-cut replay.
+pub async fn enqueue_adopted_session<G: Send + 'static>(
+    expected: SessionRecord,
+    cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
+    updated_at: String,
+    guard: G,
+) -> Result<AcceptedDatabaseWrite<SessionRecord, G>> {
+    enqueue_database_write("install adopted session", guard, move |connection| {
+        install_adopted_session_with(connection, expected, cut, updated_at)
+    })
+    .await
+}
+
+fn install_adopted_session_with(
+    connection: &mut Connection,
+    mut expected: SessionRecord,
+    cut: Option<(MaterializedSession, mj_core::relay::LiveSessionBaseline)>,
+    updated_at: String,
+) -> Result<SessionRecord> {
+    mj_core::test_hooks::reach_test_hook("adoption_install_write_accepted")?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?1)",
+        [&expected.workspace_id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        expected.workspace_id =
+            super::workspaces::create_or_get_workspace_with(&tx, "Recovered")?.id;
+    }
+    let locator = expected
+        .target
+        .as_deref()
+        .context("adoption has no locator")?;
+    for (id, target) in super::state_io::read_targets(&tx, None)? {
+        ensure!(
+            id == expected.id || !target.same_resource(locator),
+            "worker is already named by session {id}"
+        );
+    }
+    if let Some(current) = super::state_io::load_session_with(&tx, &expected.id)? {
+        ensure!(
+            current.state == SessionState::Disconnected
+                && current.native_session_id.is_none()
+                && current.target == expected.target,
+            "session {} changed before adoption install",
+            expected.id
+        );
+    } else {
+        validate_session_record(&expected)?;
+        insert_session(&tx, &expected)?;
+    }
+    if let Some((projection, baseline)) = &cut {
+        ensure!(
+            projection.session_id == expected.id,
+            "adoption cut belongs to another session"
+        );
+        super::materialized::install_live_session_baseline_with(&tx, projection, baseline)?;
+    }
+    tx.execute("UPDATE sessions SET state='disconnected', native_session_id=NULL, updated_at=?2, last_error=NULL WHERE session_id=?1", params![expected.id, updated_at])?;
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("adopted session disappeared")?;
+    tx.commit()?;
+    if cut
+        .as_ref()
+        .is_some_and(|(projection, _)| !projection.pending_elicitations.is_empty())
+    {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(current)
+}
+
+/// Publish only the worker that the atomic adoption install claimed. Ordinary
+/// catch-up runs without an install holder and may race a destroy or another attach.
+pub async fn enqueue_adoption_connected<G: Send + 'static>(
+    expected: SessionRecord,
+    native_session_id: Option<String>,
+    updated_at: String,
+    guard: G,
+) -> Result<AcceptedDatabaseWrite<SessionRecord, G>> {
+    enqueue_database_write("publish adopted connection", guard, move |connection| {
+        publish_adoption_connected_with(
+            connection,
+            &expected,
+            native_session_id.as_deref(),
+            &updated_at,
+        )
+    })
+    .await
+}
+
+fn publish_adoption_connected_with(
+    connection: &mut Connection,
+    expected: &SessionRecord,
+    native_session_id: Option<&str>,
+    updated_at: &str,
+) -> Result<SessionRecord> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("adopted session disappeared before attachment publication")?;
+    ensure!(
+        current.target == expected.target
+            && matches!(
+                current.state,
+                SessionState::Disconnected | SessionState::Running
+            ),
+        "adopted worker changed during attachment"
+    );
+    if current.state == SessionState::Disconnected {
+        ensure!(
+            current.native_session_id.is_none(),
+            "adoption attachment ownership changed"
+        );
+        mark_session_worker_connected_with(&tx, &expected.id, native_session_id, updated_at)?;
+    }
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("adopted session disappeared")?;
+    tx.commit()?;
+    Ok(current)
+}
+
+/// Refuse a legacy provisional adoption without restoring stale session edits.
+pub fn refuse_adoption_if_current(
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<SessionRecord> {
+    let expected = expected.clone();
+    let detail = detail.to_owned();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("refuse legacy adoption", move |connection| {
+        refuse_adoption_with(connection, &expected, &detail, &updated_at)
+    })
+}
+
+fn refuse_adoption_with(
+    connection: &mut Connection,
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<SessionRecord> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("provisional adoption record disappeared")?;
+    ensure!(
+        current.state == SessionState::Disconnected
+            && current.native_session_id.is_none()
+            && current.target == expected.target
+            && current.target_template_id == expected.target_template_id
+            && current.last_profile == expected.last_profile,
+        "adoption refusal ownership changed"
+    );
+    let previous_error = super::events::previous_session_error(&tx, &current.id)?;
+    current.target = None;
+    current.state = SessionState::Lost;
+    current.last_error = Some(match current.last_error {
+        Some(previous) => format!("{previous}\n{detail}"),
+        None => detail.to_owned(),
+    });
+    current.updated_at = updated_at.to_owned();
+    tx.execute(
+        "UPDATE sessions SET state=?2, last_error=?3, updated_at=?4 WHERE session_id=?1",
+        params![
+            current.id,
+            current.state.as_str(),
+            current.last_error,
+            current.updated_at
+        ],
+    )?;
+    super::events::record_session_fault_transition(&tx, &current, previous_error)?;
+    super::session_create::settle_create_intent(&tx, &current)?;
+    super::state_io::replace_targets(&tx, &current)?;
+    let current = super::state_io::load_session_with(&tx, &expected.id)?
+        .context("refused adoption record disappeared")?;
+    tx.commit()?;
+    Ok(current)
+}
+
+/// Record a failed adoption only while its disconnected resource owner is still
+/// current. A successful concurrent adoption must never be demoted by a loser.
+pub fn record_adoption_failure_if_current(
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<Option<SessionRecord>> {
+    let expected = expected.clone();
+    let detail = detail.to_owned();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("record adoption failure", move |_| {
+        record_adoption_failure_if_current_to(&database_path(), &expected, &detail, &updated_at)
+    })
+}
+
+pub(super) fn record_adoption_failure_if_current_to(
+    path: &Path,
+    expected: &SessionRecord,
+    detail: &str,
+    updated_at: &str,
+) -> Result<Option<SessionRecord>> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let Some(mut current) = super::state_io::load_session_with(&tx, &expected.id)? else {
+        return Ok(None);
+    };
+    if current.state == SessionState::Disconnected
+        && current.native_session_id.is_none()
+        && current.target == expected.target
+        && current.target_template_id == expected.target_template_id
+        && current.last_profile == expected.last_profile
+        && current.bundle_id == expected.bundle_id
+    {
+        current.last_error = Some(detail.to_owned());
+        current.updated_at = updated_at.to_owned();
+        update_lifecycle_fields(&tx, &current)?;
+    }
+    tx.commit()?;
+    Ok(Some(current))
+}
+
 /// Apply either a live preparation failure or a dead worker's startup failure
 /// only to the lifecycle state and revision that the caller observed.
 pub fn fail_unready_session(
@@ -1559,6 +1778,17 @@ pub(super) fn mark_session_worker_connected_to(
     }
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    mark_session_worker_connected_with(&tx, session_id, native_session_id, updated_at)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn mark_session_worker_connected_with(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    native_session_id: Option<&str>,
+    updated_at: &str,
+) -> Result<()> {
     let changed = tx.execute(
         "UPDATE sessions
          SET state = 'running',
@@ -1572,8 +1802,7 @@ pub(super) fn mark_session_worker_connected_to(
         bail!("unknown session {session_id}");
     }
     // The create commits in this write: nothing is left for a later daemon.
-    super::session_create::settle_create_intent_for_state(&tx, session_id, SessionState::Running)?;
-    tx.commit()?;
+    super::session_create::settle_create_intent_for_state(tx, session_id, SessionState::Running)?;
     Ok(())
 }
 
@@ -1801,185 +2030,6 @@ pub fn clear_session_draft_input_if_matches(session_id: &str, expected: &str) ->
     })
 }
 
-pub fn record_recovery_success(
-    session_id: &str,
-    native_session_id: &str,
-    checkpoint: &CheckpointMetadata,
-) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let native_session_id = native_session_id.to_owned();
-    let checkpoint = checkpoint.clone();
-    submit_database_write("record_recovery_success", move |_| {
-        record_recovery_success_to(
-            &database_path(),
-            &session_id,
-            &native_session_id,
-            &checkpoint,
-        )
-    })
-}
-
-pub(super) fn record_recovery_success_to(
-    path: &Path,
-    session_id: &str,
-    native_session_id: &str,
-    checkpoint: &CheckpointMetadata,
-) -> Result<()> {
-    let mut connection = open(path)?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
-        "UPDATE sessions
-         SET native_session_id = ?2, last_checkpoint_error = NULL
-         WHERE session_id = ?1",
-        params![session_id, native_session_id],
-    )?;
-    if changed != 1 {
-        bail!("unknown session {session_id}");
-    }
-    tx.execute(
-        "INSERT INTO session_checkpoints(
-             session_id, archive_path, sha256, created_at, event_frontier
-         ) VALUES (?1,?2,?3,?4,?5)
-         ON CONFLICT(session_id) DO UPDATE SET
-             archive_path = excluded.archive_path,
-             sha256 = excluded.sha256,
-             created_at = excluded.created_at,
-             event_frontier = excluded.event_frontier",
-        params![
-            session_id,
-            path_to_blob(&checkpoint.archive_path),
-            checkpoint.sha256,
-            checkpoint.created_at,
-            checkpoint.event_frontier,
-        ],
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
-pub fn record_recovery_success_if_current(
-    session_id: &str,
-    expected_target: &TargetLocator,
-    expected_checkpoint: Option<&CheckpointMetadata>,
-    native_session_id: &str,
-    checkpoint: &CheckpointMetadata,
-) -> Result<bool> {
-    let session_id = session_id.to_owned();
-    let expected_target = expected_target.clone();
-    let expected_checkpoint = expected_checkpoint.cloned();
-    let native_session_id = native_session_id.to_owned();
-    let checkpoint = checkpoint.clone();
-    submit_database_write("record_recovery_success_if_current", move |connection| {
-        record_recovery_success_if_current_with(
-            connection,
-            &session_id,
-            &expected_target,
-            expected_checkpoint.as_ref(),
-            &native_session_id,
-            &checkpoint,
-        )
-    })
-}
-
-fn record_recovery_success_if_current_with(
-    connection: &mut Connection,
-    session_id: &str,
-    expected_target: &TargetLocator,
-    expected_checkpoint: Option<&CheckpointMetadata>,
-    native_session_id: &str,
-    checkpoint: &CheckpointMetadata,
-) -> Result<bool> {
-    let tx = connection.transaction()?;
-    let Some(mut current) = load_session_with(&tx, session_id)? else {
-        return Ok(false);
-    };
-    if current.target.as_deref() != Some(expected_target)
-        || current.checkpoint.as_deref() != expected_checkpoint
-    {
-        return Ok(false);
-    }
-    tx.execute(
-        "UPDATE sessions SET native_session_id = ?2, last_checkpoint_error = NULL
-         WHERE session_id = ?1",
-        params![session_id, native_session_id],
-    )?;
-    current.checkpoint = Some(Box::new(checkpoint.clone()));
-    replace_checkpoint(&tx, &current)?;
-    tx.commit()?;
-    Ok(true)
-}
-
-pub fn record_recovery_failure(session_id: &str, detail: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let detail = detail.to_owned();
-    submit_database_write("record_recovery_failure", move |_| {
-        record_recovery_failure_to(&database_path(), &session_id, &detail)
-    })
-}
-
-/// A completed copy can report only against the target and checkpoint it
-/// observed. A later successful checkpoint or target replacement wins.
-pub fn record_recovery_failure_if_current(
-    session_id: &str,
-    expected_target: &TargetLocator,
-    expected_checkpoint: Option<&CheckpointMetadata>,
-    detail: &str,
-) -> Result<bool> {
-    let session_id = session_id.to_owned();
-    let expected_target = expected_target.clone();
-    let expected_checkpoint = expected_checkpoint.cloned();
-    let detail = detail.to_owned();
-    submit_database_write("record_recovery_failure_if_current", move |connection| {
-        record_recovery_failure_if_current_with(
-            connection,
-            &session_id,
-            &expected_target,
-            expected_checkpoint.as_ref(),
-            &detail,
-        )
-    })
-}
-
-fn record_recovery_failure_if_current_with(
-    connection: &mut Connection,
-    session_id: &str,
-    expected_target: &TargetLocator,
-    expected_checkpoint: Option<&CheckpointMetadata>,
-    detail: &str,
-) -> Result<bool> {
-    let tx = connection.transaction()?;
-    let Some(current) = load_session_with(&tx, session_id)? else {
-        return Ok(false);
-    };
-    if current.target.as_deref() != Some(expected_target)
-        || current.checkpoint.as_deref() != expected_checkpoint
-    {
-        return Ok(false);
-    }
-    tx.execute(
-        "UPDATE sessions SET last_checkpoint_error = ?2 WHERE session_id = ?1",
-        params![session_id, detail],
-    )?;
-    tx.commit()?;
-    Ok(true)
-}
-
-pub(super) fn record_recovery_failure_to(
-    path: &Path,
-    session_id: &str,
-    detail: &str,
-) -> Result<()> {
-    let connection = open(path)?;
-    let changed = connection.execute(
-        "UPDATE sessions SET last_checkpoint_error = ?2 WHERE session_id = ?1",
-        params![session_id, detail],
-    )?;
-    if changed != 1 {
-        bail!("unknown session {session_id}");
-    }
-    Ok(())
-}
-
 /// Re-associate a session with another project bundle.
 ///
 /// A session's bundle is otherwise fixed, because prompt history is grouped by
@@ -2051,6 +2101,153 @@ pub struct SessionResumeOptions {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    // The unguarded catch-up must not resurrect a lifecycle that won before publication.
+    #[test]
+    fn adoption_connection_publication_does_not_resurrect_a_stopped_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("adoption-race.sqlite3");
+        let mut expected = super::super::tests::session("adoption-owner", "project");
+        expected.state = SessionState::Disconnected;
+        expected.native_session_id = None;
+        expected.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: directory.path().join(&expected.id),
+        }));
+        save_session_to(&path, &expected).unwrap();
+        let mut stopped = expected.clone();
+        stopped.state = SessionState::Stopped;
+        stopped.target = None;
+        save_session_to(&path, &stopped).unwrap();
+        let stopped =
+            super::super::state_io::load_session_with(&open(&path).unwrap(), &expected.id)
+                .unwrap()
+                .unwrap();
+        let mut connection = open(&path).unwrap();
+        assert!(
+            publish_adoption_connected_with(
+                &mut connection,
+                &expected,
+                Some("late-native"),
+                "2030-01-01T00:00:00Z"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            super::super::state_io::load_session_with(&connection, &expected.id)
+                .unwrap()
+                .unwrap(),
+            stopped
+        );
+    }
+
+    // Hard-won: b8acf76: a legacy refusal rewrote concurrent title/notification edits from a stale record.
+    #[test]
+    fn legacy_adoption_refusal_preserves_concurrent_edits_and_resource_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-adoption.sqlite3");
+        let mut expected = super::super::tests::session("legacy-owner", "project");
+        expected.state = SessionState::Disconnected;
+        expected.native_session_id = None;
+        expected.last_error = Some("previous diagnosis".into());
+        expected.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: directory.path().join(&expected.id),
+        }));
+        save_session_to(&path, &expected).unwrap();
+        let mut connection = open(&path).unwrap();
+        connection.execute("UPDATE sessions SET title='concurrent edit', notifications_ignored=1 WHERE session_id=?1", [&expected.id]).unwrap();
+        let refused = refuse_adoption_with(
+            &mut connection,
+            &expected,
+            "legacy refusal",
+            "2030-01-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(refused.title, "concurrent edit");
+        assert!(refused.notifications_ignored);
+        assert_eq!(refused.state, SessionState::Lost);
+        assert!(refused.target.is_none());
+        assert_eq!(
+            refused.last_error.as_deref(),
+            Some("previous diagnosis\nlegacy refusal")
+        );
+        // A later lifecycle owner cannot be detached by the same stale refusal.
+        let mut stopped = refused;
+        stopped.state = SessionState::Stopped;
+        save_session_to(&path, &stopped).unwrap();
+        let stopped = super::super::state_io::load_session_with(&connection, &expected.id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            refuse_adoption_with(
+                &mut connection,
+                &expected,
+                "late refusal",
+                "2030-01-01T00:00:01Z"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            super::super::state_io::load_session_with(&connection, &expected.id)
+                .unwrap()
+                .unwrap(),
+            stopped
+        );
+    }
+
+    // Hard-won: de056ae: a late adoption failure overwrote a successful worker connection.
+    #[test]
+    fn a_stale_adoption_failure_preserves_the_connected_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("adoption.sqlite3");
+        let mut stale = super::super::tests::session("adoption-owner", "project");
+        stale.state = SessionState::Disconnected;
+        stale.native_session_id = None;
+        save_session_to(&path, &stale).unwrap();
+        mark_session_worker_connected_to(
+            &path,
+            &stale.id,
+            Some("surviving-native"),
+            "2030-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let current = record_adoption_failure_if_current_to(
+            &path,
+            &stale,
+            "late failure",
+            "2030-01-01T00:00:01Z",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(current.state, SessionState::Running);
+        assert_eq!(
+            current.native_session_id.as_deref(),
+            Some("surviving-native")
+        );
+        assert!(current.last_error.is_none());
+        let saved = load_state_from(&path).unwrap();
+        assert_eq!(saved.sessions[&stale.id], current);
+        // Hard-won: 3210bf3: a captured failure owner must not outlive identity changes.
+        for field in ["profile", "target"] {
+            let mut changed = stale.clone();
+            changed.last_error = Some("new owner's diagnosis".into());
+            match field {
+                "profile" => changed.last_profile.push_str("-new"),
+                "target" => changed.target_template_id.push_str("-new"),
+                _ => unreachable!(),
+            }
+            save_session_to(&path, &changed).unwrap();
+            let expected = load_state_from(&path).unwrap().sessions[&stale.id].clone();
+            let actual = record_adoption_failure_if_current_to(
+                &path,
+                &stale,
+                "stale refusal",
+                "2030-01-01T00:00:02Z",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
 
     // Hard-won: #1538: a resume save overwrote a Container settings edit made while it provisioned
     #[test]
@@ -2139,129 +2336,5 @@ mod ownership_tests {
         assert_eq!(rolled_back.draft_input, current.draft_input);
         assert_eq!(rolled_back.archived, current.archived);
         assert_eq!(rolled_back.viewed_through_event_ordinal, 99);
-    }
-
-    #[test]
-    fn recovery_completion_cannot_replace_a_newer_checkpoint_or_target() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("recovery.sqlite3");
-        let original = super::super::tests::session("recovery-owner", "project");
-        save_session_to(&path, &original).unwrap();
-        let target = original.target.as_ref().unwrap();
-        let previous = original.checkpoint.as_ref().unwrap();
-        let mut next = previous.clone();
-        next.sha256 = "b".repeat(64);
-        next.event_frontier += 1;
-        let mut connection = open(&path).unwrap();
-        assert!(
-            record_recovery_success_if_current_with(
-                &mut connection,
-                &original.id,
-                target,
-                Some(previous),
-                "new-native",
-                &next,
-            )
-            .unwrap()
-        );
-        assert!(
-            !record_recovery_failure_if_current_with(
-                &mut connection,
-                &original.id,
-                target,
-                Some(previous),
-                "old failure",
-            )
-            .unwrap()
-        );
-        assert!(
-            !record_recovery_success_if_current_with(
-                &mut connection,
-                &original.id,
-                target,
-                Some(previous),
-                "old-native",
-                previous,
-            )
-            .unwrap()
-        );
-        let current = load_session_with(&connection, &original.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(current.checkpoint.as_deref(), Some(&next).map(|v| &**v));
-        assert_eq!(current.native_session_id.as_deref(), Some("new-native"));
-        assert_eq!(current.last_checkpoint_error, None);
-
-        let mut replacement = current.clone();
-        replacement.target = None;
-        replacement.state = SessionState::Stopped;
-        save_resumed_session_to(&path, &replacement, None).unwrap();
-        assert!(
-            !record_recovery_failure_if_current_with(
-                &mut connection,
-                &original.id,
-                target,
-                Some(&next),
-                "old target failure",
-            )
-            .unwrap()
-        );
-        assert!(
-            !record_recovery_success_if_current_with(
-                &mut connection,
-                &original.id,
-                target,
-                Some(&next),
-                "old-native",
-                previous,
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn current_recovery_failure_settles_without_resurrecting_a_removed_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("recovery.sqlite3");
-        let original = super::super::tests::session("recovery-owner", "project");
-        save_session_to(&path, &original).unwrap();
-        let mut connection = open(&path).unwrap();
-        assert!(
-            record_recovery_failure_if_current_with(
-                &mut connection,
-                &original.id,
-                original.target.as_ref().unwrap(),
-                original.checkpoint.as_deref(),
-                "current failure",
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            load_session_with(&connection, &original.id)
-                .unwrap()
-                .unwrap()
-                .last_checkpoint_error
-                .as_deref(),
-            Some("current failure")
-        );
-        connection
-            .execute("DELETE FROM sessions WHERE session_id = ?1", [&original.id])
-            .unwrap();
-        assert!(
-            !record_recovery_failure_if_current_with(
-                &mut connection,
-                &original.id,
-                original.target.as_ref().unwrap(),
-                original.checkpoint.as_deref(),
-                "late failure",
-            )
-            .unwrap()
-        );
-        assert!(
-            load_session_with(&connection, &original.id)
-                .unwrap()
-                .is_none()
-        );
-        assert!(save_resumed_session_to(&path, &original, None).is_err());
     }
 }

@@ -4441,6 +4441,41 @@ sys.stdin.read()
     assert_eq!(client.next_request, before);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn command_retention_skips_protocol_72_without_writing_a_request() {
+    let script = format!(
+        r#"python3 -c '
+import json, sys
+req = json.loads(sys.stdin.readline())
+print(json.dumps({{"request_id":req["request_id"], "protocol_version":72, "result":"ok", "payload":{{"type":"hello", "data":{{"negotiated":72, "relay_version":"retention-old", "session_id":{session:?}}}}}}}), flush=True)
+sys.stdin.read()
+'"#,
+        session = SESSION_ID
+    );
+    let spec = CommandSpec::new("sh", ["-c", &script]).purpose("old retention relay fixture");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let before = client.next_request;
+    assert_eq!(client.command_retention_status().await.unwrap(), None);
+    client
+        .update_command_retention(
+            Some("move-operation".into()),
+            ["queued-config".into()].into(),
+            false,
+        )
+        .await
+        .unwrap();
+    client
+        .update_command_retention(None, Default::default(), true)
+        .await
+        .unwrap();
+    let error = client.live_session_baseline().await.unwrap_err();
+    assert!(error.is::<LiveBaselineUnsupported>(), "{error:#}");
+    assert_eq!(client.next_request, before);
+}
+
 // Hard-won: adc0d368: a worker whose harness preparation failed rejected
 // sub-agent polling, so its session could not sync, suspend or close.
 #[cfg(unix)]
@@ -4921,27 +4956,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
     for outcome in ["complete", "drop", "disconnect", "legacy_drop"] {
         let legacy = outcome == "legacy_drop";
         let (controller, worker) = tokio::io::duplex(4096);
-        let (output, input) = tokio::io::split(controller);
-        let mut client = RelayClient {
-            child: None,
-            input: Some(Box::new(input)),
-            output: BufReader::new(Box::new(output)),
-            request_timeout: RELAY_RPC_TIMEOUT,
-            abandoned: None,
-            next_request: 1,
-            connection_nonce: 1,
-            protocol_version: RELAY_PROTOCOL_VERSION,
-            session_id: SESSION_ID.into(),
-            relay_version: "queued-memory-peer".into(),
-            worker_build: None,
-            latest_ordinal: 0,
-            latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
-            subagent_acknowledged: None,
-            subagent_queue: BTreeMap::new(),
-            subagent_publication: None,
-            known_state: None,
-            ssh_session: None,
-        };
+        let mut client = duplex_relay_client(controller);
         if legacy {
             client.protocol_version = mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL - 1;
         }
@@ -5148,7 +5163,7 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     let copy = gate
         .try_start(
             SESSION_ID,
-            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery,
         )
         .unwrap();
     let lease = handle.lease_connection(&copy).await.unwrap();
@@ -5180,8 +5195,6 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     assert!(!copy.load(Ordering::Acquire));
     let released = tokio::time::Instant::now();
     lease.release();
-    copy.narrow(crate::recovery_gate::BackgroundWork::RecoveryCopyTransferring)
-        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !received.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -5303,7 +5316,7 @@ async fn a_renewed_login_reaches_a_session_whatever_background_work_holds_it() {
     assert!(delivered(codex_login("2026-09-25T21:00:00.000Z")).await);
 
     // A review and a worker upgrade refuse each other, so they are separate cases.
-    for (case, minute) in ["review", "worker upgrade", "recovery copy"]
+    for (case, minute) in ["review", "worker upgrade", "delegation delivery"]
         .into_iter()
         .zip(10_u32..)
     {
@@ -5324,7 +5337,7 @@ async fn a_renewed_login_reaches_a_session_whatever_background_work_holds_it() {
             // Hard-won: #1564: back-to-back recovery copies held the session's only background slot, so a renewed login never reached it.
             _ => {
                 let attempt = gate
-                    .try_start(SESSION_ID, BackgroundWork::RecoveryCopyCapturing)
+                    .try_start(SESSION_ID, BackgroundWork::DelegationDelivery)
                     .unwrap();
                 let flag = attempt.cancellation();
                 (Box::new(attempt) as _, flag)
@@ -5588,4 +5601,95 @@ fn access_denied_reply(directory: &std::path::Path) -> std::path::PathBuf {
     let path = directory.join("access-denied.txt");
     std::fs::write(&path, crate::aws_assume_role::test_fixtures::ACCESS_DENIED).unwrap();
     path
+}
+
+fn duplex_relay_client(controller: tokio::io::DuplexStream) -> RelayClient {
+    let (output, input) = tokio::io::split(controller);
+    RelayClient {
+        child: None,
+        input: Some(Box::new(input)),
+        output: BufReader::new(Box::new(output)),
+        request_timeout: RELAY_RPC_TIMEOUT,
+        abandoned: None,
+        next_request: 1,
+        connection_nonce: 1,
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        session_id: SESSION_ID.into(),
+        relay_version: "queued-memory-peer".into(),
+        worker_build: None,
+        latest_ordinal: 0,
+        latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        subagent_acknowledged: None,
+        subagent_queue: BTreeMap::new(),
+        subagent_publication: None,
+        known_state: None,
+        ssh_session: None,
+        adoption_wait_progress: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn adoption_wait_reports_blockers_without_a_deadline_and_is_cancellable() {
+    for cancel in [false, true] {
+        let (controller, worker) = tokio::io::duplex(4096);
+        let mut client = duplex_relay_client(controller);
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let cancellation = cancelled.clone();
+        let (progress, mut messages) = tokio::sync::watch::channel(None);
+        client.set_adoption_wait_progress(Some(progress));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let released = release.clone();
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let envelope: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            for payload in [
+                RelayResponsePayload::LiveBaselineWaiting {
+                    blockers: vec!["a running turn".into()],
+                },
+                RelayResponsePayload::LiveBaselineStarted { total_bytes: 0 },
+            ] {
+                if matches!(payload, RelayResponsePayload::LiveBaselineStarted { .. }) {
+                    let _permit = released.acquire().await.unwrap();
+                }
+                let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                    request_id: envelope.request_id.clone(),
+                    protocol_version: envelope.protocol_version,
+                    body: RelayResponseBody::Ok { payload },
+                })
+                .unwrap();
+                bytes.push(b'\n');
+                if writer.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let work = mj_core::runtime::spawn(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => anyhow::bail!("adoption cancelled"),
+                result = client.call(RelayRequest::BeginLiveBaseline) => result,
+            }
+        });
+        messages.changed().await.unwrap();
+        assert_eq!(
+            messages.borrow_and_update().as_deref(),
+            Some(["a running turn".to_owned()].as_slice())
+        );
+        tokio::time::advance(RELAY_RPC_TIMEOUT * 4).await;
+        assert!(!work.is_finished());
+        if cancel {
+            cancelled.cancel();
+            assert!(work.await.unwrap().is_err());
+        } else {
+            release.add_permits(1);
+            assert!(matches!(
+                work.await.unwrap().unwrap(),
+                RelayResponsePayload::LiveBaselineStarted { .. }
+            ));
+        }
+        peer.abort();
+        let _ = peer.await;
+    }
 }

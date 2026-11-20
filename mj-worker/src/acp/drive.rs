@@ -15,6 +15,7 @@ pub(super) const RAPID_BRIDGE_RESTART_LIMIT: u32 = 3;
 
 pub(super) const RAPID_BRIDGE_WINDOW: Duration = Duration::from_secs(5);
 
+// Tests own their connection registry here; production holds it through process teardown.
 #[cfg(test)]
 pub(super) async fn drive<T: ConnectTo<Client>>(
     transport: T,
@@ -40,6 +41,7 @@ pub(super) async fn drive<T: ConnectTo<Client>>(
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn drive_bridge<T>(
     transport: T,
     spec: LaunchSpec,
@@ -47,6 +49,30 @@ pub(super) async fn drive_bridge<T>(
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_open: BridgeSessionOpen<'_>,
+) -> Result<Option<SessionRestart>>
+where
+    T: ConnectTo<Client>,
+{
+    drive_with_terminals(
+        transport,
+        spec,
+        requests,
+        events,
+        opened,
+        session_open,
+        TerminalRegistry::new()?,
+    )
+    .await
+}
+
+pub(super) async fn drive_with_terminals<T>(
+    transport: T,
+    spec: LaunchSpec,
+    requests: &mut mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    opened: Arc<Mutex<Option<OpenedSession>>>,
+    session_open: BridgeSessionOpen<'_>,
+    terminals: TerminalRegistry,
 ) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
@@ -115,6 +141,7 @@ where
     let pending_elicitations = spec
         .operator_away
         .pending_for_bridge_with_source(spec.verdict.clone(), Some(spec.turn_context.clone()));
+    let _pending_bridge_lifetime = pending_elicitations.bridge_lifetime();
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
     // A bridge-local counter alone repeats after reload (and worker restart).
@@ -134,8 +161,8 @@ where
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
-    let terminals = TerminalRegistry::new()?;
     let create_terminals = terminals.clone();
+    let create_terminal_owner = spec.terminal_owner.clone();
     let output_terminals = terminals.clone();
     let wait_terminals = terminals.clone();
     let kill_terminals = terminals.clone();
@@ -730,26 +757,50 @@ where
                         .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTES),
                 };
                 let command = spawn.display_command();
-                match create_terminals.create(spawn, create_events.clone()) {
+                let terminal_id = create_terminals.allocate_id();
+                let owner = create_terminal_owner.as_ref().map(|owner| owner.upgrade().ok_or_else(|| anyhow::anyhow!("the relay owner is gone; refusing to spawn an unregistered terminal"))).transpose();
+                let mut registered = false;
+                let mut announced = false;
+                let spawned = async {
+                    if let Some(owner) = owner.as_ref().map_err(|error| anyhow::anyhow!("{error:#}"))? {
+                        registered = true;
+                        owner.lock().expect("relay state lock poisoned").agent_terminal_started(mj_core::relay::ActiveAgentTerminal {
+                            terminal_id: terminal_id.clone(), command: command.clone(), started_at_ms,
+                        })?;
+                    }
+                    create_events.send(RuntimeEvent::TerminalStarted {
+                        terminal_id: terminal_id.clone(), command, started_at_ms,
+                    }).await.map_err(|_| relay_event_channel_error())?;
+                    announced = true;
+                    if registered {
+                        mj_core::test_hooks::reach_test_hook("adoption_terminal_admitted_before_spawn")?;
+                    }
+                    create_terminals.create_with_id(terminal_id.clone(), spawn, create_events.clone())
+                }.await;
+                match spawned {
                     Ok(terminal_id) => {
-                        create_events
-                            .send(RuntimeEvent::TerminalStarted {
-                                terminal_id: terminal_id.clone(),
-                                command,
-                                started_at_ms,
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                        responder
-                            .respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
+                        responder.respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
                     }
                     Err(error) => {
+                        // Keep ordinary failure behind the same FIFO as the start
+                        // card. A closed FIFO cannot apply it, so withdraw only
+                        // the inventory then; no process was created.
+                        let failure_queued = if announced {
+                            create_events.send(RuntimeEvent::TerminalStartFailed { terminal_id: terminal_id.clone() }).await.is_ok()
+                        } else { false };
+                        let error = if registered && !failure_queued && let Ok(Some(owner)) = &owner {
+                            match owner.lock().expect("relay state lock poisoned").agent_terminal_closed(&terminal_id) {
+                                Ok(()) => error,
+                                Err(cleanup) => error.context(format!("could not withdraw failed terminal inventory: {cleanup:#}")),
+                            }
+                        } else { error };
+
                         create_events
                             .send(RuntimeEvent::Warning {
                                 message: format!("a client terminal failed to start: {error:#}"),
                             })
                             .await
-                            .map_err(|_| relay_event_channel_error())?;
+                            .map_err(|_| relay_event_channel_error().data(format!("terminal spawn failed: {error:#}; worker event channel closed")))?;
                         responder.respond_with_error(
                             agent_client_protocol::Error::internal_error()
                                 .data(serde_json::Value::String(format!("{error:#}"))),

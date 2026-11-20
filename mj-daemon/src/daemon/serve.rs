@@ -1,5 +1,30 @@
 use super::*;
 
+// Worker quiescence is unbounded. Only the synchronous controller operations
+// leave async workers; the wait must never occupy a blocking-pool thread.
+pub(super) fn spawn_adoption_operation<F, T>(operation: F) -> tokio::task::JoinHandle<Result<T>>
+where
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    mj_core::runtime::spawn(async move {
+        use futures::FutureExt;
+        let result = match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
+            Ok(result) => result,
+            Err(panic) => {
+                tracing::error!(?panic, "adoption controller task panicked");
+                Err(anyhow::anyhow!(
+                    "adoption controller task panicked; check session state before retrying"
+                ))
+            }
+        };
+        if let Err(error) = &result {
+            tracing::error!(%error, "adoption controller task failed");
+        }
+        result
+    })
+}
+
 pub(super) async fn refresh_runtime_workspaces(state: &RuntimeState) -> Result<()> {
     state.refresh_workspaces().await
 }
@@ -312,6 +337,10 @@ pub(super) async fn serve_client(
             })
         } else if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
+        } else if matches!(request.action, DaemonAction::CheckpointSession { .. }) {
+            // Decode the legacy action only to explain its removal, including
+            // to clients from before the protocol bump. Authentication still applies.
+            Err(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE.to_owned())
         } else if activity.is_err() {
             // No work was accepted. The client can wait and retry this exact
             // request without risking a duplicate operation.
@@ -402,6 +431,145 @@ pub(super) async fn serve_client(
                     cancellation,
                 )
                 .await;
+            }
+            if let DaemonAction::AdoptRecovery(adoption) = request.action {
+                let wait_cancel = cancellation.child_token();
+                let _cancel_on_drop = wait_cancel.clone().drop_guard();
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let _cancel_processes =
+                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
+                let (progress, mut waiting) = tokio::sync::watch::channel(None);
+                let (installed, mut installation) = tokio::sync::oneshot::channel();
+                let mut installation_open = true;
+                let work_state = state.clone();
+                let work_adoption = adoption.clone();
+                let work_cancelled = cancelled.clone();
+                let work_wait_cancel = wait_cancel.clone();
+                let _cancel_processes =
+                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
+                let operation = async move {
+                    let mut controller = blocking(Controller::load).await?;
+                    let executor = CancellableProcessExecutor::new(work_cancelled);
+                    let outcome = controller
+                        .adopt_orphan_worker_controlled(
+                            &work_adoption,
+                            &executor,
+                            mj_controller::controller::AdoptionControl {
+                                cancelled: work_wait_cancel,
+                                progress: Some(progress),
+                                installed: Some(installed),
+                                lifecycle_gate: work_state.session_gate.clone(),
+                            },
+                        )
+                        .await;
+                    refresh_runtime_controller(&work_state).await;
+                    Ok::<_, anyhow::Error>(outcome)
+                };
+                let mut work = spawn_adoption_operation(operation);
+                let mut disconnected = false;
+                let mut draining = false;
+                let mut progress_open = true;
+                let mut previous_blockers = None;
+                let mut byte = [0u8; 1];
+                use tokio::io::AsyncReadExt;
+                let outcome = loop {
+                    tokio::select! {
+                        biased;
+                        closed = stream.read(&mut byte), if !disconnected => {
+                            if let Err(error) = closed { tracing::debug!(%error, "adoption connection closed"); }
+                            disconnected = true;
+                            cancelled.store(true, Ordering::Release);
+                            wait_cancel.cancel();
+                        }
+
+                        result = &mut work => break match result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                tracing::error!(%error, "adoption supervisor task failed");
+                                Err(anyhow::anyhow!("adoption task failed: {error}"))
+                            },
+                        },
+                        () = mj_controller::upgrade::gate().wait_until_draining(), if !draining => {
+                            draining = true;
+                            cancelled.store(true, Ordering::Release);
+                            wait_cancel.cancel();
+                        }
+                        publication = &mut installation, if installation_open => {
+                            installation_open = false;
+                            progress_open = false;
+                            if let Ok(publication) = publication {
+                                refresh_runtime_controller(&state).await;
+                                let delivered = if disconnected { Ok(()) } else { write_adoption_response(&mut stream, ResponseEnvelope {
+                                    protocol_version: request.protocol_version, request_id,
+                                    result: Ok(DaemonReply::AdoptionInstalled { session_id: adoption.session_id.clone() }),
+                                }, &wait_cancel).await };
+                                if let Err(error) = delivered {
+                                    tracing::debug!(%error, "adoption installed notice connection closed");
+                                    disconnected = true;
+                                    cancelled.store(true, Ordering::Release);
+                                    wait_cancel.cancel();
+                                }
+                                drop(publication.admission);
+                                let _ = publication.acknowledged.send(());
+                            }
+                        }
+                        changed = waiting.changed(), if progress_open => {
+                            if changed.is_ok() {
+                                let blockers = waiting.borrow_and_update().clone();
+                                if blockers != previous_blockers {
+                                    previous_blockers = blockers.clone();
+                                    if let Some(blockers) = blockers && !disconnected {
+                                        let advice = adoption.clone();
+                                        let destroy_command = blocking(move || mj_controller::controller::adoption_destroy_command(
+                                            &advice.session_id, &advice.target_id, advice.all_instances,
+                                        )).await?;
+                                        if let Err(error) = write_adoption_response(&mut stream, ResponseEnvelope {
+                                            protocol_version: request.protocol_version, request_id,
+                                            result: Ok(DaemonReply::AdoptionWaiting { blockers, destroy_command: Some(destroy_command) }),
+                                        }, &wait_cancel).await {
+                                            tracing::debug!(%error, "adoption progress connection closed");
+                                            disconnected = true;
+                                            cancelled.store(true, Ordering::Release);
+                                            wait_cancel.cancel();
+                                        }
+                                    }
+                                }
+                            } else { progress_open = false; }
+                        }
+                    }
+                };
+                let (result, admission) = match outcome {
+                    Ok(outcome) => (
+                        outcome.result.map(|()| DaemonReply::Done),
+                        outcome.admission,
+                    ),
+                    Err(error) => (Err(error), None),
+                };
+                if disconnected {
+                    tracing::info!(
+                        session_id = adoption.session_id,
+                        "adoption connection closed; pending recovery cut was cancelled"
+                    );
+                    if let Err(error) = &result {
+                        tracing::debug!(%error, "disconnected adoption finished");
+                    }
+                    drop(admission);
+                    return Ok(());
+                }
+                write_adoption_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id,
+                        result: result.map_err(|error| format!("{error:#}")),
+                    },
+                    &wait_cancel,
+                )
+                .await?;
+                // The install guard spans final response delivery, as other
+                // admitted requests do; no worker wait or catch-up owns it.
+                drop(admission);
+                continue;
             }
             if request.action.is_cancellable_machine_action() {
                 let cancelled = Arc::new(AtomicBool::new(false));
@@ -657,6 +825,22 @@ pub(super) async fn serve_client(
         )
         .await?;
         drop(import_registration);
+    }
+}
+
+/// A partial frame cannot be resumed: callers close the adoption connection
+/// on interruption, then finish or release any already accepted installation.
+pub(super) async fn write_adoption_response(
+    stream: &mut TcpStream,
+    response: ResponseEnvelope,
+    cancelled: &CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        // A ready socket can still deliver the final failure during drain.
+        biased;
+        result = write_response(stream, response) => result,
+        () = cancelled.cancelled() => anyhow::bail!("adoption response interrupted"),
+        () = mj_controller::upgrade::gate().wait_until_draining() => anyhow::bail!("adoption response interrupted for daemon handoff"),
     }
 }
 

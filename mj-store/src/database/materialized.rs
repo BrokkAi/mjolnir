@@ -1868,6 +1868,61 @@ pub fn save_materialized_session(materialized: &MaterializedSession) -> Result<(
     })
 }
 
+/// Repair only the projection whose exact cursor the caller observed. A
+/// concurrent projector owns its committed history, even when repair rewinds.
+pub fn repair_materialized_session_if_current(
+    materialized: &MaterializedSession,
+    expected_ordinal: u64,
+    expected_digest: &str,
+) -> Result<bool> {
+    let materialized = materialized.clone();
+    let expected_digest = expected_digest.to_owned();
+    submit_database_write("repair_materialized_session_if_current", move |_| {
+        repair_materialized_session_if_current_to(
+            &database_path(),
+            &materialized,
+            expected_ordinal,
+            &expected_digest,
+        )
+    })
+}
+
+pub(super) fn repair_materialized_session_if_current_to(
+    path: &Path,
+    materialized: &MaterializedSession,
+    expected_ordinal: u64,
+    expected_digest: &str,
+) -> Result<bool> {
+    materialized.validate()?;
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = tx.query_row(
+        "SELECT applied_event_ordinal, applied_event_digest FROM materialized_sessions WHERE session_id=?1",
+        [&materialized.session_id],
+        |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+    ).optional()?.unwrap_or((0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into()));
+    if current.0 != expected_ordinal || current.1 != expected_digest {
+        return Ok(false);
+    }
+    // A connection may already owe an ACK for this durable frontier. That ACK
+    // needs no database write, so even a successful CAS cannot authorize rewind.
+    if materialized.applied_event_ordinal < current.0 {
+        bail!(
+            "refusing projection repair from durable frontier {}:{} to older frontier {}:{}; the durable projection is unchanged",
+            current.0,
+            current.1,
+            materialized.applied_event_ordinal,
+            materialized.applied_event_digest,
+        );
+    }
+    if !session_exists(&tx, &materialized.session_id)? {
+        bail!("unknown session {}", materialized.session_id);
+    }
+    write_materialized_session(&tx, materialized)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSession) -> Result<()> {
     materialized.validate()?;
     let mut connection = open(path)?;
@@ -1878,6 +1933,103 @@ pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSess
     write_materialized_session(&tx, materialized)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Install one current-state cut only before any attachment establishes history.
+/// The notice, live owner state, and both native replay phases commit together.
+pub fn install_live_session_baseline(
+    materialized: &MaterializedSession,
+    baseline: mj_core::relay::LiveSessionBaseline,
+) -> Result<bool> {
+    let materialized = materialized.clone();
+    submit_database_write("install_live_session_baseline", move |_| {
+        install_live_session_baseline_to(&database_path(), &materialized, &baseline)
+    })
+}
+
+pub(super) fn install_live_session_baseline_to(
+    path: &Path,
+    materialized: &MaterializedSession,
+    baseline: &mj_core::relay::LiveSessionBaseline,
+) -> Result<bool> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let installed = install_live_session_baseline_with(&tx, materialized, baseline)?;
+    tx.commit()?;
+    if installed && !materialized.pending_elicitations.is_empty() {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(installed)
+}
+
+pub(super) fn install_live_session_baseline_with(
+    tx: &Transaction<'_>,
+    materialized: &MaterializedSession,
+    baseline: &mj_core::relay::LiveSessionBaseline,
+) -> Result<bool> {
+    materialized.validate()?;
+    ensure!(
+        materialized.session_id == baseline.state.session_id
+            && materialized.applied_event_ordinal == baseline.state.latest_ordinal
+            && materialized.applied_event_digest == baseline.state.latest_digest,
+        "live baseline projection does not match its worker cut"
+    );
+    if !session_exists(tx, &materialized.session_id)? {
+        bail!("unknown session {}", materialized.session_id);
+    }
+    let frontier: Option<u64> = tx
+        .query_row(
+            "SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?1",
+            [&materialized.session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if frontier.is_some_and(|ordinal| ordinal > 0) {
+        return Ok(false);
+    }
+    let cursor = mj_core::relay::RelayCursor {
+        ordinal: baseline.state.latest_ordinal,
+        digest: baseline.state.latest_digest.clone(),
+    };
+    native_agents::seed_adopted_native_agents(
+        tx,
+        &materialized.session_id,
+        &baseline.state.native_agents,
+        &cursor,
+        0,
+    )?;
+    if let Some(staged) = &baseline.native_agent_replay {
+        tx.execute(
+            "INSERT OR IGNORE INTO native_agent_replay(owner) VALUES (?1)",
+            [&materialized.session_id],
+        )?;
+        native_agents::seed_adopted_native_agents(
+            tx,
+            &materialized.session_id,
+            staged,
+            &cursor,
+            1,
+        )?;
+    }
+    write_materialized_session(tx, materialized)?;
+    let turn_id = materialized
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.accepted_ordinal);
+    for request in &materialized.pending_elicitations {
+        events::insert_api_event(
+            tx,
+            &materialized.session_id,
+            materialized
+                .last_activity_at_ms
+                .unwrap_or_else(mj_core::clock::epoch_millis),
+            &ApiEventData::InputRequired {
+                request: Some(request.clone()),
+                turn_id,
+            },
+        )?;
+    }
+    Ok(true)
 }
 
 /// One relay page being applied inside a single write transaction. The relay
@@ -2226,6 +2378,36 @@ pub(super) fn apply_projection_page_with<T>(
 ) -> Result<T> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut page = load_projection_page(transaction, session_id)?;
+    // Dropping the page on failure rolls the whole transaction back, leaving
+    // the projection at the frontier the relay last saw acknowledged.
+    let filled = fill(&mut page)?;
+    page.flush()?;
+    commit_projection_page(page)?;
+    Ok(filled)
+}
+
+fn commit_projection_page(page: ProjectionPage<'_>) -> Result<()> {
+    let questions = page.pending_events.iter().any(|(_, event)| {
+        matches!(
+            event,
+            ApiEventData::InputRequired {
+                request: Some(_),
+                ..
+            } | ApiEventData::InputResolved { .. }
+        )
+    });
+    page.transaction.commit()?;
+    if questions {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
+}
+
+fn load_projection_page<'a>(
+    transaction: Transaction<'a>,
+    session_id: &'a str,
+) -> Result<ProjectionPage<'a>> {
     let (applied_ordinal, applied_digest, input_required_event_frontier, operator_away_event_frontier) = transaction
         .query_row(
             "SELECT applied_event_ordinal, applied_event_digest, input_required_event_frontier, operator_away_event_frontier
@@ -2250,7 +2432,7 @@ pub(super) fn apply_projection_page_with<T>(
     let usage_configuration = read_materialized_session_fields(&transaction, session_id)?
         .context("projection session disappeared")?
         .configuration;
-    let mut page = ProjectionPage {
+    Ok(ProjectionPage {
         session_id,
         transaction,
         applied_ordinal,
@@ -2263,25 +2445,7 @@ pub(super) fn apply_projection_page_with<T>(
         pending_turns: Vec::new(),
         usage_configuration,
         pending_events: Vec::new(),
-    };
-    // Dropping the page on failure rolls the whole transaction back, leaving
-    // the projection at the frontier the relay last saw acknowledged.
-    let filled = fill(&mut page)?;
-    page.flush()?;
-    let questions = page.pending_events.iter().any(|(_, event)| {
-        matches!(
-            event,
-            ApiEventData::InputRequired {
-                request: Some(_),
-                ..
-            } | ApiEventData::InputResolved { .. }
-        )
-    });
-    page.transaction.commit()?;
-    if questions {
-        crate::mailbox_outbox::notify_mailbox_outbox_changed();
-    }
-    Ok(filled)
+    })
 }
 
 /// Apply exactly one relay event, as a page of one.

@@ -27,6 +27,7 @@ pub(super) enum DatabaseWriterMessage {
 pub struct DatabaseWriter {
     pub(super) id: u64,
     pub(super) sender: SyncSender<DatabaseWriterMessage>,
+    space: Arc<tokio::sync::Notify>,
     path: Arc<PathBuf>,
     committed: tokio::sync::watch::Sender<std::result::Result<Arc<CommittedState>, Arc<str>>>,
 }
@@ -54,6 +55,33 @@ impl DatabaseWriter {
         self.committed.subscribe()
     }
 
+    fn run<T, F>(
+        &self,
+        label: &'static str,
+        connection: Result<&mut Connection>,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T>,
+    {
+        let connection = connection?;
+        let previous = self.committed_state()?;
+        committed::begin_operation(&self.path);
+        let result = operation(connection);
+        match committed::finish_operation(connection, &previous) {
+            Ok(Some(next)) => {
+                drop(self.committed.send_replace(Ok(Arc::new(next))));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let detail: Arc<str> = format!("database publication failed after {label}; a commit may have occurred, do not replay this mutation: {error:#}").into();
+                drop(self.committed.send_replace(Err(detail.clone())));
+                bail!("{detail}");
+            }
+        }
+        result
+    }
+
     pub fn execute<T, F>(&self, label: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -65,33 +93,7 @@ impl DatabaseWriter {
             .send(DatabaseWriterMessage::Run {
                 label,
                 job: Box::new(move |connection| {
-                    let reply = match connection {
-                        Ok(connection) => (|| {
-                            let previous = publication.committed_state()?;
-                            committed::begin_operation(&publication.path);
-                            let result = operation(connection);
-                            match committed::finish_operation(connection, &previous) {
-                                Ok(Some(next)) => { drop(publication.committed.send_replace(Ok(Arc::new(next)))); }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    // The write may already be durable. Refuse all
-                                    // further jobs rather than classify a readback
-                                    // failure as a retryable write failure.
-                                    let detail: Arc<str> = format!(
-                                        "database publication failed after {label}; a commit may have occurred, do not replay this mutation: {error:#}"
-                                    ).into();
-                                    drop(publication.committed.send_replace(Err(detail.clone())));
-                                    bail!("{detail}");
-                                }
-                            }
-                            result
-                        })(),
-                        // The mismatch travels as the operation's own failure,
-                        // so a refused write reports why rather than the
-                        // writer-stopped message a dropped reply would give.
-                        Err(error) => Err(error),
-                    };
-                    let _ = reply_tx.send(reply);
+                    let _ = reply_tx.send(publication.run(label, connection, operation));
                 }),
             })
             .map_err(|_| {
@@ -101,6 +103,76 @@ impl DatabaseWriter {
             .recv()
             .with_context(|| format!("database writer stopped during {label}"))?
     }
+
+    /// Dropping this future before enqueue accepts nothing. After it returns,
+    /// the caller owns a durable obligation to finish publication and its reply.
+    pub async fn enqueue<T, G, F>(
+        &self,
+        label: &'static str,
+        guard: G,
+        operation: F,
+    ) -> Result<AcceptedDatabaseWrite<T, G>>
+    where
+        T: Send + 'static,
+        G: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let publication = self.clone();
+        let mut message = DatabaseWriterMessage::Run {
+            label,
+            job: Box::new(move |connection| {
+                let result = publication.run(label, connection, operation);
+                let _ = reply_tx.send((result, guard));
+            }),
+        };
+        loop {
+            // Register before trying: dequeue may happen between Full and await.
+            let notified = self.space.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.sender.try_send(message) {
+                Ok(()) => return Ok(AcceptedDatabaseWrite { reply: reply_rx }),
+                Err(std::sync::mpsc::TrySendError::Full(returned)) => message = returned,
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    bail!("submit database writer operation {label}: writer stopped")
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+pub struct AcceptedDatabaseWrite<T, G> {
+    reply: tokio::sync::oneshot::Receiver<(Result<T>, G)>,
+}
+
+impl<T, G> AcceptedDatabaseWrite<T, G> {
+    /// Once accepted this wait must not be cancelled: the guard covers the
+    /// committed publication and the originating connection's reply attempt.
+    pub async fn finish(self) -> Result<(Result<T>, G)> {
+        self.reply
+            .await
+            .context("database writer stopped during accepted write")
+    }
+}
+
+pub(super) async fn enqueue_database_write<T, G, F>(
+    label: &'static str,
+    guard: G,
+    operation: F,
+) -> Result<AcceptedDatabaseWrite<T, G>>
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+{
+    let writer = database_writer_slot()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .context("database writer is not available")?;
+    writer.enqueue(label, guard, operation).await
 }
 
 /// Owns the daemon's writer thread and persistent SQLite connection.
@@ -264,6 +336,7 @@ pub(super) fn start_database_writer_at(
     let writer = DatabaseWriter {
         id,
         sender,
+        space: Arc::new(tokio::sync::Notify::new()),
         path: Arc::new(path.clone()),
         committed,
     };
@@ -283,6 +356,7 @@ pub(super) fn start_database_writer_at(
                 loop {
                     match receiver.recv() {
                         Ok(DatabaseWriterMessage::Run { label, job }) => {
+                            publication.space.notify_waiters();
                             tracing::trace!(operation = label, "running database writer operation");
                             let job_started = std::time::Instant::now();
                             // Recheck compatibility even after startup, and
@@ -326,6 +400,8 @@ pub(super) fn start_database_writer_at(
                     .unwrap_or("unknown panic payload");
                 Err(anyhow::anyhow!("database writer thread panicked: {detail}"))
             });
+            drop(receiver);
+            publication.space.notify_waiters();
             if let Err(error) = &result {
                 drop(
                     publication

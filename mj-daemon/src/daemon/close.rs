@@ -30,8 +30,7 @@ impl RuntimeState {
             return Ok(());
         }
         let _foreground = self
-            .recovery_observer
-            .gate
+            .session_gate
             .enter_foreground(
                 session_id,
                 "suspend preparation",
