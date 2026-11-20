@@ -1,4 +1,4 @@
-//! Additive first-run discovery shared by the dashboard and `mj setup`.
+//! Additive first-run discovery for the dashboard.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,6 @@ use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate, unique_config_id as unique_id,
 };
-use mj_core::remote_git::Shorthand;
 
 pub use crate::harness_auth::*;
 pub use crate::import::github_repository;
@@ -27,10 +26,7 @@ pub use machines::{
     MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,
 };
 mod startup;
-pub use startup::{
-    SetupReport, actionable_errors, add_detected_profiles, automatic_setup_due, run_setup,
-    run_setup_command,
-};
+pub use startup::{add_detected_profiles, automatic_setup_due, run_setup, welcome_errors};
 
 // Session tools and harnesses are installed after cloning the project.
 pub use mj_client::target::DEFAULT_IMAGE;
@@ -389,37 +385,6 @@ fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) 
     profile
 }
 
-/// Read the current directory's GitHub origin, through the same executor every
-/// other discovery probe uses so it is bounded and can be faked in tests.
-///
-/// `git -C` selects the directory instead of a working-directory field on the
-/// command, which no executor carries.
-fn discover_github_repository(
-    executor: &impl CommandExecutor,
-    cwd: &Path,
-) -> Option<GithubRepository> {
-    let command = CommandSpec::new(
-        "git",
-        [
-            "-C".to_owned(),
-            cwd.to_string_lossy().into_owned(),
-            "remote".to_owned(),
-            "get-url".to_owned(),
-            "origin".to_owned(),
-        ],
-    )
-    .purpose("detect the current repository's GitHub origin");
-    let output = executor.execute(&command).ok()?;
-    if output.status != 0 {
-        return None;
-    }
-    // `git remote get-url` prints a remote, so `owner/repo` is a path here.
-    github_repository(
-        &String::from_utf8_lossy(&output.stdout),
-        Shorthand::Rejected,
-    )
-}
-
 /// Probe the container runtimes setup can configure, reusing the doctor checks
 /// so an unavailable runtime carries doctor's detail and remediation.
 pub fn probe_local_runtimes(
@@ -452,7 +417,7 @@ fn runtime_probe_from_check(kind: RuntimeKind, check: crate::doctor::DoctorCheck
 }
 
 /// Configuration additions for installed profiles and the current repository.
-pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubRepository>) -> Config {
+pub fn build_config(homes: &[DiscoveredHome], repository: Option<&str>) -> Config {
     let mut config = Config::default();
     for home in homes {
         let base = match &home.codex_profile {
@@ -470,14 +435,15 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
     }
 
     if let Some(repository) = repository {
-        let repository_id = config_id(&repository.repository);
+        let name = mj_core::remote_git::project_source_name(repository);
+        let repository_id = config_id(name.as_deref().unwrap_or("repository"));
         config.bundles.insert(
             "current-repository".to_owned(),
             ProjectBundle {
                 primary_repo: repository_id.clone(),
                 repositories: vec![ProjectRepository {
                     id: repository_id.clone(),
-                    github: Some(repository.source()),
+                    github: Some(repository.to_owned()),
                     local: None,
                     destination: PathBuf::from(repository_id),
                     git_ref: None,

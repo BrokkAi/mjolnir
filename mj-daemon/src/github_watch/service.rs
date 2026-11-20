@@ -156,12 +156,21 @@ async fn run_poll_loop(
             });
             local.set_use_gpu(config.use_gpu);
         }
+        let jev = projection.config.jev;
+        let fastino_key = mj_core::runtime::spawn_blocking(move || jev.resolve_fastino_key())
+            .await
+            .context("resolve Fastino key")?
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Jev will use the shared proxy key");
+                None
+            });
         let classifier: Arc<dyn GithubClassifier> =
             Arc::new(mj_github_relevance::github_relevance::Classifier::new(
                 student.as_ref().map(|student| {
                     student.clone() as Arc<dyn mj_github_relevance::github_relevance::StudentOwner>
                 }),
                 notices.clone(),
+                fastino_key,
             ));
         let sessions_by_repo = sessions_by_github_repo(&projection.state);
         let watched_repositories = mj_core::runtime::spawn_blocking(

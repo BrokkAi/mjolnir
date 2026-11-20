@@ -458,7 +458,13 @@ pub(crate) fn spawn_first_run_setup(
                 );
                 // Setup decides again under its lock: another dashboard may
                 // have finished it since the daemon answered.
-                let Some(summary) = daemon.run_first_run_setup().await? else {
+                let identity = daemon.identity().await?;
+                let project_directory = if daemon.shares_client_filesystem(&identity) {
+                    std::env::current_dir().ok()
+                } else {
+                    None
+                };
+                let Some(summary) = daemon.run_first_run_setup(project_directory).await? else {
                     return Ok(None);
                 };
                 report(

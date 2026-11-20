@@ -38,9 +38,12 @@ pub struct ElicitationRequest {
 }
 
 /// What a tool permission form offers beyond the request's own options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPermissionForm {
+    /// The raw ACP tool call ID when the call belongs to this transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     /// Whether the request has a one-time rejection for Skip to select. A
     /// request without one offers no Skip.
     pub skip: bool,
@@ -84,7 +87,7 @@ impl ElicitationRequest {
     /// asks this, and [`Self::harness_response`] refuses a Skip it denies.
     #[must_use]
     pub fn offers_skip(&self) -> bool {
-        self.tool_permission.is_none_or(|form| form.skip)
+        self.tool_permission.as_ref().is_none_or(|form| form.skip)
     }
 
     pub fn from_acp_params(id: impl Into<String>, params: Value) -> Result<Self> {

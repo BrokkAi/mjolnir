@@ -1011,6 +1011,8 @@ mod tests {
              UPDATE schema_compatibility SET minimum_compatible_version=137 WHERE singleton=1;
              PRAGMA user_version=137;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);
+             CREATE TRIGGER stop_before_alert_ledger BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version=139 BEGIN SELECT RAISE(ABORT,'fixture boundary after push ledger'); END;
              CREATE TRIGGER stop_before_mail_fence BEFORE INSERT ON schema_migrations
                  WHEN NEW.version=142 BEGIN SELECT RAISE(ABORT,'fixture boundary before mail fence'); END;",
         )
@@ -1019,7 +1021,20 @@ mod tests {
             "INSERT INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,'legacy','{}',0)",
             [&subscription.endpoint],
         ).unwrap();
-        // Test the push revisions' compatibility before the separate fence
+        let error = schema::migrate_schema(&db).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fixture boundary after push ledger"),
+            "{error:#}"
+        );
+        db.execute_batch("ROLLBACK; DROP TRIGGER stop_before_alert_ledger;")
+            .unwrap();
+        let pushed = schema::read_schema_state(&db).unwrap();
+        assert_eq!(pushed.revision, 138);
+        pushed.ensure_supported_by(137).unwrap();
+
+        // Test the remaining compatible revisions before the separate fence
         // for checkpoint mail.
         let error = schema::migrate_schema(&db).unwrap_err();
         assert!(
@@ -1030,9 +1045,10 @@ mod tests {
         );
         db.execute_batch("ROLLBACK; DROP TRIGGER stop_before_mail_fence;")
             .unwrap();
-        let schema = schema::read_schema_state(&db).unwrap();
-        assert_eq!(schema.revision, 141);
-        schema.ensure_supported_by(137).unwrap();
+        let before_mail = schema::read_schema_state(&db).unwrap();
+        assert_eq!(before_mail.revision, 141);
+        before_mail.ensure_supported_by(137).unwrap();
+        schema::migrate_schema(&db).unwrap();
 
         let mut runtime = runtime(true);
         runtime.metadata.notification_cards = None;

@@ -185,7 +185,9 @@ pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 73;
 pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
 /// 75 reports the mail the relay holds at a ready checkpoint cut.
 pub const RELAY_CHECKPOINT_MAILBOX_PROTOCOL: u32 = 75;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_MAILBOX_PROTOCOL;
+/// 76 names the tool call in permission forms, which older readers reject.
+pub const RELAY_PERMISSION_TOOL_CALL_PROTOCOL: u32 = 76;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PERMISSION_TOOL_CALL_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

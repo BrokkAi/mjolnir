@@ -66,6 +66,7 @@ impl BusyRetry {
 pub(crate) struct ApiClient {
     base_url: String,
     daemon_instance: Option<String>,
+    daemon_on_client_filesystem: bool,
     token: String,
     busy_retry: BusyRetry,
     /// Where the one "waiting for the daemon" line goes; stderr outside tests.
@@ -156,7 +157,9 @@ impl ApiClient {
         probe_api(&http, &viewer_url).await?;
         let token = client.api_credential().await?;
         let mut api = Self::with_http(viewer_url, token, http);
-        api.daemon_instance = Some(client.identity().await?.instance_id);
+        let identity = client.identity().await?;
+        api.daemon_on_client_filesystem = client.shares_client_filesystem(&identity);
+        api.daemon_instance = Some(identity.instance_id);
         Ok(api)
     }
 
@@ -169,6 +172,7 @@ impl ApiClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             daemon_instance: None,
+            daemon_on_client_filesystem: false,
             token,
             busy_retry: BusyRetry::DEFAULT,
             wait_notice: |line| eprintln!("{line}"),
@@ -178,6 +182,14 @@ impl ApiClient {
 
     pub(crate) fn daemon_instance(&self) -> Option<&str> {
         self.daemon_instance.as_deref()
+    }
+
+    pub(crate) fn daemon_on_client_filesystem(&self) -> bool {
+        self.daemon_on_client_filesystem
+    }
+
+    pub(crate) async fn launch_options(&self) -> Result<mj_daemon::server::api::LaunchOptions> {
+        self.get_json("/options").await
     }
 
     pub(crate) async fn image_start(

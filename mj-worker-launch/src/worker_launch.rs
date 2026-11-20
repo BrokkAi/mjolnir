@@ -266,7 +266,7 @@ pub fn stage_worker_files_for(
         profile,
         mj_core::config::HarnessHost::current(),
         &profile_stage,
-        claude_environment_login_present(profile, &launch.environment),
+        &launch.environment,
         executor,
     )?;
     stage_managed_skills(
@@ -717,7 +717,7 @@ pub fn session_launch_config(
             "1".into(),
         );
     }
-    apply_jev_switch(&mut launch, config.jev.enabled);
+    apply_jev_settings(&mut launch, &config.jev);
     launch.agent_mailboxes_enabled = true;
     launch.subagents = session
         .subagents

@@ -3127,6 +3127,7 @@ fn removing_a_move_attachment_invalidates_and_reprepares_the_review() {
     // Submit wraps to the attachment list; removing the selected directory
     // changes the move selection and immediately starts a fresh preparation.
     ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     let new_request_id = match ready_key(&mut dashboard, key(KeyCode::Delete)) {
         DashboardAction::MoveSession {
             preparation_request_id: Some(request_id),
@@ -5633,7 +5634,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         };
         wizard.form.get_mut().focus(WizardControl::Subagents);
         let lines = captured_drawn(&mut dashboard, width, height);
-        let (label_x, y) = point(&lines, "Delegation");
+        let (label_x, y) = point(&lines, "Sub-agents");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
@@ -5663,7 +5664,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             "dismissing preview keeps preparation"
         );
         let lines = captured_drawn(&mut dashboard, width, height);
-        let (label_x, y) = point(&lines, "Delegation");
+        let (label_x, y) = point(&lines, "Sub-agents");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
@@ -5873,9 +5874,134 @@ fn new_session_wizard_keeps_its_frame_across_steps() {
     }
 }
 
+/// An agent using the Mjolnir guardian on a raw machine is warned about once,
+/// at the review, with the sandboxed target one press away; without one the
+/// warning says what is missing instead.
+fn review_warns_once_and_offers_a_sandboxed_target() {
+    let build = |with_podman: bool| {
+        let mut configuration = config();
+        configuration.profiles = BTreeMap::from([(
+            "kimi-1".into(),
+            HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi")),
+        )]);
+        let podman = config().targets["podman"].clone();
+        configuration.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+        if with_podman {
+            configuration.targets.insert("podman".into(), podman);
+        }
+        let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+        dashboard.begin_new();
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new session wizard")
+        };
+        wizard.project_directory.set_value("/home/me/project");
+        wizard.target = 0; // localhost sorts before podman
+        wizard.profile_step_skipped = false;
+        wizard.target_step_skipped = false;
+        wizard.step = WizardStep::Review;
+        dashboard
+    };
+    let draw = |dashboard: &mut DashboardState| {
+        let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
+        terminal.draw(|frame| render(frame, dashboard)).unwrap();
+        let lines = buffer_lines(terminal.backend().buffer());
+        capture_render(140, 32, &lines);
+        lines.join("\n")
+    };
+
+    let mut without = build(false);
+    let screen = draw(&mut without);
+    assert_eq!(
+        screen.matches("runs directly on the host").count(),
+        1,
+        "{screen}"
+    );
+    assert!(
+        screen.contains("No compatible sandbox is available"),
+        "{screen}"
+    );
+
+    let mut with = build(true);
+    let screen = draw(&mut with);
+    assert_eq!(
+        screen.matches("runs directly on the host").count(),
+        1,
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Use podman instead (sandboxed)"),
+        "{screen}"
+    );
+    // Activating the offer returns to the target step with the sandbox chosen.
+    let lines = screen.lines().map(str::to_owned).collect::<Vec<_>>();
+    let (column, row) = point(&lines, "Use podman instead");
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        with.handle_mouse(mouse_at(kind, (column, row)));
+    }
+    let screen = draw(&mut with);
+    assert!(
+        screen.contains("TARGET") && screen.contains("STATUS"),
+        "{screen}"
+    );
+    let Mode::New(wizard) = &with.mode else {
+        panic!("new session wizard")
+    };
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert!(wizard.target != 0);
+}
+
+// Hard-won: 01a64d2e8: trimming blank lines could remove the sandbox button row.
+/// Resuming on a bare target an agent using the Mjolnir guardian: the review
+/// carries the sandbox button, and no worktree, sub-agent or attachment
+/// control follows it, so its row is the last control row.
+fn resume_review_keeps_the_sandbox_button_as_its_last_row() {
+    let mut session = stopped_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    session.harness_kind = HarnessKind::Kimi;
+    session.last_profile = "kimi-1".into();
+    let mut dashboard = dashboard_with_session(session);
+    *dashboard.config = standard_local_targets_config();
+    dashboard.config.profiles = BTreeMap::from([(
+        "kimi-1".into(),
+        HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi")),
+    )]);
+    let action = dashboard.begin_resume_for("session-1");
+    capture_action(&action);
+    answer_target_checks(&mut dashboard, &[]);
+    let localhost = dashboard
+        .config
+        .targets
+        .keys()
+        .position(|id| id == "localhost")
+        .unwrap();
+    {
+        let Mode::Resume(wizard) = &mut dashboard.mode else {
+            panic!("resume wizard")
+        };
+        wizard.target = localhost;
+        wizard.profile_step_skipped = false;
+        wizard.target_step_skipped = false;
+        wizard.step = WizardStep::Review;
+    }
+    let review = captured_drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("sandboxed"), "{review}");
+}
+
 #[test]
 fn golden_wizard_target_step() {
     for (label, run) in [
+        (
+            "review_warns_once_and_offers_a_sandboxed_target",
+            review_warns_once_and_offers_a_sandboxed_target as fn(),
+        ),
+        (
+            "resume_review_keeps_the_sandbox_button_as_its_last_row",
+            resume_review_keeps_the_sandbox_button_as_its_last_row,
+        ),
         (
             "new_session_wizard_keeps_its_frame_across_steps",
             new_session_wizard_keeps_its_frame_across_steps as fn(),
@@ -6045,7 +6171,7 @@ fn golden_create_delegation_availability_and_submission() {
         wizard.subagents.select_policy(0);
         assert_eq!(wizard.subagents.select_policy(1), configured);
         let screen = drawn(&mut dashboard, 140, 40).join("\n");
-        assert!(screen.contains("Delegation"));
+        assert!(screen.contains("Sub-agents"));
         if !configured {
             assert!(screen.contains("Set up YOLO target sub-agents"));
         }

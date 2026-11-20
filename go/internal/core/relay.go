@@ -467,6 +467,17 @@ func (s *RestoredRelaySeed) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(s))
 }
 
+// MarshalJSON writes absent queued prompts as [], as serde writes the Vec;
+// a Rust worker refuses a null queue.
+func (s RestoredRelaySeed) MarshalJSON() ([]byte, error) {
+	type plain RestoredRelaySeed
+	v := plain(s)
+	if v.QueuedPrompts == nil {
+		v.QueuedPrompts = []CanonicalQueuedPrompt{}
+	}
+	return transcriptMarshal(v)
+}
+
 // Validate applies the same frontier checks a canonical session snapshot
 // carries, so a malformed seed is refused before it can become relay state.
 func (s *RestoredRelaySeed) Validate() error {

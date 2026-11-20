@@ -1,0 +1,231 @@
+=== user message (transcript row) ===
+safered
+=== plan proposal (transcript row) ===
+safered
+=== system message (transcript row) ===
+safered
+=== new file diff detail (transcript row) ===
+/workspace/new.txt  +2 −0
+
+=== successful terminal (transcript row) ===
+out
+exited 0
+
+=== truncated terminal (transcript row) ===
+out
+exited 1 · output truncated
+
+=== signal termination (transcript row) ===
+out
+killed by SIGKILL
+
+=== released terminal (transcript row) ===
+out
+exit status unavailable
+
+=== silent signal termination (transcript row) ===
+killed by SIGTERM
+
+=== shell command (transcript row) ===
+cd && python | cat
+
+=== ordinary argv command (transcript row) ===
+python
+
+=== output-only update (transcript row) ===
+presentation changed: false
+cargo test
+status-only update changes presentation: false
+output-only call changes presentation: true
+changed command presentation: true
+updated row: cargo check
+
+=== git registered verb (transcript row) ===
+git status
+
+=== cargo registered verb (transcript row) ===
+cargo test
+
+=== gh registered namespace (transcript row) ===
+gh pr list
+
+=== docker registered namespace (transcript row) ===
+docker compose up
+
+=== podman registered namespace (transcript row) ===
+podman machine list
+
+=== uv registered namespace (transcript row) ===
+uv pip install
+
+=== rustup registered namespace (transcript row) ===
+rustup toolchain list
+
+=== npm registered namespace (transcript row) ===
+npm run build
+
+=== shell and argv invocation depth (transcript rows) ===
+shell: git status
+argv: git status
+
+=== sudo wrapper (transcript row) ===
+sudo
+
+=== env wrapper (transcript row) ===
+env
+
+=== command wrapper (transcript row) ===
+command
+
+=== unlisted build tool (transcript row) ===
+mytool
+
+=== unlisted script (transcript row) ===
+mytool
+
+=== python script (transcript row) ===
+python
+
+=== gh API namespace (transcript row) ===
+gh api
+
+=== docker run namespace (transcript row) ===
+docker run
+
+=== registered future git verb (transcript row) ===
+git future-verb
+
+=== absolute git with attached directory (transcript row) ===
+/usr/bin/git status
+
+=== git short global option (transcript row) ===
+git status
+
+=== gh attached repository option (transcript row) ===
+gh pr list
+
+=== cargo color option (transcript row) ===
+cargo test
+
+=== cargo config option (transcript row) ===
+cargo test
+
+=== nice command options (transcript row) ===
+nice python3
+
+=== nice command options (transcript row) ===
+nice python3
+
+=== nice command options (transcript row) ===
+nice python3
+
+=== nice command options (transcript row) ===
+nice python3
+
+=== nice command options (transcript row) ===
+nice python3
+
+=== nice command options (transcript row) ===
+nice python3
+
+=== nice shell command (transcript row) ===
+nice python3
+
+=== timeout shell command (transcript row) ===
+timeout git status
+
+=== timeout argv command (transcript row) ===
+timeout git worktree list
+
+=== timeout command options (transcript row) ===
+timeout git status
+
+=== timeout attached short options (transcript row) ===
+timeout git status
+
+=== nested command wrappers (transcript row) ===
+nice timeout nice cargo test
+
+=== recursive script runner (transcript row) ===
+uv run timeout git status
+
+=== wrapped shell command (transcript row) ===
+timeout bash -c git status && cargo test
+
+=== timeout in a pipeline (transcript row) ===
+timeout git status | cat && timeout gh pr list
+
+=== timeout unknown option (transcript row) ===
+nice timeout
+
+=== timeout dynamic duration (transcript row) ===
+timeout
+
+=== timeout dynamic command (transcript row) ===
+timeout
+
+=== wrapped dynamic verb (transcript row) ===
+timeout git
+
+=== timeout without command (transcript row) ===
+timeout
+
+=== script name is not an invocation (transcript row) ===
+timeout npm run git
+
+=== ordinary command arguments are not invocations (transcript row) ===
+timeout python
+
+=== ssh remote command (transcript row) ===
+ssh builder git status
+
+=== ssh remote argv (transcript row) ===
+ssh builder git worktree list
+
+=== ssh quoted remote script (transcript row) ===
+ssh builder cd && git status | cat
+
+=== ssh quoted remote argv script (transcript row) ===
+ssh builder git status && cargo test
+
+=== ssh connection options (transcript row) ===
+/usr/bin/ssh builder git status
+
+=== ssh attached options after destination (transcript row) ===
+ssh builder uv run pytest
+
+=== ssh wrapped remote shell (transcript row) ===
+timeout ssh builder bash -c git status && cargo test
+
+=== ssh without remote command (transcript row) ===
+ssh builder
+
+=== ssh dynamic destination (transcript row) ===
+ssh
+
+=== ssh dynamic remote script (transcript row) ===
+ssh builder cd && git status
+
+=== ssh dynamic remote command (transcript row) ===
+ssh builder
+
+=== ssh unknown connection option (transcript row) ===
+ssh
+
+=== ssh unknown option after destination (transcript row) ===
+ssh builder
+
+=== ssh without destination (transcript row) ===
+ssh
+
+=== ssh nesting budget (transcript row) ===
+ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder ssh builder …
+
+=== cached wrapper summary (transcript row) ===
+nice timeout git status
+
+=== cached ssh summary (transcript row) ===
+ssh builder git status
+
+=== non-execute tool title (transcript row) ===
+Read

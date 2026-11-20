@@ -12,6 +12,7 @@
 
 use super::dashboard::{declare_wizard_buttons, invalidate_move_preparation};
 use super::*;
+use mj_core::config::offers_attached_directories;
 
 /// A draft edit that may invalidate an answer a background task already owes
 /// the wizard. A new-session draft invalidates its remote creation preflight;
@@ -90,6 +91,7 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     /// Puts the draft back on the review step. A move re-requests its
     /// preparation, because the draft it was prepared for has changed.
     fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction;
+    fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind>;
     /// The step Back leaves the review for.
     fn review_back_step(&self, dashboard: &DashboardState) -> WizardStep;
     /// Records a draft edit, cancelling whatever background answer it makes
@@ -166,6 +168,32 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
         mj_core::path_completion::CompletionKind,
     )> {
         None
+    }
+}
+
+fn declare_sandbox_offer<W: WizardDraft>(
+    dashboard: &DashboardState,
+    wizard: &W,
+    form: &mut Dialog<WizardControl>,
+) {
+    if dashboard
+        .sandbox_offer(wizard)
+        .is_some_and(|offer| offer.alternative.is_some())
+    {
+        form.declare_with_enabled(WizardControl::UseSandboxedTarget, ControlKind::Button, true);
+    }
+}
+
+fn declare_review_attachments(form: &mut Dialog<WizardControl>, mounts: &MountWizard) {
+    if !mounts.mounts.is_empty() {
+        form.declare_with_enabled(
+            WizardControl::ReviewAttachments,
+            ControlKind::ChoiceList {
+                len: mounts.mounts.len(),
+                selected: mounts.selected_mount,
+            },
+            true,
+        );
     }
 }
 
@@ -279,6 +307,15 @@ impl WizardDraft for NewWizard {
             self.step = WizardStep::Launching;
         }
         dashboard.keep(self)
+    }
+
+    fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind> {
+        let id = dashboard.nth_offered_profile(self.profile)?;
+        dashboard
+            .config
+            .profiles
+            .get(&id)
+            .map(|profile| profile.kind)
     }
 
     /// A bare project target reviews a directory; every other target reviews
@@ -628,7 +665,6 @@ impl WizardDraft for NewWizard {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool {
-        self.subagents.declare(form);
         let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
         // Isolated targets have no worktree choice, so the control only
         // exists for a bare project directory.
@@ -639,6 +675,11 @@ impl WizardDraft for NewWizard {
                 self.selected_worktree_options(&dashboard.config)
                     .is_some_and(|options| options.available),
             );
+        }
+        declare_sandbox_offer(dashboard, self, form);
+        self.subagents.declare(form);
+        if offers_attached_directories(target) {
+            declare_review_attachments(form, &self.mounts);
         }
         let ready = !is_bare_project_target(target)
             || self.selected_worktree_options(&dashboard.config).is_some()
@@ -754,6 +795,13 @@ impl WizardDraft for ResumeWizard {
         }
         let profile_id = self.destination_profile(dashboard);
         dashboard.request_move_preparation_for_review(self, profile_id)
+    }
+
+    fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind> {
+        dashboard
+            .resume_wizard_profiles(self)
+            .get(self.profile)
+            .map(|(_, kind)| *kind)
     }
 
     /// Resume has no bundle or project step, so Back returns to the target
@@ -956,18 +1004,23 @@ impl WizardDraft for ResumeWizard {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool {
+        declare_sandbox_offer(dashboard, self, form);
+        if self.subagent_choice_applies(dashboard) {
+            self.subagents.declare(form);
+        }
+        let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
+        if offers_attached_directories(target) {
+            declare_review_attachments(form, &self.mounts);
+        }
+        if self.has_queued_work(dashboard) {
+            form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
+        }
         if self
             .preparation
             .as_ref()
             .is_some_and(|p| p.workspace.is_some())
         {
             form.declare_with_enabled(WizardControl::ChooseMoveFiles, ControlKind::Button, true);
-        }
-        if self.has_queued_work(dashboard) {
-            form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
-        }
-        if self.subagent_choice_applies(dashboard) {
-            self.subagents.declare(form);
         }
         (self.subagent_change(dashboard).is_none() || self.subagents.error().is_none())
             && (!self.moving || self.preparation.is_some() || self.preparation_error.is_some())

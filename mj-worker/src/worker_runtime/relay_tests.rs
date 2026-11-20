@@ -6798,6 +6798,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
         [
             "CODEX_API_KEY".to_owned(),
             "OPENAI_API_KEY".to_owned(),
+            mj_core::jev::FASTINO_KEY_ENVIRONMENT.to_owned(),
             "MJ_REVIEW_GATE".to_owned()
         ]
     );
@@ -6845,7 +6846,7 @@ async fn the_acp_bridge_never_sees_an_excluded_variable() {
 
 // Hard-won: a4c6fe269: login environment composition could restore GitHub Enterprise tokens.
 #[tokio::test]
-async fn credential_free_supervisor_excludes_all_github_tokens_after_environment_composition() {
+async fn supervisor_excludes_private_keys_after_environment_composition() {
     let temp = tempfile::tempdir().unwrap();
     let observed = temp.path().join("observed");
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
@@ -6855,7 +6856,7 @@ async fn credential_free_supervisor_excludes_all_github_tokens_after_environment
     config.bridge_args = vec![
         "-c".into(),
         format!(
-            "printf '%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" > {}",
+            "printf '%s|%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" \"${{MJ_JEV_FASTINO_KEY-unset}}\" > {}",
             mj_core::targets::posix_quote(&observed.to_string_lossy()),
         ),
     ];
@@ -6869,13 +6870,17 @@ async fn credential_free_supervisor_excludes_all_github_tokens_after_environment
         spec.environment
             .insert(name.into(), "reintroduced-secret".into());
     }
+    spec.environment.insert(
+        mj_core::jev::FASTINO_KEY_ENVIRONMENT.into(),
+        "fastino-private".into(),
+    );
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
     unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
         .await
         .unwrap();
     assert_eq!(
         std::fs::read_to_string(observed).unwrap(),
-        "unset|unset|unset|unset"
+        "unset|unset|unset|unset|unset"
     );
 }
 

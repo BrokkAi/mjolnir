@@ -1588,6 +1588,7 @@ mod tests {
                 capacity_retry: None,
                 retry_assessment_pending: false,
                 authentication_retry_waiting: None,
+                jev_rate_limit: None,
                 held_login_fingerprint: None,
                 authentication_retry_intent: None,
                 store_id: None,

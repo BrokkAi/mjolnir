@@ -373,6 +373,9 @@ pub fn row_kind(draft: &Value, page: &[String], path: &[String]) -> RowKind {
     let value = draft
         .pointer(&pointer(path))
         .expect("a listed setting exists");
+    if path == ["jev", "fastino_key"] {
+        return RowKind::Field;
+    }
     let collection = draft
         .pointer(&pointer(page))
         .is_some_and(|current| is_collection(page, current));

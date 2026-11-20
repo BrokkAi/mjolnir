@@ -174,8 +174,8 @@ target including a bare runtime on this machine, runs from a staged copy of the
 home that belongs to the session, and the harness's home variable points at
 that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
-`mj setup` checks the home variable first and otherwise looks in the
-conventional location. It also treats an API key in the environment Mjolnir
+First-run setup and **Detect profiles** check the home variable first and then
+look in the conventional location. Discovery also treats an API key in the environment Mjolnir
 started with as an installation signal for a harness that authenticates with
 no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
 explicit `home` path in `config.toml`; subsequent sessions use that configured

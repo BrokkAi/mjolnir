@@ -42,26 +42,6 @@ pub fn apply_claude_setup_token(
     }
 }
 
-/// Whether Claude is authenticated by a non-blank launch variable. A blank
-/// value is absent, matching how the profile model interprets API keys.
-pub fn claude_environment_login_present(
-    profile: &mj_core::config::HarnessProfile,
-    environment: &std::collections::BTreeMap<String, String>,
-) -> bool {
-    profile.kind == mj_core::config::HarnessKind::Claude
-        && [
-            mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV,
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-        ]
-        .into_iter()
-        .any(|name| {
-            environment
-                .get(name)
-                .is_some_and(|value| !value.trim().is_empty())
-        })
-}
-
 /// Make a session's staged `.credentials.json` exactly the host's Claude login
 /// when the host keeps it in the macOS Keychain
 /// ([`mj_core::config::HarnessKind::login_store`]), or remove it when there is
@@ -86,12 +66,12 @@ pub fn stage_claude_keychain_login(
     profile: &mj_core::config::HarnessProfile,
     host: mj_core::config::HarnessHost,
     destination: &Path,
-    environment_login_present: bool,
+    environment: &std::collections::BTreeMap<String, String>,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     if profile.kind != mj_core::config::HarnessKind::Claude
         || !profile.auth_scheme().uses_native_login_file()
-        || environment_login_present
+        || mj_core::credentials::claude_environment_auth(environment).is_some()
         || !matches!(
             profile.kind.login_store(host, &profile.home),
             mj_core::config::HarnessLoginStore::MacKeychain

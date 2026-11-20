@@ -385,10 +385,12 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
   }
 }
 
+type GlideRequest = (state: unknown, questions: object) => Promise<Response>;
+
 /// GLiDE's handback categories for one report. Provider errors, including
 /// backpressure and its Retry-After, pass through without retries.
-async function handbackVerdict(state: unknown, key: string): Promise<Response> {
-  const response = await glide(state, handbackQuestions, key);
+async function handbackVerdict(state: unknown, classifyGlide: GlideRequest): Promise<Response> {
+  const response = await classifyGlide(state, handbackQuestions);
   if (!response.ok) return response;
   try {
     const value: unknown = await response.json();
@@ -405,8 +407,8 @@ async function handbackVerdict(state: unknown, key: string): Promise<Response> {
 
 /// GLiDE's V0 locator question for one worker state. Provider errors, including
 /// backpressure and its Retry-After, pass through without retries.
-async function questionLocatorGlideVerdict(state: QuestionLocatorRequest, key: string): Promise<Response> {
-  const response = await glide(state, questionLocatorGlideQuestions(state), key);
+async function questionLocatorGlideVerdict(state: QuestionLocatorRequest, classifyGlide: GlideRequest): Promise<Response> {
+  const response = await classifyGlide(state, questionLocatorGlideQuestions(state));
   if (!response.ok) return response;
   try {
     const probabilities = questionLocatorGlideProbabilities(await response.json(), state);
@@ -416,8 +418,8 @@ async function questionLocatorGlideVerdict(state: QuestionLocatorRequest, key: s
 
 /// GLiDE's repeated-question check for one worker state. Provider errors,
 /// including backpressure and its Retry-After, pass through without retries.
-async function afkQuestionGlideVerdict(state: unknown, key: string): Promise<Response> {
-  const response = await glide(state, afkQuestionGlideQuestions, key);
+async function afkQuestionGlideVerdict(state: unknown, classifyGlide: GlideRequest): Promise<Response> {
+  const response = await classifyGlide(state, afkQuestionGlideQuestions);
   if (!response.ok) return response;
   try {
     const probabilities = afkQuestionGlideProbabilities(await response.json());
@@ -435,8 +437,8 @@ function eotEvidence(value: unknown): boolean {
     && Array.isArray(runtime_observations) && runtime_observations.every(v => typeof v === "string");
 }
 
-async function eotVerdict(state: unknown, key: string): Promise<Response> {
-  const response = await glide(state, eotQuestions, key);
+async function eotVerdict(state: unknown, classifyGlide: GlideRequest): Promise<Response> {
+  const response = await classifyGlide(state, eotQuestions);
   if (!response.ok) return response;
   try {
     const value = await readBounded(response);
@@ -473,30 +475,57 @@ export default {
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
-    // Handback and completed-turn GLiDE checks use Fastino.
-    const key = ((handback || eot || githubGlide || questionLocatorGlide || afkQuestionGlide) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
-    const ip = request.headers.get("CF-Connecting-IP");
-    const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : env.TURN_RATE_LIMITER;
-    if (!key || !ip || !limiter) return error("service_unavailable", 503);
-    try {
-      const { success } = await limiter.limit({ key: ip });
-      if (!success) return error("rate_limited", 429, { "Retry-After": "60" });
-    } catch {
-      return error("service_unavailable", 503);
+    const fastino = handback || eot || githubGlide || questionLocatorGlide || afkQuestionGlide;
+    const ownKey = fastino ? request.headers.get("X-Fastino-Key") : null;
+    const key = ownKey ?? (fastino ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
+    if (!key) return error(ownKey === null ? "service_unavailable" : "invalid_fastino_key", ownKey === null ? 503 : 400);
+    if (ownKey === null) {
+      const ip = request.headers.get("CF-Connecting-IP");
+      const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : env.TURN_RATE_LIMITER;
+      if (!ip || !limiter) return error("service_unavailable", 503);
+      try {
+        const { success } = await limiter.limit({ key: ip });
+        if (!success) return error("rate_limited", 429, { "Retry-After": "60" });
+      } catch {
+        return error("service_unavailable", 503);
+      }
     }
+    const classifyGlide: GlideRequest = async (state, questions) => {
+      const response = await glide(state, questions, key);
+      if (ownKey === null || response.ok) return response;
+      // Return only known-safe fields from errors on a request using a private key.
+      // Keep the upstream token-limit signal that triggers the worker's size retry.
+      if (response.status === 400) {
+        try {
+          const body = await readBounded(response);
+          if (object(body) && object(body.error) && body.error.code === "input_too_long") {
+            return json({ error: { code: "input_too_long" } }, 400);
+          }
+        } catch { /* Use the status if the provider sent no usable details. */ }
+      } else {
+        await response.body?.cancel();
+      }
+      const retryAfter = response.headers.get("Retry-After");
+      const headers: Record<string, string> = {};
+      if (retryAfter && !retryAfter.includes(key)
+        && (/^\d+$/.test(retryAfter) || Number.isFinite(Date.parse(retryAfter)))) {
+        headers["Retry-After"] = retryAfter;
+      }
+      return error("fastino_request_failed", response.status >= 400 ? response.status : 502, headers);
+    };
     let state: unknown;
     try {
       state = await readBounded(request, (eot || handback || questionLocatorGlide || afkQuestionGlide) ? GLIDE_BODY_BYTES : MAX_BODY_BYTES);
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
-    if (eot) return eotEvidence(state) ? eotVerdict(state, key) : error("invalid_evidence", 400);
-    if (handback) return glideEvidence(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
-    if (questionLocatorGlide) return questionLocatorRequest(state) ? questionLocatorGlideVerdict(state, key) : error("invalid_evidence", 400);
-    if (afkQuestionGlide) return afkQuestionRequest(state) ? afkQuestionGlideVerdict(state, key) : error("invalid_evidence", 400);
+    if (eot) return eotEvidence(state) ? eotVerdict(state, classifyGlide) : error("invalid_evidence", 400);
+    if (handback) return glideEvidence(state) ? handbackVerdict(state, classifyGlide) : error("invalid_evidence", 400);
+    if (questionLocatorGlide) return questionLocatorRequest(state) ? questionLocatorGlideVerdict(state, classifyGlide) : error("invalid_evidence", 400);
+    if (afkQuestionGlide) return afkQuestionRequest(state) ? afkQuestionGlideVerdict(state, classifyGlide) : error("invalid_evidence", 400);
     if (githubGlide) {
       if (!githubItemGlideRequest(state)) return error("invalid_github_item_request", 400);
-      const response = await glide(state, githubItemGlideQuestions, key);
+      const response = await classifyGlide(state, githubItemGlideQuestions);
       if (!response.ok) return response;
       try {
         const answers = githubItemAnswersV2(await response.json());

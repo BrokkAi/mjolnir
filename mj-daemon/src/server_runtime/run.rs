@@ -846,7 +846,7 @@ pub(crate) async fn run_server(
                     }
                 }
                 bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
-                    let Some(crate::server::BundleRequest { source, exact_sources, reply }) = bundle else {
+                    let Some(crate::server::BundleRequest { source, exact_sources, discovered, reply }) = bundle else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
                         break;
                     };
@@ -860,7 +860,8 @@ pub(crate) async fn run_server(
                     bundle_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let result = match exact_sources {
-                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources).await,
+                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources, false).await,
+                            None if discovered => daemon_runtime.create_bundle_from_sources(vec![source], true).await,
                             None => daemon_runtime.create_quick_bundle(source).await,
                         };
                         if let Err(error) = done.send(BundleCreated { result, reply }) {
@@ -912,13 +913,13 @@ pub(crate) async fn run_server(
                                     detail,
                                 ) => {
                                     tracing::debug!(error = %detail, "phone bundle source was invalid");
-                                    crate::server::BundleFailure::InvalidSource
+                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::InvalidSource, crate::server::BundleFailure::Refused)
                                 }
                                 mj_controller::controller::QuickBundleFailure::Persistence(
                                     detail,
                                 ) => {
                                     tracing::warn!(error = %detail, "phone bundle creation failed");
-                                    crate::server::BundleFailure::Controller
+                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::Controller, crate::server::BundleFailure::Refused)
                                 }
                             };
                             if reply.send(Err(failure)).is_err() {

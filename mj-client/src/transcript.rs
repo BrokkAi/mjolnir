@@ -1,11 +1,13 @@
 //! Transcript conversion and presentation rules shared by terminal and web clients.
 use agent_client_protocol::v1::schema::{Plan, ToolCall, ToolCallStatus};
 use mj_core::config::ToolOutput;
+use mj_core::elicitation::ElicitationRequest;
 use mj_core::hex::lower_hex;
 use mj_core::state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, TranscriptItem};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::web::{BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry};
@@ -201,7 +203,7 @@ pub fn materialized_chat_entries_with_diffstats(
             )
         })
         .collect::<Vec<_>>();
-    apply_entry_list_rules(&mut entries);
+    apply_entry_list_rules(&mut entries, &session.pending_elicitations);
     entries
 }
 
@@ -214,13 +216,12 @@ pub const TAIL_SEED_ITEMS: usize = 256;
 /// Entries for the transcript items in `items`, which is a prefix of a
 /// session's transcript. Runs off the event loop, so it takes the items by
 /// slice rather than the session.
+/// List-wide rules run after the caller splices these into the visible tail.
 pub fn materialized_prefix_entries(items: &[Arc<TranscriptItem>], frontier: u64) -> Vec<ChatEntry> {
-    let mut entries = items
+    items
         .iter()
         .map(|item| materialized_chat_entry_with_diffstats(item, frontier, None))
-        .collect::<Vec<_>>();
-    apply_entry_list_rules(&mut entries);
-    entries
+        .collect()
 }
 
 /// Rebuilds the entry list, keeping the entries whose transcript item did not
@@ -281,14 +282,31 @@ pub fn materialized_chat_entries_reusing(
             materialized_chat_entry_with_diffstats(item, session.applied_event_ordinal, None)
         })
         .collect::<Vec<_>>();
-    apply_entry_list_rules(&mut entries);
+    apply_entry_list_rules(&mut entries, &session.pending_elicitations);
     entries
 }
 
-/// The rules that read a converted entry list as a whole rather than one
-/// item at a time. Every path that builds or splices an entry list runs
-/// them, so reused entries are brought up to date too.
-pub fn apply_entry_list_rules(entries: &mut [ChatEntry]) {
+/// Update list-wide presentation after a build or splice, including reused
+/// rows. The session's pending requests own which permissions are open.
+pub fn apply_entry_list_rules(entries: &mut [ChatEntry], pending: &[ElicitationRequest]) {
+    let open = pending
+        .iter()
+        .filter_map(|request| request.tool_permission.as_ref()?.tool_call_id.as_deref())
+        .map(mj_transcript::tool_item_id)
+        .collect::<BTreeSet<_>>();
+    for entry in entries.iter_mut() {
+        entry.awaiting_approval = !open.is_empty()
+            && entry.role == ChatRole::Tool
+            && match &entry.source.0 {
+                Some(item) => open.contains(&item.stable_id),
+                // Direct ACP replay keeps the raw call ID for tool updates.
+                None => entry
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| open.contains(&mj_transcript::tool_item_id(id))),
+            };
+    }
+
     suppress_duplicate_standalone_terminal_output(entries);
     mark_tools_ended_after_interrupt(entries);
 }
@@ -848,9 +866,9 @@ pub fn entry_tone(entry: &ChatEntry) -> &'static str {
         ChatRole::Agent => "agent",
         ChatRole::Thought => "thinking",
         ChatRole::Tool if entry.ended_after_interrupt => "system",
+        ChatRole::Tool if entry.awaiting_approval => "approval",
         ChatRole::Tool => match entry.tool_status.unwrap_or(ToolStatus::Pending) {
-            ToolStatus::Pending => "system",
-            ToolStatus::Running => "running",
+            ToolStatus::Pending | ToolStatus::Running => "running",
             ToolStatus::Completed => "done",
             ToolStatus::Failed => "failed",
         },
@@ -892,10 +910,11 @@ pub fn truncate_browser_line(line: &str) -> String {
     format!("{}{SUFFIX}", &line[..end])
 }
 
+pub const TOOL_AWAITING_APPROVAL: &str = "waiting for approval";
+
 pub const fn tool_status_name(status: ToolStatus) -> &'static str {
     match status {
-        ToolStatus::Pending => "waiting",
-        ToolStatus::Running => "running",
+        ToolStatus::Pending | ToolStatus::Running => "running",
         ToolStatus::Completed => "done",
         ToolStatus::Failed => "failed",
     }
@@ -910,6 +929,8 @@ pub const TOOL_ENDED_AFTER_INTERRUPT: &str = "ended after interrupt";
 pub fn tool_state_name(entry: &ChatEntry) -> &'static str {
     if entry.ended_after_interrupt {
         TOOL_ENDED_AFTER_INTERRUPT
+    } else if entry.awaiting_approval {
+        TOOL_AWAITING_APPROVAL
     } else {
         tool_status_name(entry.tool_status.unwrap_or(ToolStatus::Pending))
     }
@@ -919,9 +940,26 @@ pub fn is_completed_tool(entry: &ChatEntry) -> bool {
     entry.role == ChatRole::Tool && entry.tool_status == Some(ToolStatus::Completed)
 }
 
+/// Cache identity of the entry and its list-derived presentation.
+pub fn entry_render_fingerprint(entry: &ChatEntry) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        entry.start_seq,
+        entry.revision,
+        entry.raw_only,
+        entry.leading_omitted,
+        entry.ended_after_interrupt,
+        entry.awaiting_approval,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn collapse_revision_fingerprint(entries: &[ChatEntry]) -> u64 {
     entries.iter().fold(0u64, |accumulated, entry| {
-        accumulated.wrapping_mul(31).wrapping_add(entry.revision)
+        accumulated
+            .wrapping_mul(31)
+            .wrapping_add(entry_render_fingerprint(entry))
     })
 }
 
@@ -1024,13 +1062,13 @@ pub fn entry_collapse_states(
         }
         return states;
     }
-    // A tool that ended after its turn was interrupted keeps its own row, so
-    // a summary of finished work never speaks for it.
+    // Interrupted tools and tools awaiting approval keep their own rows.
     let streak_member = |index: usize| {
         tools == ToolOutput::Grouped
             && (entries[index].role == ChatRole::Thought
                 || (is_completed_tool(&entries[index])
                     && !entries[index].ended_after_interrupt
+                    && !entries[index].awaiting_approval
                     && !expanded_tool_calls.contains(&entries[index].start_seq)))
     };
     let mut start = 0;
@@ -1174,9 +1212,9 @@ pub fn entry_glyph(entry: &ChatEntry) -> &'static str {
         ChatRole::PlanProposal => "◈",
         ChatRole::System => "─",
         ChatRole::Tool if entry.ended_after_interrupt => "■",
+        ChatRole::Tool if entry.awaiting_approval => "?",
         ChatRole::Tool => match entry.tool_status.unwrap_or(ToolStatus::Pending) {
-            ToolStatus::Pending => "•",
-            ToolStatus::Running => "●",
+            ToolStatus::Pending | ToolStatus::Running => "●",
             ToolStatus::Completed => "✓",
             ToolStatus::Failed => "×",
         },
@@ -1356,9 +1394,37 @@ mod tests {
                 },
             }));
         }
+        for (position, id) in [(11, "tool-ask"), (12, "tool-queued")] {
+            let mut tool = item(
+                position,
+                TranscriptBody::Tool {
+                    call: json!({"toolCallId":id, "title":"cargo test", "status":"pending", "kind":"execute"}).into(),
+                    terminal_outputs: Vec::new(),
+                    terminal_refs: Vec::new(),
+                    presentation: None,
+                },
+            );
+            Arc::make_mut(&mut tool).stable_id = mj_transcript::tool_item_id(id);
+            session.transcript.push(tool);
+        }
+        let mut permission = ElicitationRequest::from_acp_params(
+            "tool-permission-0",
+            json!({
+                "mode": "form", "sessionId": "recipient", "message": "Run it?",
+                "requestedSchema": {"type":"object", "required":["choice"], "properties":{
+                    "choice":{"type":"string", "oneOf":[{"const":"approved", "title":"Yes"}]}}}
+            }),
+        )
+        .unwrap();
+        permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip: true,
+            tool_call_id: Some("tool-ask".into()),
+        });
+        session.pending_elicitations = vec![permission.clone()];
+        session.applied_event_ordinal = 12;
         let mut projector = BrowserTranscriptProjector::default();
         let browser = assert_projection(&mut projector, &session);
-        session.applied_event_ordinal = 11;
+        session.applied_event_ordinal = 13;
         let unchanged = assert_projection(&mut projector, &session);
         assert_eq!(
             unchanged.entries, browser.entries,
@@ -1375,6 +1441,41 @@ mod tests {
             "delivered-message-browser-history",
             &serde_json::to_string_pretty(&json!({"live": browser, "earlier": history})).unwrap(),
         );
+        session.pending_elicitations.clear();
+        let closed = assert_projection(&mut projector, &session);
+        session.pending_elicitations.push(permission.clone());
+        session.applied_event_ordinal = 14;
+        let opened = assert_projection(&mut projector, &session);
+        assert_eq!(opened.entries[2].tool_status, Some(TOOL_AWAITING_APPROVAL));
+        assert_eq!(opened.entries[2].updated_seq, 14);
+        assert_eq!(opened.entries[3], closed.entries[3]);
+
+        // A completed call can still have an open request. Warm publication
+        // must split and rejoin the completed group without an item revision.
+        for tool in session.transcript.iter_mut().skip(2) {
+            let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(tool).body else {
+                unreachable!()
+            };
+            let mut value = call.value();
+            value["status"] = json!("completed");
+            *call = value.into();
+        }
+        session.pending_elicitations.clear();
+        let grouped = assert_projection(&mut projector, &session);
+        session.pending_elicitations.push(permission);
+        let opened = assert_projection(&mut projector, &session);
+        assert_ne!(opened.presentation_key, grouped.presentation_key);
+        assert!(
+            opened
+                .entries
+                .iter()
+                .any(|entry| entry.tool_status == Some(TOOL_AWAITING_APPROVAL))
+        );
+        session.pending_elicitations.clear();
+        let closed = assert_projection(&mut projector, &session);
+        assert_eq!(closed.presentation_key, grouped.presentation_key);
+        assert_eq!(closed.entries, grouped.entries);
+
         // Full message content also survives the live browser's ordinary
         // tool-output byte/line budgets.
         let TranscriptBody::Message { event } = &mut Arc::make_mut(&mut session.transcript[0]).body

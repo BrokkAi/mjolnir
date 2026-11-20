@@ -8,8 +8,7 @@ use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Environment, ExecutionPolicy, PermissionMode, is_github_source, validate_id,
-    validate_relative_destination,
+    Environment, ExecutionPolicy, PermissionMode, validate_id, validate_relative_destination,
 };
 
 pub fn container_memory_limit(text: &str) -> anyhow::Result<i64> {
@@ -33,7 +32,7 @@ pub fn container_memory_limit(text: &str) -> anyhow::Result<i64> {
 pub struct ProjectRepository {
     /// Stable name within the bundle, used by `primary_repo`.
     pub id: String,
-    /// GitHub HTTPS or SSH URL (or `owner/repository` shorthand).
+    /// Network Git URL (or GitHub `owner/repository` shorthand).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
     /// Controller-side repository whose default network remotes seed isolated sessions.
@@ -76,15 +75,15 @@ impl ProjectBundle {
                     repository.id,
                 );
             }
-            if repository
-                .github
-                .as_deref()
-                .is_some_and(|source| !is_github_source(source))
-            {
-                bail!(
-                    "bundle {bundle_id:?} repository {:?} is not a supported GitHub source",
-                    repository.id,
-                );
+            if let Some(source) = repository.github.as_deref() {
+                crate::remote_git::validate_configured_project_source(source).with_context(
+                    || {
+                        format!(
+                            "invalid Git source for bundle {bundle_id:?} repository {:?}",
+                            repository.id
+                        )
+                    },
+                )?;
             }
             if repository
                 .local
@@ -137,6 +136,16 @@ impl ProjectBundle {
 }
 
 impl ProjectRepository {
+    pub(super) fn strip_http_userinfo(&mut self) {
+        if let Some(source) = self.github.as_deref()
+            && let Ok(std::borrow::Cow::Owned(clean)) =
+                crate::remote_git::project_source(source, crate::remote_git::Shorthand::Allowed)
+        {
+            self.github = Some(clean);
+            tracing::warn!("{}", crate::remote_git::HTTP_USERINFO_REMOVED);
+        }
+    }
+
     pub fn source_label(&self) -> String {
         self.github
             .clone()
@@ -339,7 +348,7 @@ pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
 }
 
 /// The image a container target runs when its table names none: the
-/// reference image CI publishes, which `mj setup` also writes.
+/// reference image CI publishes, which first-run setup also writes.
 fn default_container_image() -> String {
     super::DEFAULT_SESSION_IMAGE.to_owned()
 }

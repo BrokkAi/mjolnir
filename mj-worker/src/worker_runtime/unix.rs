@@ -615,6 +615,7 @@ pub(crate) async fn wait_for_change(
     state_digest: Option<&str>,
 ) -> Result<RelayResponseBody> {
     let mut releases = Some(relay.releases());
+    let mut jev = mj_core::jev::rate_limit_changes();
     let mut preparation = preparation.cloned();
     // A finished preparation closes its channel but keeps its last value,
     // which an attach still reads; keep reading it, stop awaiting it.
@@ -631,6 +632,7 @@ pub(crate) async fn wait_for_change(
         if let Some(generations) = &mut generations {
             generations.borrow_and_update();
         }
+        jev.borrow_and_update();
         let harness_preparation = preparation
             .as_mut()
             .and_then(|receiver| receiver.borrow_and_update().state.clone());
@@ -676,6 +678,7 @@ pub(crate) async fn wait_for_change(
                     None => std::future::pending().await,
                 }
             } => if !changed { preparation_open = false },
+            _ = jev.changed() => {}
             () = tokio::time::sleep_until(deadline) => return Ok(observed),
         }
     }
@@ -971,9 +974,18 @@ pub async fn run_daemon_owned(
         .target_environment
         .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
         .map(PathBuf::from);
+    if let Some(key) = config
+        .target_environment
+        .remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+    {
+        anyhow::ensure!(
+            crate::acp::verdict_client::FASTINO_KEY.set(key).is_ok(),
+            "the worker's Fastino key was already initialized"
+        );
+    }
     let mut target_environment = config.target_environment.clone();
-    target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     target_environment.extend(config.environment);
+    target_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
     target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     config.environment = target_environment;
     let startup_directory = std::env::current_dir()?;

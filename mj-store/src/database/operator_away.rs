@@ -286,7 +286,10 @@ mod tests {
             title: None,
             description: None,
             fields: vec![],
-            tool_permission: Some(mj_core::elicitation::ToolPermissionForm { skip: true }),
+            tool_permission: Some(mj_core::elicitation::ToolPermissionForm {
+                skip: true,
+                tool_call_id: None,
+            }),
         };
         let tx = connection.transaction().unwrap();
         super::super::insert_api_event(

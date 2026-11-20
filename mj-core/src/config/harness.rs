@@ -2045,10 +2045,8 @@ impl HarnessProfile {
             };
         }
         if self.kind == HarnessKind::Claude
-            && self
-                .environment
-                .get("CLAUDE_CODE_USE_BEDROCK")
-                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+            && crate::credentials::claude_environment_auth(self.environment.resolved())
+                == Some(crate::credentials::ClaudeEnvironmentAuth::Bedrock)
         {
             return AuthScheme::AwsCredentialChain;
         }
@@ -2697,9 +2695,9 @@ impl HarnessProfile {
     ///
     /// Codex records the choice as `auth_mode` in `auth.json`: `"apikey"`
     /// after `codex login --with-api-key` and `"chatgpt"` after a ChatGPT
-    /// login. Anything but `"apikey"`, a missing file included, counts as a
-    /// ChatGPT login, because such a profile has no API key of its own: a key
-    /// could only reach it from somewhere else.
+    /// login. A missing file leaves the target free to supply credentials.
+    /// An unreadable or unrecognized file still protects a possible ChatGPT
+    /// login from inherited API credentials.
     pub fn codex_login(&self) -> Option<CodexLogin> {
         if self.kind != HarnessKind::Codex
             || self
@@ -2710,9 +2708,13 @@ impl HarnessProfile {
         {
             return None;
         }
-        let auth_mode = std::fs::read(harness_authentication_marker(self.kind, &self.home))
+        let bytes = match std::fs::read(harness_authentication_marker(self.kind, &self.home)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => return Some(CodexLogin::ChatGpt),
+        };
+        let auth_mode = serde_json::from_slice::<serde_json::Value>(&bytes)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|login| login.get("auth_mode")?.as_str().map(str::to_owned));
         Some(match auth_mode.as_deref() {
             Some("apikey") => CodexLogin::ApiKey,

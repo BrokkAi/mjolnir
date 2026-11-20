@@ -331,8 +331,14 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
     // A host that never started also withholds the grant; its diagnostic, not
     // the missing grant, is what the person has to act on.
     let opened = open_muse("failed").await;
-    let error = format!("{:#}", opened.outcome.unwrap_err());
-    assert!(error.contains("Muse Code is not logged in"), "{error}");
+    let error = worker_exit_reason(&opened.outcome.unwrap_err());
+    assert!(
+        error.contains(&format!(
+            "create ACP session ({}): Muse Code is not logged in",
+            mj_core::acp::PROMPT_AUTH_REQUIRED_MARKER
+        )),
+        "{error}"
+    );
     assert!(!error.contains("MCP"), "{error}");
     assert!(!opened.configured);
 }

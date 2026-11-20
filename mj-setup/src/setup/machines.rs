@@ -2,7 +2,7 @@
 //!
 //! A machine is only a host: sessions run on its runtimes, so a machine with
 //! none never appears as a session target. Saving a machine, starting the
-//! dashboard, Settings' Detect runtimes and `mj setup` all probe the machine
+//! dashboard, and Settings' Detect runtimes both probe the machine
 //! here and add what it runs. `mj doctor` probes a machine the same way to
 //! say why it still has no runtime.
 

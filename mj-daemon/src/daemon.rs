@@ -4,6 +4,7 @@ mod auto_afk;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
+mod jev_limit;
 mod owner;
 mod record_index;
 mod restart;

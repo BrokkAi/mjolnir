@@ -886,13 +886,14 @@ impl RuntimeState {
     pub async fn create_bundle_from_sources(
         &self,
         sources: Vec<String>,
+        discovered: bool,
     ) -> std::result::Result<
         mj_controller::controller::QuickBundleCreation,
         mj_controller::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
         mj_core::runtime::spawn_blocking(move || {
-            mj_controller::controller::create_bundle_from_sources(&sources)
+            mj_controller::controller::persist_project_sources(&sources, discovered)
         })
         .await
         .map_err(|error| {

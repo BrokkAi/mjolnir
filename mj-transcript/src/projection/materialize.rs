@@ -44,10 +44,10 @@ pub fn materialized_session_from_entries(
                     || format!("thought:{}", entry.start_seq),
                     |id| format!("thought:{id}"),
                 ),
-                ChatRole::Tool => entry.tool_call_id.as_ref().map_or_else(
-                    || format!("tool:{}", entry.start_seq),
-                    |id| format!("tool:{id}"),
-                ),
+                ChatRole::Tool => entry
+                    .tool_call_id
+                    .as_ref()
+                    .map_or_else(|| crate::tool_item_id(entry.start_seq), crate::tool_item_id),
                 ChatRole::Plan => format!("plan:{}", entry.start_seq),
                 ChatRole::PlanProposal => format!("plan-proposal:{}", entry.start_seq),
                 ChatRole::System => format!("system:{}", entry.start_seq),
