@@ -13,7 +13,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mj_chat::components::EventResult;
 use mj_core::config::KeyAction;
-use mj_core::state::SessionTransitionKind;
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::tile_layout::NavDirection;
@@ -397,7 +396,7 @@ fn session_idle(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
-    if dashboard.move_queue_admission_incomplete(&session.id) {
+    if dashboard.verdict(&session.id).move_queue_held {
         return Availability::Blocked("Move queue admission is incomplete; retry Move first");
     }
     if dashboard.transition_kind(&session.id).is_some() {
@@ -412,49 +411,55 @@ fn session_idle(dashboard: &DashboardState) -> Availability {
     }
 }
 
-fn suspend_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
+fn offer(offer: mj_client::runtime_feed::SessionOffer) -> Availability {
+    use mj_client::runtime_feed::SessionOffer::*;
+    match offer {
+        Hidden => Availability::Hidden,
+        Ready => Availability::Ready,
+        MoveQueueHeld => {
+            Availability::Blocked("Move queue admission is incomplete; retry Move first")
+        }
+        Transitioning => Availability::Blocked("a session transition is in progress"),
+        TransitionFailed => Availability::Blocked("recover the failed transition first"),
+        OperationInProgress => Availability::Blocked("an operation is in progress"),
+        NoRecoveryCopy => Availability::Blocked("this session has no recovery copy"),
+        NoOtherWorkspace => Availability::Blocked("there is no other workspace"),
+        Active => Availability::Blocked("this session is active"),
+        MoveEnvironmentRetained => {
+            Availability::Blocked("retry Move to recover the retained environment")
+        }
+    }
+}
+
+fn lifecycle_offer(
+    dashboard: &DashboardState,
+    published: impl FnOnce(
+        mj_client::runtime_feed::SessionVerdict,
+    ) -> mj_client::runtime_feed::SessionOffer,
+) -> Availability {
+    let Some(id) = dashboard.command_session_id() else {
         return Availability::Hidden;
     };
-    if !session.state.is_active() {
-        return Availability::Hidden;
+    let availability = offer(published(dashboard.verdict(id)));
+    if availability == Availability::Ready
+        && dashboard.pending_local_session_operation(id).is_some()
+    {
+        Availability::Blocked("an operation is in progress")
+    } else {
+        availability
     }
-    // A close or destroy that failed part-way is exactly what Stop should be
-    // able to retry: the daemon re-runs the interrupted close when it gets a
-    // Close for a Closing or Destroying record. `transition_failure_kind` is
-    // already None while an operation is in flight, so the only other gate
-    // that still applies here is move queue admission.
-    if matches!(
-        dashboard.transition_failure_kind(&session.id),
-        Some(SessionTransitionKind::Suspending | SessionTransitionKind::Destroying)
-    ) {
-        return if dashboard.move_queue_admission_incomplete(&session.id) {
-            Availability::Blocked("Move queue admission is incomplete; retry Move first")
-        } else {
-            Availability::Ready
-        };
-    }
-    session_idle(dashboard)
+}
+
+fn suspend_session_available(dashboard: &DashboardState) -> Availability {
+    lifecycle_offer(dashboard, |verdict| verdict.stop)
 }
 
 fn restart_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if !session.state.is_active() && session.checkpoint.is_none() {
-        return Availability::Blocked("this session has no recovery copy to restart");
-    }
-    session_idle(dashboard)
+    lifecycle_offer(dashboard, |verdict| verdict.restart)
 }
 
-fn move_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if !session.state.is_active() {
-        return Availability::Hidden;
-    }
-    session_idle(dashboard)
+pub(crate) fn move_session_available(dashboard: &DashboardState) -> Availability {
+    lifecycle_offer(dashboard, |verdict| verdict.move_session)
 }
 
 /// A selected session whose target is running, which is what reading its
@@ -471,26 +476,21 @@ fn live_session(dashboard: &DashboardState) -> Availability {
 }
 
 fn change_workspace_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if dashboard.workspace_ids().len() < 2 {
-        return Availability::Blocked("there is no other workspace");
-    }
-    if dashboard.move_queue_admission_incomplete(&session.id) {
-        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
-    }
-    Availability::Ready
+    offer(
+        dashboard
+            .command_session_id()
+            .map(|id| dashboard.verdict(id).change_workspace)
+            .unwrap_or_default(),
+    )
 }
 
 fn container_session(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.selected_container_session() else {
-        return Availability::Hidden;
-    };
-    if dashboard.move_queue_admission_incomplete(&session.id) {
-        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
-    }
-    Availability::Ready
+    offer(
+        dashboard
+            .command_session_id()
+            .map(|id| dashboard.verdict(id).container_settings)
+            .unwrap_or_default(),
+    )
 }
 
 fn config_present(dashboard: &DashboardState) -> Availability {
@@ -570,7 +570,7 @@ fn interrupt_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session_id() else {
         return Availability::Hidden;
     };
-    if dashboard.own_turn_is_running(session) {
+    if dashboard.verdict(session).interrupt {
         Availability::Ready
     } else {
         Availability::Blocked("no turn is running")
@@ -583,7 +583,7 @@ fn interrupt_all_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session_id() else {
         return Availability::Hidden;
     };
-    if dashboard.interrupt_all_targets(session).is_empty() {
+    if !dashboard.verdict(session).interrupt_all {
         Availability::Blocked("no turn is running here or in its sub-agents")
     } else {
         Availability::Ready
@@ -1985,7 +1985,12 @@ impl DashboardState {
         }
         if matches!(
             id,
-            CommandId::SuspendSession | CommandId::RestartSession | CommandId::GoAfk
+            CommandId::SuspendSession
+                | CommandId::RestartSession
+                | CommandId::MoveSession
+                | CommandId::ChangeWorkspace
+                | CommandId::ContainerSettings
+                | CommandId::GoAfk
         ) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,
@@ -2035,7 +2040,7 @@ impl DashboardState {
                     // A suspend stops the sub-agents without a checkpoint.
                     // Only the ones still at their task lose anything.
                     let children_not_handed_back = self.subagents_not_handed_back(&session.id);
-                    let interrupting = self.own_turn_is_running(&session.id);
+                    let interrupting = self.has_active_work(&session.id);
                     let unverified_clone = session.publication_state().is_some();
                     if !interrupting && children_not_handed_back.is_empty() && !unverified_clone {
                         return DashboardAction::Suspend {
@@ -2085,7 +2090,7 @@ impl DashboardState {
                 }
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
-                if self.own_turn_is_running(&session_id) {
+                if self.has_active_work(&session_id) {
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::InterruptWork {
                             session_id,
@@ -2195,11 +2200,13 @@ impl DashboardState {
                     if let Some(session) = self.command_session() {
                         let session_id = session.id.clone();
                         let name = crate::render::session_name(session).to_owned();
-                        let targets = self.interrupt_all_targets(&session_id);
-                        let parent_running = targets.sessions.contains(&session_id);
+                        let verdict = self.verdict(&session_id);
+                        let parent_running = verdict.interrupt_member;
                         self.mode = crate::Mode::Confirm(
                             ConfirmDialog::new(Confirmation::InterruptAll {
-                                subagents_running: targets.len() - usize::from(parent_running),
+                                subagents_running: verdict
+                                    .interrupt_count
+                                    .saturating_sub(usize::from(parent_running)),
                                 parent_running,
                                 session_id,
                             })
@@ -2498,10 +2505,16 @@ mod tests {
             "session-1".into(),
             operation(SessionOperationKind::Launching, None),
         );
-        assert!(matches!(
-            (spec(CommandId::SuspendSession).available)(&dashboard),
-            Availability::Blocked(_)
-        ));
+        for command in [
+            CommandId::SuspendSession,
+            CommandId::RestartSession,
+            CommandId::MoveSession,
+        ] {
+            assert_eq!(
+                (spec(command).available)(&dashboard),
+                Availability::Blocked("an operation is in progress")
+            );
+        }
     }
 
     /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's
@@ -2603,25 +2616,6 @@ mod tests {
             (spec(CommandId::InterruptAll).available)(&dashboard),
             Availability::Blocked("no turn is running here or in its sub-agents")
         );
-        // A pre-64 worker's question may have no daemon dismissal target; its
-        // latest-turn rule still makes the turn unfinished. A protocol-64
-        // worker's question counts only through the daemon's identity.
-        let child = dashboard.session_details.get_mut("child-session").unwrap();
-        child.legacy_awaiting_input = true;
-        assert_eq!(
-            (spec(CommandId::InterruptAll).available)(&dashboard),
-            Availability::Ready
-        );
-        let child = dashboard.session_details.get_mut("child-session").unwrap();
-        child.supports_open_request = true;
-        assert_eq!(
-            (spec(CommandId::InterruptAll).available)(&dashboard),
-            Availability::Blocked("no turn is running here or in its sub-agents")
-        );
-        dashboard
-            .session_details
-            .insert("child-session".into(), Default::default());
-
         crate::test_support::set_working(&mut dashboard, "child-session");
         assert_eq!(
             dashboard.dispatch_command(CommandId::InterruptAll),
@@ -2643,13 +2637,7 @@ mod tests {
         // interrupts what is running then.
         crate::test_support::set_working(&mut dashboard, &parent);
         let action = dashboard.handle_key(key(KeyCode::Char('i')));
-        let DashboardAction::InterruptAll { targets } = action else {
-            panic!("confirming interrupts, got {action:?}");
-        };
-        let mut sessions = targets.sessions.clone();
-        sessions.sort();
-        assert_eq!(sessions, vec!["child-session".to_owned(), parent]);
-        assert!(targets.native.is_empty());
+        assert_eq!(action, DashboardAction::InterruptAll { session_id: parent });
     }
 
     /// B-16: the terminal said "Interrupt turn" nowhere. The command is in

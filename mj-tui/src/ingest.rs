@@ -1006,17 +1006,6 @@ impl DashboardState {
             .map(|operation| operation.kind)
     }
 
-    /// Whether the daemon has a ready Move destination whose queue admission
-    /// is incomplete. The destination must be retried in place before normal
-    /// session mutations can safely be accepted.
-    pub fn move_queue_admission_incomplete(&self, session_id: &str) -> bool {
-        self.move_operations
-            .get(session_id)
-            .is_some_and(|operation| {
-                operation.queue_admission_started && !operation.queue_admission_finished
-            })
-    }
-
     /// Whether the daemon still owns an active Move intent for this session.
     /// Surfaces use this to keep the transition row while intermediate durable
     /// records (Stopped/Provisioning/Running) catch up.

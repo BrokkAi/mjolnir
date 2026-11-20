@@ -192,14 +192,29 @@ impl ViewerSnapshot {
                 .or_insert_with(Default::default)
                 .insert(relation.child_session_id.clone(), relation.kind);
         }
-        Self::from_config_records(
+        let snapshot = Self::from_config_records(
             config,
             state,
             revision,
             state.sessions.values(),
             &children,
             None,
-        )
+        );
+        #[cfg(test)]
+        let snapshot = {
+            let mut snapshot = snapshot;
+            for (id, record) in &state.sessions {
+                let session = snapshot.sessions.0.get_mut(id).expect("fixture row");
+                session.verdict.live_dashboard = record.state.is_active();
+                session.verdict.transition = record.state.transition_kind();
+                session.transitioning = session.verdict.transition.is_some();
+                session.capabilities.suspend = session.lifecycle.is_dashboard_visible();
+                session.capabilities.resume =
+                    !session.lifecycle.is_dashboard_visible() && session.has_resume_source();
+            }
+            snapshot
+        };
+        snapshot
     }
 
     pub fn from_config_records<'a>(
@@ -393,8 +408,8 @@ impl ViewerSnapshot {
                     additional_mounts: session.additional_mounts.clone(),
                     resource_allocation: session.resource_allocation.clone(),
                     lifecycle,
-                    transitioning: !failed_launch_retry
-                        && session.state.transition_kind().is_some(),
+                    transitioning: false,
+                    verdict: Default::default(),
                     latest_event_ordinal: 0,
                     last_activity_at_ms: None,
                     last_message_at_ms: None,
@@ -426,16 +441,10 @@ impl ViewerSnapshot {
                         run_shell: false,
                         interrupt_turn: false,
                         cancel_operation: false,
-                        suspend: lifecycle.is_dashboard_visible(),
+                        suspend: false,
                         destroy: true,
                         rename: true,
-                        resume: !lifecycle.is_dashboard_visible()
-                            && resume_source_available(
-                                session.state.as_str(),
-                                session.checkpoint.is_some(),
-                                session.target.is_some(),
-                                failed_launch_retry,
-                            ),
+                        resume: false,
                         move_session: false,
                         set_config: false,
                         set_plan_mode: false,
@@ -814,6 +823,8 @@ pub struct ViewerSession {
     /// hide the old transcript while its durable record is still `Running`.
     #[serde(default)]
     pub transitioning: bool,
+    #[serde(default)]
+    pub verdict: mj_client::runtime_feed::SessionVerdict,
     /// How far the controller's projection of this session has advanced. A
     /// phone compares it against its own read frontier to know what is unread,
     /// without fetching a transcript to find out.

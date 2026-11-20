@@ -39,7 +39,7 @@ const SUMMARY_FIELDS = new Set([
   'subagent_session_ids', 'reviewer_session_ids', 'publication_state', 'profile_id',
   'target_id', 'state', 'container_upgrade_supported', 'created_at', 'updated_at', 'has_error',
   'configuration_issue', 'launch_error', 'storage_problem', 'project_label',
-  'display_location', 'lifecycle', 'transitioning', 'last_activity_at_ms',
+  'display_location', 'lifecycle', 'transitioning', 'verdict', 'last_activity_at_ms',
   'last_message_at_ms', 'capacity_retry', 'retry_assessment_pending',
   'quota_recovery', 'operation', 'move_recovery', 'chat_phase', 'is_idle', 'active',
   'activity_details', 'activity', 'capabilities',
@@ -63,11 +63,44 @@ function emptyInternedValue(value) {
     || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
 }
 
+// Older fixture builders describe activities and operations directly. Publish
+// the verdicts alongside their row fields before handing them to the viewer.
+function fixtureSession(row, sessions) {
+  if (row.verdict) return { ...row };
+  const operation = row.operation?.kind;
+  const transition = row.transitioning || (operation && operation !== 'checkpoint')
+    ? ({ create: 'starting', resume: 'resuming', move: 'moving', suspend: 'suspending',
+      destroy: 'destroying', stop: 'stopping', cleanup: 'destroying' })[operation] || 'starting'
+    : null;
+  const live = ['live', 'starting', 'suspending'].includes(row.lifecycle);
+  const working = (row.subagent_session_ids || []).filter(id =>
+    sessions.some(child => child.id === id && child.chat_phase === 'running')).length
+    + new Set((row.native_subagents || []).filter(child => child.state === 'running')
+      .map(child => child.stable_id || child.session_id)).size;
+  const queueHeld = row.move_recovery?.queue_admission_started
+    && !row.move_recovery?.queue_admission_finished;
+  const unrecoverable = ['lost', 'destroyed-with-data-loss'].includes(row.state);
+  const resume = row.capabilities?.resume && !queueHeld && !live && !unrecoverable ? 'ready'
+    : live ? 'active' : 'no_recovery_copy';
+  return {
+    ...row,
+    capabilities: { ...row.capabilities, resume: resume === 'ready' },
+    verdict: {
+      transition,
+      live_dashboard: live || Boolean(transition),
+      needs_person: ['needs_input', 'important', 'unread', 'failed', 'unreachable'].includes(row.attention),
+      resume,
+      working_children: working,
+      unfinished_children: working,
+    },
+  };
+}
+
 function viewerWireSnapshot(value) {
   const snapshot = cloneJson(value);
   const interned = {};
   snapshot.sessions = (snapshot.sessions || []).map(source => {
-    const row = { ...source };
+    const row = fixtureSession(source, snapshot.sessions);
     if (row.detail === false) {
       const promptCount = row.queued_prompts?.length ?? row.queued_prompt_count ?? 0;
       const elicitationCount = row.pending_elicitations?.length ?? row.pending_elicitation_count ?? 0;
@@ -101,7 +134,7 @@ function viewerWireSnapshot(value) {
 function viewerDetailResponse(snapshot, sessionId) {
   const source = (snapshot.sessions || []).find(row => row.id === sessionId);
   if (!source) return null;
-  const row = { ...source };
+  const row = fixtureSession(source, snapshot.sessions);
   delete row.detail;
   delete row.queued_prompt_count;
   delete row.pending_elicitation_count;

@@ -64,6 +64,12 @@ pub(super) fn update(
                     .changes(&next.native_agents)
                     .map(|(id, _)| id.clone()),
             )
+            .chain(
+                previous
+                    .moves
+                    .changes(&next.moves)
+                    .map(|(id, _)| id.clone()),
+            )
             .collect()
     };
     if ids.is_empty() {
@@ -249,7 +255,7 @@ fn unread_frontier(runtime: &RuntimeProjection, id: &str) -> Option<u64> {
 
 /// The request owner is the worker. Pre-64 workers retain the latest-turn rule;
 /// remove that compatibility branch when relay protocols below 64 are retired.
-fn semantic_question(
+pub(super) fn semantic_question(
     runtime: &RuntimeProjection,
     id: &str,
 ) -> Option<mj_core::assessment::InferredQuestion> {
@@ -282,6 +288,24 @@ fn semantic_question(
             completed_ordinal: outcome.completed_ordinal,
         })
     }
+}
+
+/// Workers before open-request projection can dismiss only their current
+/// inferred assessment. Older workers may be unable to dismiss prose at all.
+pub(super) fn supports_question_dismissal(
+    live: &mj_core::relay::RelayOperationalState,
+    question: &mj_core::assessment::InferredQuestion,
+) -> bool {
+    live.relay_protocol_version.is_some_and(|version| {
+        version >= mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL
+            || version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
+                && live
+                    .assessment
+                    .as_ref()
+                    .and_then(|assessment| assessment.inferred_question())
+                    .as_ref()
+                    == Some(question)
+    })
 }
 
 fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
@@ -340,11 +364,7 @@ fn dismissal(
         SessionAttention::Important => Some(NotificationDismissal::ReadThrough(
             live.assessment.as_deref()?.completed_ordinal,
         )),
-        SessionAttention::NeedsInput
-            if live.relay_protocol_version.is_some_and(|version| {
-                version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
-            }) =>
-        {
+        SessionAttention::NeedsInput => {
             let tail = runtime.transcripts.get(id)?;
             if !tail.header.pending_elicitations.is_empty()
                 || runtime.metadata.reviews.iter().any(|review| {
@@ -354,20 +374,8 @@ fn dismissal(
                 return None;
             }
             let question = semantic_question(runtime, id)?;
-            // Pre-64 workers can dismiss only the current inferred assessment.
-            if live
-                .relay_protocol_version
-                .is_some_and(|version| version < mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL)
-                && live
-                    .assessment
-                    .as_ref()
-                    .and_then(|assessment| assessment.inferred_question())
-                    .as_ref()
-                    != Some(&question)
-            {
-                return None;
-            }
-            Some(NotificationDismissal::Question(question))
+            supports_question_dismissal(live, &question)
+                .then_some(NotificationDismissal::Question(question))
         }
         _ => None,
     }
@@ -398,11 +406,11 @@ fn project_states(
     for review in &runtime.metadata.reviews {
         reviews.entry(review.session_id.as_str()).or_insert(review);
     }
-    let lifecycles: BTreeSet<_> = runtime
+    let lifecycles: BTreeMap<_, _> = runtime
         .metadata
         .lifecycles
         .iter()
-        .map(|operation| operation.session_id.as_str())
+        .map(|operation| (operation.session_id.as_str(), operation.kind))
         .collect();
     let mut questions = BTreeSet::new();
     let mut native_forms = BTreeMap::new();
@@ -504,8 +512,12 @@ fn project_states(
             let view = runtime.sessions.get(id);
             let live = view.and_then(|view| view.operational.as_deref());
             let review = reviews.get(id.as_str()).copied();
-            let transitioning =
-                record.state.transition_kind().is_some() || lifecycles.contains(id.as_str());
+            let transitioning = super::verdicts::transition_kind(
+                record,
+                lifecycles.get(id.as_str()).copied(),
+                runtime.moves.get(id),
+            )
+            .is_some();
             let failure = mj_core::attention::FailureIdentity::of(record);
             let dismissed = failure
                 .as_ref()

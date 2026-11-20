@@ -32,8 +32,13 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20 19:06Z) Milestone 3: verified that a stopped worker keeps its last committed title, that a rejected projection page rolls its title back, and that full prompt bodies stay within the browser capture.
 - [x] (2026-11-20 19:20Z) Milestone 3: a headless daemon restarted with malformed stored queue data. It logged and skipped the affected queue for startup while leaving the SQLite row available for recovery.
 - [x] (2026-11-20 19:30Z) Milestone 3: verified that a saved non-UTF-8 project path remains available in the browser capture without breaking terminal control frames.
-- [ ] Milestone 4: one verdict per action and per session state.
-- [ ] Milestone 5: one history for both feeds.
+- [x] (2026-11-20) Milestone 4: added the per-session verdict, switched both surfaces to it, and put Interrupt All selection and execution in the daemon.
+- [x] (2026-11-20) Milestone 4: validated after merging `origin/master`. The terminal and phone goldens, daemon offer tests, browser tests, and a named-instance run with one working child passed.
+- [x] (2026-11-20) Milestone 4 first review: retained worker-targeted terminal interruption, included autonomous goal work, kept the stopped record and its Resume verdict together, and preserved Retry Launch after failed startup cleanup. Checkpoint activity blocks lifecycle offers while the conversation and workspace editing stay available.
+- [x] (2026-11-20) Milestone 4 second review: protected queues held by Move at selection and worker admission, restored terminal warnings for active tool and shell work, and sent Interrupt All requests to independent workers concurrently. The composer refreshes its child counts from the same frame as the dashboard.
+- [x] (2026-11-20) Milestone 4 third review: Move admission protects pending prose questions, lifecycle warnings include tool-only children, and Interrupt All refuses untargetable autonomous goal cancellation.
+- [ ] Milestone 4 follow-ups, before Milestone 5: fix the items listed under Outcomes ("Milestone 4 review follow-ups"); the import's second daemon read stays deferred. In progress as of 2026-11-20. The held-Move case is not fixed by sharing a predicate: the offer and execution already share `interrupt_targets`, which skips a held parent's whole subtree. Accept it when Interrupt All reaches an independently running managed child of a parent whose Move holds its queue, while the hold still protects the parent itself and any native children that share the parent's worker. The other offers must be withdrawn wherever their execution refuses, the terminal's standalone shell interrupt must come back, and an Expecting or dormant Goal child must not trigger a lifecycle confirmation.
+- [ ] Milestone 5: one history for both feeds. Whether to do it now or fold it into the versioned `/api/v1` stream plan is awaiting the user's decision (asked 2026-11-20).
 
 
 ## Surprises & Discoveries
@@ -71,6 +76,9 @@ This plan does not add a new public API. A later plan will publish this projecti
   Evidence: `mj-daemon/src/daemon/snapshot.rs`, `mj-store/src/database/sessions.rs`, and `mj-daemon/src/daemon/feed.rs`.
 
 
+- Observation: the current terminal includes managed children with unfinished turns, including a waiting form or question. The runtime's `interrupted` child status describes a finished turn and includes ordinary user-requested cancellation. Including that status by itself would keep Interrupt All offered on an idle parent after cancelling its only working child. A parked child can retain the turn outcome after its worker has stopped.
+  Evidence: `mj-tui/src/dashboard_sessions.rs` at the Milestone 3 revision, `mj-core/src/subagent.rs` (`failed_turn`), `mj-daemon/src/server_runtime/api.rs` (`subagent_status`), `mj-controller/src/controller/subagent_park.rs`, and the Milestone 3 live result above.
+
 ## Decision Log
 
 
@@ -78,7 +86,7 @@ This plan does not add a new public API. A later plan will publish this projecti
   Rationale: moving the web viewer onto the terminal's history first would carry its stale and duplicated facts along unchanged. The two small fact fixes (#1372, #1596) are user-visible bugs that can ship on their own first.
   Date/Author: 2026-11-20, parent session.
 
-- Decision: where the terminal and the web viewer disagree today, the terminal's semantics win unless noted, because they are the more complete ones. Failed Closing or Destroying with no remaining operation is a settled failure, not a transition. Interrupt All covers managed children that are waiting or interrupted and cancellable native (harness-started) children. The Move offer respects the move-queue admission hold. Changing workspace is offered when another workspace exists and no move-queue hold applies; an ordinary checkpoint does not block it. Execution admission (the daemon's check when the action actually runs) still refuses on its own terms.
+- Decision: where the terminal and the web viewer disagree today, the terminal's semantics win unless noted, because they are the more complete ones. Failed Closing or Destroying with no remaining operation is a settled failure, not a transition. Interrupt All covers unfinished managed turns, including open questions and forms, and cancellable native (harness-started) children. The Interrupt All revision below supersedes the original wording. The Move offer respects the move-queue admission hold. Changing workspace is offered when another workspace exists and no move-queue hold applies; an ordinary checkpoint does not block it. Execution admission (the daemon's check when the action actually runs) still refuses on its own terms.
   Rationale: each of these is a case where the web viewer offers something the daemon cannot do, or omits work the user asked to stop.
   Date/Author: 2026-11-20, parent session.
 
@@ -129,6 +137,12 @@ This plan does not add a new public API. A later plan will publish this projecti
   Date/Author: 2026-11-20, Milestone 3 implementation.
 
 
+- Decision revision: Interrupt All follows unfinished worker state and cancellable native work. This supersedes the 2026-11-20 semantics entry’s “waiting or interrupted” wording. A settled interruption is a finished turn, including on a parked child whose worker has stopped. No outcome value qualifies a child on its own. The offer withdraws when the last eligible work settles.
+  Date/Author: 2026-11-20, parent session.
+
+- An autonomous goal can count as unfinished without a worker-issued command that identifies its turn. Execution reports a refusal in this case because a raw cancel could hit the next queued prompt. Tool-only activity counts in lifecycle warnings even without an open turn to interrupt.
+  Date/Author: 2026-11-20, Milestone 4 review.
+
 ## Outcomes & Retrospective
 
 
@@ -142,6 +156,10 @@ Milestone 3 review follow-ups cover the retained allocation of browser prompt bo
 
 Follow-ups: publish the unified projection as a versioned `/api/v1` stream including profile availability and "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache; revisit the browser Move picker’s implicit destination when all compatible destinations have a missing verdict. The existing profile-only Move can omit a destination and relies on execution preflight to check the implicit one.
 
+
+Milestone 4 publishes transition, dashboard membership, attention, action offers, and child counts on the same capture. A parked child whose relay actor retired reports idle. The `feeds-m4` run started the same managed child twice while its parent was idle. The browser and terminal each interrupted it once. The harness observed two cancellation requests for the child and none for the parent. The offer withdrew after both interruptions. The isolated daemon stopped and no test processes remained. A daemon regression also covers a parent whose only eligible work is a cancellable native child.
+
+Milestone 4 review follow-ups, accepted after the review cutoff: Interrupt All does not yet visit running managed children under a parent whose Move queue is held, though each child can still be interrupted on its own; the terminal lost its separate interrupt action for a standalone user shell, though the chat control still cancels it; the browser still shows its worker-issued interrupt control while Move holds the queue, and admission refuses the command; a completed import reads the daemon a second time when it could reuse its completion state; the single-session Interrupt is offered for an untargetable autonomous goal, and HTTP acknowledges the request before the daemon's `submit_turn_interrupt` refuses it without sending any relay command, so the fix belongs in the daemon verdict, not in worker acknowledgement handling; and a child whose only activity is Expecting or a dormant Goal triggers a lifecycle confirmation even with no tool or shell running, because the verdict's `active_work` treats every non-idle activity state as work.
 
 ## Context and Orientation
 

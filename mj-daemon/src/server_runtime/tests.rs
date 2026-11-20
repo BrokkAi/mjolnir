@@ -358,9 +358,8 @@ fn bare_preflight_config() -> Config {
     config
 }
 
-#[test]
-fn move_recovery_projection_exposes_safe_retry_settings_only() {
-    let operation = mj_core::state::MoveOperation {
+fn move_recovery_fixture() -> mj_core::state::MoveOperation {
+    mj_core::state::MoveOperation {
         quota_stop_reason: None,
         quota_continuation: None,
         prepared_destination: None,
@@ -416,7 +415,12 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         created_at: "now".into(),
         updated_at: "now".into(),
         error: Some("private path and token".into()),
-    };
+    }
+}
+
+#[test]
+fn move_recovery_projection_exposes_safe_retry_settings_only() {
+    let operation = move_recovery_fixture();
     let recovery = ViewerMoveRecovery::from_operation(&operation).unwrap();
     assert_eq!(recovery.phase, "cancelled");
     assert_eq!(recovery.source_profile_id, "source-profile");
@@ -2864,6 +2868,10 @@ fn publish_fixture(
     controller: &Controller,
     runtime: &mj_client::runtime_feed::RuntimeProjection,
 ) -> ViewerSnapshot {
+    let mut capture = runtime.clone();
+    capture.metadata.config = controller.config.clone().into();
+    crate::daemon::verdicts::project(&mut capture, &Default::default());
+    let runtime = &capture;
     let mut native_agents = BTreeMap::new();
     let mut move_recoveries = BTreeMap::new();
     publisher.observe_runtime(runtime, &mut native_agents, &mut move_recoveries);
@@ -3055,4 +3063,76 @@ fn metadata_only_workspace_and_storage_changes_refresh_existing_rows() {
             .values()
             .all(|row| row.storage_problem.is_some())
     );
+}
+
+#[test]
+fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
+    use mj_client::runtime_feed::{RuntimeProjection, SessionOffer};
+    let mut controller = controller_with_profiles(&["codex"]);
+    let mut checkpoint = phone_session("checkpoint", 0);
+    checkpoint.state = SessionState::Checkpointing;
+    let mut failed = phone_session("failed", 0);
+    failed.state = SessionState::Destroying;
+    failed.last_error = Some("destroy failed".into());
+    let mut moving = phone_session("moving", 0);
+    moving.state = SessionState::Running;
+    let mut failed_launch = phone_session("retry-launch", 0);
+    failed_launch.state = SessionState::StartupCleanup;
+    failed_launch.last_error = Some("launch cleanup failed".into());
+    for record in [checkpoint, failed, moving, failed_launch] {
+        controller.state.sessions.insert(record.id.clone(), record);
+    }
+    let mut held = move_recovery_fixture();
+    held.selection.session_id = "moving".into();
+    held.phase = mj_core::state::MovePhase::Failed;
+    held.queue_admission_started = true;
+    let mut runtime = RuntimeProjection {
+        records: controller.state.sessions.clone(),
+        moves: [("moving".to_owned(), held)].into_iter().collect(),
+        ..Default::default()
+    };
+    let mut live = mj_core::relay::RelaySnapshot::new("moving".into()).operational_state();
+    live.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 10 });
+    let mut view =
+        mj_client::daemon::RuntimeSessionView::from_managed("moving".into(), Default::default());
+    view.operational = Some(live.into());
+    runtime.sessions.insert("moving".into(), view);
+    runtime.metadata.workspaces = ["default", "other"]
+        .into_iter()
+        .map(|id| mj_core::workspace::WorkspaceRecord {
+            id: id.into(),
+            name: id.into(),
+            created_at: String::new(),
+            last_opened_at: String::new(),
+            session_count: 0,
+        })
+        .collect();
+    runtime
+        .metadata
+        .failed_launch_retries
+        .insert("retry-launch".into());
+    let snapshot = publish_fixture(&mut Default::default(), &controller, &runtime);
+    assert!(snapshot.sessions.0["retry-launch"].verdict.resume.offered());
+    let failed = &snapshot.sessions.0["failed"];
+    assert!(failed.verdict.live_dashboard);
+    assert!(failed.verdict.transition.is_none());
+    assert!(failed.verdict.transition_failure.is_some());
+    assert!(failed.verdict.stop.offered());
+    assert!(failed.capabilities.suspend);
+    assert!(!failed.transitioning);
+    let moving = &snapshot.sessions.0["moving"];
+    assert_eq!(moving.verdict.move_session, SessionOffer::MoveQueueHeld);
+    assert!(moving.verdict.active_work);
+    assert!(!moving.capabilities.interrupt_turn);
+    assert!(!moving.capabilities.interrupt_all);
+    assert!(!moving.capabilities.move_session);
+    assert!(!moving.capabilities.change_workspace);
+    let checkpoint = &snapshot.sessions.0["checkpoint"];
+    assert!(checkpoint.verdict.transition.is_none());
+    assert!(checkpoint.verdict.change_workspace.offered());
+    assert!(checkpoint.capabilities.change_workspace);
+    assert_eq!(checkpoint.verdict.stop, SessionOffer::OperationInProgress);
+    assert!(!checkpoint.capabilities.suspend);
+    assert!(!checkpoint.capabilities.restart);
+    assert!(!checkpoint.capabilities.move_session);
 }

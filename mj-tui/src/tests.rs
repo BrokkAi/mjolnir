@@ -1923,6 +1923,9 @@ fn retry_launch_from_the_failed_session_dialog_uses_the_saved_destination() {
     };
     let id = session.id.clone();
     let mut dashboard = dashboard_with_session(session);
+    let mut verdict = dashboard.verdict(&id);
+    verdict.resume = mj_client::runtime_feed::SessionOffer::Ready;
+    dashboard.set_session_verdict(&id, verdict);
     dashboard.set_failed_launch_retries([id].into());
 
     dashboard.handle_key(key(KeyCode::Enter));
@@ -1947,6 +1950,9 @@ fn a_failed_session_with_a_retained_target_offers_resume_without_an_archive() {
         worker_root: "/retained/session-1".into(),
     }));
     let mut dashboard = dashboard_with_session(session);
+    let mut verdict = dashboard.verdict("session-1");
+    verdict.resume = mj_client::runtime_feed::SessionOffer::Ready;
+    dashboard.set_session_verdict("session-1", verdict);
     dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(&dashboard.mode, Mode::Confirm(dialog)
         if matches!(dialog.confirmation, Confirmation::RecoverFailed { recoverable: true, .. })));
@@ -2266,6 +2272,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         .get_mut("done")
         .unwrap()
         .unread_agent_messages = 1;
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     dashboard.set_unread_frontiers([("done".into(), 4)].into_iter().collect());
     dashboard
 }

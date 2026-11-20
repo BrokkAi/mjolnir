@@ -17,7 +17,8 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use mj_core::config::{Config, HarnessKind, SessionOrder, TargetTemplate as HelTargetTemplate};
+use mj_core::config::{Config, HarnessKind, SessionOrder};
+use mj_core::snapshot_map::SnapshotMap;
 use mj_core::state::{
     MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
     SessionResourceAllocation, SessionState, SessionTransitionKind, State,
@@ -725,7 +726,7 @@ pub enum DashboardAction {
     /// session's turn through the daemon, and each harness-native
     /// sub-agent through its owner.
     InterruptAll {
-        targets: InterruptAllTargets,
+        session_id: String,
     },
     /// Show a session's sub-agents in their own workspace. The controller
     /// saves the composer draft first, as the prompt border's click does.
@@ -955,6 +956,8 @@ pub struct DashboardState {
     pub(crate) notification_dismissals: Tracked<
         mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::NotificationDismissal>,
     >,
+    pub(crate) session_verdicts:
+        Tracked<SnapshotMap<String, mj_client::runtime_feed::SessionVerdict>>,
     pub(crate) served_attention:
         Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
@@ -1017,7 +1020,7 @@ pub struct DashboardState {
     /// dialog, the session `mj go` starts in, and a session just imported.
     /// The runtime feed carries only live sessions; read both through
     /// [`DashboardState::session_record`].
-    pub(crate) stopped_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    pub(crate) stopped_records: SnapshotMap<String, mj_client::daemon::SessionRecordWithVerdict>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, so this summary of every session arrives beside them.
     pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
@@ -1306,7 +1309,7 @@ mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
 mod pane_controls;
-pub use dashboard_sessions::{AttentionEntry, AttentionLevel, InterruptAllTargets};
+pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
 use dashboard_workspaces::ChildWorkspace;
@@ -1366,6 +1369,7 @@ impl DashboardState {
             notification_dismissals: Default::default(),
             notification_cards: None,
             form_holders: Default::default(),
+            session_verdicts: Default::default(),
             served_attention: Tracked::new(Default::default()),
             launch_recency,
             recent_launch: None,

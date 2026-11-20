@@ -1225,6 +1225,9 @@ pub enum DaemonAction {
         old_id: String,
         new_id: String,
     },
+    InterruptAll {
+        session_id: String,
+    },
     SubmitSessionCommand {
         #[serde(default)]
         inherited_draft: Option<String>,
@@ -1426,6 +1429,7 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    InterruptedAll(InterruptAllResult),
     AdoptionInstalled {
         session_id: String,
     },
@@ -1502,7 +1506,7 @@ pub enum DaemonReply {
     SessionTail(Box<crate::runtime_feed::SessionTailReply>),
     ResumeCandidates(Box<ResumeCandidates>),
     GoStartupSession(Option<Box<SessionRecord>>),
-    SessionRecord(Option<Box<SessionRecord>>),
+    SessionRecord(Option<Box<SessionRecordWithVerdict>>),
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
@@ -1547,6 +1551,20 @@ impl DaemonReply {
                 | Self::ResumeCandidates(_)
         )
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptAllResult {
+    pub requested: usize,
+    pub failures: Vec<(String, String)>,
+}
+
+/// An on-demand record and its verdict from the same capture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRecordWithVerdict {
+    pub record: SessionRecord,
+    pub verdict: crate::runtime_feed::SessionVerdict,
 }
 
 /// What the resume dialog lists, read on demand.
@@ -3318,6 +3336,16 @@ impl DaemonClient {
     }
 
     pub async fn session_record(&mut self, session_id: String) -> Result<Option<SessionRecord>> {
+        Ok(self
+            .session_record_with_verdict(session_id)
+            .await?
+            .map(|session| session.record))
+    }
+
+    pub async fn session_record_with_verdict(
+        &mut self,
+        session_id: String,
+    ) -> Result<Option<SessionRecordWithVerdict>> {
         match self
             .request(DaemonAction::SessionRecord { session_id })
             .await?
@@ -3907,7 +3935,8 @@ pub const RUNTIME_HOST_CAPACITY_PROTOCOL: u32 = TOOL_PERMISSION_CALL_PROTOCOL + 
 /// Availability checks are requested independently of their runtime feed results.
 pub const RUNTIME_AVAILABILITY_PROTOCOL: u32 = RUNTIME_HOST_CAPACITY_PROTOCOL + 1;
 pub const RUNTIME_SESSION_MATERIALIZED_PROTOCOL: u32 = RUNTIME_AVAILABILITY_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = RUNTIME_SESSION_MATERIALIZED_PROTOCOL;
+pub const RUNTIME_SESSION_VERDICTS_PROTOCOL: u32 = RUNTIME_SESSION_MATERIALIZED_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = RUNTIME_SESSION_VERDICTS_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";

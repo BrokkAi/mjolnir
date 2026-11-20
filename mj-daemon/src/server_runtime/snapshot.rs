@@ -125,14 +125,11 @@ pub(super) fn viewer_operation(
 /// Everything here is a fact the controller holds and the browser cannot:
 /// whether the session manager is driving this session, what the agent said it
 /// supports, and whether a lifecycle operation already owns it.
-pub(super) fn session_capabilities(
+fn viewer_capabilities(
     session: &crate::server::ViewerSession,
     operational: Option<&mj_core::relay::RelayOperationalState>,
     operation: Option<&crate::server::ViewerOperation>,
     facts: Option<&mj_core::acp::AcpSessionFacts>,
-    workspace_count: usize,
-    container_target: bool,
-    tree_turn_running: bool,
 ) -> crate::server::ViewerSessionCapabilities {
     use crate::server::ViewerLifecycleCategory;
 
@@ -140,19 +137,9 @@ pub(super) fn session_capabilities(
     // A session the manager is not driving cannot be talked to, whatever its
     // durable state says.
     let attached = operational.is_some();
-    // A failed close/destroy can leave its durable record in an intermediate
-    // state after the lifecycle owner has gone away. Keep the status card
-    // selectable, but do not turn the failure into an endless mutation lock:
-    // the published Stop capability is the recovery action.
-    let transition_busy = session.transitioning && !session.has_error;
-    let busy = operation.is_some() || transition_busy;
-    // A failed move can retain a live destination while queue admission is
-    // incomplete. The durable move hold owns all mutating session controls in
-    // that interval; retry Move is the one intentional exception.
-    let partial_move_queue = session.move_recovery.as_ref().is_some_and(|recovery| {
-        recovery.queue_admission_started && !recovery.queue_admission_finished
-    });
-    let mutation_busy = busy || partial_move_queue;
+    let verdict = session.verdict;
+    let mutation_busy =
+        operation.is_some() || verdict.transition.is_some() || verdict.move_queue_held;
     let idle = operational
         .is_some_and(|state| state.execution == mj_core::relay::RelayExecutionState::Idle);
     crate::server::ViewerSessionCapabilities {
@@ -166,25 +153,9 @@ pub(super) fn session_capabilities(
         read_history: false,
         prompt: live && attached && !mutation_busy,
         run_shell: live && attached && !mutation_busy,
-        // A turn Claude Code started on its own after a background task can
-        // be stopped too. A Codex turn of that kind is a native goal, which
-        // has its own controls.
-        interrupt_turn: live
-            && !mutation_busy
-            && operational.is_some_and(|state| {
-                state.active_prompt.is_some()
-                    || (state.harness_turn.is_some() && !state.goal.active())
-                    || state.capacity_retry.is_some()
-                    || state
-                        .continuation
-                        .quota_recovery
-                        .as_ref()
-                        .is_some_and(|r| !r.submitted)
-            }),
+        interrupt_turn: verdict.interrupt,
         cancel_operation: operation.is_some_and(|operation| operation.cancellable),
-        // Stopping a session that is already stopping asks for something that
-        // is happening; resuming one that is running asks for a second copy.
-        suspend: session.lifecycle.is_dashboard_visible() && !mutation_busy,
+        suspend: verdict.stop.offered(),
         destroy: !operation.is_some_and(|op| {
             matches!(
                 op.kind,
@@ -195,16 +166,8 @@ pub(super) fn session_capabilities(
         }),
         dismiss_notification: session.notification_dismissal.is_some(),
         rename: !session.transitioning,
-        // A Move that holds the source environment refuses Resume; it is
-        // retried or the session is destroyed.
-        resume: session.has_resume_source()
-            && !session.lifecycle.is_dashboard_visible()
-            && !mutation_busy
-            && !session
-                .move_recovery
-                .as_ref()
-                .is_some_and(|recovery| recovery.environment_retained),
-        move_session: live && !busy,
+        resume: verdict.resume.offered(),
+        move_session: verdict.move_session.offered(),
         set_config: live && attached && facts.is_some() && !mutation_busy,
         // Plan mode is a turn boundary: the terminal offers it only while the
         // agent is idle, and the phone must not be looser.
@@ -212,21 +175,10 @@ pub(super) fn session_capabilities(
             && !mutation_busy
             && idle
             && facts.is_some_and(mj_core::acp::AcpSessionFacts::supports_plan_mode),
-        // Moving between workspaces is a durable-record edit, but offering it
-        // needs the one fact the record does not hold: that another workspace
-        // exists. The terminal refuses with "there is no other workspace".
-        change_workspace: workspace_count >= 2 && !mutation_busy,
-        // The container gate shares the terminal's classifier: the session's
-        // configured target template decides, never the worker's report.
-        container_settings: container_target && !mutation_busy,
-        // A live session restarts from a fresh recovery copy; a suspended one
-        // comes back from the checkpoint it already has. The terminal gates
-        // the same way, plus idle, which `mutation_busy` stands in for here.
-        restart: (session.lifecycle.is_dashboard_visible() || session.has_checkpoint)
-            && !mutation_busy,
-        // True when this session or any sub-agent under it has a turn running,
-        // which the execution arm re-checks against the live handles.
-        interrupt_all: !mutation_busy && tree_turn_running,
+        change_workspace: verdict.change_workspace.offered(),
+        container_settings: verdict.container_settings.offered(),
+        restart: verdict.restart.offered(),
+        interrupt_all: verdict.interrupt_all,
     }
 }
 
@@ -396,6 +348,77 @@ pub(super) fn viewer_snapshot(
             .or_insert_with(Default::default)
             .insert(relation.child_session_id.clone(), relation.kind);
     }
+    let mut capture = mj_client::runtime_feed::RuntimeProjection {
+        records: controller.state.sessions.clone(),
+        subagents: controller.state.subagents.clone(),
+        sessions: views.sessions.clone(),
+        metadata: mj_client::runtime_feed::RuntimeMetadata {
+            config: controller.config.clone().into(),
+            workspaces: workspaces.to_vec(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    use crate::daemon::{RuntimeLifecycleKind, RuntimeLifecycleView};
+    use crate::server::ViewerOperationKind;
+    capture.metadata.lifecycles = views
+        .operations
+        .iter()
+        .filter_map(|(id, op)| {
+            let kind = match op.kind {
+                ViewerOperationKind::Create => RuntimeLifecycleKind::Create,
+                ViewerOperationKind::Resume => RuntimeLifecycleKind::Resume,
+                ViewerOperationKind::Suspend => RuntimeLifecycleKind::Suspend,
+                ViewerOperationKind::Destroy => RuntimeLifecycleKind::ForceDestroy,
+                ViewerOperationKind::Stop => RuntimeLifecycleKind::StopSubagent,
+                ViewerOperationKind::Cleanup => RuntimeLifecycleKind::Cleanup,
+                ViewerOperationKind::Move => RuntimeLifecycleKind::Move,
+                ViewerOperationKind::Checkpoint => return None,
+            };
+            Some(RuntimeLifecycleView {
+                operation_id: format!("fixture-{id}"),
+                move_operation_id: None,
+                session_id: id.clone(),
+                kind,
+                cancellable: op.cancellable,
+                active_stages: Vec::new(),
+                started_at_epoch_seconds: op.started_at_epoch_seconds,
+                resume_destination: None,
+                notice: None,
+            })
+        })
+        .collect();
+    capture.native_agents = views
+        .native_agents
+        .values()
+        .flatten()
+        .map(|agent| {
+            let view = mj_core::native_agent::NativeAgentSummary {
+                agent: agent.clone(),
+                generation_ordinal: 0,
+                projection_ordinal: 0,
+                projection_digest: String::new(),
+                pending_input: false,
+                pending_input_request_id: None,
+                pending_input_message: None,
+                pending_input_raised_at_ms: None,
+            };
+            (agent.view_id(), view)
+        })
+        .collect();
+    capture.metadata.failed_launch_retries = capture
+        .records
+        .iter()
+        .filter_map(|(id, record)| {
+            mj_controller::database::failed_first_launch(
+                record,
+                capture.subagents.contains_key(id),
+                None,
+            )
+            .then_some(id.clone())
+        })
+        .collect();
+    crate::daemon::verdicts::project(&mut capture, &Default::default());
     viewer_snapshot_selected(
         controller,
         workspaces,
@@ -407,7 +430,7 @@ pub(super) fn viewer_snapshot(
             children: &children,
             failed_launch_retries: None,
         },
-        &Default::default(),
+        &capture,
     )
 }
 
@@ -425,8 +448,10 @@ pub(super) fn viewer_snapshot_selected(
     views: &PhoneSessionViews<'_>,
     revision: u64,
     selection: ViewerRecordSelection<'_>,
-    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    capture: &mj_client::runtime_feed::RuntimeProjection,
 ) -> ViewerSnapshot {
+    let metadata = &capture.metadata;
+    let verdicts = &capture.verdicts;
     let PhoneSessionViews {
         native_agents,
         conversations,
@@ -644,15 +669,8 @@ pub(super) fn viewer_snapshot_selected(
         session.prompt_images_supported =
             live.is_some_and(mj_core::relay::RelayOperationalState::accepts_prompt_images);
         session.operation = operations.get(&session.id).cloned().map(Box::new);
-        // Runtime ownership takes precedence over the durable record. Move
-        // can still look Running while its old conversation is no longer a
-        // valid destination, and stopped cleanup/destroy operations have no
-        // live lifecycle category of their own.
-        if let Some(operation) = session.operation.as_ref()
-            && operation.kind.transition_kind().is_some()
-        {
-            session.transitioning = true;
-        }
+        session.verdict = verdicts.get(&session.id).copied().unwrap_or_default();
+        session.transitioning = session.verdict.transition.is_some();
         if session.state == mj_core::state::SessionState::Disconnected.as_str()
             && session.operation.as_ref().is_some_and(|operation| {
                 matches!(
@@ -685,6 +703,11 @@ pub(super) fn viewer_snapshot_selected(
         // restart is still running, and calling it idle made automation treat
         // it as finished (#1025).
         let activity_state = match live {
+            _ if session.verdict.idle && session.state == "parked" => {
+                mj_core::activity::ActivityState::Idle {
+                    since_ms: session.last_activity_at_ms,
+                }
+            }
             Some(state) => state.activity_state(),
             None => mj_core::activity::while_disconnected(
                 materialized.map_or(Default::default(), |view| view.execution),
@@ -695,6 +718,9 @@ pub(super) fn viewer_snapshot_selected(
         // corrected for a turn that flag has not caught up with; one it cannot
         // see reports what was last known.
         let chat_phase = match live {
+            _ if session.verdict.idle && session.state == "parked" => {
+                mj_core::relay::RelayExecutionState::Idle
+            }
             Some(state) => mj_core::activity::chat_phase(&state.facts()),
             None => activity_state.chat_phase(),
         };
@@ -704,21 +730,7 @@ pub(super) fn viewer_snapshot_selected(
             mj_core::relay::RelayExecutionState::Closing => crate::server::ViewerChatPhase::Closing,
             mj_core::relay::RelayExecutionState::Closed => crate::server::ViewerChatPhase::Closed,
         };
-        // A parked sub-agent is idle: its turn ended and its worker is
-        // stopped until its parent sends it more input.
-        session.is_idle = activity_state.is_idle()
-            && controller
-                .state
-                .sessions
-                .get(&session.id)
-                .is_some_and(|record| {
-                    matches!(
-                        record.state,
-                        mj_core::state::SessionState::Running
-                            | mj_core::state::SessionState::Parked
-                    )
-                })
-            && session.operation.is_none();
+        session.is_idle = session.verdict.idle;
         session.attention = metadata
             .session_attention
             .get(&session.id)
@@ -829,41 +841,8 @@ pub(super) fn viewer_snapshot_selected(
             .get(&session.id)
             .map(crate::server::ViewerTurnReview::from_runtime)
             .map(Box::new);
-        // Two capability inputs the session row itself does not carry: whether
-        // its configured target template runs a container, and whether any
-        // session in its sub-agent tree has a turn running. The InterruptAll
-        // execution walks the same tree this measures.
-        let container_target = controller
-            .state
-            .sessions
-            .get(&session.id)
-            .and_then(|record| controller.config.targets.get(&record.target_template_id))
-            .is_some_and(mj_core::config::is_container_target);
-        let tree_turn_running = std::iter::once(session.id.as_str())
-            .chain(
-                selection
-                    .children
-                    .get(&session.id)
-                    .into_iter()
-                    .flat_map(|children| children.keys().map(String::as_str)),
-            )
-            .any(|id| {
-                sessions
-                    .get(id)
-                    .and_then(|view| view.operational.as_ref())
-                    .is_some_and(|state| {
-                        state.active_prompt.is_some() || state.harness_turn.is_some()
-                    })
-            });
-        session.capabilities = session_capabilities(
-            session,
-            live,
-            operations.get(&session.id),
-            facts.as_ref(),
-            workspaces.len(),
-            container_target,
-            tree_turn_running,
-        );
+        session.capabilities =
+            viewer_capabilities(session, live, operations.get(&session.id), facts.as_ref());
         // The state owns what "stopped sub-agent" means, so the terminal and
         // the viewer agree on which children can be read.
         session.capabilities.read_history =

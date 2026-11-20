@@ -1106,6 +1106,7 @@ mod tests {
         let mut second = running_session();
         second.id = "another-session".into();
         navigation.state.sessions.insert(second.id.clone(), second);
+        crate::test_support::publish_fixture_verdicts(&mut navigation);
         navigation.focus_sessions();
         navigation.set_selection_for(Focus::Sessions, 0);
         append_state(
@@ -1544,6 +1545,7 @@ mod tests {
             .state
             .sessions
             .insert(branch_session.id.clone(), branch_session);
+        crate::test_support::publish_fixture_verdicts(&mut branch);
         branch.focus_sessions();
         branch.handle_key(key(KeyCode::Char('/')));
         for character in "OCTOPUS".chars() {

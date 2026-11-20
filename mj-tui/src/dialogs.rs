@@ -1973,20 +1973,7 @@ impl DashboardState {
             }
             (Confirmation::InterruptAll { session_id, .. }, 1) => {
                 self.cancel_modal();
-                let targets = self.interrupt_all_targets(&session_id);
-                if targets.is_empty() {
-                    self.set_notice("Nothing is running any more.");
-                    return DashboardAction::None;
-                }
-                for (owner, child) in &targets.native {
-                    if let Some(pane) = self
-                        .native_agents
-                        .get_mut(&mj_core::native_agent::view_id(owner, child))
-                    {
-                        pane.stopping = true;
-                    }
-                }
-                DashboardAction::InterruptAll { targets }
+                DashboardAction::InterruptAll { session_id }
             }
             (Confirmation::RecoverFailed { session_id, .. }, 1) => {
                 self.cancel_modal();
@@ -2198,7 +2185,7 @@ impl DashboardState {
 
 impl DashboardState {
     pub fn show_normal_restart(&mut self, session_id: String) {
-        let interrupting = self.own_turn_is_running(&session_id);
+        let interrupting = self.has_active_work(&session_id);
         self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::RestartAgent {
             session_id,
             interrupting,

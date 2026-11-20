@@ -35,9 +35,12 @@ use mj_core::config::{
 };
 use mj_core::state::{
     HostContainerSize, MaterializedQueuedPrompt, MoveOperation, MovePreparation,
-    ResumeQueueDisposition, SessionResourceAllocation, SessionState, allocation_cpus,
-    allocation_memory, default_container_size,
+    ResumeQueueDisposition, SessionResourceAllocation, allocation_cpus, allocation_memory,
+    default_container_size,
 };
+
+#[cfg(test)]
+use mj_core::state::SessionState;
 
 use mj_chat::components::PathField;
 use mj_chat::components::{

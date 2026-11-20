@@ -182,6 +182,7 @@ fn runtime_state_update(
         revision: snapshot.revision,
         records: snapshot.records,
         sessions: snapshot.sessions,
+        verdicts: snapshot.verdicts,
         lifecycles: metadata.lifecycles,
         moves: snapshot.moves,
         subagents: snapshot.subagents,

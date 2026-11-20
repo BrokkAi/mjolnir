@@ -105,7 +105,7 @@ where
 pub(crate) struct SessionFacts {
     /// Revisions of the inputs these facts were derived from; `None` before
     /// the first derivation.
-    inputs: Option<[u64; 6]>,
+    inputs: Option<[u64; 7]>,
     /// Served attention with this terminal's unread receipt applied.
     own: HashMap<String, AttentionLevel>,
     /// Live records, and records an operation keeps on screen, by id.
@@ -116,7 +116,7 @@ pub(crate) struct SessionFacts {
 }
 
 impl SessionFacts {
-    fn derive(dashboard: &DashboardState, inputs: [u64; 6]) -> Self {
+    fn derive(dashboard: &DashboardState, inputs: [u64; 7]) -> Self {
         let mut index = dashboard.row_index.borrow_mut();
         index.synchronize(&dashboard.state);
         let own = dashboard
@@ -125,10 +125,15 @@ impl SessionFacts {
             .keys()
             .map(|id| (id.clone(), presentation_attention(dashboard, id)))
             .collect::<HashMap<_, _>>();
-        let mut listed = index.live.clone();
+        let mut listed: BTreeSet<_> = dashboard
+            .session_verdicts
+            .iter()
+            .filter(|(_, verdict)| verdict.live_dashboard)
+            .map(|(id, _)| id.clone())
+            .collect();
         listed.extend(
             own.iter()
-                .filter(|(_, level)| level.needs_person())
+                .filter(|(id, level)| dashboard.verdict(id).needs_person && level.needs_person())
                 .map(|(id, _)| id.clone()),
         );
         listed.extend(dashboard.session_operations.keys().cloned());
@@ -370,7 +375,7 @@ pub(crate) struct SessionOrder {
 
 #[derive(Clone, PartialEq, Eq)]
 struct OrderKey {
-    inputs: [u64; 15],
+    inputs: [u64; 16],
     selected: Option<String>,
 }
 
@@ -442,7 +447,7 @@ impl SessionOrder {
 }
 
 impl DashboardState {
-    fn session_facts_inputs(&self) -> [u64; 6] {
+    fn session_facts_inputs(&self) -> [u64; 7] {
         [
             self.state.revision(),
             self.session_details.revision(),
@@ -450,6 +455,7 @@ impl DashboardState {
             self.served_attention.revision(),
             self.notification_dismissals.revision(),
             self.session_operations.revision(),
+            self.session_verdicts.revision(),
         ]
     }
 
@@ -548,8 +554,15 @@ impl DashboardState {
     }
 
     fn session_order_key(&self) -> OrderKey {
-        let [state, details, reviews, attention, dismissals, operations] =
-            self.session_facts_inputs();
+        let [
+            state,
+            details,
+            reviews,
+            attention,
+            dismissals,
+            operations,
+            verdicts,
+        ] = self.session_facts_inputs();
         OrderKey {
             inputs: [
                 state,
@@ -558,6 +571,7 @@ impl DashboardState {
                 attention,
                 dismissals,
                 operations,
+                verdicts,
                 self.config.revision(),
                 self.project_sources.revision(),
                 self.native_agents.revision(),
