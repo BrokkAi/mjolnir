@@ -31,7 +31,7 @@ To see it working:
 ## Progress
 
 - [x] (2026-11-20 10:40Z) Claimed #1495 (assignee + `agent-in-progress`). Three read-only maps done; findings folded into Context and Surprises. Raw reports, not committed: `.mj/agents/86723bf780a4dd9d8b24056c7b6be9b8/findings.md` (mbx crates and protocol), `.mj/agents/f3f4746fa398e3dbff9133f5e48cee2e/findings.md` (engine, network, IAM, controller), `.mj/agents/8f2bc9dd138866074e59bf08f113d596/findings.md` (Nitro and mise images).
-- [ ] Milestone 1: engine image alignment (platform check, `maintain` verb with image reconciliation, pull credential remediation).
+- [x] (2026-11-20) Milestone 1: engine image alignment (platform check, `maintain` verb with image reconciliation, pull credential remediation).
 - [ ] Milestone 2: controller image alignment (warm effective images at host creation, reconcile images during refresh, `mj image status` without a builder, Doctor, docs).
 - [ ] Milestone 3: mbx in Nitro guests (pinned client, launchers, guest-local store).
 - [ ] Milestone 4: the host proxy (engine verb, per-VM unit, firewall, host cache, trimming, tests).
@@ -107,7 +107,9 @@ To see it working:
 
 ## Outcomes & Retrospective
 
-(Not started.)
+Milestone 1 adds validation of the fetched OCI architecture before publishing image state and validates cached image metadata before reuse. The engine's `maintain --keep-image` command reconciles tags and runs the existing unused-image prune; output lists removed references and reclaimed flattened-disk bytes. Crane digest resolution errors now point operators to host-side crane authorization.
+
+The requested package identifier in the concrete command is outdated for this checkout: Cargo names the package `brokk-mj-worker-runtime`, though its library target is `mj_worker`. Use that package name for test and clippy invocations.
 
 ## Context and Orientation
 

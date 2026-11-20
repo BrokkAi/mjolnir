@@ -54,6 +54,8 @@ enum Command {
     Container(ContainerCommand),
     /// List VMs.
     Ps(PsArgs),
+    /// Remove image references outside the wanted set and prune unused images.
+    Maintain(MaintainArgs),
     /// Start stopped VMs from their retained disks.
     Start(NamesArgs),
     /// Stop VMs.
@@ -93,6 +95,13 @@ struct PullArgs {
     #[arg(short, long)]
     quiet: bool,
     image: String,
+}
+
+#[derive(Debug, Args)]
+struct MaintainArgs {
+    /// Image references the host must retain.
+    #[arg(long = "keep-image", required = true)]
+    keep_image: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -362,6 +371,7 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
         }
         Command::Container(ContainerCommand::ReplaceRoot(command)) => replace_root(layout, command),
         Command::Ps(args) => list(layout, args),
+        Command::Maintain(args) => maintain(layout, args),
         Command::Start(args) => {
             for name in &args.names {
                 vm::start(layout, name)?;
@@ -497,6 +507,29 @@ fn image_command(layout: &Layout, command: ImageCommand) -> Result<i32> {
             1
         }),
     }
+}
+
+fn maintain(layout: &Layout, args: MaintainArgs) -> Result<i32> {
+    let removed_refs = image::reconcile_references(layout, &args.keep_image)?;
+    // Root disks are sparse, so their nominal size says nothing about the
+    // space a prune frees; count the blocks they actually hold.
+    let mut allocated = BTreeMap::new();
+    for entry in std::fs::read_dir(layout.images())? {
+        let id = entry?.file_name().to_string_lossy().into_owned();
+        if let Ok(metadata) = std::fs::metadata(image::root_image(layout, &id)) {
+            allocated.insert(id, std::os::unix::fs::MetadataExt::blocks(&metadata) * 512);
+        }
+    }
+    let removed = image::prune(layout)?;
+    let bytes = removed
+        .iter()
+        .filter_map(|id| allocated.get(id))
+        .sum::<u64>();
+    for reference in removed_refs {
+        println!("{reference}");
+    }
+    println!("bytes reclaimed: {bytes}");
+    Ok(0)
 }
 
 fn parse_memory(text: &str) -> Result<u64> {
