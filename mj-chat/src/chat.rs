@@ -1053,7 +1053,8 @@ impl ChatState {
         let started = std::time::Instant::now();
         self.reconcile_submissions(session);
         self.reconcile_notices(session);
-        let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
+        let rebuild_projection = session.applied_event_ordinal != self.latest_seq
+            || session.pending_elicitations != self.pending_elicitations;
         let phase = match session.execution {
             MaterializedExecutionState::Idle => WorkerPhase::Idle,
             MaterializedExecutionState::Running { .. } => WorkerPhase::Running,

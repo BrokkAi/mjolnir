@@ -149,6 +149,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                     content: vec![json!({"type": "text", "text": "next"})],
                     queued_at_ms: 2,
                 }],
+                mailbox: None,
             },
             output_path: output.clone(),
         },

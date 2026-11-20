@@ -553,7 +553,7 @@ async fn complete_child(
     // before anything is decided about the ended turn, and before taking the
     // handoff admission: during startup the host defers the answer until its
     // interrupted-review sweep ends, and a handoff must not wait on reviews.
-    let review_open = state.child_awaits_review(&child_id).await;
+    let review_open = state.child_review(&child_id).await.holds();
     // A handback the daemon already executed is no longer the queue's: its
     // durable result says what happened (a rejected one recorded no report),
     // even while the worker still lists it until the result is delivered.
@@ -671,6 +671,12 @@ async fn settle_child(
     // verdict, not forgetting to hand back: no reminder, no notice, no park.
     if review_open {
         return Ok(ChildCompletion::AwaitingReview);
+    }
+    // As for a reviewer above, the queue owns a handback until the daemon has
+    // executed it. A handback can wait in the queue while the review host
+    // restores reviews, so the ended turn alone does not decide the report.
+    if handback_queued {
+        return Ok(ChildCompletion::AwaitingHandback);
     }
     // A reminder turn is judged every time: whether its child is held depends
     // on the worker's liveness, which changes without a new turn.
@@ -1069,6 +1075,16 @@ mod tests {
 
     /// The session actor's view of the child: connected and idle after `turn`,
     /// which is what a delegation observation is made from.
+    /// Waits for the review host's startup sweep. Until it ends the host
+    /// cannot say whether a child's review is open, so every child is held.
+    async fn review_host_ready(state: &RuntimeState) {
+        while state.review_host().has_open_review("no-such-session").await
+            == Err(crate::review_host::OpenReviewUnknown::NotReady)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     async fn publish_idle_child(
         manager: &crate::daemon::tests::TestRemoteManager,
         turn: &mj_core::state::MaterializedTurnOutcome,
@@ -1156,6 +1172,7 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        review_host_ready(&state).await;
         // The readers' snapshot holds the turn the observation reports.
         let turn = store_finished_turn("child", "turn", 10);
         publish_idle_child(&manager, &turn).await;
@@ -1311,14 +1328,14 @@ mod tests {
         let stored = mj_controller::database::load_subagent("child")
             .unwrap()
             .unwrap();
-        let settle = |review_open| {
+        let settle = |review_open, handback_queued| {
             settle_child(
                 &state,
                 &backend,
                 mj_controller::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
                 ChildSeen {
-                    handback_queued: false,
+                    handback_queued,
                     in_flight: Vec::new(),
                     liveness: None,
                 },
@@ -1327,8 +1344,14 @@ mod tests {
             )
         };
         assert!(matches!(
-            settle(true).await.unwrap(),
+            settle(true, false).await.unwrap(),
             ChildCompletion::AwaitingReview
+        ));
+        // A handback still in the queue, retried while the review host
+        // restores reviews, decides the report; the ended turn does not.
+        assert!(matches!(
+            settle(false, true).await.unwrap(),
+            ChildCompletion::AwaitingHandback
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park attempt");
         assert_eq!(
@@ -1354,7 +1377,7 @@ mod tests {
             .unwrap()
         );
         assert!(matches!(
-            settle(false).await.unwrap(),
+            settle(false, false).await.unwrap(),
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);
@@ -1416,6 +1439,7 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        review_host_ready(&state).await;
 
         // The snapshot holds the child's earlier turn; the observation is the
         // turn after it.
@@ -1495,8 +1519,8 @@ mod tests {
     }
 
     // After a failed review-host startup recovery its open-review answer is an
-    // error. Delegation decides what that means: a child that cannot request
-    // review never asks, and one that can settles as having no open review.
+    // error. Delegation decides what that means: the child settles as having
+    // no open review, whatever its parent's review choice.
     #[tokio::test]
     async fn children_settle_when_the_review_host_failed_its_startup_recovery() {
         const CHILD: &str = "MJ_TEST_DELEGATION_REVIEW_HOST_FAILED";
@@ -1557,8 +1581,6 @@ mod tests {
                 .insert(child_id.into(), relation.into());
         }
         let state = crate::daemon::tests::test_runtime_state_with(controller);
-        assert!(state.child_can_request_review("child-push"));
-        assert!(!state.child_can_request_review("child-off"));
         state
             .review_host()
             .fail_startup_recovery("the sweep could not read the store");

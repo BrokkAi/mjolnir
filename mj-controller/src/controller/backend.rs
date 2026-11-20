@@ -439,7 +439,7 @@ fn push_unique(paths: &mut Vec<String>, more: impl IntoIterator<Item = String>) 
 
 /// Check a target before a launch, resume, or move uses it.
 ///
-/// An SSH host's container runtime is verified by `mj setup`, `mj doctor`,
+/// An SSH host's container runtime is verified by first-run setup, `mj doctor`,
 /// and the Targets pane's Test action; here it is assumed to still be as
 /// they left it, and only the host's reachability is checked. That probe
 /// joins an open shared connection, so it usually costs one SSH channel.

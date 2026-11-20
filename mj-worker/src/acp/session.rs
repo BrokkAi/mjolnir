@@ -1,5 +1,22 @@
 use super::*;
 
+/// Keep evidence from the ACP response before the worker records a text error.
+fn startup_request_error(error: agent_client_protocol::Error, step: &str) -> anyhow::Error {
+    let diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
+    let auth_failure = !diagnostic.is_usage_limit()
+        && (error.code == agent_client_protocol::ErrorCode::AUTH_REQUIRED
+            || mj_core::credentials::turn_diagnostic_reports_auth_failure(&diagnostic));
+    let error = anyhow::Error::new(error);
+    if auth_failure {
+        error.context(format!(
+            "{step} ({})",
+            mj_core::acp::PROMPT_AUTH_REQUIRED_MARKER
+        ))
+    } else {
+        error.context(step.to_owned())
+    }
+}
+
 /// The name the worker gives an agent as its ACP client. It is the name of
 /// the package that ships the worker program, which this library was once
 /// part of; agents and their logs have always seen this name.
@@ -182,7 +199,8 @@ pub(super) async fn serve_session(
         .block_task()
         .await;
     spec.acp_activity.mark();
-    let initialized = initialized.context("initialize ACP bridge")?;
+    let initialized =
+        initialized.map_err(|error| startup_request_error(error, "initialize ACP bridge"))?;
     if initialized.protocol_version != ProtocolVersion::V1 {
         bail!(
             "ACP bridge negotiated unsupported protocol {:?}",
@@ -489,7 +507,8 @@ pub(super) async fn serve_session(
         offered_mcp_servers = request.mcp_servers.len();
         let created = connection.send_request(request).block_task().await;
         spec.acp_activity.mark();
-        let created = created.context("create ACP session")?;
+        let created =
+            created.map_err(|error| startup_request_error(error, "create ACP session"))?;
         if capability.is_some()
             && let Some(meta) = created.meta.as_ref()
         {

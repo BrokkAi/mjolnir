@@ -13,7 +13,7 @@ const TOOL_SUMMARY_MAX_NESTING: usize = 16;
 /// Stands for a command whose name is an expansion, such as `$E cargo test`.
 const UNNAMED_COMMAND_SUMMARY: &str = "…";
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 8;
+pub const TOOL_SUMMARY_VERSION: u8 = 10;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -458,8 +458,43 @@ fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresenta
     }
 }
 
+/// The short name shown for a call to one of Mjolnir's own MCP servers
+/// (`mj-agents`, `mj-review`, `mj-memory`; Codex registers them as
+/// `mj_agents` and so on): `mj_<tool>`. Harnesses title such a call
+/// `mcp__<server>__<tool>`, `mcp:<server>/<tool>`, `mcp.<server>.<tool>` or
+/// `<server>.<tool>`, sometimes followed by a bracketed status such as
+/// ` [in_progress]`, which is kept. Any other title is left alone. Stored
+/// titles and the logic that matches on them keep the raw spelling.
+pub fn tool_display_title(title: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = title.trim();
+    let (name, suffix) = match trimmed.split_once(' ') {
+        Some((name, rest)) if rest.starts_with('[') => (name, &trimmed[name.len()..]),
+        Some(_) => return title.into(),
+        None => (trimmed, ""),
+    };
+    let tool = name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .or_else(|| name.strip_prefix("mcp:").and_then(|r| r.split_once('/')))
+        .or_else(|| name.strip_prefix("mcp.").and_then(|r| r.split_once('.')))
+        .or_else(|| name.split_once('.'))
+        .filter(|(server, tool)| {
+            (server.starts_with("mj-") || server.starts_with("mj_"))
+                && !tool.is_empty()
+                && tool.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(_, tool)| tool);
+    match tool {
+        Some(tool) => format!("mj_{tool}{suffix}").into(),
+        None => title.into(),
+    }
+}
+
 fn title_source(title: &str) -> String {
     let title = title.trim();
+    if let std::borrow::Cow::Owned(display) = tool_display_title(title) {
+        return display;
+    }
     let title = title
         .strip_prefix("Running:")
         .or_else(|| title.strip_prefix("Starting background:"))

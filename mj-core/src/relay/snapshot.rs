@@ -607,8 +607,11 @@ pub enum HarnessPreparation {
     /// The harness bridge was started. `acp_ready` then reports whether its
     /// session is open.
     Started,
-    /// Preparation stopped at `step`. The worker keeps serving its relay, so
-    /// the session can still be checkpointed and closed.
+    /// Preparation stopped at `step`, and that worker kept serving its relay.
+    /// Only older workers report this. A current worker whose harness cannot
+    /// start exits, and its exit record carries a
+    /// [`crate::relay::WorkerHarnessStartupFailure`] instead. Daemons still
+    /// read it from older workers.
     Failed {
         step: String,
         error: String,
@@ -797,6 +800,8 @@ pub struct RelayOperationalState {
     /// it. It stays so that an older daemon still decodes the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication_retry_waiting: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_rate_limit: Option<crate::jev::RateLimitKind>,
     /// Worker-published: the access-token hash of the failed turn this
     /// worker still owes a retry for. Present while the durable intent holds
     /// (the turn failed authentication, nothing newer was accepted or
@@ -1156,6 +1161,7 @@ impl RelayOperationalState {
     }
 
     /// Terminal startup failure; this worker cannot retry preparation in place.
+    /// Only an older worker, still serving after the failure, reports it.
     #[must_use]
     pub fn harness_preparation_failed(&self) -> bool {
         matches!(
@@ -2125,6 +2131,7 @@ impl RelaySnapshot {
                 )
             }) || self.retry_assessment.is_some(),
             authentication_retry_waiting: None,
+            jev_rate_limit: None,
             held_login_fingerprint: None,
             authentication_retry_intent: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,

@@ -55,7 +55,7 @@ A clean review advances the review base. It records the reviewed tree in `refs/m
 
 The `override_review` tool takes pairs of findings and reasons for findings the agent will not fix. The agent should record these before committing other fixes. The override allows pushing the exact reviewed commits, but does not move the review base. Mjolnir records overridden trees in `refs/mj/overridden/<tree>` and tells later reviewers not to report declined findings again. The declined list clears when the review base moves.
 
-`set_review_baseline(commit, path?)` moves the review base through a commit whose tree was reviewed or overridden. Later reviews start after that commit. Moving the base clears the declined list. The tools `request_review`, `override_review`, and `set_review_baseline` are provided by `mj-review`.
+`set_baseline(commit, path?)` moves the review base through a commit whose tree was reviewed or overridden. Later reviews start after that commit. Moving the base clears the declined list. The tools `request_review`, `override_review`, and `set_baseline` are provided by `mj-review`.
 
 The pre-push hook accepts trees recorded under either `refs/mj/reviewed/` or `refs/mj/overridden/`. A merge of the default branch does not require reviewing changes already covered by the prior review base.
 

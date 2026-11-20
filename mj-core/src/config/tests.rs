@@ -106,6 +106,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
         codex_profile: None,
     }
@@ -116,7 +117,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
 /// address from; a profile that uses an API key keeps them.
 // Hard-won: c4e2838d: a leaked API key broke ChatGPT Codex turns
 #[test]
-fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
+fn codex_launch_protects_chatgpt_logins_and_allows_keys_for_fresh_profiles() {
     let environment = || {
         BTreeMap::from([
             ("OPENAI_API_KEY".to_owned(), "sk-svcacct-test".to_owned()),
@@ -139,6 +140,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
         codex_profile: None,
         ..HarnessProfile::new(kind, home.to_path_buf())
@@ -161,12 +163,13 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
     );
     assert_eq!(launched.keys().collect::<Vec<_>>(), ["RUST_LOG"]);
 
-    // A profile with no login yet has no key of its own either.
-    let fresh = profile(HarnessKind::Codex, Path::new("/does/not/exist"));
-    assert_eq!(fresh.codex_login(), Some(CodexLogin::ChatGpt));
+    // A profile without a login file can receive keys from the target.
+    let home = tempfile::tempdir().expect("temporary home");
+    let fresh = profile(HarnessKind::Codex, home.path());
+    assert_eq!(fresh.codex_login(), None);
     let mut launched = environment();
-    assert_eq!(fresh.exclude_harness_environment(&mut launched), every_name);
-    assert_eq!(launched.keys().collect::<Vec<_>>(), ["RUST_LOG"]);
+    assert!(fresh.exclude_harness_environment(&mut launched).is_empty());
+    assert_eq!(launched, environment());
 
     // `codex login --with-api-key` stores the key and says so.
     let api_key = tempfile::tempdir().expect("temporary home");
@@ -1216,37 +1219,61 @@ fn bundle_requires_existing_primary_repository() {
 }
 
 #[test]
-fn bundle_rejects_non_github_sources() {
+fn bundle_config_round_trip_removes_http_userinfo_and_keeps_ssh_user() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
     let mut config = sample_config();
-    config.bundles.get_mut("hel").unwrap().repositories[0].github =
-        Some("https://example.com/owner/repo".into());
-    assert!(
-        config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("not a supported GitHub source")
+    let repository = &mut config.bundles.get_mut("hel").unwrap().repositories[0];
+    repository.github = Some("https://gitlab.example/team/hel.git?token=route#checkout".into());
+    let mut ssh = repository.clone();
+    ssh.id = "ssh".into();
+    ssh.destination = "ssh".into();
+    ssh.github = Some("ssh://build@gitlab.example/team/hel.git".into());
+    config
+        .bundles
+        .get_mut("hel")
+        .unwrap()
+        .repositories
+        .push(ssh);
+    config.save_to(&path).unwrap();
+
+    // Loading keeps the old source usable, and an ordinary save must also
+    // remove the credentials from the actual file when preserving comments.
+    let body = fs::read_to_string(&path).unwrap().replace(
+        "https://gitlab.example",
+        "https://user:password@gitlab.example",
     );
+    fs::write(&path, format!("# keep this comment\n{body}")).unwrap();
+    let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(loaded.bundles, config.bundles);
+    loaded.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.starts_with("# keep this comment"));
+    assert!(!saved.contains("user:password"));
+    assert_eq!(Config::load_from(&path).unwrap().bundles, config.bundles);
 }
 
-/// A rejected `github` value fails the whole configuration, so every value
-/// that loaded before the shared GitHub parser must keep loading, including
-/// ones the parser does not call GitHub (the last three).
+// Hard-won: fd9e9238c: an older accepted repository value blocked config load after upgrade.
 #[test]
-fn bundle_keeps_loading_github_values_accepted_before_the_shared_parser() {
+fn bundle_keeps_loading_legacy_repository_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    sample_config().save_to(&path).unwrap();
+    let previous_config = fs::read_to_string(&path).unwrap();
+
     for source in [
-        "BrokkAi/hel",
-        "https://github.com/BrokkAi/hel.git",
-        "ssh://git@github.com/BrokkAi/hel.git",
-        "git@gitlab.example:BrokkAi/hel.git",
+        "./repo",
+        "~/repo",
+        "owner@host/repo",
+        "file:mirror/repo",
+        "git@github.com:owner/repo",
         "BrokkAi/hel+fork",
-        "https://github.com/BrokkAi/hel?ref=main",
     ] {
-        let mut config = sample_config();
-        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
-        config
-            .validate()
-            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
+        fs::write(&path, previous_config.replace("BrokkAi/hel", source)).unwrap();
+        let config = Config::load_from(&path).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+        let repository = &config.bundles["hel"].repositories[0];
+        assert_eq!(repository.github.as_deref(), Some(source));
+        config.save_to(&path).unwrap();
     }
 }
 
@@ -3386,6 +3413,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
         codex_profile: codex_profile.map(str::to_owned),
         ..HarnessProfile::new(kind, home.to_path_buf())
@@ -3622,6 +3650,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             codex_profile: None,
             ..HarnessProfile::new(HarnessKind::Claude, home)

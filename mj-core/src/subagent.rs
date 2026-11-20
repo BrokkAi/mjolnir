@@ -996,7 +996,7 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 pub const REVIEW_MCP_SERVER: &str = "mj-review";
 
 /// The tools the review server lists, in the order it lists them.
-pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_review_baseline"];
+pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_baseline"];
 
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
@@ -2724,7 +2724,7 @@ mod tests {
         assert_eq!(REVIEW_MCP_SERVER, "mj-review");
         assert_eq!(
             REVIEW_MCP_TOOLS,
-            ["request_review", "override_review", "set_review_baseline"]
+            ["request_review", "override_review", "set_baseline"]
         );
         for role in [
             SubagentMcpRole::Parent,

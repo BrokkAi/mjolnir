@@ -717,6 +717,22 @@ pub(crate) async fn run_server(
                             .map(|session| session.bundle_id.clone())
                     };
                     match stored {
+                        crate::server::ClientStateRequest::ContainerSettings { session_id, resource_allocation, mounts, reply } => {
+                            next_action_id = next_action_id.wrapping_add(1).max(1);
+                            let reference = action_reference(next_action_id);
+                            let runtime = daemon_runtime.clone();
+                            move_preparation_jobs.spawn(async move {
+                                let settings = mj_core::state::ContainerSettingsChange { resource_allocation, mounts, mount_history: None };
+                                let result = runtime.set_container_settings(session_id, settings).await.map_err(|error| {
+                                    if let Some(refusal) = mj_core::refusal::Refusal::of(&error) {
+                                        return crate::server::ActionOutcome::Refused(refusal);
+                                    }
+                                    tracing::warn!(%reference, %error, "container settings request failed");
+                                    crate::server::ActionOutcome::Failed { reference }
+                                });
+                                if reply.send(result).is_err() { tracing::debug!("container settings client disconnected"); }
+                            });
+                        }
                         crate::server::ClientStateRequest::ContainerUpgradePreview { session_id, reply } => {
                             let runtime = daemon_runtime.clone();
                             move_preparation_jobs.spawn(async move {
@@ -830,7 +846,7 @@ pub(crate) async fn run_server(
                     }
                 }
                 bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
-                    let Some(crate::server::BundleRequest { source, exact_sources, reply }) = bundle else {
+                    let Some(crate::server::BundleRequest { source, exact_sources, discovered, reply }) = bundle else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
                         break;
                     };
@@ -844,7 +860,8 @@ pub(crate) async fn run_server(
                     bundle_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let result = match exact_sources {
-                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources).await,
+                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources, false).await,
+                            None if discovered => daemon_runtime.create_bundle_from_sources(vec![source], true).await,
                             None => daemon_runtime.create_quick_bundle(source).await,
                         };
                         if let Err(error) = done.send(BundleCreated { result, reply }) {
@@ -896,13 +913,13 @@ pub(crate) async fn run_server(
                                     detail,
                                 ) => {
                                     tracing::debug!(error = %detail, "phone bundle source was invalid");
-                                    crate::server::BundleFailure::InvalidSource
+                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::InvalidSource, crate::server::BundleFailure::Refused)
                                 }
                                 mj_controller::controller::QuickBundleFailure::Persistence(
                                     detail,
                                 ) => {
                                     tracing::warn!(error = %detail, "phone bundle creation failed");
-                                    crate::server::BundleFailure::Controller
+                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::Controller, crate::server::BundleFailure::Refused)
                                 }
                             };
                             if reply.send(Err(failure)).is_err() {
@@ -1052,7 +1069,7 @@ pub(crate) async fn run_server(
                         let result = daemon_runtime
                             .prepare_move_session(selection)
                             .await
-                            .map_err(|error| format!("{error:#}"));
+                            .map_err(|error| { tracing::debug!(%error, "move preparation rejected"); mj_core::refusal::Refusal::of(&error) });
                         if let Err(error) = done.send(MovePrepared { result, reply }) {
                             tracing::debug!(%error, "move preparation finished after the server stopped");
                         }
@@ -1283,7 +1300,8 @@ pub(crate) async fn run_server(
                     }
                     let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }
                         | ControllerAction::Resume { .. } | ControllerAction::PushSubscribe { .. } | ControllerAction::PushRenew { .. }
-                        | ControllerAction::PushUnsubscribe { .. } | ControllerAction::PushTest { .. }) {
+                        | ControllerAction::PushUnsubscribe { .. } | ControllerAction::PushTest { .. }
+                        | ControllerAction::UpgradeContainer { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);
@@ -1345,8 +1363,6 @@ pub(crate) async fn run_server(
                                     bail!("phone action cancelled");
                                 }
                                 let mut operation_controller = Controller::load()?;
-                                let executor =
-                                    CancellableProcessExecutor::new(control.cancelled.clone());
                                 mj_core::runtime::block_on(apply_phone_action(
                                     &mut operation_controller,
                                     PhoneActionServices {
@@ -1354,7 +1370,6 @@ pub(crate) async fn run_server(
                                         daemon_runtime: &daemon_runtime,
                                     },
                                     action,
-                                    &executor,
                                     action_id,
                                     &started,
                                     &control,
