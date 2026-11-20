@@ -1,4 +1,4 @@
-//! Additive first-run discovery shared by the dashboard and `mj setup`.
+//! Additive first-run discovery for the dashboard.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -27,10 +27,7 @@ pub use machines::{
     MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,
 };
 mod startup;
-pub use startup::{
-    SetupReport, actionable_errors, add_detected_profiles, automatic_setup_due, run_setup,
-    run_setup_command,
-};
+pub use startup::{add_detected_profiles, automatic_setup_due, run_setup, welcome_errors};
 
 // Session tools and harnesses are installed after cloning the project.
 pub use mj_client::target::DEFAULT_IMAGE;

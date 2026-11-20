@@ -466,7 +466,7 @@ fn golden_setup_origin_discovery() {
     use std::fmt::Write as _;
 
     fn append_summary(out: &mut String, repository: Option<GithubRepository>) {
-        let summary = SetupReport {
+        let summary = mj_client::daemon::FirstRunSetupReport {
             agents: Vec::new(),
             repository: repository.as_ref().map(GithubRepository::source),
         }

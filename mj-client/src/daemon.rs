@@ -136,8 +136,7 @@ impl FirstRunSetupReport {
         let mut lines = Vec::new();
         if self.agents.is_empty() {
             lines.push(
-                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
-                    .to_owned(),
+                "No coding agent found yet. Mjolnir can install one and sign you in.".to_owned(),
             );
         } else {
             lines.push(format!(

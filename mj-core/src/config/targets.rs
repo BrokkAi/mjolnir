@@ -322,7 +322,7 @@ pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
 }
 
 /// The image a container target runs when its table names none: the
-/// reference image CI publishes, which `mj setup` also writes.
+/// reference image CI publishes, which first-run setup also writes.
 fn default_container_image() -> String {
     super::DEFAULT_SESSION_IMAGE.to_owned()
 }

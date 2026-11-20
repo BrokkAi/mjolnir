@@ -52,7 +52,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use mj_core::config::{Config, config_path};
+use mj_core::config::Config;
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -60,7 +60,6 @@ use std::io::{self, Write};
 use mj_controller::controller::update::StartupUpdateNotice;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
-use mj_setup::setup::run_setup_command;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -120,7 +119,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
     Ec2(ec2::Ec2Args),
-    /// Rerun agent and repository discovery, preserving existing configuration.
+    /// Former spelling of `mj doctor instructions`.
+    #[command(hide = true)]
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
     Import(ImportArgs),
@@ -526,6 +526,8 @@ enum RecoverCommand {
 
 #[derive(Debug, Args)]
 struct DoctorArgs {
+    #[command(subcommand)]
+    command: Option<DoctorCommand>,
     /// Emit a machine-readable array of prerequisite checks.
     #[arg(long)]
     json: bool,
@@ -537,11 +539,11 @@ struct DoctorArgs {
 #[derive(Debug, Args)]
 struct SetupArgs {
     #[command(subcommand)]
-    command: Option<SetupCommand>,
+    command: DoctorCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum SetupCommand {
+enum DoctorCommand {
     /// Print coding-agent instructions for preparing a host.
     Instructions {
         /// Platform to prepare.
@@ -1077,6 +1079,13 @@ async fn run_command(
             }
             ec2::run(args).await.map(|()| DashboardExit::Normal)
         }
+        Some(Command::Doctor(DoctorArgs {
+            command: Some(command),
+            ..
+        })) => {
+            print_setup_instructions(command);
+            Ok(DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => {
             if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
@@ -1084,10 +1093,8 @@ async fn run_command(
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
-            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
-                return Ok(DashboardExit::Normal);
-            }
-            setup(args).map(|()| DashboardExit::Normal)
+            print_setup_instructions(args.command);
+            Ok(DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
             let workspace_id =
@@ -2555,9 +2562,9 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!(
-            "no enabled agent profiles are configured; add one in Settings → Agent Profiles, or run `mj setup`"
-        ),
+        (None, _) => {
+            bail!("no enabled agent profiles are configured; add one in Settings → Agent Profiles")
+        }
     }
 }
 
@@ -2665,18 +2672,13 @@ async fn recover(args: RecoverArgs) -> Result<()> {
     }
 }
 
-fn setup(args: SetupArgs) -> Result<()> {
-    match args.command {
-        Some(SetupCommand::Instructions { platform }) => {
-            let platform = match platform {
-                SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
-            };
-            print!("{}", mj_setup::doctor::setup_instructions(platform));
-            Ok(())
-        }
-        None => run_setup_command(&config_path()),
-    }
+fn print_setup_instructions(command: DoctorCommand) {
+    let DoctorCommand::Instructions { platform } = command;
+    let platform = match platform {
+        SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
+        SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
+    };
+    print!("{}", mj_setup::doctor::setup_instructions(platform));
 }
 
 /// How long doctor waits for the daemon to report one profile's catalogue.

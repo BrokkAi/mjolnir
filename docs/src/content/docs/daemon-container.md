@@ -60,18 +60,17 @@ in that container.
 
 ## Setup and logins
 
-Run setup and harness logins through the normal commands:
+Start `mj` on a fresh volume and wait for the welcome dialog to finish
+discovering agents. First-run setup finds the harnesses in the daemon container
+and configures the volume. Sign in with the normal command:
 
 ```console
-mj setup
 mj login --profile codex
 ```
 
-When container placement is enabled, these run inside the daemon container
-with `HOME`, the data directory, and the configuration directory pointing into
-the volume. They do not write the host's configuration. The dashboard's
-automatic first-run setup also runs in the daemon, so a fresh container volume
-is configured in place.
+When container placement is enabled, `mj login` and the prerequisite checks
+from `mj doctor` run inside the daemon container with the home, data, and
+configuration directories pointing into the volume.
 
 ## Host directories
 

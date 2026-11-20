@@ -92,18 +92,13 @@ pub(super) async fn handle_action(
         DaemonAction::RunFirstRunSetup => {
             let report = blocking(|| {
                 let executor = mj_controller::targets::ProcessExecutor;
-                let report = mj_setup::setup::run_setup(
+                mj_setup::setup::run_setup(
                     &mj_core::config::config_path(),
                     &mj_core::config::data_dir(),
-                    false,
                     &executor,
                     &|| false,
                     || {},
-                )?;
-                Ok(report.map(|report| FirstRunSetupReport {
-                    agents: report.agents,
-                    repository: report.repository,
-                }))
+                )
             })
             .await?;
             if report.is_some() {
@@ -122,7 +117,7 @@ pub(super) async fn handle_action(
                     mj_setup::doctor::current_apple_platform(&executor),
                     mj_setup::doctor::DoctorOptions { smoke: false },
                 );
-                mj_setup::setup::actionable_errors(&checks)
+                mj_setup::setup::welcome_errors(&checks)
             })
             .await
             .context("daemon doctor task panicked")?;
