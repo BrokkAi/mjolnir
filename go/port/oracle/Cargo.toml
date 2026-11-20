@@ -1,0 +1,44 @@
+# The oracle runs the real Rust libraries (and, later, Mjolnir's own Rust
+# crates) on inputs a Go test supplies, so the Go port can be compared with
+# Rust instead of with someone's reading of Rust. See "The oracle" in
+# .agents/docs/go-port/runtime-packages.md.
+#
+# It is a standalone package, not a workspace member: the empty [workspace]
+# table keeps it out of the product workspace, its lockfile and its checks.
+#
+# Each module is behind a feature of the same name and is built on its own
+# (`cargo build --release --features <name> --target-dir target/<name>`), so a
+# module that does not compile never blocks another. Dependency versions are
+# the ones the product's Cargo.lock pins.
+[package]
+name = "mj-go-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order", "float_roundtrip", "raw_value"] }
+
+[features]
+# Standard library behaviour needs no extra crate.
+std_fmt = []
+std_str = []
+std_collections = []
+std_path = []
+std_io = []
+std_time = []
+std_process = []
+std_sort = []
+serde_derive = []
+serde_json = []
+
+[profile.release]
+opt-level = 1
+debug = false
