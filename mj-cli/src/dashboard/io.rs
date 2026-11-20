@@ -216,7 +216,10 @@ pub(crate) enum DashboardIoUpdate {
     },
     ContainerSettings {
         session_id: String,
-        result: std::result::Result<DashboardMetadata, String>,
+        result: std::result::Result<
+            std::result::Result<DashboardMetadata, mj_core::state::ContainerUpgradePreview>,
+            String,
+        >,
     },
     /// Whether a configured project's local directory exists; `None` when
     /// the check could not tell.
@@ -1177,7 +1180,8 @@ impl DashboardContext {
                 )),
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
-                Ok(controller) => {
+                Ok(Err(preview)) => self.dashboard.show_container_upgrade_preview(preview, true),
+                Ok(Ok(controller)) => {
                     self.apply_controller_metadata(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());

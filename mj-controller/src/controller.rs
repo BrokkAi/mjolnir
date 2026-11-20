@@ -1460,15 +1460,11 @@ impl Controller {
         Ok(true)
     }
 
-    /// Record the per-session container size overrides and attached
-    /// directories. Nothing is applied to a running container: the values are
-    /// read the next time the session's container is created.
-    pub fn update_session_container_settings(
-        &mut self,
+    fn validate_session_container_settings(
+        &self,
         session_id: &str,
-        resource_allocation: Option<SessionResourceAllocation>,
-        additional_mounts: Vec<targets::AdditionalMount>,
-        mount_history: Vec<std::path::PathBuf>,
+        resource_allocation: Option<&SessionResourceAllocation>,
+        additional_mounts: &[targets::AdditionalMount],
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         let session = self
@@ -1482,7 +1478,7 @@ impl Controller {
         // this host for a local runtime, over the machine's connection for an
         // SSH one. A directory already attached was checked when it was
         // added, and a size change must not fail because it has since gone.
-        for mount in &additional_mounts {
+        for mount in additional_mounts {
             if session
                 .additional_mounts
                 .iter()
@@ -1497,12 +1493,32 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        backend::validate_resource_allocation(template, resource_allocation.as_ref())?;
-        if resource_allocation != session.resource_allocation
-            && let Some(allocation) = &resource_allocation
+        backend::validate_resource_allocation(template, resource_allocation)?;
+        if resource_allocation != session.resource_allocation.as_ref()
+            && let Some(allocation) = resource_allocation
         {
             allocation.validate_minimum_useful_container()?;
         }
+        targets::validate_additional_mounts(additional_mounts)
+    }
+
+    /// Record the per-session container size overrides and attached
+    /// directories. Nothing is applied to a running container: the values are
+    /// read the next time the session's container is created.
+    pub fn update_session_container_settings(
+        &mut self,
+        session_id: &str,
+        resource_allocation: Option<SessionResourceAllocation>,
+        additional_mounts: Vec<targets::AdditionalMount>,
+        mount_history: Option<Vec<std::path::PathBuf>>,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        self.validate_session_container_settings(
+            session_id,
+            resource_allocation.as_ref(),
+            &additional_mounts,
+            executor,
+        )?;
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,
@@ -1523,9 +1539,11 @@ impl Controller {
             let host = host.to_owned();
             // The dialog owns the suggestion list, so forgetting a directory
             // there has to survive the mounts being remembered right after.
-            crate::database::replace_mount_history(&host, &mount_history)?;
+            if let Some(history) = mount_history {
+                crate::database::replace_mount_history(&host, &history)?;
+                self.state.mount_history.insert(host.clone(), history);
+            }
             crate::database::remember_mount_sources(&host, &additional_mounts)?;
-            self.state.mount_history.insert(host.clone(), mount_history);
             self.state.remember_mount_sources(&host, &additional_mounts);
         }
         let record = self

@@ -343,6 +343,87 @@ impl Controller {
         operation_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<targets::RetainedContainer> {
+        self.plan_container_replacement(session_id, operation_id, None, executor)
+    }
+
+    pub fn plan_container_settings_replacement(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        settings: &mj_core::state::ContainerSettingsChange,
+        executor: &impl CommandExecutor,
+    ) -> Result<Option<targets::RetainedContainer>> {
+        use mj_core::state::{TargetLocator, applied_container_settings};
+        let record = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session is missing")?;
+        if !matches!(
+            record.state,
+            SessionState::Running | SessionState::Disconnected
+        ) || !matches!(
+            record.target.as_deref(),
+            Some(
+                TargetLocator::LocalPodman {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::SshPodman {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::LocalDocker {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::SshDocker {
+                    borrowed_from: None,
+                    ..
+                }
+            )
+        ) {
+            return Ok(None);
+        }
+        let current = record.target_runtime_settings(&self.config)?;
+        let configured = mj_core::state::TargetRuntimeSettings::from(
+            self.config
+                .targets
+                .get(&record.target_template_id)
+                .context("session target template is missing")?,
+        );
+        if configured.kind != current.kind || configured.connection != current.connection {
+            return Ok(None);
+        }
+        let applied = applied_container_settings(record);
+        if applied.resource_allocation == settings.resource_allocation.as_ref()
+            && applied.additional_mounts == settings.mounts
+        {
+            return Ok(None);
+        }
+        self.validate_session_container_settings(
+            session_id,
+            settings.resource_allocation.as_ref(),
+            &settings.mounts,
+            executor,
+        )?;
+        match self.plan_container_replacement(session_id, operation_id, Some(settings), executor) {
+            Ok(plan) => Ok(Some(plan)),
+            Err(error)
+                if mj_core::refusal::Refusal::of(&error).is_some_and(|refusal| {
+                    refusal.code() == Some("container-storage-not-preserved")
+                }) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn plan_container_replacement(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        settings: Option<&mj_core::state::ContainerSettingsChange>,
+        executor: &impl CommandExecutor,
+    ) -> Result<targets::RetainedContainer> {
         let session = self
             .state
             .sessions
@@ -371,7 +452,7 @@ impl Controller {
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
         let root = targets::worker_root(&backend, session_id)?;
         let image = mj_core::state::ContainerSettings::upgrade_image(session, &container.image);
-        let plan = targets::inspect_retained_container(
+        let mut plan = targets::inspect_retained_container(
             &backend,
             session_id,
             image,
@@ -380,6 +461,13 @@ impl Controller {
             Path::new(&root),
             executor,
         )?;
+        if let Some(settings) = settings {
+            plan.apply_settings(
+                mj_core::state::applied_container_settings(session).additional_mounts,
+                settings,
+                Path::new(&workspace),
+            )?;
+        }
         ensure!(
             container.pull_policy != mj_core::config::ImagePullPolicy::Never
                 || plan.prepared_image.is_some(),
@@ -388,19 +476,29 @@ impl Controller {
         Ok(plan)
     }
 
-    pub fn record_container_upgrade(&mut self, session_id: &str, image: &str) -> Result<()> {
+    pub fn record_container_upgrade(
+        &mut self,
+        session_id: &str,
+        plan: &targets::RetainedContainer,
+    ) -> Result<()> {
         let record = self
             .state
             .sessions
             .get_mut(session_id)
             .context("session disappeared during container upgrade")?;
-        // The mounts and resource selection remain the source's applied settings.
-        if let Some(settings) = record
+        if plan.replaces_settings() {
+            let applied = mj_core::state::ContainerSettings::applied(record, &plan.target_image);
+            let mut runtime = record.target_runtime_settings(&self.config)?.into_owned();
+            runtime.container_settings = Some(applied);
+            record.target_runtime = Some(std::sync::Arc::new(runtime));
+        } else if let Some(settings) = record
             .target_runtime
             .as_mut()
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
-            settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(image));
+            settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(
+                &plan.target_image,
+            ));
         }
         self.persist_session_state(session_id)
     }

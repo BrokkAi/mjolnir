@@ -69,7 +69,7 @@ pub fn begin_session_restart(
     cancelled: Arc<AtomicBool>,
     _container_recreation_acknowledged: bool,
 ) -> Result<SessionRestartIntent> {
-    begin_session_restart_with(session_id, operation_id, cancelled, None)
+    begin_session_restart_with(session_id, operation_id, cancelled, None, None)
 }
 
 pub fn begin_container_upgrade(
@@ -77,8 +77,9 @@ pub fn begin_container_upgrade(
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
     plan: crate::targets::RetainedContainer,
+    settings: Option<mj_core::state::ContainerSettingsChange>,
 ) -> Result<SessionRestartIntent> {
-    begin_session_restart_with(session_id, operation_id, cancelled, Some(plan))
+    begin_session_restart_with(session_id, operation_id, cancelled, Some(plan), settings)
 }
 
 fn begin_session_restart_with(
@@ -86,6 +87,7 @@ fn begin_session_restart_with(
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
     container_upgrade: Option<crate::targets::RetainedContainer>,
+    settings: Option<mj_core::state::ContainerSettingsChange>,
 ) -> Result<SessionRestartIntent> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
@@ -112,6 +114,15 @@ fn begin_session_restart_with(
             !cancelled.load(Ordering::Acquire),
             "Restart was cancelled before its durable intent was recorded"
         );
+        if let Some(settings) = settings {
+            sessions::write_container_settings(
+                &tx,
+                &session_id,
+                settings.resource_allocation.as_ref(),
+                &settings.mounts,
+                &Utc::now().to_rfc3339(),
+            )?;
+        }
         tx.execute(
             "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, container_upgrade_json)
              VALUES (?1, ?2, 'stopping', ?3, ?4)",

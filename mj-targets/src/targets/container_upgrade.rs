@@ -210,6 +210,10 @@ fn owned(record: &Inspection, session_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn storage_unavailable(message: impl Into<String>) -> mj_core::refusal::Refusal {
+    mj_core::refusal::Refusal::precondition(message).with_code("container-storage-not-preserved")
+}
+
 pub fn inspect_retained_container(
     locator: &TargetLocator,
     session_id: &str,
@@ -231,7 +235,9 @@ pub fn inspect_retained_container(
             && (command == ["sh", "-c", container::KEEPALIVE_SCRIPT]
                 || command == ["sleep", "infinity"]))
             || (entrypoint == ["sh"] && command == ["-c", container::KEEPALIVE_SCRIPT]),
-        "container upgrade cannot safely restart this custom container entrypoint; retain the current environment"
+        storage_unavailable(
+            "container upgrade cannot safely restart this custom container entrypoint; retain the current environment"
+        )
     );
     let nonempty = |value: &Option<serde_json::Value>| {
         value.as_ref().is_some_and(|value| match value {
@@ -272,14 +278,16 @@ pub fn inspect_retained_container(
                     })
                 })
             && !record.host_config.network_mode.starts_with("container:"),
-        "storage-preserving upgrades do not support this container's device, privilege, port, or namespace overrides; the existing container is unchanged"
+        storage_unavailable(
+            "storage-preserving upgrades do not support this container's device, privilege, port, or namespace overrides; the existing container is unchanged"
+        )
     );
     for assignment in &record.config.env {
         validate_retained_environment(assignment)?;
     }
     ensure!(
         !record.host_config.auto_remove,
-        "cannot preserve storage of an auto-remove container"
+        storage_unavailable("cannot preserve storage of an auto-remove container")
     );
     ensure!(
         record.name.trim_start_matches('/') == name,
@@ -297,9 +305,10 @@ pub fn inspect_retained_container(
                     ) || o.contains("overlay")
                         || o.contains("idmap"))
                     && matches!(mount.propagation.as_str(), "" | "private" | "rprivate"),
-                "cannot preserve transient or unsupported mount at {} ({})",
-                mount.destination,
-                mount.kind
+                storage_unavailable(format!(
+                    "cannot preserve transient or unsupported mount at {} ({})",
+                    mount.destination, mount.kind
+                ))
             );
             let source = if mount.kind == "volume" {
                 mount.name
@@ -329,8 +338,10 @@ pub fn inspect_retained_container(
     };
     ensure!(
         retained_path(workspace),
-        "cannot preserve workspace: {} lives in the container writable layer; use independent workspace storage before upgrading",
-        workspace.display()
+        storage_unavailable(format!(
+            "cannot preserve workspace: {} lives in the container writable layer; use independent workspace storage before upgrading",
+            workspace.display()
+        ))
     );
     let control_root = Path::new("/var/lib/hel");
     let control_state = if retained_path(worker_root)
@@ -386,7 +397,9 @@ pub fn inspect_retained_container(
                 ]
                 .iter()
                 .all(|option| help.contains(option)),
-            "this container lacks the tar support needed to preserve worker state; the source is unchanged"
+            storage_unavailable(
+                "this container lacks the tar support needed to preserve worker state; the source is unchanged"
+            )
         );
     }
     let cached = executor.execute(&host.command(
@@ -443,10 +456,123 @@ pub fn inspect_retained_container(
     })
 }
 
+fn mount_conflict(destination: &Path, retained: &str) -> mj_core::refusal::Refusal {
+    mj_core::refusal::Refusal::precondition(format!(
+        "attachment {} overlaps {retained}",
+        destination.display()
+    ))
+    .with_code("container-mount-conflict")
+}
+
 impl RetainedContainer {
+    /// Explicit image upgrades only accept a different immutable image.
+    pub fn replaces_settings(&self) -> bool {
+        self.selected_image_id.as_deref().is_some_and(|id| {
+            id.trim_start_matches("sha256:") == self.current_image_id.trim_start_matches("sha256:")
+        })
+    }
+
+    pub fn apply_settings(
+        &mut self,
+        applied: &[AdditionalMount],
+        change: &mj_core::state::ContainerSettingsChange,
+        workspace: &Path,
+    ) -> Result<()> {
+        let overlaps = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
+        for mount in applied
+            .iter()
+            .filter(|mount| !change.mounts.contains(mount))
+        {
+            if let Some(index) = self.mounts.iter().position(|retained| {
+                retained.destination == mj_core::target_path::text(&mount.destination)
+                    && retained.kind == "bind"
+                    && retained.source == mj_core::target_path::text(&mount.source)
+                    && retained.writable == (mount.access == MountAccess::Rw)
+            }) {
+                ensure!(
+                    !overlaps(&mount.destination, workspace)
+                        && !overlaps(&mount.destination, Path::new("/var/lib/hel"))
+                        && self
+                            .control_state
+                            .as_ref()
+                            .is_none_or(|control| !Path::new(&control.staging_directory)
+                                .starts_with(&mount.destination)),
+                    mount_conflict(
+                        &mount.destination,
+                        "the retained workspace or worker control tree"
+                    )
+                );
+                self.mounts.remove(index);
+            } else {
+                bail!(
+                    "the attached directory at {} no longer matches the running container",
+                    mount.destination.display()
+                );
+            }
+        }
+        for mount in change
+            .mounts
+            .iter()
+            .filter(|mount| !applied.contains(mount))
+        {
+            ensure!(
+                !overlaps(&mount.destination, workspace)
+                    && !overlaps(&mount.destination, Path::new("/var/lib/hel")),
+                mount_conflict(
+                    &mount.destination,
+                    "the retained workspace or worker control tree"
+                )
+            );
+            for retained in &self.mounts {
+                ensure!(
+                    !overlaps(&mount.destination, Path::new(&retained.destination)),
+                    mount_conflict(&mount.destination, &retained.destination)
+                );
+            }
+            let source = mj_core::target_path::text(&mount.source);
+            let destination = mj_core::target_path::text(&mount.destination);
+            ensure!(
+                !source.contains([',', '\n']) && !destination.contains([',', '\n']),
+                "mount at {destination} cannot be represented safely for replacement"
+            );
+            self.mounts.push(RetainedMount {
+                kind: "bind".into(),
+                source,
+                destination,
+                writable: mount.access == MountAccess::Rw,
+            });
+        }
+        if let Some(allocation) = &change.resource_allocation {
+            self.memory = i64::try_from(mj_core::state::allocation_memory(allocation))?;
+            self.nano_cpus = i64::try_from(mj_core::state::allocation_cpus(allocation))?
+                .checked_mul(1_000_000_000)
+                .context("container CPU limit is too large")?;
+        } else {
+            self.memory = 0;
+            self.nano_cpus = 0;
+        }
+        self.prepared_image = Some(self.current_image_id.clone());
+        self.selected_image_id = self.prepared_image.clone();
+        self.target_image.clone_from(&self.current_image);
+        Ok(())
+    }
+
+    pub fn settings_preview(
+        &self,
+        session_id: &str,
+        settings: mj_core::state::ContainerSettingsChange,
+    ) -> mj_core::state::ContainerUpgradePreview {
+        mj_core::state::ContainerUpgradePreview {
+            settings: Some(Box::new(settings)),
+            available: true,
+            ..self.preview(session_id)
+        }
+    }
+
     pub fn preview(&self, session_id: &str) -> mj_core::state::ContainerUpgradePreview {
         mj_core::state::ContainerUpgradePreview {
             warning: mj_core::state::CONTAINER_UPGRADE_WARNING.into(),
+            settings: None,
             session_id: session_id.into(),
             source_container_id: self.source_id.clone(),
             current_image: self.current_image.clone(),

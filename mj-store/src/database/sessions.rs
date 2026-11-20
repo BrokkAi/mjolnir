@@ -1395,6 +1395,18 @@ pub(super) fn set_session_container_settings_to(
             "finish Restart or suspend the session before changing container settings",
         )));
     }
+    write_container_settings(&tx, session_id, allocation, mounts, updated_at)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn write_container_settings(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    allocation: Option<&SessionResourceAllocation>,
+    mounts: &[AdditionalMount],
+    updated_at: &str,
+) -> Result<()> {
     let changed = tx.execute(
         "UPDATE sessions
          SET resource_allocation = ?2, updated_at = ?3
@@ -1408,9 +1420,7 @@ pub(super) fn set_session_container_settings_to(
     if changed != 1 {
         bail!("unknown session {session_id}");
     }
-    replace_mounts(&tx, session_id, mounts)?;
-    tx.commit()?;
-    Ok(())
+    replace_mounts(tx, session_id, mounts)
 }
 
 pub(super) fn set_session_title_override_to(

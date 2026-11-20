@@ -319,7 +319,7 @@ impl RuntimeState {
                 || self.try_commit_container_upgrade(session_id, &operation_id),
             ))
             .await?;
-            controller.record_container_upgrade(session_id, &plan.target_image)?;
+            controller.record_container_upgrade(session_id, plan)?;
             mj_core::test_hooks::reach_test_hook(
                 "container_upgrade_worker_ready_before_retirement",
             )?;

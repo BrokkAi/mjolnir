@@ -164,9 +164,11 @@ pub(super) fn validate_move_selection(
     if selection.profile_id.is_none()
         && selection.target_template_id.is_none()
         && selection.resource_allocation.is_none()
+        && selection.additional_mounts.is_none()
+        && !selection.clear_resource_allocation
     {
         return Err(ApiError::bad_request(
-            "move must select a profile, a target, or a container size",
+            "move must select a profile, a target, or container settings",
         ));
     }
     if selection.clear_resource_allocation && selection.resource_allocation.is_some() {

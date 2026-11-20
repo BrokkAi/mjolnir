@@ -2756,7 +2756,7 @@ impl DaemonClient {
         resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<Option<mj_core::state::ContainerUpgradePreview>> {
         match self
             .request(DaemonAction::SetSessionContainerSettings {
                 session_id,
@@ -2766,7 +2766,8 @@ impl DaemonClient {
             })
             .await?
         {
-            DaemonReply::Done => Ok(()),
+            DaemonReply::Done => Ok(None),
+            DaemonReply::ContainerUpgradePreview(preview) => Ok(Some(preview)),
             reply => bail!("unexpected container-settings reply {reply:?}"),
         }
     }

@@ -175,9 +175,11 @@ pub(super) struct BundleCreated {
 }
 
 pub(super) struct MovePrepared {
-    pub(super) result: std::result::Result<mj_core::state::MovePreparation, String>,
-    pub(super) reply:
-        tokio::sync::oneshot::Sender<std::result::Result<mj_core::state::MovePreparation, String>>,
+    pub(super) result:
+        std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
+    pub(super) reply: tokio::sync::oneshot::Sender<
+        std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
+    >,
 }
 
 /// Loads durable controller state without occupying the phone control loop.

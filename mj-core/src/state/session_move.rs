@@ -214,6 +214,8 @@ impl PreparedMoveDestination {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePreparation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_upgrade: Option<Box<super::ContainerUpgradePreview>>,
     #[serde(default)]
     pub destination_checks: DestinationChecks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
