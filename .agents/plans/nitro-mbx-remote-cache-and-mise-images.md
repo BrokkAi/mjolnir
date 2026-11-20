@@ -36,11 +36,11 @@ To see it working:
 - [x] (2026-11-20 16:17Z) Validated Milestone 2 with focused dev-profile tests and strict Clippy.
 - [x] (2026-11-20) Milestone 3: mbx in Nitro guests (pinned v1.30.0 musl release per guest architecture, staged through the worker binary store, launchers, guest-local store at /var/lib/hel/mbx). Ten focused filters passed one each; clippy clean on six crates. Live guest execution unverified until Milestone 6.
 - [x] (2026-11-20) Milestone 4 implementation: engine verbs, TAP-bound systemd unit, typed VM state, signed S3 reads, verified filesystem cache and trimming. Fake-S3 and pinned mbx checks passed.
-- [ ] Milestone 4 privileged network test. Local `sudo -n true` requires interactive authentication. Run the gated test on a root-capable Linux host or cover it during Milestone 6.
+- [x] Milestone 4 network isolation: covered live (another VM's proxy refuses connections). The root-gated spoofed-source namespace test remains unrun here because local sudo needs a password.
 - [x] (2026-11-20 16:05Z) Milestone 5: implemented configuration, controller wiring, EC2 instance-role provisioning, the Doctor probe caller, and documentation in `nitro-mbx-wiring`.
 - [x] (2026-11-20 16:08Z) Milestone 5: five focused test filters passed one test each, and all 11 touched Rust crates passed Clippy with all targets and warnings denied.
 - [x] (2026-11-20) Integrated Milestones 1-5 on local master; the two `maintain` halves are one verb (reconcile when `--keep-image` is given, always trim).
-- [ ] Milestone 6: live EC2 validation and measurements, tool-cache decision.
+- [x] (2026-11-20 18:10Z) Milestone 6: live EC2 validation and measurements; four live-only defects fixed; tool cache not built (see Decision Log and Outcomes).
 - [ ] Integrated review, commit, push; update #1495; close it.
 
 ## Surprises & Discoveries
@@ -161,6 +161,25 @@ To see it working:
   verifies that the engine can answer.
   Date/Author: 2026-11-20, Milestone 2.
 
+- Decision: superseding the original high-level S3 client path, the proxy and `mbx-check` send raw SigV4-signed GETs over the worker's rustls reqwest client. Keep mbx-cache-core for the shared IMDS provider and mbx-cache-protocol for digest and document validation. Treat `NoSuchKey` and plain 404 as absence, and surface `AccessDenied` and other S3 errors. Preserve validated action-result bytes and the strong S3 ETag on uncached manifests.
+  Rationale: core 0.21 maps a generic S3 403 to an absence on action results and manifests. That would silently disable a denied cache and make Doctor report it as readable.
+  Date/Author: 2026-11-20, parent session.
+
+- Decision: the proxy starts without waiting for instance credentials and connects to S3 on first use; a proxy that cannot start leaves the VM running with its guest-local cache, and provisioning turns the engine's one-line warning into a session notice.
+  Rationale: review (twice) and AGENTS.md "never leave the user stuck": an optional cache must not block a sandbox. Readiness covers only the TAP-bound listener.
+  Date/Author: 2026-11-20, parent session (review rounds 1-3).
+- Decision: each proxy also trims the shared host cache after publishing 5% of the budget since its last trim; the machine's `build_cache.max_total_size` reaches the proxy through `run` (unset means mbx's automatic budget), and the hourly `maintain` trims too, before it reconciles images. `maintain` reconciles images with the configured keep set even after a failed pull.
+  Rationale: hourly trimming alone let a cold build fill the filesystem shared with VM disks; the keep set comes from configuration, so a failed pull is no reason to keep obsolete tags pinning space.
+  Date/Author: 2026-11-20, parent session (review round 3).
+- Decision: the session's mbx Cargo launcher evaluates `mise env` for the build's own directory before it execs mbx.
+  Rationale: mbx refuses a mise shim as the real Cargo, and a mise project image has Cargo only behind mise's shims. Found live on Nitro and reproduced in a local mj-dev Podman container, so it applies to every container session on a mise image, not only Nitro.
+  Date/Author: 2026-11-20, parent session (Milestone 6).
+- Decision: do not build the read-only harness tool cache now.
+  Rationale: on the live host a fresh mj-dev session spent 7.6 s preparing worker files (2.7 s of it staging mbx) and 11.2 s preparing the harness after checkout, about 19 s together, under the 30 s threshold set above. Revisit if bridge installs grow.
+  Date/Author: 2026-11-20, parent session (Milestone 6).
+- Decision: declined review findings, recorded with reasons through override_review: coordinating image reconciliation across several SSH entries or daemons for one host, coalescing simultaneous cold fills across proxies, Nitro C/C++ launchers (depend on the excluded native tool cache), older daemons dropping a custom `mbx_namespace` (falls back to the same repository's default), staging-file age, Doctor architecture checks for pre-upgrade caches, budget changes while a proxy runs, config reloads mid-batch, a profile deleted during launch, Doctor wording under `pull_policy = "never"`, and whitespace in S3 prefixes. These remain follow-ups.
+  Date/Author: 2026-11-20, parent session.
+
 ## Outcomes & Retrospective
 
 Milestone 1 adds validation of the fetched OCI architecture before publishing image state and validates cached image metadata before reuse. The engine's `maintain --keep-image` command reconciles tags and runs the existing unused-image prune; output lists removed references and reclaimed flattened-disk bytes. Crane digest resolution errors now point operators to host-side crane authorization.
@@ -177,13 +196,15 @@ uses the crane path and version reported by the installed engine. Live EC2
 validation and confirmation with the combined engine work remain in
 Milestone 6.
 
-- Decision: superseding the original high-level S3 client path, the proxy and `mbx-check` send raw SigV4-signed GETs over the worker's rustls reqwest client. Keep mbx-cache-core for the shared IMDS provider and mbx-cache-protocol for digest and document validation. Treat `NoSuchKey` and plain 404 as absence, and surface `AccessDenied` and other S3 errors. Preserve validated action-result bytes and the strong S3 ETag on uncached manifests.
-  Rationale: core 0.21 maps a generic S3 403 to an absence on action results and manifests. That would silently disable a denied cache and make Doctor report it as readable.
-  Date/Author: 2026-11-20, parent session.
-
-## Outcomes & Retrospective
-
 Milestone 4 has implemented the proxy and real-client fixture. The fixture used the pinned mbx 1.30.0 and an independently cold local store and target. It observed one prefetched hit, 4.5 MiB downloaded, and zero bytes uploaded. Test and build counts are recorded in the Milestone 4 handback. The root-gated device binding and AL2023 service and IAM behavior remain to be verified.
+
+Milestone 6 ran live on 2026-11-20 on an m7i.4xlarge Nitro host in us-east-1d (AL2023 kernel 6.18.62, systemd 252, Firecracker 1.18.0) from an isolated instance, build 926ac9e8e through cdf2b774b. `mj ec2 create --runtime nitro --mbx-remote s3://<test bucket>/mbx` created the role and instance profile, retried EC2's propagation refusal for about 2 s, pinned the hop limit and recorded the remote. `mj doctor` reported "Remote build cache for target nitro-mbx: remote cache readable" (a miss returned 404 under the generated policy with unconditioned ListBucket), crane 0.22.1, and the warmed default image. A cold pull and conversion of the 7.06 GB mj-dev image took 142 s and 7.5 GB of host disk, which is what warming at creation saves the first session.
+
+A CI-style microVM on the same mj-dev image, holding short-lived credentials for a bucket-scoped writer role, seeded the bucket with `mbx build -p brokk-mj-core` (988 MiB) and then `-p brokk-mj-controller` (2.0 GiB more). From real sessions on 8 vCPUs, the agent's shell had the three MBX_REMOTE_* values and observed PUT 405, a foreign namespace 403 and its own namespace 200. Session D built `brokk-mj-controller` in 65 s with 737 hits and 253 misses, against 104 s for a cold control in fresh directories with the remote disabled. Session E, a second session on the same host, built in 68 s with the same hits while the host cache stayed at 6,686 files (2.9 GB), so every blob and action result came from the host cache. Raw engine probes confirmed another VM's proxy refuses connections, the host's port 22 is unreachable through the gateway, an S3 miss is 404, and the proxy unit stops and restarts with its VM. A fresh mj-dev session took 40.5 s from create to a running harness.
+
+The live run found and fixed four defects that no local test had caught: IAM CreateRole omits the description the ownership check read; the second concurrent provisioning lane had no Tokio runtime, so staging mbx panicked; systemd-run looks the unit's executable up on the host before bind mounts exist; and mbx cannot find Cargo behind mise shims. It also showed the fallback notice read the wrong command's stderr.
+
+Not verified live: the privileged network-namespace test of spoofed source addresses (needs root locally; the live cross-VM probe covers the same boundary without spoofing), arm64 hosts, and private-registry pulls. Misses on CI-seeded builds (253 of 990 actions) come from mbx's own key derivation, mostly build scripts and workspace-local crates seeded from a different checkout path, and are not something the proxy affects.
 
 ## Context and Orientation
 
@@ -441,3 +462,5 @@ Revision note (2026-11-20): initial plan, written after the three reconnaissance
 Revision note (2026-11-20, Milestone 5): documented the Doctor engine verb and the bucket-level list permission required for S3 misses.
 
 Revision note (2026-11-20): recorded the Milestone 2 implementation and its host retention and platform decisions.
+
+Revision note (2026-11-20, Milestone 6): recorded the live results and four live-found defects, moved the S3 read decision into the Decision Log, merged duplicated Outcomes sections from parallel merges, and recorded the review-driven decisions, declined findings, and the tool-cache decision.
