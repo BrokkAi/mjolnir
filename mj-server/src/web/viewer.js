@@ -9763,14 +9763,22 @@ function bindTurnControlButton(target, binding) {
 }
 
 function renderTurnControl(session) {
+  const held = session.verdict?.move_queue_held;
   const control = turnControlState(session);
+  const published = session.turn_controls;
+  cancelTurnButton.classList.toggle(
+    'hidden',
+    held || session.verdict?.transition || isLoadingConversationSession(session)
+      || (published ? !(published.primary || published.interrupt || control.pending || control.uncertain)
+        : !session.capabilities?.interrupt_turn),
+  );
   cancelTurnButton.textContent = control.label;
   cancelTurnButton.disabled = control.pending || control.uncertain || control.unavailable || pendingTurnControls.has(session.id);
   cancelTurnButton.title = control.message || control.label;
   bindTurnControlButton(cancelTurnButton, { sessionId: session.id, command: control.command, legacy: !session.turn_controls });
   const actions = document.querySelector('#turn-actions');
   const interrupt = document.querySelector('#interrupt-turn');
-  actions.hidden = !control.interrupt || control.command?.type === 'cancel_turn_for';
+  actions.hidden = held || !control.interrupt || control.command?.type === 'cancel_turn_for';
   interrupt.disabled = pendingTurnControls.has(session.id);
   bindTurnControlButton(interrupt, { sessionId: session.id, command: control.interrupt });
   let panel = document.querySelector('#turn-control-status');
@@ -9779,7 +9787,7 @@ function renderTurnControl(session) {
     panel.setAttribute('role', 'status'); document.querySelector('.conversation-header').after(panel);
   }
   panel.replaceChildren();
-  if (control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
+  if (!held && control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
   const signature = `${session.steering?.command_id}:${session.steering?.status}:${session.active_prompt_id || ''}`;
   const localError = failedTurnControls.get(session.id);
   if (!(control.uncertain || control.failed || localError) || dismissedTurnControls.get(session.id) === signature) return;
@@ -9788,6 +9796,7 @@ function renderTurnControl(session) {
   const keep = button('Keep queued');
   keep.onclick = () => { dismissedTurnControls.set(session.id, signature); panel.replaceChildren(); };
   panel.append(keep);
+  if (held) return;
   if (control.interrupt && session.active_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
     const cancel = button('Interrupt');
     cancel.title = 'Interrupt this turn; queued input stays ordered.';
@@ -9852,14 +9861,6 @@ function renderConversationHeader(session) {
   state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;
   renderConversationTransition(session);
-  cancelTurnButton.classList.toggle(
-    'hidden',
-    session?.verdict?.transition
-      || isLoadingConversationSession(session)
-      || (session.turn_controls ? !(session.turn_controls.primary || session.turn_controls.interrupt
-        || ['pending', 'unconfirmed'].includes(session.turn_controls.status)) : !session.capabilities?.interrupt_turn),
-  );
-
   renderTurnControl(session);
   const running = session.chat_phase === 'running';
   const queued = (session.queued_prompts || []).length;
@@ -10293,7 +10294,14 @@ async function runSessionAction(dataset, errorNode, extra) {
     }
   }
   if (dataset.action === 'interrupt-all') {
-    if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;
+    const verdict = sessionById(dataset.id)?.verdict;
+    const parent = verdict?.interrupt_member === true;
+    const children = (verdict?.interrupt_count ?? 0) - Number(parent);
+    const targets = [
+      ...(parent ? ['this session'] : []),
+      ...(children > 0 ? [children === 1 ? '1 sub-agent' : `${children} sub-agents`] : []),
+    ];
+    if (!targets.length || !confirm(`Interrupt all turns?\n\nInterrupt ${targets.join(' and ')}.`)) return false;
   }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);

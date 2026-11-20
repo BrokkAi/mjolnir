@@ -140,6 +140,8 @@ impl PendingActionReplies {
 pub(super) fn admit_phone_action(
     action: &ControllerAction,
     active_sessions: &mut std::collections::BTreeSet<String>,
+    action_sessions: &std::collections::BTreeMap<u64, String>,
+    action_cancellations: &std::collections::BTreeMap<u64, PhoneActionControl>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
     if matches!(action, ControllerAction::UpgradeContainer { request } if request.selection.settings.is_some())
     {
@@ -155,7 +157,21 @@ pub(super) fn admit_phone_action(
         && !active_sessions.insert(session_id.clone())
         && !closing
     {
-        return Err(ActionOutcome::SessionBusy);
+        // Let Interrupt All reach independent workers during a Move. A
+        // second Interrupt All must wait: two raw cancellations could span
+        // the end of the old turn and interrupt its queued successor.
+        let mut active = action_sessions
+            .iter()
+            .filter_map(|(id, owner)| (owner == session_id).then_some(id));
+        let move_only = matches!(action, ControllerAction::InterruptAll { .. })
+            && active
+                .next()
+                .and_then(|id| action_cancellations.get(id))
+                .is_some_and(|control| control.kind == Some(LifecycleKind::Move))
+            && active.next().is_none();
+        if !move_only {
+            return Err(ActionOutcome::SessionBusy);
+        }
     }
     Ok(session_id)
 }

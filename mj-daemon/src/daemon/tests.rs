@@ -13137,7 +13137,7 @@ async fn startup_delivery_waits_for_durable_move_after_daemon_restart() {
     restarted.cancel_and_join_startup_prompts().await.unwrap();
 }
 
-fn retained_startup_test_move(
+pub(super) fn retained_startup_test_move(
     session: &mj_core::state::SessionRecord,
 ) -> mj_core::state::MoveOperation {
     mj_core::state::MoveOperation {

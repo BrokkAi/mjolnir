@@ -13,11 +13,10 @@ use mj_core::config::{
 use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
-#[test]
-fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() {
+fn phone_move_action(session_id: &str) -> ControllerAction {
     let move_request = serde_json::from_value(serde_json::json!({
         "preparation": {
-            "selection": {"session_id": "move-web-session"},
+            "selection": {"session_id": session_id},
             "source_profile_id": "codex", "source_target_template_id": "podman",
             "cross_harness": false, "active": false, "queued_commands": [],
             "fingerprint": "prepared", "operation_id": "move-operation"
@@ -25,6 +24,13 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
         "queue": null, "acknowledge_interruption": true
     }))
     .unwrap();
+    ControllerAction::Move {
+        request: Box::new(move_request),
+    }
+}
+
+#[test]
+fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() {
     for action in [
         ControllerAction::Suspend {
             session_id: "suspend-web-session".into(),
@@ -34,9 +40,7 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
             session_id: "restart-web-session".into(),
             acknowledge_container_recreation: false,
         },
-        ControllerAction::Move {
-            request: Box::new(move_request),
-        },
+        phone_move_action("move-web-session"),
         ControllerAction::Resume {
             session_id: "resume-web-session".into(),
             workspace_id: "workspace".into(),
@@ -2262,7 +2266,12 @@ fn force_close_is_admitted_like_close() {
     // A session already busy with a stuck close is exactly when a force
     // close has to get through.
     assert_eq!(
-        admit_phone_action(&force_close, &mut active),
+        admit_phone_action(
+            &force_close,
+            &mut active,
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        ),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
@@ -2275,6 +2284,8 @@ fn force_close_is_admitted_like_close() {
 #[test]
 fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do() {
     let mut active = std::collections::BTreeSet::new();
+    let sessions = BTreeMap::new();
+    let cancellations = BTreeMap::new();
     for index in 1..=8 {
         let session_id = format!("session-{index}");
         let action = ControllerAction::Prompt {
@@ -2284,12 +2295,12 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
             command_id: None,
         };
         assert_eq!(
-            admit_phone_action(&action, &mut active),
+            admit_phone_action(&action, &mut active, &sessions, &cancellations),
             Ok(Some(session_id))
         );
     }
     assert_eq!(
-        admit_phone_action(&prompt_action(), &mut active),
+        admit_phone_action(&prompt_action(), &mut active, &sessions, &cancellations),
         Err(ActionOutcome::SessionBusy)
     );
     let close = ControllerAction::Suspend {
@@ -2297,11 +2308,41 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
         acknowledge_unpublished_work: false,
     };
     assert_eq!(
-        admit_phone_action(&close, &mut active),
+        admit_phone_action(&close, &mut active, &sessions, &cancellations),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
-        admit_phone_action(&prompt_action(), &mut active),
+        admit_phone_action(&prompt_action(), &mut active, &sessions, &cancellations),
+        Err(ActionOutcome::SessionBusy)
+    );
+}
+
+// Hard-won: f1947384e: overlapping Interrupt All requests could cancel a queued successor.
+#[test]
+fn interrupt_all_can_overlap_a_move_but_not_another_interrupt_all() {
+    let session_id = "session-1".to_owned();
+    let move_action = phone_move_action(&session_id);
+    let interrupt = ControllerAction::InterruptAll {
+        session_id: session_id.clone(),
+    };
+    let mut active = std::collections::BTreeSet::from([session_id.clone()]);
+    let mut sessions = BTreeMap::from([(1, session_id.clone())]);
+    let mut cancellations = BTreeMap::from([(1, PhoneActionControl::for_action(&move_action))]);
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active, &sessions, &cancellations),
+        Ok(Some(session_id.clone()))
+    );
+
+    sessions.insert(2, session_id);
+    cancellations.insert(2, PhoneActionControl::for_action(&interrupt));
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active, &sessions, &cancellations),
+        Err(ActionOutcome::SessionBusy)
+    );
+    sessions.remove(&1);
+    cancellations.remove(&1);
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active, &sessions, &cancellations),
         Err(ActionOutcome::SessionBusy)
     );
 }

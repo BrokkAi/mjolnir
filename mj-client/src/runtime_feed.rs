@@ -58,6 +58,8 @@ pub struct SessionVerdict {
     pub active_work: bool,
     pub unfinished: bool,
     pub interrupt: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt_shell: bool,
     pub interrupt_member: bool,
     pub interrupt_all: bool,
     pub interrupt_count: usize,
