@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from census_label import (
-    LABELS, RUST, canonical_site, checkout_revision, exclude_families, input_documents, inputs_sha, item_sets, labeller_item, replication_sample,
+    LABELS, RUST, canonical_site, checkout_revision, exclude_families, input_documents, inputs_sha, item_sets, labeller_item, replication_sample, ROLES, LABELLER_EFFORT,
     read_current_labels,
 )
 
@@ -216,6 +216,11 @@ def main():
     repos = {item["repo"] for cohort in cohorts.values() for item in cohort}
     heads = {repo: checkout_revision(repo, pins) for repo in repos}
     report = {
+        "labellers": {role: f"{model}/{LABELLER_EFFORT}" for role, (_, model, _) in ROLES.items()},
+        "caveat": "Replication is a trial on a 10% sample with a weaker model than the primary "
+                  "(PLAN-rql-census.md, revised 2026-11-20). A disagreement can reflect the "
+                  "capability difference as well as labeller dependence, so low agreement here "
+                  "does not by itself show that the labels don't reproduce.",
         "field_descriptions": {
             "sampled": "Bugs in the replication sample (replication_sample in census_label.py). "
                        "Agreement and the missing counts are over these bugs only.",

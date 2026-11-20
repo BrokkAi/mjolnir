@@ -36,8 +36,9 @@ ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": (None, "sonn
 # their id, round(10%) of them and at least one. Fixed before any replication label exists.
 REPLICATION_SHARE = 0.10
 REPLICATION_SALT = "rql-census-replication-sample-v1"
-# Replication must not reach the host that holds the primary labels; the coordinator approved
-# this container target for it.
+# Replication must not reach the host that holds the primary labels. The coordinator approved this
+# container target on another machine; it is the only one replication accepts, since a target's
+# name says nothing about where it runs. Approving another one means changing this line.
 REPLICATION_TARGET = "s50-max-a"
 
 
@@ -717,6 +718,10 @@ def quota(args, role):
                 values = [w.get("remaining_percent") for w in windows]
                 readings[candidate] = (min(values) if values and None not in values
                                        and not report.get("error") else None)
+            # Every allotted profile refused by mj quota is a configuration error (a misspelled
+            # or disabled profile), not quota that will recover, so report it instead of holding.
+            if len(unavailable) == len(args.profiles):
+                raise RuntimeError(f"no allotted replication profile is usable: {json.dumps(unavailable)}")
             eligible = [(value, candidate) for candidate, value in readings.items()
                         if value is not None and value > 25]
             if eligible:
@@ -1042,9 +1047,9 @@ def main():
     parser.add_argument("--profile", help="pin this labeller to a profile of the same model family")
     parser.add_argument("--profiles", default="claude3,claude5,claude6",
                         help="replication profiles eligible for quota-based selection")
-    parser.add_argument("--target", help="mj target (primary: localhost; replication: "
-                        f"{REPLICATION_TARGET}, never localhost); a container target starts each "
-                        "session from the repo's census bundle")
+    parser.add_argument("--target", help="mj target (primary: localhost; replication: only "
+                        f"{REPLICATION_TARGET}); a container target starts each session from the "
+                        "repo's census bundle")
     parser.add_argument("--repo", help="run only this repo, e.g. 1jehuang/jcode")
     parser.add_argument("--limit", type=int, help="take only the first N selected items, before applying resume")
     parser.add_argument("--batch-size", type=int, default=5)
@@ -1072,8 +1077,8 @@ def main():
             parser.error(f"profiles excluded from the census: {', '.join(sorted(excluded))}")
         args.profiles = profiles
         args.target = args.target or REPLICATION_TARGET
-        if args.target == "localhost":
-            parser.error("replication runs on an isolated container target, not localhost")
+        if args.target != REPLICATION_TARGET:
+            parser.error(f"replication runs only on the approved isolated target {REPLICATION_TARGET}")
     else:
         args.target = args.target or "localhost"
     if not args.inspect and (not args.labeller or (not args.split and not args.check_quota)):
