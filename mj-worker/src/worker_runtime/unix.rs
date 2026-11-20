@@ -1901,7 +1901,6 @@ async fn prepare_and_start_harness(
             let policy = config.execution_policy;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
-            let managed_subagent = config.is_managed_subagent();
             let (registered, environment, mode) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -1956,7 +1955,6 @@ async fn prepare_and_start_harness(
             let role = subagent_role;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
-            let managed_subagent = config.is_managed_subagent();
             if managed_subagent {
                 // Marketplace refreshes on every child start fetch from Git or
                 // HTTP sources; the child's staged plugins are copied from

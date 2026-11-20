@@ -458,8 +458,10 @@ pub(super) fn configure_claude_mailbox_hook(
 /// for predicted next prompts, which can spend an extra model request on a
 /// turn; claude.ai connectors are enumerated, connected and listed at startup
 /// on an eligible login. Project instructions, skills, plugins and configured
-/// MCP servers do not depend on either. A child overrides even an explicit
-/// user setting, which still applies to top-level sessions.
+/// MCP servers do not depend on either. A child overrides the inherited user
+/// settings, which still apply to top-level sessions; an explicitly exported
+/// `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` is a deliberate choice and still
+/// wins.
 pub(super) fn configure_claude_subagent_settings(
     root: &Path,
     session_id: &str,
@@ -591,8 +593,10 @@ fn configure_codex_mcp_with_mailboxes(
 /// adds a ~500-token tool that spends image quota. AGENTS.md injection, staged
 /// skills and configured MCP servers do not depend on any of these. Flags that
 /// add nothing to a headless session (browser and computer use, skill search)
-/// are left alone. A child overrides even an explicit user setting, which still
-/// applies to top-level sessions.
+/// are left alone. A child overrides the inherited user configuration, which
+/// still applies to top-level sessions; a project configuration or profile
+/// session override that enables a feature is a deliberate choice for that
+/// scope and still wins.
 const CODEX_SUBAGENT_DISABLED_FEATURES: [&str; 5] = [
     "apps",
     "plugins",
