@@ -5139,7 +5139,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
             .unwrap();
     owner
         .scope(async {
-            mj_controller::database::begin_subagent_unpark("child-1", &wake).unwrap();
+            mj_controller::database::begin_subagent_unpark("child-1", &wake, None).unwrap();
             assert!(
                 !mj_controller::database::try_commit_container_upgrade("session-1", "upgrade-test")
                     .unwrap()
@@ -5171,7 +5171,9 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
                     .unwrap()
                     .is_committed()
             );
-            assert!(mj_controller::database::begin_subagent_unpark("child-1", &wake).is_err());
+            assert!(
+                mj_controller::database::begin_subagent_unpark("child-1", &wake, None).is_err()
+            );
         })
         .await;
     let new_child = runtime_test_session(

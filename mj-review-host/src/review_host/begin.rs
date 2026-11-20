@@ -45,7 +45,7 @@ impl HostState {
     pub fn begin_push(
         &mut self,
         session_id: String,
-        path: Option<String>,
+        scope: super::reviewer::ReviewScope,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
         let refusal = if mj_session_runtime::session_manager::move_ownership::move_owns_session(
@@ -73,7 +73,7 @@ impl HostState {
                 session_id,
                 reply,
                 "review-off",
-                move |control, _persistence, _events, owner| run_review_off(control, owner, path),
+                move |control, _persistence, _events, owner| run_review_off(control, owner, scope),
             );
             return;
         }
@@ -104,7 +104,7 @@ impl HostState {
                     &session_id,
                     config,
                     &stages,
-                    path.map(|path| vec![std::path::PathBuf::from(path)]),
+                    scope,
                 ) => prepared,
             };
             tracing::info!(
@@ -148,7 +148,7 @@ impl HostState {
 async fn run_review_off(
     control: SessionManagerControl,
     session_id: String,
-    path: Option<String>,
+    scope: super::reviewer::ReviewScope,
 ) -> Result<serde_json::Value, StartRefusal> {
     let protocol = control
         .session(session_id.clone())
@@ -162,9 +162,7 @@ async fn run_review_off(
         .snapshot
         .and_then(|snapshot| snapshot.operational.relay_protocol_version)
         .unwrap_or(0);
-    let repositories = path
-        .map(|path| vec![std::path::PathBuf::from(path)])
-        .filter(|_| protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL);
+    let repositories = super::reviewer::capture_scope(scope, protocol)?;
     let outcome = resolve::push_action(
         &control,
         &session_id,

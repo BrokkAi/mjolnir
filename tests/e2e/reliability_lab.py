@@ -544,6 +544,9 @@ class Lab:
     ) -> int:
         if fake_acp_prompt_delay_ms is None:
             fake_acp_prompt_delay_ms = fake_acp_delay_ms
+        # This fixture is a machine that has run a daemon, which is what keeps
+        # the first-launch placement question from waiting in the terminal.
+        (self.data / "mj.sqlite3").touch()
         self.git_output(["init", "--initial-branch=main"], self.project)
         self.git_output(["config", "user.name", "Hel Reliability"], self.project)
         self.git_output(["config", "user.email", "reliability@invalid"], self.project)

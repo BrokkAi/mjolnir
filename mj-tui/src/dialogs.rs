@@ -792,7 +792,7 @@ impl DashboardState {
             .capacity_details
             .values()
             .nth(self.capacity_index)
-            .and_then(|detail| detail.target.target_ids.first())
+            .and_then(|detail| detail.reading.target_ids.first())
             .cloned();
         let target_ids = self.config.targets.keys().cloned().collect::<Vec<_>>();
         let target_index = preferred

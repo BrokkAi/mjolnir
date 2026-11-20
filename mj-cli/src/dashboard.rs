@@ -47,7 +47,6 @@ use mj_controller::controller::update::StartupUpdateNotice;
 use mj_controller::session_manager::{
     SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
 };
-use mj_controller::targets::DeploymentCapacityTarget;
 use mj_core::workspace::{ConversationLayout, PaneSizes};
 use mj_tui::tile_layout::PaneId;
 use mj_tui::{
@@ -71,9 +70,9 @@ use crate::import::{
     PendingDashboardImport, spawn_dashboard_import,
 };
 use crate::pollers::{
-    CapacityPollUpdate, DashboardLifecycleUpdate, Feed, RuntimeStateUpdate, WorkerDiagnosisTracker,
+    DashboardLifecycleUpdate, Feed, RuntimeStateUpdate, WorkerDiagnosisTracker,
     apply_worker_poll_update, complete_manual_quota_refresh, session_target_is_pollable,
-    spawn_dashboard_capacity_poller, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
+    spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
 use crate::{TerminalGuard, short_id};
@@ -493,10 +492,6 @@ pub(crate) struct DashboardContext {
     lifecycle: Feed<UnboundedReceiver<DashboardLifecycleUpdate>>,
     pub(crate) lifecycle_operations: BTreeMap<String, ActiveLifecycleOperation>,
 
-    capacity_targets_tx: watch::Sender<Vec<DeploymentCapacityTarget>>,
-    capacity_triggers_tx: Sender<()>,
-    capacity: Feed<Receiver<CapacityPollUpdate>>,
-
     import_updates_tx: Sender<(u64, ImportProfileOption)>,
     import_profiles: Feed<Receiver<(u64, ImportProfileOption)>>,
     pub(crate) import_task_tx: Sender<DashboardImportUpdate>,
@@ -542,7 +537,6 @@ pub(crate) struct DashboardContext {
     checkpoint_archive_generation: u64,
     checkpoint_archive_pending: BTreeMap<String, u64>,
     checkpoint_archive_records: mj_core::snapshot_map::SnapshotMap<String, std::path::PathBuf>,
-    polling_records: std::cell::RefCell<surface::PollingRecords>,
 }
 
 /// One worker publication, kept together while background projections coalesce.
@@ -1074,10 +1068,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             update = paced(feed_gate, context.runtime_state.wait()), if context.runtime_state.is_open() => {
                 context.loop_stalls.woke("runtime_state");
                 context.runtime_state.accept(update);
-            }
-            update = paced(feed_gate, context.capacity.wait()), if context.capacity.is_open() => {
-                context.loop_stalls.woke("capacity");
-                context.capacity.accept(update);
             }
             update = paced(feed_gate, context.import_profiles.wait()), if context.import_profiles.is_open() => {
                 context.loop_stalls.woke("import_profiles");
@@ -1967,11 +1957,6 @@ impl DashboardContext {
             tokio::sync::mpsc::unbounded_channel::<DashboardLifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();
         let lifecycle_operations = BTreeMap::<String, ActiveLifecycleOperation>::new();
-        let (capacity_targets_tx, capacity_triggers_tx, capacity_updates_rx) =
-            spawn_dashboard_capacity_poller();
-        let capacity_targets = controller.deployment_capacity_targets();
-        capacity_targets_tx.send_replace(capacity_targets.clone());
-        dashboard.set_deployment_capacity_targets(capacity_targets);
         let (import_updates_tx, import_updates_rx) =
             tokio::sync::mpsc::channel::<(u64, ImportProfileOption)>(32);
         let (import_task_tx, import_task_rx) =
@@ -2069,9 +2054,6 @@ impl DashboardContext {
             lifecycle_updates_tx,
             lifecycle: Feed::new(lifecycle_updates_rx),
             lifecycle_operations,
-            capacity_targets_tx,
-            capacity_triggers_tx,
-            capacity: Feed::new(capacity_updates_rx),
             wiki_search_task: None,
             wiki_sync_task: None,
             sessions_sync_task: None,
@@ -2104,7 +2086,6 @@ impl DashboardContext {
             checkpoint_archive_generation: 0,
             checkpoint_archive_pending: Default::default(),
             checkpoint_archive_records: Default::default(),
-            polling_records: Default::default(),
         };
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();

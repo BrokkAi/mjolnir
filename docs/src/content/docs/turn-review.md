@@ -43,7 +43,7 @@ Review requires a committed Git checkout. Tracked changes must be committed befo
 
 ## Request a review
 
-Claude Code, Codex, and DSH sessions receive the `request_review` tool from the separate `mj-review` MCP server. The agent commits its work and calls the tool before pushing. `/review` in Prompt, `mj review start`, and `POST /review` also start a push review of committed work. The verdict arrives as a message to the agent. If a review cannot start, the requester sees the reason. `mj review status` shows the open review and verdict.
+Claude Code, Codex, and DSH sessions receive the `request_review` tool from the separate `mj-review` MCP server. The agent commits its work and calls the tool before pushing. With no arguments it reviews the repository that contains the session's working directory. `request_review(paths)` reviews the named worktrees together in one review, for example a change that spans two repositories. `/review` in Prompt, `mj review start`, and `POST /review` also start a push review of committed work. The verdict arrives as a message to the agent. If a review cannot start, the requester sees the reason. `mj review status` shows the open review and verdict.
 
 Reviewers read the whole change from its review base. They do not receive prior findings for a corrective pass. A findings verdict tells the agent to address findings and request review again.
 

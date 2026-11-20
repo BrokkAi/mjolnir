@@ -906,8 +906,8 @@ fn review_tool_definitions() -> Vec<Value> {
     vec![
         tool(
             "request_review",
-            "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.",
-            json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+            "Request review of committed work before pushing. Reviews HEAD of each worktree in `paths` together, in one review (default: the repository that contains your working directory). The verdict arrives later as a Mjolnir message.",
+            json!({"type":"object","properties":{"paths":{"type":"array","minItems":1,"items":{"type":"string"},"description":"Worktrees of workspace repositories to review together."}},"additionalProperties":false}),
         ),
         tool(
             "override_review",
@@ -950,7 +950,7 @@ fn review_tool_definitions() -> Vec<Value> {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestReviewArgs {
-    path: Option<String>,
+    paths: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -976,9 +976,22 @@ struct SetReviewBaselineArgs {
 /// Build the action for one review tool call, refusing empty values.
 fn review_action(name: &str, arguments: Value) -> Result<SubagentToolAction> {
     Ok(match name {
-        "request_review" => SubagentToolAction::RequestReview {
-            path: serde_json::from_value::<RequestReviewArgs>(arguments)?.path,
-        },
+        "request_review" => {
+            if arguments.get("path").is_some() {
+                bail!("request_review now takes `paths`, a list of worktrees to review together");
+            }
+            let paths = serde_json::from_value::<RequestReviewArgs>(arguments)?.paths;
+            if paths.as_ref().is_some_and(Vec::is_empty) {
+                bail!(
+                    "request_review paths cannot be empty; omit it for the repository of your working directory"
+                );
+            }
+            let paths = paths.unwrap_or_default();
+            if paths.iter().any(|path| path.trim().is_empty()) {
+                bail!("request_review paths cannot contain an empty path");
+            }
+            SubagentToolAction::RequestReview { paths }
+        }
         "override_review" => {
             if arguments.get("reason").is_some() && arguments.get("overrides").is_none() {
                 bail!(
@@ -1283,14 +1296,14 @@ mod tests {
         use std::os::unix::net::UnixListener;
         for (params, action) in [
             (
-                json!({"name":"request_review","arguments":{"path":"/workspace"}}),
+                json!({"name":"request_review","arguments":{"paths":["/workspace","/other"]}}),
                 SubagentToolAction::RequestReview {
-                    path: Some("/workspace".into()),
+                    paths: vec!["/workspace".into(), "/other".into()],
                 },
             ),
             (
                 json!({"name":"request_review","arguments":{}}),
-                SubagentToolAction::RequestReview { path: None },
+                SubagentToolAction::RequestReview { paths: Vec::new() },
             ),
             (
                 json!({"name":"override_review","arguments":{"overrides":[
@@ -1417,6 +1430,9 @@ mod tests {
                 .contains("unknown field `extra`")
         );
         assert!(refused("request_review", json!({"extra":true})).contains("unknown field"));
+        assert!(
+            refused("request_review", json!({"path":"/workspace"})).contains("now takes `paths`")
+        );
         assert!(refused("spawn", json!({})).contains("unknown review tool"));
     }
 
@@ -1506,11 +1522,9 @@ mod tests {
                 .unwrap()
                 .starts_with("Mark commits through `commit` as reviewed")
         );
-        assert!(
-            by_name("request_review")["inputSchema"]["properties"]
-                .get("path")
-                .is_some()
-        );
+        let request = &by_name("request_review")["inputSchema"]["properties"];
+        assert_eq!(request["paths"]["type"], "array");
+        assert!(request.get("path").is_none());
     }
 
     #[test]

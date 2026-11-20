@@ -64,7 +64,7 @@ pub trait ExportRuntime: Send + Sync {
     fn request_review(
         &self,
         _session_id: String,
-        _path: Option<String>,
+        _paths: Vec<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -203,6 +203,13 @@ pub trait ExportRuntime: Send + Sync {
         false
     }
 
+    fn child_park_snapshot(
+        &self,
+        session_id: &str,
+    ) -> (Option<mj_core::state::SessionRecord>, bool) {
+        (self.session_record(session_id), false)
+    }
+
     /// Stop an idle child's worker and keep everything else, once its parent
     /// has been told its turn ended (#1161).
     fn park_subagent(
@@ -304,11 +311,20 @@ impl ExportRuntime for RuntimeState {
     fn request_review(
         &self,
         session_id: String,
-        path: Option<String>,
+        paths: Vec<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .begin_push(&session_id, path)
+                .begin_push(
+                    &session_id,
+                    if paths.is_empty() {
+                        crate::review_host::ReviewScope::WorkingDirectory
+                    } else {
+                        crate::review_host::ReviewScope::Paths(
+                            paths.into_iter().map(PathBuf::from).collect(),
+                        )
+                    },
+                )
                 .await
                 .map_err(|error| anyhow!("request_review refused: {}", error.0))
         })
@@ -457,6 +473,13 @@ impl ExportRuntime for RuntimeState {
 
     fn subagent_park_running(&self, session_id: &str) -> bool {
         RuntimeState::subagent_park_running(self, session_id)
+    }
+
+    fn child_park_snapshot(
+        &self,
+        session_id: &str,
+    ) -> (Option<mj_core::state::SessionRecord>, bool) {
+        RuntimeState::child_park_snapshot(self, session_id)
     }
 
     fn park_subagent(
@@ -1005,6 +1028,21 @@ impl ApiBackend {
             .await
     }
 
+    /// Whether the child's worker still queues a handback the daemon has not
+    /// executed, by the rule child completion uses. A child that is not live
+    /// has published no queue, so nothing of its is pending here.
+    async fn child_handback_pending(&self, child_id: &str) -> Result<bool> {
+        let Ok(handle) = self.sessions.session(child_id.to_owned()).await else {
+            return Ok(false);
+        };
+        let Some(observation) =
+            mj_controller::session_manager::DelegationObservation::from_view(&handle.view())
+        else {
+            return Ok(false);
+        };
+        crate::daemon::delegation::handback_pending(child_id, &observation).await
+    }
+
     /// For an ordinary worker child's handback, whether its review is open,
     /// asked once so the decision rests on one answer. `None` for any other
     /// action and for reviewers and oracles, which have no review of their
@@ -1164,9 +1202,9 @@ impl ApiBackend {
                     serde_json::from_slice(&output).context("decode the saved fetch")?;
                 Ok(serde_json::to_value(saved)?)
             }
-            SubagentToolAction::RequestReview { path } => {
+            SubagentToolAction::RequestReview { paths } => {
                 self.exports
-                    .request_review(parent_session_id.to_owned(), path.clone())
+                    .request_review(parent_session_id.to_owned(), paths.clone())
                     .await
             }
             SubagentToolAction::AskOracle { message } => {
@@ -1356,7 +1394,7 @@ impl ApiBackend {
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
                             "name":name,
-                            "profile_id":relation.profile_id,
+                            "profile_id":record.as_ref().map_or(&relation.profile_id, |record| &record.last_profile),
                             "effort":relation.effort,
                             "state":state,
                         });
@@ -1782,7 +1820,15 @@ impl ApiBackend {
         )],
     ) -> Result<()> {
         for (id, _, progress) in children {
-            let record = self.exports.session_record(id);
+            let (record, parking) = self.exports.child_park_snapshot(id);
+            if parking
+                && record
+                    .as_ref()
+                    .is_some_and(|record| record.state == SessionState::Parked)
+            {
+                progress.state = ChildState::WaitingForWorker;
+                continue;
+            }
             let view = if record
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state))
@@ -1803,23 +1849,38 @@ impl ApiBackend {
             let active = record
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state));
-            if active
-                && connected.is_some_and(|snapshot| {
-                    snapshot
-                        .materialized
-                        .last_turn_outcome
+            if let Some(snapshot) = connected {
+                use crate::server::api::WaitObservation;
+                let mut observation = WaitObservation {
+                    subagent: true,
+                    ..Default::default()
+                };
+                observation.observe_worker_turn(snapshot);
+                let decision = observation
+                    .last_turn_outcome
+                    .as_ref()
+                    .filter(|turn| {
+                        Some(turn.completed_ordinal) == progress.last_completed_ordinal
+                            && observation.execution == MaterializedExecutionState::Idle
+                    })
+                    .and_then(|turn| observation.turn_end(turn));
+                if decision.is_none() {
+                    progress.state = ChildState::WaitingForWorker;
+                    continue;
+                }
+                if let Some(recovery) = observation.quota_recovery
+                    && progress
+                        .answer
                         .as_ref()
-                        .map(|turn| turn.completed_ordinal)
-                        != progress.last_completed_ordinal
-                        || !matches!(
-                            snapshot.materialized.execution,
-                            MaterializedExecutionState::Idle
-                        )
-                        || crate::server::api::WaitObservation::worker_turn_pending(snapshot)
-                })
-            {
-                progress.state = ChildState::WaitingForWorker;
-                continue;
+                        .is_some_and(|turn| turn.command_id == recovery.completed_command_id)
+                {
+                    progress.state = ChildState::Failed {
+                        state: "failed",
+                        reason: recovery.notice,
+                        provider_failure: true,
+                    };
+                    continue;
+                }
             }
             let state = self
                 .child_state(
@@ -2145,7 +2206,15 @@ impl ApiBackend {
                         failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
                     }
                 }
+                // A queued handback holds only the finish, and only as "not
+                // finished yet": its report is still to come, so completion
+                // retries the park rather than settling the child, while failed
+                // messages to the child are reported as usual.
+                let handback_pending = child.identity.is_some()
+                    && child.relation.reported_finish.as_ref() != child.identity.as_ref()
+                    && self.child_handback_pending(&id).await?;
                 match &child.identity {
+                    _ if handback_pending => ChildDisposition::NotFinished,
                     None => ChildDisposition::NotFinished,
                     Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
                         ChildDisposition::Reported

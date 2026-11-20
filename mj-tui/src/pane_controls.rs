@@ -145,8 +145,8 @@ impl DashboardState {
         };
         let Some((target_id, rows)) = self.capacity_details.values().nth(index).map(|detail| {
             (
-                detail.target.id.clone(),
-                crate::render::capacity_disks_menu_lines(self, detail),
+                detail.reading.id.clone(),
+                crate::render::capacity_disks_menu_lines(detail),
             )
         }) else {
             return;

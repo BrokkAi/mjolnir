@@ -111,9 +111,17 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        quota_ordinal: Option<u64>,
     ) -> Result<ParkOutcome> {
-        self.stop_idle_subagent_worker(admission, session_id, executor, manager, None)
-            .await
+        self.stop_idle_subagent_worker(
+            admission,
+            session_id,
+            executor,
+            manager,
+            None,
+            quota_ordinal,
+        )
+        .await
     }
 
     /// Stop a sub-agent whose first prompt can never run and record it as
@@ -134,7 +142,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<ParkOutcome> {
-        self.stop_idle_subagent_worker(admission, session_id, executor, manager, Some(cause))
+        self.stop_idle_subagent_worker(admission, session_id, executor, manager, Some(cause), None)
             .await
     }
 
@@ -147,6 +155,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         failure: Option<&str>,
+        quota_ordinal: Option<u64>,
     ) -> Result<ParkOutcome> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -170,7 +179,17 @@ impl Controller {
             else {
                 return Ok(ParkOutcome::Busy);
             };
-            if !lease.verify_for_upgrade().await? {
+            let Some(snapshot) = lease.reserved_snapshot().await? else {
+                return Ok(ParkOutcome::Busy);
+            };
+            if let Some(ordinal) = quota_ordinal
+                && !snapshot.operational.assessment.as_ref().is_some_and(|a| {
+                    use mj_core::assessment::{Action, Status};
+                    a.status == Status::Deferred
+                        && a.action == Some(Action::RecoverQuota)
+                        && a.completed_ordinal == ordinal
+                })
+            {
                 return Ok(ParkOutcome::Busy);
             }
             stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
@@ -212,6 +231,7 @@ impl Controller {
         &self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
+        profile_change: Option<(&str, &str)>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
@@ -255,10 +275,32 @@ impl Controller {
                         .context("parked child has no target")?,
                 )?;
             }
+            // Prepare using a local view of the chosen profile. The record
+            // still names the source if staging fails or is interrupted.
+            if let Some((source, destination)) = profile_change {
+                ensure!(
+                    session.last_profile == source
+                        && session.harness_kind != mj_core::config::HarnessKind::OpenCode
+                        && self.config.enabled_profile(destination).is_some()
+                        && self.config.native_continuity(
+                            session.harness_kind,
+                            source,
+                            destination,
+                        )?,
+                    "the sub-agent's quota switch profiles changed before staging"
+                );
+            }
+            let destination_profile = profile_change.map(|(_, destination)| destination);
+            let staged = destination_profile.map(|profile| {
+                let mut state = self.state.clone();
+                state.sessions.get_mut(session_id).unwrap().last_profile = profile.to_owned();
+                Controller { config: self.config.clone(), state }
+            });
+            let staging = staged.as_ref().unwrap_or(self);
             // The parked home holds the login the child had when it parked; a
             // renewal since then revoked it. Stage the profile again so the
             // worker starts with the current login (#1547).
-            let staged_login = self.prepare_worker_files_for(
+            let staged_login = staging.prepare_worker_files_for(
                 session_id,
                 &backend,
                 &worker_root,
@@ -267,7 +309,7 @@ impl Controller {
                 super::worker_binary::LaunchHistory::Stored,
             )
             .context("stage the current profile login for the parked sub-agent")?;
-            let launch = self.current_worker_launch_config(session_id, &backend)?;
+            let launch = staging.current_worker_launch_config(session_id, &backend)?;
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
             replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
@@ -305,6 +347,7 @@ impl Controller {
                     target: *target.clone(),
                     desired_build: String::new(),
                 },
+                profile_change,
             )?;
             let observed = async {
                 start_worker_durably(&owner, target, executor, &backend, &worker_root, &self.config.github)
@@ -313,7 +356,7 @@ impl Controller {
                 // The active record and boot intent are durable. Handoff may cancel
                 // this wait; the next daemon attaches to the same live worker.
                 executor.begin_resumable_work()?;
-                self.observe_started_worker(
+                staging.observe_started_worker(
                     session_id,
                     executor,
                     InstalledWorkerRestart {
@@ -338,7 +381,7 @@ impl Controller {
                     let evidence = staged_login
                         .filter(|_| mj_core::credentials::text_reports_auth_failure(&detail))
                         .map(|staged_login| mj_core::subagent::WakeFailure::Authentication {
-                            profile_id: session.last_profile.clone(),
+                            profile_id: destination_profile.unwrap_or(&session.last_profile).to_owned(),
                             staged_login,
                         });
                     crate::database::fail_subagent_unpark(
@@ -689,7 +732,7 @@ mod tests {
                     target: *target,
                     desired_build: String::new(),
                 };
-                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
+                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None).unwrap();
                 let detail = "workspace routing discovery unauthorized (401)";
                 let evidence = mj_core::subagent::WakeFailure::Authentication {
                     profile_id: "codex".into(),
@@ -732,7 +775,7 @@ mod tests {
                         .is_none()
                 );
                 // The same child can accept a later wake after login repair.
-                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
+                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None).unwrap();
                 assert_eq!(
                     crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
                     Some(SessionState::Running)
@@ -756,6 +799,7 @@ mod tests {
             controller.unpark_subagent_worker(
                 &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
+                None,
                 &executor,
             ),
         )
@@ -819,6 +863,7 @@ mod tests {
             .unpark_subagent_worker(
                 &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
+                None,
                 &WakeTarget::new(),
             )
             .await
@@ -846,6 +891,7 @@ mod tests {
                     .unpark_subagent_worker(
                         &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                         LATCH_RELAY_SESSION,
+                        None,
                         &*executor,
                     )
                     .await
@@ -1006,6 +1052,7 @@ mod tests {
                             .unwrap(),
                         desired_build: String::new(),
                     },
+                    None,
                 )
             })
             .unwrap_err();
@@ -1072,6 +1119,7 @@ mod tests {
                 LATCH_RELAY_SESSION,
                 &executor,
                 &control,
+                None,
             )
             .await
             .unwrap();
@@ -1228,6 +1276,7 @@ mod tests {
                 LATCH_RELAY_SESSION,
                 &executor,
                 &channels.control,
+                None,
             )
             .await
             .unwrap();

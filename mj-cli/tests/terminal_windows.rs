@@ -123,6 +123,11 @@ fn dashboard_starts_its_daemon_renders_and_quits_under_conpty() {
     )
     .unwrap();
 
+    // This installation has run a daemon before, so no first-launch question
+    // is asked.
+    fs::create_dir_all(&data_directory).unwrap();
+    fs::write(data_directory.join("mj.sqlite3"), b"").unwrap();
+
     let pty = native_pty_system()
         .openpty(PtySize {
             rows: PTY_ROWS as u16,

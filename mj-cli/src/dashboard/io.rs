@@ -249,6 +249,7 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    CapacityRefreshRequested(std::result::Result<(), String>),
     /// The daemon's answer to a single profile's Refresh: it accepted the
     /// probe, or it could not be reached.
     QuotaProbeRequested {
@@ -1264,6 +1265,11 @@ impl DashboardContext {
             }
             DashboardIoUpdate::GitIdentitySaved(result) => {
                 self.dashboard.apply_git_identity_save(result)
+            }
+            DashboardIoUpdate::CapacityRefreshRequested(Ok(())) => {}
+            DashboardIoUpdate::CapacityRefreshRequested(Err(error)) => {
+                self.dashboard
+                    .set_notice(format!("Could not refresh target capacity: {error}"));
             }
             DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
             DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {

@@ -4,10 +4,15 @@
 //! with one command that samples CPU, memory and the free space on the
 //! filesystems Mjolnir writes to. The free space goes to
 //! [`mj_controller::target_storage`], which decides whether a host is full; the whole
-//! reading goes to whoever subscribes, today the web viewer. A host that does
+//! reading goes to the terminal dashboard and web viewer. A host that does
 //! not answer holds only its own probe slot, for at most the probe timeout.
 
 use super::*;
+use crate::pollers::CapacityProbeSet;
+use mj_client::runtime_feed::RuntimeHostCapacity;
+use mj_controller::targets::HostCapacityRow;
+use mj_core::snapshot_map::SharedSnapshot;
+use mj_core::targets::storage::TargetStorageView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityInput {
@@ -75,20 +80,61 @@ impl Drop for ContainerCapacityLease {
     }
 }
 
+type CapacityReadings = BTreeMap<String, mj_controller::targets::TargetCapacityState>;
+
+/// Host rows are retained in runtime history, so build them at most once per
+/// input publication. These receivers track only what this projection has seen.
+pub(super) struct HostCapacityProjection {
+    targets: tokio::sync::watch::Receiver<CapacityProbeSet>,
+    states: tokio::sync::watch::Receiver<CapacityReadings>,
+    rows: SharedSnapshot<Vec<RuntimeHostCapacity>>,
+    storage: SharedSnapshot<Vec<TargetStorageView>>,
+}
+
+impl HostCapacityProjection {
+    pub(super) fn new(feed: &CapacityFeed) -> Self {
+        let mut targets = feed.targets.clone();
+        let mut states = feed.states.clone();
+        targets.mark_changed();
+        states.mark_changed();
+        Self {
+            targets,
+            states,
+            rows: SharedSnapshot::default(),
+            storage: SharedSnapshot::default(),
+        }
+    }
+
+    pub(super) fn project(
+        &mut self,
+    ) -> (
+        SharedSnapshot<Vec<RuntimeHostCapacity>>,
+        SharedSnapshot<Vec<TargetStorageView>>,
+    ) {
+        let states = self.states.borrow_and_update();
+        let targets = self.targets.borrow_and_update();
+        // Keep the reading lock until the storage snapshot is captured. A
+        // sample updates both under that lock.
+        let storage = mj_controller::target_storage::views_snapshot();
+        if states.has_changed() || targets.has_changed() || !storage.ptr_eq(&self.storage) {
+            let rows = project_host_rows(&targets, &states, &storage);
+            if *self.rows != rows {
+                self.rows = rows.into();
+            }
+            self.storage = storage;
+        }
+        (self.rows.clone(), self.storage.clone())
+    }
+}
+
 /// What the capacity service shares with the surfaces that show capacity.
 pub(crate) struct CapacityFeed {
-    pub(crate) targets:
-        tokio::sync::watch::Receiver<Vec<mj_controller::targets::DeploymentCapacityTarget>>,
+    pub(crate) targets: tokio::sync::watch::Receiver<CapacityProbeSet>,
     /// The one owner of each target's last good reading, sample time, latest
     /// failure and empty-fleet answer. The poller updates an entry in a single
     /// `send_modify`, so every reader sees a whole entry.
-    pub(crate) states:
-        tokio::sync::watch::Receiver<BTreeMap<String, mj_controller::targets::TargetCapacityState>>,
-    refresh: tokio::sync::mpsc::Sender<()>,
-    /// Refresh requests made so far. The poller reads it when a probe starts
-    /// and reports the value with the result, so the feed owns the one
-    /// numbering of requests.
-    refresh_requests: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) states: tokio::sync::watch::Receiver<CapacityReadings>,
+    refresh: tokio::sync::watch::Sender<u64>,
 }
 
 impl CapacityFeed {
@@ -106,6 +152,7 @@ impl CapacityFeed {
         let target = self
             .targets
             .borrow()
+            .targets
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))?
             .clone();
@@ -121,6 +168,7 @@ impl CapacityFeed {
     ) -> Option<mj_controller::targets::DeploymentCapacityTarget> {
         self.targets
             .borrow()
+            .targets
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))
             .cloned()
@@ -133,41 +181,43 @@ impl CapacityFeed {
         self.reading_for_target(target_id).map(|(_, usage)| usage)
     }
 
-    /// Every host and fleet with its latest reading and storage verdicts, in
-    /// the order the capacity service lists them. Reads what the service
-    /// already holds; it never probes.
-    pub(crate) fn host_rows(&self) -> Vec<mj_controller::targets::HostCapacityRow> {
-        let storage = mj_controller::target_storage::views();
+    /// Every host and fleet with its latest reading and storage verdicts.
+    pub(crate) fn host_rows(&self) -> Vec<HostCapacityRow> {
         let states = self.states.borrow();
-        self.targets
-            .borrow()
-            .iter()
-            .map(|target| {
-                mj_controller::targets::HostCapacityRow::new(
-                    target,
-                    &states.get(&target.id).cloned().unwrap_or_default(),
-                    &storage,
-                )
-            })
+        let targets = self.targets.borrow();
+        let storage = mj_controller::target_storage::views_snapshot();
+        project_host_rows(&targets, &states, &storage)
+            .into_iter()
+            .map(|row| row.reading)
             .collect()
     }
 
-    /// Ask for a new reading of every host. Returns the request's generation:
-    /// the target's `answered_refresh` reaches it once a probe that started
-    /// after this call has produced a result. A request that arrives while one
-    /// is queued is the same request. `None` means the poller has stopped.
-    pub(crate) fn request_refresh(&self) -> Option<u64> {
-        // Count first, then trigger: a probe that counts this request starts
-        // after it was made.
-        let generation = self
-            .refresh_requests
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-        match self.refresh.try_send(()) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => Some(generation),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => None,
-        }
+    /// Ask for a new reading of every host. The service coalesces requests
+    /// and publishes the latest generation together with freshly derived
+    /// definitions. Only probes started with those inputs can answer it.
+    pub(crate) fn request_refresh(&self) -> bool {
+        self.refresh.send_modify(|requested| *requested += 1);
+        !self.refresh.is_closed()
     }
+}
+
+fn project_host_rows(
+    inputs: &CapacityProbeSet,
+    states: &CapacityReadings,
+    storage: &[TargetStorageView],
+) -> Vec<RuntimeHostCapacity> {
+    let empty = mj_controller::targets::TargetCapacityState::default();
+    inputs
+        .targets
+        .iter()
+        .map(|target| {
+            let state = states.get(&target.id).unwrap_or(&empty);
+            RuntimeHostCapacity {
+                reading: HostCapacityRow::new(target, state, storage),
+                refreshing: inputs.refreshing(state),
+            }
+        })
+        .collect()
 }
 
 /// The shortest gap between two recomputations of the probe targets. Every
@@ -664,6 +714,7 @@ impl ContainerCapacityProjection {
                 let states = feed.states.borrow();
                 feed.targets
                     .borrow()
+                    .targets
                     .iter()
                     .filter(|target| {
                         target.kind == mj_controller::targets::DeploymentCapacityKind::Host
@@ -715,15 +766,18 @@ pub(super) fn spawn_capacity_service(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let refresh_requests = Arc::<std::sync::atomic::AtomicU64>::default();
-    let (targets_tx, refresh, mut readings) =
-        crate::pollers::spawn_daemon_capacity_poller(refresh_requests.clone());
+    let (targets_tx, storage_refresh, mut readings) =
+        crate::pollers::spawn_daemon_capacity_poller();
+    let (refresh, mut refresh_requests) = tokio::sync::watch::channel(0);
     mj_controller::target_storage::install_no_space_observer();
-    mj_controller::target_storage::attach_refresh(refresh.clone());
+    mj_controller::target_storage::attach_refresh(storage_refresh);
     let initial = state
         .active_controller_projection()
         .deployment_capacity_targets();
-    targets_tx.send_replace(initial);
+    targets_tx.send_replace(CapacityProbeSet {
+        targets: initial,
+        refresh_generation: 0,
+    });
     let (states_tx, states_rx) = tokio::sync::watch::channel(BTreeMap::<
         String,
         mj_controller::targets::TargetCapacityState,
@@ -732,7 +786,6 @@ pub(super) fn spawn_capacity_service(
         targets: targets_tx.subscribe(),
         states: states_rx,
         refresh,
-        refresh_requests,
     };
     if state.capacity.set(feed).is_err() {
         tracing::error!("the daemon capacity service was started twice");
@@ -741,34 +794,31 @@ pub(super) fn spawn_capacity_service(
         let mut revisions = state.revisions();
         let mut storage = mj_controller::target_storage::subscribe();
         let mut full_hosts = BTreeSet::new();
+        let mut target_refresh_at = None;
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
-                changed = revisions.changed() => {
+                changed = revisions.changed(), if target_refresh_at.is_none() => {
                     if changed.is_err() {
                         break;
                     }
-                    tokio::select! {
-                        _ = cancellation.cancelled() => break,
-                        _ = tokio::time::sleep(TARGET_REFRESH_GAP) => {}
+                    target_refresh_at = Some(tokio::time::Instant::now() + TARGET_REFRESH_GAP);
+                }
+                _ = async {
+                    if let Some(at) = target_refresh_at {
+                        tokio::time::sleep_until(at).await;
                     }
+                }, if target_refresh_at.is_some() => {
+                    target_refresh_at = None;
                     revisions.borrow_and_update();
-                    let targets = state
-                        .active_controller_projection()
-                        .deployment_capacity_targets();
-                    states_tx.send_if_modified(|states| {
-                        let before = states.len();
-                        states.retain(|id, _| targets.iter().any(|target| target.id == *id));
-                        states.len() != before
-                    });
-                    targets_tx.send_if_modified(|current| {
-                        if *current == targets {
-                            false
-                        } else {
-                            *current = targets;
-                            true
-                        }
-                    });
+                    refresh_probe_targets(&state, &targets_tx, &states_tx, None);
+                }
+                changed = refresh_requests.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let generation = *refresh_requests.borrow_and_update();
+                    refresh_probe_targets(&state, &targets_tx, &states_tx, Some(generation));
                 }
                 changed = storage.changed() => {
                     if changed.is_err() {
@@ -783,29 +833,63 @@ pub(super) fn spawn_capacity_service(
                         tracing::error!("the daemon capacity poller stopped");
                         break;
                     };
+                    // The service may have rebuilt the targets after the
+                    // poller queued this result.
+                    if !targets_tx.borrow().targets.contains(&reading.target) {
+                        continue;
+                    }
                     states_tx.send_modify(|states| {
                         states
-                            .entry(reading.target_id.clone())
+                            .entry(reading.target.id)
                             .or_default()
                             .apply(
                                 &reading.result,
                                 reading.sampled_at_epoch_seconds,
                                 reading.refresh_generation,
                             );
+                        if let Ok(Some(usage)) = &reading.result {
+                            mj_controller::target_storage::record_samples(
+                                &usage.storage,
+                                reading.sampled_at_epoch_seconds,
+                            );
+                        }
                     });
-                    if let Ok(Some(usage)) = &reading.result {
-                        mj_controller::target_storage::record_samples(
-                            &usage.storage,
-                            reading.sampled_at_epoch_seconds,
-                        );
-                    }
-                    // The runtime feed carries the reservation-adjusted
-                    // headroom to terminal surfaces.
                     state.publish_revision();
                 }
             }
         }
     })
+}
+
+/// Re-read probe inputs, including mbx's paths, before scheduling a refresh.
+fn refresh_probe_targets(
+    state: &RuntimeState,
+    targets_tx: &tokio::sync::watch::Sender<CapacityProbeSet>,
+    states_tx: &tokio::sync::watch::Sender<
+        BTreeMap<String, mj_controller::targets::TargetCapacityState>,
+    >,
+    refresh_generation: Option<u64>,
+) {
+    let targets = state
+        .active_controller_projection()
+        .deployment_capacity_targets();
+    states_tx.send_if_modified(|states| {
+        let before = states.len();
+        states.retain(|id, _| targets.iter().any(|target| target.id == *id));
+        states.len() != before
+    });
+    if targets_tx.send_if_modified(|current| {
+        if refresh_generation.is_none() && current.targets == targets {
+            return false;
+        }
+        current.targets = targets;
+        if let Some(generation) = refresh_generation {
+            current.refresh_generation = generation;
+        }
+        true
+    }) {
+        state.publish_revision();
+    }
 }
 
 /// Tell every surface once when a filesystem on a host becomes full.
@@ -944,7 +1028,10 @@ mod tests {
             disk_total_bytes: None,
             storage: Vec::new(),
         };
-        let (targets, _) = tokio::sync::watch::channel(vec![target]);
+        let (targets, _) = tokio::sync::watch::channel(CapacityProbeSet {
+            targets: vec![target],
+            refresh_generation: 0,
+        });
         let (_states, states) = tokio::sync::watch::channel(BTreeMap::from([(
             "local".to_owned(),
             mj_controller::targets::TargetCapacityState {
@@ -952,7 +1039,7 @@ mod tests {
                 ..Default::default()
             },
         )]));
-        let (refresh, _) = tokio::sync::mpsc::channel(1);
+        let (refresh, _) = tokio::sync::watch::channel(0);
         assert!(
             state
                 .capacity
@@ -960,7 +1047,6 @@ mod tests {
                     targets: targets.subscribe(),
                     states,
                     refresh,
-                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
@@ -1512,12 +1598,14 @@ mod tests {
 
     // Hard-won: d27eb9f56: the terminal feed omitted daemon-only reservations.
     // Hard-won: 8c88175f7: every update scanned historical sessions for each host.
+    // Hard-won: 2d2476348: retained revisions duplicated unchanged host rows.
     #[tokio::test]
     async fn runtime_capacity_projection_includes_the_move_reservation() {
+        const HOST: &str = "runtime-capacity-sharing";
         let state = crate::daemon::tests::test_runtime_state();
         let target = mj_controller::targets::DeploymentCapacityTarget {
             id: "local".into(),
-            host: "local".into(),
+            host: HOST.into(),
             target_ids: vec!["podman".into()],
             kind: mj_controller::targets::DeploymentCapacityKind::Host,
             local: true,
@@ -1534,7 +1622,10 @@ mod tests {
             disk_total_bytes: None,
             storage: Vec::new(),
         };
-        let (targets, _targets_rx) = tokio::sync::watch::channel(vec![target]);
+        let (targets, _targets_rx) = tokio::sync::watch::channel(CapacityProbeSet {
+            targets: vec![target],
+            refresh_generation: 0,
+        });
         let (latest, latest_rx) = tokio::sync::watch::channel(BTreeMap::from([(
             "local".to_owned(),
             mj_controller::targets::TargetCapacityState {
@@ -1542,7 +1633,7 @@ mod tests {
                 ..Default::default()
             },
         )]));
-        let (refresh, _) = tokio::sync::mpsc::channel(1);
+        let (refresh, _) = tokio::sync::watch::channel(0);
         assert!(
             state
                 .capacity
@@ -1550,10 +1641,45 @@ mod tests {
                     targets: targets.subscribe(),
                     states: latest_rx,
                     refresh,
-                    refresh_requests: Default::default(),
                 })
                 .is_ok()
         );
+        // The same storage publication supplies the session warnings and the
+        // host rows. Retained revisions should share unchanged host rows.
+        let storage_sample =
+            |free| mj_controller::target_storage::test_storage_sample(HOST, free, 30 << 30);
+        mj_controller::target_storage::record_samples(&[storage_sample(20 << 30)], 100);
+        let before = state.runtime_publication().unwrap().metadata;
+        state.publish_revision();
+        let unchanged = state.runtime_publication().unwrap().metadata;
+        assert!(before.host_capacities.ptr_eq(&unchanged.host_capacities));
+        assert_eq!(
+            before.host_capacities[0].reading.filesystems[0].available_bytes,
+            20 << 30
+        );
+        mj_controller::target_storage::record_samples(&[storage_sample(0)], 101);
+        let changed = state.runtime_publication().unwrap().metadata;
+        assert!(!before.host_capacities.ptr_eq(&changed.host_capacities));
+        let storage = changed
+            .storage
+            .iter()
+            .find(|view| view.host == HOST)
+            .unwrap();
+        let row = &changed.host_capacities[0].reading.filesystems[0];
+        assert_eq!(row.available_bytes, 0);
+        assert_eq!(row.condition, storage.filesystems[0].condition);
+        assert_eq!(
+            before.host_capacities[0].reading.filesystems[0].available_bytes,
+            20 << 30
+        );
+
+        targets.send_modify(|inputs| inputs.refresh_generation = 1);
+        let pending = state.runtime_publication().unwrap().metadata;
+        assert!(pending.host_capacities[0].refreshing);
+        latest.send_modify(|states| states.get_mut("local").unwrap().answered_refresh = 1);
+        let finished = state.runtime_publication().unwrap().metadata;
+        assert!(!finished.host_capacities[0].refreshing);
+
         let input = ContainerCapacityInput {
             memory_is_pool: false,
             target_ids: vec!["podman".into()],
@@ -1635,7 +1761,7 @@ mod tests {
         });
         let resized = publisher.project(&state, &sessions.sessions);
         assert_eq!(resized["local"].capacity.remaining.cpus, 12);
-        targets.send_modify(|targets| targets.clear());
+        targets.send_modify(|inputs| inputs.targets.clear());
         assert!(publisher.project(&state, &sessions.sessions).is_empty());
     }
 }

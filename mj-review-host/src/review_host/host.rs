@@ -117,13 +117,13 @@ impl TurnReviewHost {
     pub async fn begin_push(
         &self,
         session_id: &str,
-        path: Option<String>,
+        scope: ReviewScope,
     ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::StartPush {
                 session_id: session_id.to_owned(),
-                path,
+                scope,
                 reply,
             })
             .map_err(|_| StartRefusal("the review host stopped".into()))?;
@@ -170,9 +170,12 @@ impl TurnReviewHost {
             .map_err(|_| StartRefusal("the review host stopped".into()))?
     }
 
-    /// Reviews committed work through the request_review gate.
+    /// A person's review of every workspace repository: `/review`,
+    /// `mj review start` and `POST /review` name no repository.
     pub async fn start(&self, session_id: &str) -> Result<(), StartRefusal> {
-        self.begin_push(session_id, None).await.map(|_| ())
+        self.begin_push(session_id, ReviewScope::Workspace)
+            .await
+            .map(|_| ())
     }
 
     /// Whether `session_id` has a review open. The host's own slots answer, so

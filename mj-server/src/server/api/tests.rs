@@ -6241,6 +6241,29 @@ async fn only_the_session_wait_follows_the_quota_check() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let backend = summarizing_backend();
+    let quota_stop = completed(7, "quota_limit");
+    let queued = WaitObservation {
+        queued: vec![format!("quota-retry-{}", quota_stop.completed_ordinal)],
+        last_turn_outcome: Some(quota_stop),
+        ..observation.clone()
+    };
+    assert_eq!(
+        resolve_wait(&queued, &request)
+            .expect("primary turn ended")
+            .outcome,
+        WaitOutcome::QuotaLimit,
+    );
+    assert!(
+        resolve_wait(
+            &WaitObservation {
+                subagent: true,
+                ..queued
+            },
+            &request,
+        )
+        .is_none()
+    );
+
     let response = finish_wait(
         &backend,
         "session-1",
