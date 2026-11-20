@@ -75,6 +75,38 @@ impl DaemonConfig {
         Ok(placement.daemon)
     }
 
+    /// Write this placement as the file's `[daemon]` table. Every other table,
+    /// comment and the order of the file stay as they are, and the rest of the
+    /// file is not loaded: an SSH client's config belongs to the daemon machine
+    /// and may hold tables this build must not reinterpret.
+    pub fn save_placement(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let _lock = super::ConfigLock::acquire(path)?;
+        super::Config::ensure_writable(path)?;
+        let existing = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read placement {}", path.display()));
+            }
+        };
+        let mut document = existing
+            .parse::<toml_edit::Document>()
+            .with_context(|| format!("parse placement {}", path.display()))?;
+        // Only the non-default keys serialize, so the default placement
+        // removes the table instead of leaving an empty one behind.
+        let keys = toml::to_string(self).context("serialize daemon placement")?;
+        let keys = keys
+            .parse::<toml_edit::Document>()
+            .context("reparse daemon placement")?;
+        if keys.as_table().is_empty() {
+            document.remove("daemon");
+        } else {
+            document["daemon"] = toml_edit::Item::Table(keys.as_table().clone());
+        }
+        super::atomic_write(path, document.to_string().as_bytes())
+    }
+
     pub fn remote_command(&self) -> &str {
         self.remote_command.as_deref().unwrap_or("mj")
     }
@@ -162,5 +194,33 @@ ssh_args = ["-p", "2222"]
         );
         assert!(refusal.contains("`daemon.isntance`"), "{refusal}");
         assert!(!refusal.contains("a_later_section"), "{refusal}");
+    }
+
+    /// The placement is written into a file the daemon machine owns, so every
+    /// other table and comment must survive, and choosing the default
+    /// placement again must leave no empty `[daemon]` table behind.
+    #[test]
+    fn saving_a_placement_keeps_the_rest_of_the_file_and_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let others = "# kept comment\nprofiles = \"owned by remote\"\n\n[phone]\nenabled = false\n";
+        std::fs::write(&path, others).unwrap();
+        let ssh = super::DaemonConfig {
+            runtime: super::DaemonRuntime::Ssh,
+            host: Some("test-box".into()),
+            ..super::DaemonConfig::default()
+        };
+        ssh.save_placement(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with(others), "{written}");
+        assert_eq!(super::DaemonConfig::load_placement(&path).unwrap(), ssh);
+
+        super::DaemonConfig::default()
+            .save_placement(&path)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim_end(),
+            others.trim_end()
+        );
     }
 }

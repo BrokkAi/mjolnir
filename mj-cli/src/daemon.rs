@@ -91,6 +91,7 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
     Ok(true)
 }
 
+pub(crate) mod choice;
 pub(crate) mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};

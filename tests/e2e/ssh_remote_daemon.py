@@ -3,13 +3,58 @@
 
 import signal
 import argparse
-import os, pathlib, socket, subprocess, tempfile, time, json
+import os, pathlib, pty, re, select, shlex, socket, subprocess, tempfile, time, json
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mj", required=True)
 parser.add_argument("--instance", required=True)
-parser.add_argument("--scenario", choices=["control", "http", "dispatch"], required=True)
+parser.add_argument("--scenario", choices=["control", "http", "dispatch", "first-launch"], required=True)
 options = parser.parse_args()
+
+class Terminal:
+    """A real pseudo-terminal around the client binary. reedline asks the
+    terminal for the cursor position, and waits until something answers."""
+
+    def __init__(self, argv, env):
+        self.output = b""
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.execve(argv[0], argv, env)
+
+    def pump(self, timeout):
+        ready, _, _ = select.select([self.fd], [], [], timeout)
+        if not ready:
+            return
+        try:
+            data = os.read(self.fd, 65536)
+        except OSError:
+            return
+        self.output += data
+        if b"\x1b[6n" in data:
+            os.write(self.fd, b"\x1b[1;1R")
+
+    def expect(self, text, seconds=120):
+        end = time.time() + seconds
+        while text.encode() not in self.output:
+            assert time.time() < end, f"timed out waiting for {text!r}: {self.screen()[-1500:]}"
+            self.pump(0.2)
+        # Later expectations look only at what follows this one.
+        self.output = self.output.split(text.encode(), 1)[1]
+
+    def send(self, text):
+        os.write(self.fd, text.encode())
+
+    def screen(self):
+        return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", self.output.decode(errors="replace"))
+
+    def kill(self):
+        try:
+            os.killpg(os.getpgid(self.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(self.pid, 0)
+
+
 assert options.instance != "default", "a named isolated instance is required"
 binary = str(pathlib.Path(options.mj).resolve())
 with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
@@ -134,7 +179,68 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                         p / "client-config" / "config.toml")),
                     check=True,
                 )
-            if options.scenario == "dispatch":
+            if options.scenario == "first-launch":
+                # The prompt takes only a host name, so an ssh in front of PATH
+                # supplies the key, port and host key this sshd needs, and
+                # names the remote executable the wrapper stands for.
+                shim = p / "shim"
+                shim.mkdir()
+                # This harness's ControlPath has no host in it, so every host
+                # would reuse the shared master; the shim connects directly.
+                direct = [
+                    a
+                    for i, a in enumerate(args)
+                    if not a.startswith(("ControlMaster=", "ControlPath="))
+                    and not (a == "-o" and args[i + 1].startswith(("ControlMaster=", "ControlPath=")))
+                ]
+                # The daemon command quotes each word, then quotes the whole
+                # line again, so the remote `mj` is the word 'mj' in that form.
+                (shim / "ssh").write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import os, sys\n"
+                    f"args = {['/usr/bin/ssh', *direct]!r} + sys.argv[1:]\n"
+                    "args[-1] = args[-1].replace(\"'\\\\''mj'\\\\''\", "
+                    f"\"'\\\\''{wrapper}'\\\\''\", 1)\n"
+                    f"if 'daemon' in args[-1] and {str(wrapper)!r} not in args[-1]:\n"
+                    "    sys.exit('shim: the remote mj was not rewritten; refusing to run the installed mj')\n"
+                    "os.execv(args[0], args)\n"
+                )
+                (shim / "ssh").chmod(0o700)
+                fresh_config = p / "fresh-config"
+                fresh_data = p / "fresh-data"
+                fresh_config.mkdir()
+                fresh_data.mkdir()
+                (p / "config" / "config.toml").write_text("version = 23\n[phone]\nenabled = false\n")
+                env = dict(
+                    os.environ,
+                    MJ_CONFIG_DIR=str(fresh_config),
+                    MJ_DATA_DIR=str(fresh_data),
+                    PATH=f"{shim}:{os.environ['PATH']}",
+                    TERM="xterm-256color",
+                )
+                terminal = Terminal([binary, "--instance", options.instance, "--no-splash"], env)
+                try:
+                    terminal.expect("Where should it run?")
+                    terminal.expect("Choose 1 or 2")
+                    terminal.send("2\r")
+                    # A host that cannot be used saves nothing and asks again.
+                    terminal.expect("SSH destination")
+                    terminal.send("no-such-host.invalid\r")
+                    terminal.expect("Could not use the daemon on no-such-host.invalid")
+                    assert not (fresh_config / "config.toml").exists()
+                    terminal.expect("SSH destination")
+                    terminal.send("127.0.0.1\r")
+                    terminal.expect("This computer will use the daemon on 127.0.0.1")
+                    saved = (fresh_config / "config.toml").read_text()
+                    assert 'runtime = "ssh"' in saved and 'host = "127.0.0.1"' in saved, saved
+                    # The remote daemon runs; no daemon or store was made here.
+                    assert (p / "data" / "daemon.json").exists()
+                    assert not list(fresh_data.rglob("daemon.json"))
+                    assert not list(fresh_data.rglob("*.sqlite3"))
+                finally:
+                    terminal.kill()
+                print("PASS: first launch asks, rejects a bad host, saves a working one")
+            elif options.scenario == "dispatch":
                 base = [binary, "--instance", options.instance]
                 subprocess.run(
                     [

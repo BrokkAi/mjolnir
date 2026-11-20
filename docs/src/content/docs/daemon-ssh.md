@@ -15,7 +15,17 @@ Install the same Mjolnir release on both computers using the
 [installation instructions](/install/). Development builds must come from the
 same commit; see the development command below.
 
-In your desktop's Mjolnir configuration, set:
+The first time you run `mj` on a computer that has never run a daemon, it
+asks where the daemon should run. Choose the second answer and enter an SSH
+destination (`user@host`, or a Host from your SSH configuration). Mjolnir
+connects to it, starts its daemon if needed, and saves the `[daemon]` table
+below only after that connection works. If it cannot connect, it shows the
+SSH error and asks again; you can go back and start a daemon on this computer
+instead. SSH must already work without a password prompt. To pass options such
+as `-i` or a port, set them in your SSH configuration or in `ssh_args` below.
+
+To set the placement yourself, or to change it later, set this in your
+desktop's Mjolnir configuration:
 
 ```toml
 [daemon]
