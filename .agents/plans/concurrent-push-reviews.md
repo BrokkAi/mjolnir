@@ -15,6 +15,7 @@ To see it working: in a test instance, start a session in a workspace with two w
 ## Progress
 
 - [x] (2026-11-20) Precursor, separate commit: sub-agents no longer get the review tools, and `set_review_baseline` is renamed `set_baseline`. (Not part of this plan's milestones, but it changes the same tool surface.)
+- [x] (2026-11-20) Review of the plan: added root reservation for override and set_baseline, and corrected the older-worker behavior.
 - [ ] Milestone 1: tool API and default scope, still one review per session.
 - [ ] Milestone 2: store one row per open review (breaking migration).
 - [ ] Milestone 3: review host keyed by review, with the overlap decision at the open step.
@@ -71,6 +72,14 @@ To see it working: in a test instance, start a session in a workspace with two w
   Rationale: the latest verdict for a root is the one the agent must answer; an older record for that root describes commits that have since been reviewed again.
   Date/Author: 2026-11-20.
 
+- Decision: `override_review` and `set_baseline` reserve their roots in the actor before the worker changes any ref, and release them when the operation ends.
+  Rationale: found by review of the plan. The worker's `SetReviewBase` and `RecordOverridden` actions move refs before they answer, so a check after the answer would come too late. An override selected through `a` also writes refs for every root of the selected verdict, for example `b` of a verdict for `a, b`, so it must reserve all of them, not just the root it was named by.
+  Date/Author: 2026-11-20.
+
+- Decision: a worker older than relay protocol 49 keeps its old behavior for a request with no `paths` (`repositories: None`), and explicit `paths` stay refused with "restart the session".
+  Rationale: found by review of the plan, which had assumed an old worker ignores a scoped capture. `prepare` in `mj-review-host/src/review_host/reviewer.rs` refuses it instead, so always sending a scope would break no-argument reviews that work today.
+  Date/Author: 2026-11-20.
+
 - Decision: the session part of review state (declined findings and findings records) has one owner, the review host's actor, which keeps it in memory per session. Operations that run in tasks (override, set_baseline, a verdict) return the change they want to make; the actor applies it to its current copy and saves it through the ordered persistence lane. No task loads, changes and saves that state itself.
   Rationale: today `run_override` in `override_push.rs` loads the session's state from the store, works on it across awaits, and saves it. That was safe only because one review per session meant nothing else wrote the state meanwhile. With several reviews, a verdict for `c` could save between an override's load and save for `a`, and one update would be lost. Moving the change into the actor makes that lost update impossible to express, rather than narrowing the window.
   Date/Author: 2026-11-20.
@@ -110,7 +119,9 @@ In `mj-worker/src/subagent_mcp.rs`, change the `request_review` schema to `{"pat
 
 In `mj-core/src/subagent.rs`, change `SubagentToolAction::RequestReview` to carry `paths: Vec<String>` (empty means the default) and `OverrideReview` to carry `path: Option<String>`. In `SubagentToolActionWire`, keep reading the old `path: Option<String>` field of `RequestReview` and fold it into `paths`, the way `OverrideReview` already folds the legacy `reason`. Extend the existing test `request_review_path_preserves_legacy_encoding` rather than adding a new one.
 
-Through `mj-daemon/src/server_runtime/api.rs` and `TurnReviewHost::begin_push` in `mj-review-host/src/review_host/host.rs`, pass `paths: Vec<PathBuf>` instead of `path: Option<String>`. In `begin.rs` and `reviewer.rs` (`prepare`), always send `CaptureDelta { repositories: Some(paths) }`, using `vec![PathBuf::from(".")]` for the default. The worker resolves relative paths against the working directory (`scoped_repositories`), so `"."` means the working directory's repository. Check the relay protocol gate already in `begin.rs`: a worker older than `RELAY_WORKTREE_REVIEW_PROTOCOL` ignores the list and captures everything, which is a superset and therefore safe.
+Through `mj-daemon/src/server_runtime/api.rs` and `TurnReviewHost::begin_push` in `mj-review-host/src/review_host/host.rs`, pass `paths: Vec<PathBuf>` instead of `path: Option<String>`. In `begin.rs` and `reviewer.rs` (`prepare`), send `CaptureDelta { repositories: Some(paths) }`, using `vec![PathBuf::from(".")]` for the default. The worker resolves relative paths against the working directory (`scoped_repositories`), so `"."` means the working directory's repository.
+
+A worker older than `RELAY_WORKTREE_REVIEW_PROTOCOL` (relay protocol 49) cannot take a scoped capture: `prepare` in `reviewer.rs` refuses one with "the session's worker predates worktree review; restart the session", and the relay client in `mj-session-runtime/src/worker_client/reviewer.rs` checks the same version. Keep that refusal for explicit `paths`. For a request with no `paths`, send `repositories: None` to such a worker, which reviews what it always reviewed. The review's roots are then the roots the capture returned, so the overlap rule in Milestone 3 still compares real roots; an old worker's review may simply cover more and so conflict more often.
 
 In `scoped_repositories`, when a path is not inside a Git repository and it is the default `"."`, return an error that lists the discovered repositories so the agent can pass them. Keep the existing message for an explicit path.
 
@@ -132,7 +143,7 @@ Put the overlap decision in the handling of `HostEvent::Prepared` in `dispatch.r
 
 Make every per-session question ask across that session's reviews: `has_open_review` answers whether any is open; the publish step emits one view per review; `retain_sessions` and session removal close every review of the session; the legacy `Resolution` cancel cancels all of them. Reviewer children already find their review by searching all slots' registrations (see `begin.rs` near the top); keep that search, now over review-keyed slots.
 
-`HostState::push_operation_refusal` in `override_push.rs` refuses `override_review` and `set_baseline` while the session has any open or preparing review. Make it refuse only when the operation's resolved root is covered by an open review, so overriding the verdict for `a` works while `c` is being reviewed. The root is known only after the worker resolves the path, so this check also moves into the actor's handling of the operation's result, before it saves anything. `override_push.rs` selects the findings record by root and `set_base.rs` applies the base move to the record and the declined findings for that root only. Recovery in `recovery.rs` restores each open review separately. The verdict message enqueued through `ReviewEnvironment::enqueue_verdict` names the review's roots.
+`HostState::push_operation_refusal` in `override_push.rs` refuses `override_review` and `set_baseline` while the session has any open or preparing review. Replace it with a per-root reservation, so overriding the verdict for `a` works while `c` is being reviewed. Both operations change Git refs in the worker (`RecordOverridden`, `SetReviewBase`), and the worker moves the ref before it answers, so the decision must come before the worker acts, not after. Each operation therefore runs in three steps. First, when the caller gave a `path`, resolve it to a root with a read-only scoped `CaptureDelta`. Second, back in the actor, decide: for an override, select the findings record that covers the root and take all of that record's roots; for `set_baseline`, take the one root. Refuse if any of those roots is in an open review, a `pending_open` entry or another reservation; otherwise record the reservation in `HostState` (a map from session to reserved roots and the operation holding them). Third, run the mutating worker action and the save, and release the reservation when the operation finishes on every exit path, including failure and panic (the existing `OverrideFinished` event is where `spawn_operation` already ends). The open step for a new review also refuses when its roots overlap a reservation. `override_push.rs` selects the findings record by root and `set_base.rs` applies the base move to the record and the declined findings for that root only. Recovery in `recovery.rs` restores each open review separately. The verdict message enqueued through `ReviewEnvironment::enqueue_verdict` names the review's roots.
 
 ### Milestone 4: surfaces
 
@@ -207,3 +218,5 @@ In `mj-review-host/src/review_host/host.rs`:
         overrides: Vec<ReviewOverride>) -> Result<serde_json::Value, StartRefusal>
 
 In `mj-client/src/review.rs`, `RuntimeReviewView` gains `review_id: String` and `roots: Vec<String>`.
+
+Revision note (2026-11-20): review of the first version found that override and set_baseline change refs before the actor could refuse them, and that older workers refuse a scoped capture rather than ignore it. Milestone 1, Milestone 3 and the Decision Log now cover both.
