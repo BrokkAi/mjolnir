@@ -99,6 +99,14 @@ pub(super) enum SourceTargetDisposition {
 pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 impl Controller {
+    /// Whether an interrupted suspend of this session is an accepted
+    /// origin-delta suspend. Its worker owns the durable stop request, and the
+    /// wait for its processes can last indefinitely, so startup recovery of
+    /// it must not hold daemon handoff admission.
+    pub fn suspend_wait_is_worker_owned(&self, session_id: &str) -> bool {
+        OriginDeltaSuspend::load(self, session_id).is_ok_and(|attempt| attempt.accepted())
+    }
+
     fn explicit_suspend_export_policy(
         &self,
         session_id: &str,

@@ -2162,11 +2162,10 @@ impl SessionRecord {
         }
     }
 
-    /// Cached publication verdict for a clone that uses the publication
-    /// check on suspend, or has a legacy publication assessment on disk.
+    /// Cached verdict for an independent clone. Active checkouts are unknown
+    /// until a new checkpoint binds an assessment to their exact contents.
     pub fn publication_state(&self) -> Option<PublicationState> {
-        let checkout = self.checkout();
-        let independent_clone = match checkout.effective() {
+        let independent_clone = match self.checkout().effective() {
             Checkout::ManagedWorktree { worktree, .. } => {
                 worktree.kind == ManagedCheckoutKind::Clone
             }
@@ -2176,29 +2175,23 @@ impl SessionRecord {
         if !independent_clone {
             return None;
         }
-        let assessment = self
-            .checkpoint
-            .as_ref()
-            .zip(self.publication.as_ref())
-            .filter(|(checkpoint, assessment)| assessment.checkpoint_sha256 == checkpoint.sha256);
-        if checkout
-            .managed_worktree()
-            .is_some_and(ManagedWorktree::uses_origin_delta_suspend)
-            && (self.state.is_active() || assessment.is_none())
-        {
-            return None;
-        }
         if self.state.is_active() {
             return Some(PublicationState::Unknown);
         }
         Some(
-            assessment.map_or(PublicationState::Unknown, |(_, assessment)| {
-                if assessment.dirty || assessment.stashed {
-                    PublicationState::Unpublished
-                } else {
-                    assessment.state
-                }
-            }),
+            self.checkpoint
+                .as_ref()
+                .zip(self.publication.as_ref())
+                .filter(|(checkpoint, assessment)| {
+                    assessment.checkpoint_sha256 == checkpoint.sha256
+                })
+                .map_or(PublicationState::Unknown, |(_, assessment)| {
+                    if assessment.dirty || assessment.stashed {
+                        PublicationState::Unpublished
+                    } else {
+                        assessment.state
+                    }
+                }),
         )
     }
 

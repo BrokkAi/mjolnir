@@ -185,9 +185,11 @@ fn checkout_holders(checkout: &Path) -> Result<Vec<String>> {
             });
         if holds_files && lookup(pid)?.is_some_and(|current| current.is_live_instance_of(&process))
         {
-            let command = std::fs::read(directory.join("cmdline")).unwrap_or_default();
-            let command = String::from_utf8_lossy(&command).replace('\0', " ");
-            holders.push(format!("{pid} {}", command.trim()));
+            // The short command name, never the arguments: an unrelated
+            // process's command line can carry credentials, and this text
+            // reaches the user's refusal.
+            let name = std::fs::read(directory.join("comm")).unwrap_or_default();
+            holders.push(format!("{pid} {}", String::from_utf8_lossy(&name).trim()));
         }
     }
     Ok(holders)

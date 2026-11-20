@@ -3794,25 +3794,40 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
 }
 
 // Hard-won: #1448: publication preflight refused child close although it preserves the shared checkout.
+/// The controller alone decides whether a suspend needs the publication
+/// acknowledgement, since only it knows which capture the suspend uses. The
+/// API forwards the caller's answer, for owned clones and child closes alike.
 #[tokio::test]
-async fn suspend_requires_publication_ack_only_for_owned_clones() {
+async fn suspend_forwards_the_publication_ack_to_the_controller() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].publication_state =
                 Some(mj_core::state::PublicationState::Unknown);
         });
 
-    let response = app
-        .clone()
-        .oneshot(
+    let response = mj_core::runtime::spawn(
+        app.clone().oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/suspend"))
                 .body(Body::empty())
                 .unwrap(),
-        )
-        .await
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::Suspend {
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: false,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
         .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert!(actions.try_recv().is_err());
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
 
     let response = mj_core::runtime::spawn(
         app.oneshot(

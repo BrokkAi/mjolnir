@@ -450,10 +450,10 @@ pub(super) async fn suspend(
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
 ) -> Result<(StatusCode, Json<SuspendSessionResponse>), ApiFailure> {
-    let (active_children, publication_ack_required) = {
+    let active_children = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        let active_children = session
+        session
             .subagent_session_ids
             .iter()
             .filter(|id| {
@@ -463,25 +463,11 @@ pub(super) async fn suspend(
                     .any(|child| child.id == id.as_str() && child.lifecycle.is_dashboard_visible())
             })
             .cloned()
-            .collect::<Vec<_>>();
-        // Child close retains the parent's checkout and commits. Only an
-        // owning session can release unpublished repository work here.
-        (
-            active_children,
-            !session.is_subagent_session && session.publication_state.is_some(),
-        )
+            .collect::<Vec<_>>()
     };
-    // The controller re-checks publication after its checkpoint; this is only
-    // an early refusal that avoids a needless checkpoint.
-    if publication_ack_required
-        && !request
-            .as_ref()
-            .is_some_and(|r| r.acknowledge_unpublished_work)
-    {
-        return Err(ApiFailure::conflict(
-            "publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
-        ));
-    }
+    // Publication is decided once, by the controller after its checkpoint:
+    // only it knows whether this suspend uses the legacy capture, which needs
+    // the acknowledgement, or an origin-delta snapshot, which does not.
     let backend = backend(&state)?.clone();
     // Counted before the suspend is sent, which is what stops the children.
     let mut not_handed_back = 0;

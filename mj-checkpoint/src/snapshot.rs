@@ -178,14 +178,14 @@ impl std::fmt::Display for SnapshotRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingManagedOrigin(checkout) => write!(f,
-                "managed checkout {}:{} has no origin remote or source override; restore its origin with `git remote add origin <url>`, or use `mj suspend --without-checkpoint`",
+                "managed checkout {}:{} has no origin remote or source override; restore its origin with `git remote add origin <url>`",
                 checkout.repository_id, checkout.checkout_path.display()),
             Self::OriginRemovedByTeardown(origins) => {
                 for (index, origin) in origins.iter().enumerate() {
                     if index != 0 { write!(f, "; ")?; }
                     if let Some(provider) = &origin.value.object_provider {
                         let path = mj_core::targets::posix_quote(&origin.value.canonical_path.to_string_lossy());
-                        write!(f, "local origin {} relies on provider {} inside the managed teardown; make the origin an independent repository outside that set; to dissociate borrowed objects run `git -C {path} repack -a -d`, then remove its objects/info/alternates, and suspend again, or use `mj suspend --without-checkpoint`", origin.value.route.display(), provider.display())?;
+                        write!(f, "local origin {} relies on provider {} inside the managed teardown; make the origin an independent repository outside that set; to dissociate borrowed objects run `git -C {path} repack -a -d`, then remove its objects/info/alternates, and suspend again", origin.value.route.display(), provider.display())?;
                         continue;
                     }
                     let directory = if origin.checkout.checkout_path.as_os_str().is_empty() { String::new() }
@@ -200,7 +200,7 @@ impl std::fmt::Display for SnapshotRefused {
                     } else {
                         write!(f, "run `git{directory} {setting} {}`", mj_core::targets::posix_quote(&origin.value.canonical_path.to_string_lossy()))?;
                     }
-                    write!(f, ", then suspend again, or use `mj suspend --without-checkpoint`")?;
+                    write!(f, ", then suspend again")?;
                 }
                 Ok(())
             }
@@ -236,7 +236,7 @@ impl std::fmt::Display for SnapshotRefused {
                     .join(", ")
             ),
             Self::UnrepresentedGitState { directories, worktrees } => {
-                let mut items = directories.iter().map(|item| format!("unsupported Git state at {}; finish or remove it through Git before suspending, or use `mj suspend --without-checkpoint`", item.value.display())).collect::<Vec<_>>();
+                let mut items = directories.iter().map(|item| format!("unsupported Git state at {}; finish or remove it through Git before suspending", item.value.display())).collect::<Vec<_>>();
                 items.extend(worktrees.iter().map(|item| {
                     let repo = mj_core::targets::posix_quote(&item.value.git_dir.to_string_lossy());
                     let path = mj_core::targets::posix_quote(&item.value.path.to_string_lossy());
@@ -249,7 +249,7 @@ impl std::fmt::Display for SnapshotRefused {
                 write!(f, "{}", items.join("; "))
             }
             Self::DirtySubmodule(path) => write!(f,
-                "submodule {}:{}:{} has tracked changes or an origin-relative delta; commit and push the work (including wanted refs and stashes), or use `mj suspend --without-checkpoint`",
+                "submodule {}:{}:{} has tracked changes or an origin-relative delta; commit and push the work (including wanted refs and stashes)",
                 path.checkout.repository_id, path.checkout.checkout_path.display(), path.value.display()),
             Self::OperationInProgress(operation) => {
                 write!(
@@ -3642,6 +3642,40 @@ pub fn restore_workspace_snapshot(
         .origin_url
         .as_ref()
         .context("snapshot has no origin")?;
+    let seeded = run_git(runner, destination, ["config", "--get", "remote.origin.url"], &[])?;
+    let origin_changed = seeded.status != 0
+        || String::from_utf8_lossy(&seeded.stdout).trim_end() != origin.as_str();
+    if origin_changed {
+        // The seed's push URL and tracking refs describe the seed's remote.
+        // Keep neither under the session's origin: a push must not reach the
+        // old destination, and upstreams must not resolve to its commits.
+        let unset = run_git(
+            runner,
+            destination,
+            ["config", "--local", "--unset-all", "remote.origin.pushurl"],
+            &[],
+        )?;
+        // Exit 5: there was no push URL to remove.
+        ensure!(
+            matches!(unset.status, 0 | 5),
+            "remove the seed's origin push URL: {}",
+            String::from_utf8_lossy(&unset.stderr).trim()
+        );
+        let stale = git_text(
+            runner,
+            destination,
+            ["for-each-ref", "--format=delete %(refname)", "refs/remotes/origin/"],
+        )?;
+        if !stale.is_empty() {
+            git_bytes(
+                runner,
+                destination,
+                ["update-ref", "--no-deref", "--stdin"],
+                format!("{stale}\n").as_bytes(),
+                "remove the seed's origin tracking refs",
+            )?;
+        }
+    }
     git_text(
         runner,
         destination,
@@ -3653,6 +3687,8 @@ pub fn restore_workspace_snapshot(
             origin,
         ],
     )?;
+    // Tracking refs for the restored origin arrive with the next fetch;
+    // until then, upstreams show as gone rather than as the seed's commits.
     let mut notices = Vec::new();
     if let Some(pack) = &snapshot.pack {
         let directory = git_path(runner, destination, "objects/pack")?;
