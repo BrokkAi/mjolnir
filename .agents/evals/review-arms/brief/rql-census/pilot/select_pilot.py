@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Select and freeze the deterministic lean RQL census pilot."""
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -153,6 +154,7 @@ def main():
                            "catalogue_sha256": sha(census_root / "rql-documented-steps.md"),
                            "steps_sha256": sha(steps_path) if steps_path.exists() else None,
                            "labels_snapshot_sha256": hashlib.sha256(snapshot_text.encode()).hexdigest(),
+                           "cases_sha256": sha(census_root / "menu-steps-cases.md"),
                            "plan_sha256": hashlib.sha256(frozen_plan).hexdigest()},
                 "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high",
                            "engine": "fable/high", "judge": "fable/high"},
@@ -161,14 +163,19 @@ def main():
                 "duplicates": duplicates, "diffs": diffs, "jobs": jobs}
     if args.frozen_at:
         manifest["frozen_at"] = args.frozen_at
-    # Publish the freeze only now that everything validated: each file goes to a temp name and is
-    # renamed into place, so no reader sees a half-written file.
+    # Publish the freeze only now that everything validated, under one lock so concurrent runs
+    # can't interleave. Each file goes to a unique temp name and is renamed into place, and the
+    # manifest is renamed last. An interruption before that leaves the old manifest, whose
+    # recorded hashes no longer match the new label files, and every reader checks those hashes,
+    # so a partial publication fails visibly instead of being read as a freeze.
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    for path, text in ((eligible_path, eligible_text), (snapshot_path, snapshot_text),
-                       (args.out, json.dumps(manifest, sort_keys=True, indent=2) + "\n")):
-        temp = path.with_name(path.name + ".tmp")
-        temp.write_text(text)
-        os.replace(temp, path)
+    with (args.out.parent / ".freeze.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for path, text in ((eligible_path, eligible_text), (snapshot_path, snapshot_text),
+                           (args.out, json.dumps(manifest, sort_keys=True, indent=2) + "\n")):
+            temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            temp.write_text(text)
+            os.replace(temp, path)
     print(json.dumps({"diffs": len(diffs), "writer_jobs": sum(j["kind"] == "writer" for j in jobs),
                       "reviewer_jobs": sum(j["kind"] == "reviewer" for j in jobs),
                       "chosen": {repo: [r["id"] for r in sorted(chosen, key=lambda x: (x["repo"], x["id"])) if r["repo"] == repo]

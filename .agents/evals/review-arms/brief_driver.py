@@ -29,7 +29,7 @@ import time
 import traceback
 
 import driver
-from driver import ROOT, SCRIPTS, MJX, mj, save, session
+from driver import ROOT, SCRIPTS, mj, save, session
 
 # Brief kind -> writer model and effort. Everything else (prompt, tools, blinding, lint) is shared.
 KINDS = {"blind": ("gpt-6.1-sol", "high"), "blind-terra": ("gpt-6.1-terra", "high"),
@@ -92,6 +92,10 @@ def lint(text, bug, in_diff_items=()):
     return problems
 
 
+class WriterTurnFailed(RuntimeError):
+    """The requested command reached a terminal failure."""
+
+
 def wait_command(sid, command, limit=1800):
     end = time.monotonic() + limit
     while time.monotonic() < end:
@@ -99,9 +103,9 @@ def wait_command(sid, command, limit=1800):
         outcome = s.get("last_turn_outcome") or {}
         if outcome.get("command_id") == command and s.get("is_idle"):
             if (outcome.get("outcome") or {}).get("stop_reason") == "QuotaLimit":
-                raise RuntimeError(f"writer turn hit QuotaLimit: {json.dumps(outcome)[:600]}")
+                raise WriterTurnFailed(f"writer turn hit QuotaLimit: {json.dumps(outcome)[:600]}")
             if outcome["outcome"]["kind"] != "completed":
-                raise RuntimeError(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
+                raise WriterTurnFailed(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
             return outcome
         if s.get("lifecycle") == "failed" or s.get("has_error"):
             raise RuntimeError(f"writer session {sid} failed: {json.dumps(s)[:600]}")
@@ -110,7 +114,7 @@ def wait_command(sid, command, limit=1800):
 
 
 def fetch_brief(sid):
-    r = subprocess.run([str(MJX), "fetch", "--session", sid, "--path", "brief.md", "--stdout"],
+    r = subprocess.run(driver.mj_invocation("fetch", "--session", sid, "--path", "brief.md", "--stdout"),
                        capture_output=True, timeout=300)
     if r.returncode:
         raise RuntimeError(f"writer {sid} left no brief.md: {r.stderr.decode()[-400:]}")
@@ -126,74 +130,120 @@ def send(d, sid, name, command, text):
         save(d / f"{name}-completion.json", wait_command(sid, command))
 
 
-def run(bug_id, gate):
-    bug = driver.CORPUS[bug_id]
-    d = ROOT / "briefs" / KIND / bug_id
+def sealed_launch(bundle, commit, profile, title, *, base=None, effort=None):
+    """Start a pinned pilot session, leaving the caller to check readiness."""
+    if not profile or not driver.MJ_INSTANCE_ARGS:
+        raise ValueError("sealed launch requires an explicit profile and named instance")
+    launch = mj("new", "--workspace-id", driver.workspace_id(), "--target", "podman",
+                "--bundle", bundle, "--at", commit, "--base", base or commit, "--no-later-history",
+                "--profile", profile, *(["--effort", effort] if effort else ()), "--review", "off",
+                "--no-project-memory", "--no-github-events", "--no-github-credentials",
+                "--subagents", "none", "--oracle", "disabled", "--title", title, timeout=900)
+    return launch["session_id"]
+
+
+def configure_pilot_model(sid, model, effort):
+    current = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+    for key in ("web_fetch", "web_search"):
+        if key in current:
+            mj("set-config", "--session", sid, "--key", key, "--value", "disabled")
+    for key, value in (("model", model), ("effort", effort)):
+        current = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+        if current.get(key) != value:
+            mj("set-config", "--session", sid, "--key", key, "--value", value)
+    settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+    assert settings.get("model") == model and settings.get("effort") == effort, settings
+    return settings
+
+
+def run(bug_id, gate, *, pilot=None):
+    bug = pilot["bug"] if pilot else driver.CORPUS[bug_id]
+    d = pilot["path"] if pilot else ROOT / "briefs" / KIND / bug_id
+    model, effort = pilot["model"] if pilot else (WRITER_MODEL, WRITER_EFFORT)
+    profile = pilot["profile"] if pilot else WRITER_PROFILE
     if (d / "done.json").exists():
         return "done"
     # Stage B's tag is kept for its kind, so its command ids and titles stay the same.
-    tag = hashlib.sha256(("brief" + ("" if KIND == "blind" else KIND) + bug_id).encode()).hexdigest()
+    tag_key = pilot["tag"] if pilot else "brief" + ("" if KIND == "blind" else KIND) + bug_id
+    tag = hashlib.sha256(tag_key.encode()).hexdigest()
     if (d / "launch.json").exists():
         sid = json.loads((d / "launch.json").read_text())["session_id"]
+        if pilot:
+            profile = json.loads((d / "launch-intent.json").read_text())["profile"]
+            if (d / "accepted.json").exists():
+                return finish_pilot_writer(d, sid, bug_id, profile, pilot["inputs"])
+            if (d / "failed.json").exists():
+                driver.suspend_pilot_session(d, sid)
+                return "void" if "void_reason" in json.loads((d / "failed.json").read_text()) else "rejected"
     elif (d / "launch-intent.json").exists():
         return "needs-recovery"  # a session may exist without a record; find it before rerunning
     else:
         with gate:
-            hold = driver.quota_hold()
+            hold = None if pilot else driver.quota_hold()
         if hold:
             return "held: " + hold  # nothing recorded; the writer starts on a later run
-        workspace = driver.workspace_id()
-        save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
-                                        "profile": WRITER_PROFILE, "time_ns": time.time_ns()})
+        workspace = None if pilot else driver.workspace_id()
+        save(d / "launch-intent.json", {"bug": bug_id, "model": model, "effort": effort,
+                                        "profile": profile, "time_ns": time.time_ns()})
         with gate:
-            launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", driver.BUNDLE,
-                        "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
-                        # mj new takes a profile or a model, not both; a pinned writer gets its
-                        # model below, before its first prompt, as verify_driver.py does.
-                        *(["--profile", WRITER_PROFILE] if WRITER_PROFILE else ["--model", WRITER_MODEL]),
-                        "--effort", WRITER_EFFORT, "--review", "off",
-                        "--no-project-memory", "--no-github-events", "--no-github-credentials",
-                        "--subagents", "none", "--title", "brief " + tag[:8], timeout=900)
+            title = "brief " + tag[:8]
+            if pilot:
+                sid = sealed_launch(driver.BUNDLE, bug["intro_commit"], profile, title,
+                                    base=bug["base_commit"], effort=effort)
+                launch = {"session_id": sid}
+            else:
+                launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", driver.BUNDLE,
+                            "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
+                            # A pinned writer selects its model below, before its first prompt.
+                            *(["--profile", profile] if profile else ["--model", model]),
+                            "--effort", effort, "--review", "off",
+                            "--no-project-memory", "--no-github-events", "--no-github-credentials",
+                            "--subagents", "none", "--title", title, timeout=900)
             save(d / "launch.json", launch)
             sid = launch["session_id"]
-            driver.wait_idle(sid)
+            if not pilot:
+                driver.wait_idle(sid)
+    if pilot and pilot["prepare_tool"]:
+        pilot["prepare_tool"](sid)
     if not (d / "settings.json").exists():
-        s = session(sid)
+        s = driver.wait_idle(sid) if pilot else session(sid)
         assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
-        for key in ("web_fetch", "web_search"):
-            if any(c["key"] == key for c in s.get("config_options", [])):
-                mj("set-config", "--session", sid, "--key", key, "--value", "disabled")
-        for key, value in (("model", WRITER_MODEL), ("effort", WRITER_EFFORT)):
-            current = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-            if current.get(key) != value:
-                mj("set-config", "--session", sid, "--key", key, "--value", value)
-        settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-        assert settings.get("model") == WRITER_MODEL and settings.get("effort") == WRITER_EFFORT, settings
-        if WRITER_PROFILE:
-            assert s.get("profile_id") == WRITER_PROFILE, s.get("profile_id")
-        save(d / "settings.json", settings)
+        settings = configure_pilot_model(sid, model, effort)
+        if profile:
+            assert s.get("profile_id") == profile, s.get("profile_id")
+        if not pilot:
+            save(d / "settings.json", settings)
         place = driver.container(sid)
         save(d / "placement.json", place)
+        if pilot and driver.image_digest(place["image"]) != pilot["inputs"]["image_digest"]:
+            save(d / "failed.json", {"session_id": sid, "image": place["image"],
+                                     "pinned": pilot["inputs"]["image_digest"]})
+            driver.suspend_pilot_session(d, sid)
+            return "rejected"
         before = driver.inventory(place, "audit", bug["base_commit"])
         assert not before["remotes"] and not before["alternates"] and not before["status"], before
+        if pilot and pilot["attest_cache"]:
+            driver.attest_pilot_cache(d, place, bug["intro_commit"], bug["base_commit"])
         save(d / "pre-inventory.json", before)
+        if pilot:
+            save(d / "settings.json", settings)
 
-    prompt = ((SCRIPTS / "brief/WRITER.md").read_text()
+    prompt = pilot["prompt"] if pilot else ((SCRIPTS / "brief/WRITER.md").read_text()
               .replace("{base}", bug["base_commit"]).replace("{message}", driver.commit_message(bug)))
-    send(d, sid, "prompt", "brief-" + tag[:32], prompt)
-    text = fetch_brief(sid)
-    rounds = 0
-    while True:
-        problems = lint(text, bug)
-        save(d / f"lint-{rounds}.json", problems)
-        if not problems or rounds == FIX_ROUNDS:
-            break
-        rounds += 1
-        fix = ("Your brief.md breaks these rules from the instructions:\n\n"
-               + "\n".join(f"- {p}" for p in problems)
-               + "\n\nFix brief.md so that it follows every rule, then reply `brief written`.\n")
-        send(d, sid, f"fix-{rounds}", f"brief-fix{rounds}-" + tag[:28], fix)
-        text = fetch_brief(sid)
+    try:
+        text, problems, rounds = write_brief(d, sid, tag, prompt, bug)
+    except WriterTurnFailed as error:
+        if not pilot:
+            raise
+        save(d / "transcript.json", driver.transcript(sid))
+        save(d / "usage.json", mj("usage", "--session", sid))
+        verdict = pilot_audit(d, sid, bool(pilot["prepare_tool"]))
+        failure = {"session_id": sid, "error": str(error)}
+        if not verdict["passed"]:
+            failure["void_reason"] = verdict["hits"]
+        save(d / "failed.json", failure)
+        driver.suspend_pilot_session(d, sid)
+        return "rejected" if verdict["passed"] else "void"
     # brief.md is where the oracle builder and the blind arms read; it is written only on success.
     (d / "brief-candidate.md").write_text(text)
     if not (d / "inventory-check.json").exists():
@@ -206,9 +256,20 @@ def run(bug_id, gate):
             json.loads((d / "pre-inventory.json").read_text()),
             {**after, **{k: "" for k, v in only_brief.items() if after.get(k, "").strip() == v}})
         save(d / "inventory-check.json", {"problems": problems_inv, "new_refs": new_refs})
-    cd = d / "reviewers" / sid[:12]
+    cd = d if pilot else d / "reviewers" / sid[:12]
     save(cd / "transcript.json", driver.transcript(sid))
     save(cd / "usage.json", mj("usage", "--session", sid))
+    if pilot:
+        verdict = pilot_audit(d, sid, bool(pilot["prepare_tool"]))
+        if not verdict["passed"]:
+            save(d / "failed.json", {"session_id": sid, "void_reason": verdict["hits"]})
+            driver.suspend_pilot_session(d, sid)
+            return "void"
+        actual_profile = session(sid).get("profile_id")
+        if actual_profile != profile:
+            raise RuntimeError(f"writer profile changed from {profile} to {actual_profile}")
+        if not driver.valid_usage(cd / "usage.json"):
+            raise RuntimeError("writer usage is missing total_tokens.tokens")
     inv = json.loads((d / "inventory-check.json").read_text())["problems"]
     if inv or problems:
         # No done.json: a rerun fails the same way instead of passing an invalid brief on.
@@ -216,11 +277,54 @@ def run(bug_id, gate):
         (d / "brief-rejected.md").write_text(text)
         save(d / "failed.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "lint_problems": problems,
                                  "inventory_problems": inv, "time_ns": time.time_ns()})
+        if pilot:
+            driver.suspend_pilot_session(d, sid)
+            return "rejected"
         raise RuntimeError(f"brief not accepted: inventory problems {inv}; "
                            f"{len(problems)} rule violations after {rounds} fix rounds (lint-{rounds}.json)")
+    if pilot:
+        save(d / "accepted.json", {"fix_rounds": rounds, "brief_sha256": hashlib.sha256(text.encode()).hexdigest()})
+        return finish_pilot_writer(d, sid, bug_id, profile, pilot["inputs"])
     save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
     (d / "brief.md").write_text(text)
     save(d / "done.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "finished_ns": time.time_ns()})
+    return "done"
+
+
+def pilot_audit(d, sid, allow_rql):
+    before = json.loads((d / "pre-inventory.json").read_text())
+    commits = [*before["commits"], before["head_tree"], before["base_tree"]]
+    import audit  # pilot-only; legacy brief_driver commands run without audit.py beside them
+
+    verdict = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql)
+    save(d / "audit.json", verdict)
+    return verdict
+
+
+def write_brief(d, sid, tag, prompt, bug):
+    send(d, sid, "prompt", "brief-" + tag[:32], prompt)
+    for rounds in range(FIX_ROUNDS + 1):
+        text = fetch_brief(sid)
+        problems = lint(text, bug)
+        save(d / f"lint-{rounds}.json", problems)
+        if not problems or rounds == FIX_ROUNDS:
+            return text, problems, rounds
+        fix = ("Your brief.md breaks these rules from the instructions:\n\n"
+               + "\n".join(f"- {p}" for p in problems)
+               + "\n\nFix brief.md so that it follows every rule, then reply `brief written`.\n")
+        repair = rounds + 1
+        send(d, sid, f"fix-{repair}", f"brief-fix{repair}-" + tag[:28], fix)
+
+
+def finish_pilot_writer(d, sid, bug_id, profile, inputs):
+    accepted = json.loads((d / "accepted.json").read_text())
+    text = (d / "brief-candidate.md").read_bytes()
+    if hashlib.sha256(text).hexdigest() != accepted["brief_sha256"]:
+        raise RuntimeError(f"accepted brief changed under {d}")
+    driver.suspend_pilot_session(d, sid)
+    (d / "brief.md").write_bytes(text)
+    save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,
+                               profile=profile, inputs=inputs, finished_ns=time.time_ns()))
     return "done"
 
 

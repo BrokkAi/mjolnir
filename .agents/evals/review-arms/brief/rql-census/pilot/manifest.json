@@ -839,6 +839,7 @@
   ],
   "eligible_pool_sha256": "d0fd469a4d0d5a22e7ac8833c0607ed4901e7432e81c0586187a2a457dbafc0d",
   "inputs": {
+    "cases_sha256": "e34d365da47188f735fbc3367474895db18012079cf0741d310c2ea64f71743b",
     "catalogue_sha256": "0ceb62a3c5b5e465fe7df216d191b2133b081ac2cc01ff54544df238d84a8551",
     "eligible_labels_sha256": "17a6a495c4bab449296c2037c8be4f2bff391aade1ba6d6f017270bed4624072",
     "labels_snapshot_sha256": "c1c143eeb5b8e107f9785300b839bbf3f8f9d7ca99c9a563eb6fb2e6c868ea02",

@@ -44,7 +44,10 @@ def call_parts(item):
 
 
 def audit_reviewer(transcript_path, own_workspace):
-    pages = json.loads(transcript_path.read_text())
+    return scan(json.loads(transcript_path.read_text()), own_workspace)
+
+
+def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False):
     hits, calls = [], 0
     for page in pages:
         for item in page["items"]:
@@ -52,6 +55,9 @@ def audit_reviewer(transcript_path, own_workspace):
                 continue
             calls += 1
             inp, out = call_parts(item)
+            call = (item.get("body") or {}).get("call") or {}
+            if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
+                continue
             for name, pattern in INPUT_PATTERNS.items():
                 for m in re.finditer(pattern, inp, re.I | re.M):
                     start = max(0, m.start() - 160)
@@ -69,7 +75,38 @@ def audit_reviewer(transcript_path, own_workspace):
             if foreign:
                 hits.append({"seq": item["seq"], "kind": "other-workspace", "where": "input/output",
                              "snippet": ", ".join(foreign)})
+            if commits is not None:
+                for name, snippet in pilot_hits(inp, commits, single_commit):
+                    hits.append({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet})
     return {"tool_items": calls, "hits": hits}
+
+
+def pilot_hits(inp, commits, single_commit):
+    extra_network = CMD + r"(ssh|scp|sftp|rsync|nc|ncat|netcat|socat|telnet|ftp)\s|\b(socket\.connect|urllib\.request|requests\.(get|post)|Invoke-WebRequest)\b"
+    if match := re.search(extra_network, inp, re.I):
+        yield "network-command", inp[max(0, match.start() - 80):match.end() + 120]
+    for match in re.finditer(r"\bgit\s+[^\n;&|]*", inp):
+        command = match[0].split(r"\n", 1)[0]
+        if not re.search(r"\b(diff|log|show|blame|rev-list|rev-parse|cat-file|checkout|switch)\b", command):
+            continue
+        unsafe_ref = re.search(r"\b(origin/|upstream/|refs/remotes/|FETCH_HEAD\b|ORIG_HEAD\b|"
+                               r"MERGE_HEAD\b)|--(git-dir|work-tree|no-index)\b", command)
+        hashes = re.findall(r"\b[0-9a-f]{7,40}\b", command)
+        if (unsafe_ref or any(not any(pin.startswith(oid) for pin in commits) for oid in hashes)
+                or (single_commit and re.search(r"HEAD(?:[~^][1-9]?|@\{)", command))):
+            yield "git-revision-outside-pin", command[:400]
+
+
+def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, single_commit=False):
+    """Apply the study's transcript screen without changing legacy audit results."""
+    try:
+        pages = json.loads(transcript_path.read_text())
+        if not any(page["items"] for page in pages):
+            raise ValueError("empty transcript")
+        result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
+    return dict(result, passed=not result["hits"])
 
 
 def audit_run(run):

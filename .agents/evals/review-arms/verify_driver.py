@@ -33,6 +33,7 @@ import os
 import pathlib
 import subprocess
 import threading
+from tempfile import mkdtemp
 import time
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
@@ -44,8 +45,10 @@ p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("--concurrency", type=int, default=7)
 p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
-# Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
+p.add_argument("--text-only", action="store_true",
+               help="pilot judgment task: one pinned profile and a fresh plain directory per unit")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
+# Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
 # Judge rounds normally run both judges with one model; --judges A (or B) runs one side, so the
@@ -69,6 +72,8 @@ if instance != "default":
 if a.kind == "task" and not a.output:
     p.error("--kind task needs --output")
 PROFILES = a.profiles.split(",")
+if a.text_only and (a.kind != "task" or a.bundle or a.target != "localhost" or len(PROFILES) != 1):
+    p.error("--text-only requires a local task with one pinned profile and no bundle")
 REPO_NAME = a.bundle or os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
@@ -98,7 +103,8 @@ def ensure_checkout():
         tmp.rename(REPO)
 
 
-ensure_checkout()
+if not a.text_only:
+    ensure_checkout()
 for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
@@ -183,6 +189,10 @@ INPUT = "review-input"  # workspace folder that receives SPEC.md and the batch
 
 def prompt_text(batch_path, judge):
     if a.kind == "task":
+        if a.text_only:
+            return (f"Read {INPUT}/{batch_path.name}/INSTRUCTIONS.md and follow it exactly. "
+                    f"Read only the files in {INPUT}/{batch_path.name}/. "
+                    f"Write {a.output} in your current working directory. Do not use the network.")
         first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
                  "directory, and do not open .agents/evals/ at any point.\n\n") if a.bundle else ""
         return first + f"""Read {INPUT}/{batch_path.name}/INSTRUCTIONS.md and follow it exactly. Your unit's files are in {INPUT}/{batch_path.name}/.
@@ -212,7 +222,11 @@ The {REPO_NAME} checkout with full history is your current working directory. Re
 
 def upload_inputs(sid, batch_path):
     if a.kind == "task":
-        for src in sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output):
+        if a.text_only:
+            sources = [batch_path / name for name in ("INSTRUCTIONS.md", "SPEC.md", "PILOT.md", "items.json")]
+        else:
+            sources = sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output)
+        for src in sources:
             rel = src.relative_to(batch_path)
             r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
                                 "--overwrite", str(src)], capture_output=True, timeout=300)
@@ -257,6 +271,21 @@ def run(batch_path, judge=None):
         return run_unit(batch_path, judge)
 
 
+def suspend(sid):
+    args = ["suspend", "--session", sid]
+    if not a.text_only:
+        args.append("--acknowledge-unpublished-work")
+    mj(*args, timeout=900)
+
+
+def finish_text_task(path, out):
+    if not out.get("suspended"):
+        sid = out["producer"]["session_id"]
+        if session(sid).get("lifecycle") != "suspended":
+            suspend(sid)
+        save(path, {**out, "suspended": True})
+
+
 def run_unit(batch_path, judge=None):
     n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
     tag = n if judge is None else f"{n}-{judge}"
@@ -266,12 +295,17 @@ def run_unit(batch_path, judge=None):
     if out_path.exists():
         # An existing output from another model is not this invocation's result: say so rather than
         # republish it (for example judge B first run on Opus, then rerun with --model gpt-6.1-sol).
-        producer = json.loads(out_path.read_text()).get("producer") or {}
+        cached = json.loads(out_path.read_text())
+        producer = cached.get("producer") or {}
         made_by = (producer.get("config") or {}).get("model")
         made_on = producer.get("profile")
         # A split-judge invocation pins one side's model, so an output that predates producer records
         # cannot show it matches. Unknown and mismatched producers are both ineligible.
-        unknown = not producer and a.kind == "judge" and len(JUDGES) == 1
+        unknown = not producer and (a.text_only or (a.kind == "judge" and len(JUDGES) == 1))
+        if a.text_only:
+            output = batch_path / a.output
+            if not output.is_file() or hashlib.sha256(output.read_bytes()).hexdigest() != producer.get("output_sha256"):
+                raise RuntimeError(f"unit {tag}: cached verdicts differ from the fetched output")
         if unknown or (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
             # Mark the unit ineligible and retire any aggregate in one serialized step, so no collector
             # reads verdicts this check rejects.
@@ -287,6 +321,8 @@ def run_unit(batch_path, judge=None):
                                f"sessions/batch-{tag}.json aside to rerun it")
         # The cached output matches this invocation, so any earlier invalid marker for it is stale.
         (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
+        if a.text_only:
+            finish_text_task(out_path, cached)
         return tag, "done"
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
@@ -298,17 +334,24 @@ def run_unit(batch_path, judge=None):
                                f"{','.join(PROFILES)}/{a.model}; move sessions/batch-{tag}.json aside to rerun it")
     else:
         profile = pick_profile()
-        if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
+        if a.text_only or os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
             # Share the experiment drivers' floor interpretation. Import only
             # for guarded runs; older verifier data has no driver workspace.
             from driver import quota_hold
-            hold = quota_hold(a.quota_scope)
+            hold = (quota_hold(a.quota_scope, floor=f"{profile}=25", weekly=True, strict=True)
+                    if a.text_only else quota_hold(a.quota_scope))
             if hold:
                 raise RuntimeError("held before verifier session start: " + hold)
-        source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
+        if a.text_only:
+            workspaces = ROOT / "assessment-workspaces"
+            workspaces.mkdir(exist_ok=True, mode=0o700)
+            source = ["--project-directory", mkdtemp(dir=workspaces.resolve())]
+        else:
+            source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
                  *source, "--effort", "high", "--review", "off", "--no-project-memory",
-                 "--no-github-events", "--no-github-credentials", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
+                 "--no-github-events", "--no-github-credentials", "--subagents", "none",
+                 "--title", f"Assessment {tag}" if a.text_only else f"review-arms {V.name} {tag}",
                  timeout=900)["session_id"]
         rec = {"session_id": sid, "profile": profile, "time_ns": time.time_ns()}
         save(rec_path, rec)
@@ -360,7 +403,7 @@ def run_unit(batch_path, judge=None):
         # Each retry marks its profile exhausted, so the retries end.
         with lock:
             exhausted.update({rec["profile"], s.get("profile_id")} - {None})
-        mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+        suspend(sid)
         rec_path.rename(V / "sessions" / f"quota-batch-{tag}-{sid[:12]}.json")
         print(json.dumps({"batch": tag, "state": "quota", "session": sid, "profile": s.get("profile_id")}), flush=True)
         return run_unit(batch_path, judge)
@@ -385,13 +428,24 @@ def run_unit(batch_path, judge=None):
             (V / "workflow-out.json").unlink(missing_ok=True)
         raise RuntimeError(f"unit {tag} finished on {made_on}/{made_by}, not {','.join(PROFILES)}/{a.model}")
     if a.kind == "task":
-        (batch_path / a.output).write_text(out["text"])
+        data = out["text"].encode("utf-8")
+        if a.text_only:
+            from pilot_judge import validate_payload_verdicts
+            validate_payload_verdicts(json.loads((batch_path / "items.json").read_text()), data)
+            producer["output_sha256"] = hashlib.sha256(data).hexdigest()
+            save(V / "sessions" / f"usage-{tag}.json", mj("usage", "--session", sid))
+            (batch_path / a.output).write_bytes(data)
+        else:
+            (batch_path / a.output).write_text(out["text"])
         out = {"output": str(batch_path / a.output), "session_id": sid}
     out = {**out, "producer": producer}
     save(out_path, out)
     # A valid replacement makes the unit eligible again.
     (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
-    mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+    if a.text_only:
+        finish_text_task(out_path, out)
+    else:
+        suspend(sid)
     return tag, "done"
 
 

@@ -24,10 +24,11 @@ import threading
 import time
 import traceback
 
-SCRIPTS = pathlib.Path(__file__).resolve().parent
+SCRIPTS = pathlib.Path(os.environ.get("REVIEW_ARMS_SCRIPTS", pathlib.Path(__file__).resolve().parent)).resolve()
 # Experiment data (instance, corpus, runs) lives outside the repository.
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 MJX = SCRIPTS / "mjx"
+MJ_INSTANCE_ARGS = ()
 # The mj instance mjx reaches (see mjx): the default instance, or the private one of the
 # earlier stages. Each keeps its workspace record in its own directory under ROOT.
 if os.environ.get("REVIEW_ARMS_INSTANCE", "default") == "private":
@@ -97,6 +98,19 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              "OX": ["gpt-6.1-terra:high"] * 3, "AF2": ["gpt-6.1-terra:high"] * 3})
 
 
+def use_named_instance(name):
+    """Point the study drivers at one named instance through mjx."""
+    if (not re.fullmatch(r"[a-zA-Z0-9._-]{1,64}", name) or name in (".", "..", "default")
+            or os.environ.get("REVIEW_ARMS_INSTANCE", "default") != "default"):
+        raise ValueError("use a dedicated named instance and unset REVIEW_ARMS_INSTANCE")
+    global INSTANCE, STORE, MJ_INSTANCE_ARGS
+    home = pathlib.Path.home()
+    INSTANCE = home / ".config/mjolnir/instances" / name
+    STORE = home / ".local/share/mjolnir/instances" / name / "mj.sqlite3"
+    MJ_INSTANCE_ARGS = ("--instance", name)
+    return INSTANCE
+
+
 def workspace_id():
     """Read the selected instance's workspace only when a new session is launched."""
     path = INSTANCE / "workspace.json"
@@ -114,8 +128,12 @@ def save(path, value):
     tmp.replace(path)
 
 
+def mj_invocation(*args):
+    return [str(MJX), *MJ_INSTANCE_ARGS, *map(str, args)]
+
+
 def mj(*args, timeout=300):
-    result = subprocess.run([str(MJX), *map(str, args), "--json"], capture_output=True, timeout=timeout)
+    result = subprocess.run(mj_invocation(*args, "--json"), capture_output=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f"mj {' '.join(map(str, args[:2]))}: {result.stderr.decode()[-1500:]}")
     return json.loads(result.stdout)
@@ -124,6 +142,33 @@ def mj(*args, timeout=300):
 def session(sid):
     value = mj("sessions", "--session", sid)
     return value["sessions"][0] if "sessions" in value else value
+
+
+def valid_usage(path):
+    try:
+        tokens = json.loads(path.read_text())["totals"]["total_tokens"]["tokens"]
+        return type(tokens) is int and tokens >= 0
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def image_digest(image):
+    return "sha256:" + image.removeprefix("sha256:")
+
+
+def suspend_pilot_session(d, sid):
+    """Wait for teardown before publishing outputs or replacing a rejected attempt."""
+    if (d / "suspend.json").exists():
+        return
+    state = session(sid).get("lifecycle")
+    result = mj("suspend", "--session", sid, "--acknowledge-unpublished-work",
+                timeout=900) if state != "suspended" else {"already_suspended": True}
+    end = time.monotonic() + 900
+    while (state := session(sid).get("lifecycle")) != "suspended":
+        if time.monotonic() >= end or state == "failed":
+            raise RuntimeError(f"pilot session {sid} is {state}, not suspended")
+        time.sleep(5)
+    save(d / "suspend.json", result)
 
 
 def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
@@ -359,6 +404,20 @@ def inventory(place, mode, base):
     if out.returncode:
         raise RuntimeError("inventory: " + out.stderr.decode()[-1500:])
     return json.loads(out.stdout)
+
+
+def attest_pilot_cache(d, place, intro, base):
+    """Check the mounted cache from inside the session before any model turn."""
+    command = ["podman", "exec", "-i", place["container"], "python3", "-c",
+               pathlib.Path(__file__).with_name("pilot_cache_probe.py").read_text(), place["cwd"], intro, base]
+    result = subprocess.run(command, capture_output=True, timeout=300)
+    if result.returncode:
+        raise RuntimeError(f"pilot cache probe failed: {result.stderr.decode()[-1500:]}")
+    evidence = json.loads(result.stdout)
+    save(d / "cache-attestation.json", evidence)
+    if not evidence["passed"]:
+        raise RuntimeError(f"pilot Git cache contains history outside its pin: {d / 'cache-attestation.json'}")
+    return evidence
 
 
 def transcript(sid):

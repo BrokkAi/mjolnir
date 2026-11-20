@@ -1,0 +1,13 @@
+# Mjolnir Codex overlay for the R and R-loc writers.
+[mcp_servers.rql]
+command = "sh"
+args = ["-c", '''
+set -eu
+: "${MJ_SESSION_ID:?expected a Mjolnir session ID}"
+# The key is published after the client files and host assignment are ready.
+while [ ! -r "$RQL_SSH_KEY" ]; do sleep 0.1; done
+exec python3 -B "${RQL_SSH_CONFIG%/*}/client.py"
+''']
+env_vars = ["RQL_SSH_CONFIG", "RQL_SSH_KNOWN_HOSTS", "RQL_SSH_KEY", "RQL_SSH_TARGET", "MJ_SESSION_ID"]
+startup_timeout_sec = 60
+default_tools_approval_mode = "approve"

@@ -1,0 +1,193 @@
+"""Exercise the real stdio server and forced-command wrapper with the stub engine."""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+
+from stub_engine import answer
+
+
+HERE = Path(__file__).resolve().parent
+SESSION_R = "a" * 32
+SESSION_LOC = "b" * 32
+COMMIT = "1" * 40
+DIFF = "mjolnir/123"
+
+
+def rpc(method, request_id, **params):
+    return json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+
+
+def call(request_id, **arguments):
+    return rpc("tools/call", request_id, name="rql_query", arguments=arguments)
+
+
+def payload(response):
+    return json.loads(response["result"]["content"][0]["text"])
+
+
+class TransportTest(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.root = Path(root.name)
+        self.manifest = self.root / "manifest.json"
+        self.manifest.write_text(json.dumps({
+            "page_rows": 50, "diffs": [{"key": DIFF, "intro": COMMIT}],
+        }))
+        self.logs = {session: self.root / f"{session}.jsonl" for session in (SESSION_R, SESSION_LOC)}
+        self.config = self.root / "config.json"
+        self.config.write_text(json.dumps({
+            "manifest": str(self.manifest),
+            "engine": "rql_mock.stub_engine:answer",
+            "sessions": {
+                session: {"diff": DIFF, "intro": COMMIT, "arm": arm, "log": str(self.logs[session])}
+                for session, arm in ((SESSION_R, "R"), (SESSION_LOC, "R-loc"))
+            },
+        }))
+
+    def run_server(self, session, *requests, original=None):
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment["SSH_ORIGINAL_COMMAND"] = session if original is None else original
+        return subprocess.run(
+            [HERE / "serve-rql.sh", self.config, session],
+            env=environment,
+            input="\n".join(requests) + "\n", text=True, capture_output=True, timeout=15,
+        )
+
+    def exchange(self, session, *requests):
+        process = self.run_server(session, *requests)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        return [json.loads(line) for line in process.stdout.splitlines()]
+
+    def test_mcp_overlay_lists_one_tool_and_negotiates_protocol(self):
+        config = tomllib.loads((HERE / "review_arms_rql.config.toml").read_text())
+        self.assertEqual(list(config["mcp_servers"]), ["rql"])
+        init, tools = self.exchange(
+            SESSION_R, rpc("initialize", 1, protocolVersion="2025-06-18"), rpc("tools/list", 2),
+        )
+        self.assertEqual(init["result"]["protocolVersion"], "2025-06-18")
+        [tool] = tools["result"]["tools"]
+        self.assertEqual(tool["name"], "rql_query")
+        self.assertEqual(tool["inputSchema"]["properties"]["page"]["default"], 1)
+
+    def test_pages_cover_all_rows_in_engine_order(self):
+        pages = [payload(res) for res in self.exchange(
+            SESSION_R, call(1, query="paged"), call(2, query="paged", page=2),
+            call(3, query="paged", page=3), call(4, query="paged", page=4),
+            call(5, query="empty"),
+        )]
+        self.assertEqual([(p["page"], p["total"], p["pages"], len(p["rows"])) for p in pages[:3]],
+                         [(1, 123, 3, 50), (2, 123, 3, 50), (3, 123, 3, 23)])
+        expected = answer(COMMIT, "paged")
+        self.assertEqual([row for p in pages[:3] for row in p["rows"]], expected["rows"])
+        self.assertEqual([page["coverage"] for page in pages[:4]], [expected["coverage"]] * 4)
+        self.assertEqual(pages[3]["status"], "page_out_of_range")
+        self.assertEqual(pages[4], {"status": "ok", "rows": [], "total": 0, "page": 1, "pages": 0,
+                                    "coverage": {"complete": True, "open": []}})
+
+        self.manifest.write_text(json.dumps({
+            "page_rows": 60, "diffs": [{"key": DIFF, "intro": COMMIT}],
+        }))
+        [response] = self.exchange(SESSION_R, call(6, query="paged", page=3))
+        self.assertEqual(payload(response)["rows"], answer(COMMIT, "paged")["rows"][120:])
+
+    def test_location_arm_holds_every_span_in_its_original_row(self):
+        reduced = [payload(res) for res in self.exchange(
+            SESSION_LOC, call(1, query="paged"), call(2, query="paged", page=2),
+            call(3, query="paged", page=3),
+        )]
+        self.assertEqual([row for page in reduced for row in page["rows"]], [
+            {"sites": [
+                {"path": "src/source.rs", "start_line": i + 1, "end_line": i + 2},
+                {"path": "src/target.rs", "start_line": i + 11, "end_line": i + 13},
+                {"path": "src/other.rs", "start_line": i + 21, "end_line": i + 21},
+            ]}
+            for i in range(123)
+        ])
+        self.assertEqual([page["total"] for page in reduced], [123, 123, 123])
+        coverage = {"complete": False, "open": [
+            {"site": {"path": "src/dispatch.rs", "start_line": 4, "end_line": 8}},
+            {"site": {"path": "src/depth.rs", "start_line": 12, "end_line": 12}},
+        ]}
+        self.assertEqual([page["coverage"] for page in reduced], [coverage] * 3)
+        records = [json.loads(line) for line in self.logs[SESSION_LOC].read_text().splitlines()]
+        self.assertEqual([record["coverage"] for record in records], [coverage] * 3)
+        self.assertEqual([record["payload"] for record in records], reduced)
+
+    def test_open_answer_with_zero_rows_delivers_and_logs_coverage(self):
+        [response] = self.exchange(SESSION_R, call(1, query="open-empty"))
+        delivered = payload(response)
+        coverage = answer(COMMIT, "open-empty")["coverage"]
+        self.assertEqual(delivered, {"status": "ok", "rows": [], "total": 0, "page": 1,
+                                     "pages": 0, "coverage": coverage})
+        self.assertIs(delivered["coverage"]["complete"], False)
+        self.assertEqual(len(delivered["coverage"]["open"]), 2)
+        [record] = [json.loads(line) for line in self.logs[SESSION_R].read_text().splitlines()]
+        self.assertEqual(record["coverage"], coverage)
+        self.assertEqual(record["payload"], delivered)
+
+    def test_unknown_session_is_refused(self):
+        res = self.run_server("f" * 32, rpc("tools/list", 1))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unknown session", res.stderr)
+        self.assertEqual(res.stdout, "")
+        self.assertTrue(all(not log.exists() for log in self.logs.values()))
+
+    def test_client_cannot_select_another_session_or_supply_a_shell_command(self):
+        for original in (SESSION_LOC, SESSION_R + " ; echo no"):
+            with self.subTest(original=original):
+                res = self.run_server(SESSION_R, rpc("tools/list", 1), original=original)
+                self.assertEqual(res.returncode, 64)
+                self.assertIn("does not match", res.stderr)
+                self.assertEqual(res.stdout, "")
+        self.assertTrue(all(not log.exists() for log in self.logs.values()))
+
+    def test_success_and_errors_write_one_record_each_with_the_delivered_hash(self):
+        responses = self.exchange(
+            SESSION_R, call(1, query="demo"), call(2, query="parse-error"),
+            call(3, query="engine-error"), call(4, query="demo", page=True),
+        )
+        records = [json.loads(line) for line in self.logs[SESSION_R].read_text().splitlines()]
+        self.assertEqual(len(records), len(responses))
+        for record, response in zip(records, responses):
+            with self.subTest(id=response["id"]):
+                delivered = response["result"]["content"][0]["text"]
+                self.assertEqual(record["answer_sha256"], hashlib.sha256(delivered.encode()).hexdigest())
+                self.assertEqual(record["payload"], payload(response))
+                self.assertEqual(record["coverage"], payload(response).get("coverage"))
+                self.assertEqual((record["session"], record["diff"], record["intro"], record["arm"]),
+                                 (SESSION_R, DIFF, COMMIT, "R"))
+                self.assertTrue(record["time"])
+                self.assertGreaterEqual(record["latency_ms"], 0)
+        self.assertEqual([r["status"] for r in records],
+                         ["ok", "parse_error", "engine_error", "invalid_arguments"])
+        self.assertEqual([r["total"] for r in records], [3, None, None, None])
+        self.assertEqual([r["query"] for r in records], ["demo", "parse-error", "engine-error", "demo"])
+        self.assertEqual(records[0]["page"], 1)
+        self.assertEqual([r["result"]["isError"] for r in responses], [False, True, True, True])
+        self.assertEqual(payload(responses[1])["message"], "Stub parser rejected the query.")
+        self.assertEqual(payload(responses[2])["message"], "Stub engine could not answer.")
+
+    def test_large_jsonrpc_answer_streams_without_truncating_or_blocking_requests(self):
+        # Both input and output exceed a pipe buffer before the final ping. subprocess.run
+        # drains stdout while feeding stdin so any implementation stall times out.
+        request = "q" * (96 * 1024)
+        large, after, ping = self.exchange(
+            SESSION_R, call(1, query="large"), call(2, query=request), rpc("ping", 3),
+        )
+        self.assertEqual(payload(large)["rows"], answer(COMMIT, "large")["rows"])
+        self.assertGreater(len(large["result"]["content"][0]["text"].encode()), 64 * 1024)
+        self.assertEqual(payload(after)["rows"], answer(COMMIT, request)["rows"])
+        self.assertEqual(ping, {"jsonrpc": "2.0", "id": 3, "result": {}})
+
+
+if __name__ == "__main__":
+    unittest.main()
