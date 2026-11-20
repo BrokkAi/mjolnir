@@ -2352,6 +2352,53 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
 }
 
 #[test]
+fn a_damaged_prompt_queue_does_not_hide_other_sessions_queues_at_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queued-prompts.sqlite3");
+    for id in ["damaged", "healthy"] {
+        save_session_to(&path, &session(id, "project")).unwrap();
+        let mut materialized = mj_core::state::MaterializedSession::empty(id);
+        for command_id in ["first", "second", "third"] {
+            materialized
+                .queued_prompts
+                .push(mj_core::state::MaterializedQueuedPrompt {
+                    command_id: command_id.into(),
+                    kind: Default::default(),
+                    content: vec![serde_json::json!({"type": "text", "text": command_id})],
+                    queued_at_ms: 1_000,
+                    accepted_ordinal: None,
+                });
+        }
+        save_materialized_session_to(&path, &materialized).unwrap();
+    }
+    open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE materialized_queued_prompts SET content_json = 'null'
+         WHERE session_id = 'damaged' AND command_id = 'second'",
+            [],
+        )
+        .unwrap();
+
+    let mut damaged = Vec::new();
+    let queues = read_all_materialized_queued_prompts(&path, |id, _| {
+        damaged.push(id.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(damaged, ["damaged"]);
+    assert!(!queues.contains_key("damaged"));
+    assert_eq!(
+        queues["healthy"]
+            .iter()
+            .map(|prompt| prompt.command_id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(load_materialized_queued_prompts_from(&path).is_err());
+}
+
+#[test]
 fn bulk_materialized_activity_matches_session_summaries() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

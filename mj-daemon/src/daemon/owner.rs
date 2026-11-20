@@ -762,7 +762,7 @@ pub(super) fn load_materialized_seed()
             )
         })
         .collect();
-    for (id, queue) in mj_controller::database::load_materialized_queued_prompts()? {
+    for (id, queue) in mj_controller::database::load_materialized_queued_prompts_for_startup()? {
         seed.entry(id).or_default().queued_prompts = crate::pollers::queued_prompt_entries(&queue);
     }
     Ok(seed)

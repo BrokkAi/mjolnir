@@ -30,6 +30,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20 18:37Z) Milestone 3: revalidated after merging `origin/master`. The phone golden, owner and viewer regressions, runtime feed tests, API wait and turn tests, Clippy, and a live browser Interrupt All action passed.
 - [x] (2026-11-20 18:50Z) Milestone 3: verified the review fixes for persisted titles, launch preferences, and storage invalidation. The browser published all three restored values in `feeds-m3`, and the named daemon and workers stopped.
 - [x] (2026-11-20 19:06Z) Milestone 3: verified that a stopped worker keeps its last committed title, that a rejected projection page rolls its title back, and that full prompt bodies stay within the browser capture.
+- [x] (2026-11-20 19:20Z) Milestone 3: a headless daemon restarted with malformed stored queue data. It logged and skipped the affected queue for startup while leaving the SQLite row available for recovery.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
 
@@ -135,6 +136,8 @@ Milestone 1 is implemented and validated in its detached worktree. Both pickers 
 Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page showed the pending refresh and then displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
 
 Milestone 3 moved the viewer's worker and session facts into the runtime capture. The test cases cover workspace and storage changes without a session record change, and a child update that publishes operational state and attention together. The full queues and forms stay in the in-process capture, and terminal clients continue reading them from the transcript tail. A browser stream in `feeds-m3` showed the parent change from no Interrupt All offer to offering it after a child started. The browser action was accepted and the existing stream withdrew the offer when the child stopped. The named daemon was stopped and its workers were reaped.
+
+Milestone 3 review follow-ups cover the retained allocation of browser prompt bodies in terminal replay history (Milestone 5), the idle verdict for a parked child whose relay actor has retired (Milestone 4), and comparing storage warnings only for sessions on affected hosts.
 
 Follow-ups: publish the unified projection as a versioned `/api/v1` stream including profile availability and "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache; revisit the browser Move picker’s implicit destination when all compatible destinations have a missing verdict. The existing profile-only Move can omit a destination and relies on execution preflight to check the implicit one.
 
