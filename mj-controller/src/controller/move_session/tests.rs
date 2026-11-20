@@ -1385,6 +1385,12 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         RelayCommand::CancelTurnFor {
             active_prompt_id: "accepted-prompt".into(),
         },
+        RelayCommand::DismissQuestion {
+            question: mj_core::assessment::InferredQuestion {
+                turn_id: "waiting-turn".into(),
+                completed_ordinal: 1,
+            },
+        },
     ] {
         assert!(move_refuses_command(MOVE_QUEUE_SESSION_ID, &command));
     }

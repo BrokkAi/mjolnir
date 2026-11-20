@@ -170,9 +170,12 @@ fn own_verdict(
                 .get(id)
                 .is_some_and(|tail| tail.header.active_turn.is_some())
     });
-    let unfinished = state.has_live_worker()
+    let interrupt_member = state.has_live_worker()
         && live.is_some()
         && (running || form || super::attention::semantic_question(runtime, id).is_some());
+    let active_work = state.has_live_worker()
+        && !form
+        && (running || activity.as_ref().is_some_and(|state| !state.is_idle()));
     let failed_first_launch = runtime.metadata.failed_launch_retries.contains(id);
     let resume = if failed_first_launch && operation == Ready {
         Ready
@@ -207,12 +210,10 @@ fn own_verdict(
             && live.is_some_and(|live| {
                 mj_client::usage_format::SessionActivity::of(live).is_working(None, form)
             }),
-        active_work: state.has_live_worker()
-            && !form
-            && (running || activity.as_ref().is_some_and(|state| !state.is_idle())),
-        unfinished,
+        active_work,
+        unfinished: interrupt_member || active_work,
         interrupt: !queue_held && running && !form && state.has_live_worker(),
-        interrupt_member: unfinished,
+        interrupt_member,
         stop: if state.is_active() {
             if operation == TransitionFailed {
                 Ready
@@ -496,8 +497,15 @@ impl RuntimeState {
             );
             RelayCommand::DismissQuestion { question }
         } else {
-            live.and_then(|live| live.turn_controls.as_ref()?.interrupt.clone())
-                .unwrap_or(RelayCommand::CancelTurn)
+            let command = live.and_then(|live| live.turn_controls.as_ref()?.interrupt.clone());
+            // A raw cancel can hit a newly started prompt after autonomous
+            // goal work settles between capture and worker admission.
+            ensure!(
+                !live.is_some_and(|live| live.goal.running() && live.active_prompt.is_none())
+                    || matches!(command, Some(RelayCommand::CancelTurnFor { .. })),
+                "this worker cannot target the current autonomous goal turn; open the session to use its goal controls"
+            );
+            command.unwrap_or(RelayCommand::CancelTurn)
         };
         self.session_manager
             .session(id)
@@ -625,6 +633,20 @@ mod tests {
         project(&mut capture, &before);
         assert!(!capture.verdicts["parent"].interrupt_all);
 
+        let before = capture.clone();
+        let mut live = mj_core::relay::RelaySnapshot::new("parent".into()).operational_state();
+        live.activity = Some(mj_core::activity::ActivityState::Tool {
+            tool_call_id: "standalone-tool".into(),
+            started_at_ms: 1,
+            last_activity_at_ms: None,
+        });
+        let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
+        view.operational = Some(live.into());
+        capture.sessions.insert("parent".into(), view);
+        project(&mut capture, &before);
+        assert!(capture.verdicts["parent"].unfinished);
+        assert!(!capture.verdicts["parent"].interrupt_all);
+
         // A harness-owned goal can run without either a prompt or a
         // materialized active turn. It still adds the owning session.
         let before = capture.clone();
@@ -648,9 +670,9 @@ mod tests {
         );
         let result = outcome.unwrap();
         assert_eq!(result.requested, 1);
-        assert!(result.failures.is_empty());
-        assert!(
-            matches!(commands.as_slice(), [(id, _, RelayCommand::CancelTurn)] if id == "parent")
-        );
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].0, "parent");
+        assert!(result.failures[0].1.contains("autonomous goal turn"));
+        assert!(commands.is_empty());
     }
 }

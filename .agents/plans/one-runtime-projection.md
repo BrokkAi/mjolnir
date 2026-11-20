@@ -36,6 +36,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20) Milestone 4: validated after merging `origin/master`. The terminal and phone goldens, daemon offer tests, browser tests, and a named-instance run with one working child passed.
 - [x] (2026-11-20) Milestone 4 first review: retained worker-targeted terminal interruption, included autonomous goal work, kept the stopped record and its Resume verdict together, and preserved Retry Launch after failed startup cleanup. Checkpoint activity blocks lifecycle offers while the conversation and workspace editing stay available.
 - [x] (2026-11-20) Milestone 4 second review: protected queues held by Move at selection and worker admission, restored terminal warnings for active tool and shell work, and sent Interrupt All requests to independent workers concurrently. The composer refreshes its child counts from the same frame as the dashboard.
+- [x] (2026-11-20) Milestone 4 third review: Move admission protects pending prose questions, lifecycle warnings include tool-only children, and Interrupt All refuses untargetable autonomous goal cancellation.
 - [ ] Milestone 5: one history for both feeds.
 
 
@@ -137,6 +138,9 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Decision revision: Interrupt All follows unfinished worker state and cancellable native work. This supersedes the 2026-11-20 semantics entry’s “waiting or interrupted” wording. A settled interruption is a finished turn, including on a parked child whose worker has stopped. No outcome value qualifies a child on its own. The offer withdraws when the last eligible work settles.
   Date/Author: 2026-11-20, parent session.
+
+- An autonomous goal can count as unfinished without a worker-issued command that identifies its turn. Execution reports a refusal in this case because a raw cancel could hit the next queued prompt. Tool-only activity counts in lifecycle warnings even without an open turn to interrupt.
+  Date/Author: 2026-11-20, Milestone 4 review.
 
 ## Outcomes & Retrospective
 

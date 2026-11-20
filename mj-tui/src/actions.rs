@@ -2201,7 +2201,7 @@ impl DashboardState {
                         let session_id = session.id.clone();
                         let name = crate::render::session_name(session).to_owned();
                         let verdict = self.verdict(&session_id);
-                        let parent_running = verdict.unfinished;
+                        let parent_running = verdict.interrupt_member;
                         self.mode = crate::Mode::Confirm(
                             ConfirmDialog::new(Confirmation::InterruptAll {
                                 subagents_running: verdict

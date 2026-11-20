@@ -556,7 +556,7 @@ pub(super) async fn apply_phone_action(
             // successfully interrupted members are already settling.
             if failed != 0 {
                 return Err(mj_core::refusal::Refusal::precondition(format!(
-                    "Could not interrupt {failed} of the tree's sessions. Open the remaining sessions to check for an unanswered question or stop the session."
+                    "Could not interrupt {failed} of the tree's sessions. Open the remaining sessions to use their turn or goal controls, answer their questions, or stop them."
                 )).into());
             }
             Ok(())
