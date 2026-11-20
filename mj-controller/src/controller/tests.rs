@@ -2444,7 +2444,21 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
                     .unwrap();
             }
         }
-        let cut = relay.live_session_baseline().unwrap();
+        let cut = if delivered {
+            relay.live_session_baseline().unwrap()
+        } else {
+            // A live cut waits for startup's selector to finish while it
+            // holds the queue, so the brief is still queued at the cut.
+            let mut cut = relay.reserve_live_baseline();
+            assert!(cut.try_recv().is_err(), "{case}");
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1, "{case}");
+            assert_eq!(claimed[0].command_id, "test-selector");
+            relay
+                .record_command_completed("test-selector", RelayCommandOutcome::Configured)
+                .unwrap();
+            cut.try_recv().unwrap().unwrap()
+        };
         let mut projection =
             mj_transcript::projection::materialized_session_from_live_baseline(&cut).unwrap();
         assert_eq!(
