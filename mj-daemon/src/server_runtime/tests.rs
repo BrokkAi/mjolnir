@@ -98,16 +98,11 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             },
             question_message: Some("agent:held-b".into()),
         });
-        let operational = BTreeMap::from([("history-000000".into(), live.into())]);
-        let views = PhoneSessionViews {
+
+        let mut views = PhoneSessionViews {
             native_agents: &native_rows,
             conversations: &Default::default(),
-            queued_prompts: &Default::default(),
-            active_user_shells: &Default::default(),
-            pending_elicitations: &Default::default(),
-            prompt_images: &Default::default(),
-            operational: &operational,
-            materialized_activity: &Default::default(),
+            sessions: &Default::default(),
             project_sources: &sources,
             operations: &Default::default(),
             move_recoveries: &Default::default(),
@@ -143,13 +138,18 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             .metadata
             .unread_frontiers
             .insert("history-000000".into(), 80);
-        let runtime_view = mj_client::daemon::RuntimeSessionView::from_managed(
+        let mut runtime_view = mj_client::daemon::RuntimeSessionView::from_managed(
             "history-000000".into(),
             mj_client::session::ManagedSessionView {
                 attention,
                 ..Default::default()
             },
         );
+        runtime_view.operational = Some(live.into());
+        runtime
+            .sessions
+            .insert("history-000000".into(), runtime_view.clone());
+        views.sessions = &runtime.sessions;
         publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
         let held = publisher.snapshot(&controller, &[], &Default::default(), &views, 1);
         let viewer = &held.sessions.0["history-000000"];
@@ -236,7 +236,11 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             Some("agent:shown-a")
         );
         assert_eq!(
-            operational["history-000000"].question_message(),
+            runtime_view
+                .operational
+                .as_ref()
+                .unwrap()
+                .question_message(),
             Some("agent:held-b")
         );
         assert_eq!(crate::server::take_viewer_row_visits(), 1);
@@ -631,9 +635,10 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
     let project = |execution| {
         let materialized_activity = std::collections::BTreeMap::from([(
             "session-1".to_owned(),
-            crate::server_runtime::snapshot::MaterializedActivity {
+            mj_client::daemon::RuntimeMaterializedSession {
                 last_activity_at_ms: Some(7_777),
                 execution,
+                ..Default::default()
             },
         )]);
         viewer_snapshot(
@@ -643,14 +648,11 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
             &PhoneSessionViews {
                 native_agents: &Default::default(),
                 conversations: &mj_core::snapshot_map::SnapshotMap::new(),
-                queued_prompts: &std::collections::BTreeMap::new(),
-                active_user_shells: &std::collections::BTreeMap::new(),
-                pending_elicitations: &std::collections::BTreeMap::new(),
-                prompt_images: &std::collections::BTreeSet::new(),
+
                 // No live operational state: this is exactly the window after
                 // a daemon restart, before it has reattached to the worker.
-                operational: &std::collections::BTreeMap::new(),
-                materialized_activity: &materialized_activity,
+                sessions: &fixture_runtime_sessions(&Default::default(), &materialized_activity),
+
                 project_sources: &PhoneProjectSources::default(),
                 operations: &std::collections::BTreeMap::new(),
                 move_recoveries: &std::collections::BTreeMap::new(),
@@ -738,12 +740,7 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &mj_core::snapshot_map::SnapshotMap::new(),
-            queued_prompts: &std::collections::BTreeMap::new(),
-            active_user_shells: &std::collections::BTreeMap::new(),
-            pending_elicitations: &std::collections::BTreeMap::new(),
-            prompt_images: &std::collections::BTreeSet::new(),
-            operational: &std::collections::BTreeMap::new(),
-            materialized_activity: &std::collections::BTreeMap::new(),
+            sessions: &Default::default(),
             project_sources: &PhoneProjectSources::default(),
             operations: &std::collections::BTreeMap::new(),
             move_recoveries: &std::collections::BTreeMap::new(),
@@ -876,9 +873,10 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         std::collections::BTreeMap::from([("session-1".into(), operational.into())]);
     let materialized_activity = std::collections::BTreeMap::from([(
         "session-1".to_owned(),
-        crate::server_runtime::snapshot::MaterializedActivity {
+        mj_client::daemon::RuntimeMaterializedSession {
             last_activity_at_ms: Some(7_777_i64),
             execution: mj_core::state::MaterializedExecutionState::Idle,
+            ..Default::default()
         },
     )]);
     let project = |operational: &std::collections::BTreeMap<
@@ -892,12 +890,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             &PhoneSessionViews {
                 native_agents: &Default::default(),
                 conversations: &mj_core::snapshot_map::SnapshotMap::new(),
-                queued_prompts: &std::collections::BTreeMap::new(),
-                active_user_shells: &std::collections::BTreeMap::new(),
-                pending_elicitations: &std::collections::BTreeMap::new(),
-                prompt_images: &std::collections::BTreeSet::new(),
-                operational,
-                materialized_activity: &materialized_activity,
+                sessions: &fixture_runtime_sessions(operational, &materialized_activity),
+
                 project_sources: &PhoneProjectSources::default(),
                 operations: &std::collections::BTreeMap::new(),
                 move_recoveries: &std::collections::BTreeMap::new(),
@@ -1239,12 +1233,8 @@ fn golden_phone_session_snapshot() {
                 &PhoneSessionViews {
                     native_agents,
                     conversations: &Default::default(),
-                    queued_prompts: &Default::default(),
-                    active_user_shells: &Default::default(),
-                    pending_elicitations: &Default::default(),
-                    prompt_images: &Default::default(),
-                    operational,
-                    materialized_activity: &Default::default(),
+                    sessions: &fixture_runtime_sessions(operational, &Default::default()),
+
                     project_sources: &PhoneProjectSources::default(),
                     operations: &Default::default(),
                     move_recoveries: &Default::default(),
@@ -1414,12 +1404,7 @@ fn golden_phone_session_snapshot() {
                 &PhoneSessionViews {
                     native_agents: &Default::default(),
                     conversations,
-                    queued_prompts: &Default::default(),
-                    active_user_shells: &Default::default(),
-                    pending_elicitations: &Default::default(),
-                    prompt_images: &Default::default(),
-                    operational: &Default::default(),
-                    materialized_activity: &Default::default(),
+                    sessions: &Default::default(),
                     project_sources: &PhoneProjectSources::default(),
                     operations: &Default::default(),
                     move_recoveries: &Default::default(),
@@ -1463,20 +1448,14 @@ fn golden_phone_session_snapshot() {
     );
 
     let session_id = "0123456789abcdef0123456789abcdef";
-    let session = phone_session(session_id, 0);
-    let mut state = State::default();
     let mut active_actions = std::collections::BTreeSet::new();
     let mut action_sessions = BTreeMap::new();
-    track_started_phone_session(
-        &mut state,
-        &mut active_actions,
-        &mut action_sessions,
-        7,
-        session,
-    )
-    .unwrap();
+    track_started_phone_session(&mut active_actions, &mut action_sessions, 7, session_id).unwrap();
     let mut controller = controller_with_profiles(&[]);
-    controller.state = state;
+    controller
+        .state
+        .sessions
+        .insert(session_id.into(), phone_session(session_id, 0));
     let started = viewer_snapshot(
         &controller,
         &[],
@@ -1484,12 +1463,7 @@ fn golden_phone_session_snapshot() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &Default::default(),
-            queued_prompts: &Default::default(),
-            active_user_shells: &Default::default(),
-            pending_elicitations: &Default::default(),
-            prompt_images: &Default::default(),
-            operational: &Default::default(),
-            materialized_activity: &Default::default(),
+            sessions: &Default::default(),
             project_sources: &PhoneProjectSources::default(),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
@@ -1637,12 +1611,7 @@ fn golden_phone_session_snapshot() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &Default::default(),
-            queued_prompts: &Default::default(),
-            active_user_shells: &Default::default(),
-            pending_elicitations: &Default::default(),
-            prompt_images: &Default::default(),
-            operational: &Default::default(),
-            materialized_activity: &Default::default(),
+            sessions: &Default::default(),
             project_sources: &PhoneProjectSources::default(),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
@@ -1795,12 +1764,7 @@ fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &Default::default(),
-            queued_prompts: &Default::default(),
-            active_user_shells: &Default::default(),
-            pending_elicitations: &Default::default(),
-            prompt_images: &Default::default(),
-            operational: &Default::default(),
-            materialized_activity: &Default::default(),
+            sessions: &Default::default(),
             project_sources: &sources,
             operations: &Default::default(),
             move_recoveries: &Default::default(),
@@ -1844,12 +1808,7 @@ fn snapshot_with_project_sources(
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &Default::default(),
-            queued_prompts: &Default::default(),
-            active_user_shells: &Default::default(),
-            pending_elicitations: &Default::default(),
-            prompt_images: &Default::default(),
-            operational: &Default::default(),
-            materialized_activity: &Default::default(),
+            sessions: &Default::default(),
             project_sources: sources,
             operations: &Default::default(),
             move_recoveries: &Default::default(),
@@ -2214,38 +2173,6 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     }
 }
 
-#[tokio::test]
-async fn controller_reload_does_not_block_the_phone_control_loop() {
-    let (completed_tx, mut completed_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let loaded = controller_with_profiles(&[]);
-    let release = std::thread::spawn(move || {
-        started_rx.recv().unwrap();
-        std::thread::sleep(Duration::from_millis(250));
-        release_tx.send(()).unwrap();
-    });
-
-    let started = Instant::now();
-    spawn_controller_reload_with(completed_tx, move || {
-        started_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-        Ok(loaded)
-    });
-    assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "scheduling a controller reload occupied the control loop for {:?}",
-        started.elapsed()
-    );
-
-    let completed = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
-        .await
-        .expect("background reload timed out")
-        .expect("background reload channel closed");
-    assert!(completed.result.is_ok());
-    release.join().unwrap();
-}
-
 #[test]
 fn read_receipt_only_persists_and_refreshes_when_the_cursor_advances() {
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -2418,12 +2345,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
             &PhoneSessionViews {
                 native_agents: &Default::default(),
                 conversations: &mj_core::snapshot_map::SnapshotMap::new(),
-                queued_prompts: &std::collections::BTreeMap::new(),
-                active_user_shells: &std::collections::BTreeMap::new(),
-                pending_elicitations: &std::collections::BTreeMap::new(),
-                prompt_images: &std::collections::BTreeSet::new(),
-                operational: &std::collections::BTreeMap::new(),
-                materialized_activity: &std::collections::BTreeMap::new(),
+                sessions: &Default::default(),
                 project_sources: &PhoneProjectSources::default(),
                 operations: &std::collections::BTreeMap::new(),
                 move_recoveries: &std::collections::BTreeMap::new(),
@@ -2489,12 +2411,7 @@ fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &mj_core::snapshot_map::SnapshotMap::new(),
-            queued_prompts: &std::collections::BTreeMap::new(),
-            active_user_shells: &std::collections::BTreeMap::new(),
-            pending_elicitations: &std::collections::BTreeMap::new(),
-            prompt_images: &std::collections::BTreeSet::new(),
-            operational: &std::collections::BTreeMap::new(),
-            materialized_activity: &std::collections::BTreeMap::new(),
+            sessions: &Default::default(),
             project_sources: &PhoneProjectSources::default(),
             operations: &std::collections::BTreeMap::new(),
             move_recoveries: &std::collections::BTreeMap::new(),
@@ -2773,12 +2690,7 @@ fn historical_sessions_do_not_restore_missing_workspace_tabs() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &mj_core::snapshot_map::SnapshotMap::new(),
-            queued_prompts: &std::collections::BTreeMap::new(),
-            active_user_shells: &std::collections::BTreeMap::new(),
-            pending_elicitations: &std::collections::BTreeMap::new(),
-            prompt_images: &std::collections::BTreeSet::new(),
-            operational: &std::collections::BTreeMap::new(),
-            materialized_activity: &std::collections::BTreeMap::new(),
+            sessions: &Default::default(),
             project_sources: &PhoneProjectSources::default(),
             operations: &std::collections::BTreeMap::new(),
             move_recoveries: &std::collections::BTreeMap::new(),
@@ -2884,12 +2796,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
         &PhoneSessionViews {
             native_agents: &Default::default(),
             conversations: &Default::default(),
-            queued_prompts: &Default::default(),
-            active_user_shells: &Default::default(),
-            pending_elicitations: &Default::default(),
-            prompt_images: &Default::default(),
-            operational: &Default::default(),
-            materialized_activity: &Default::default(),
+            sessions: &Default::default(),
             project_sources: &sources,
             operations: &Default::default(),
             move_recoveries: &Default::default(),
@@ -2906,5 +2813,221 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
         mj_client::review::parse_reviewer_question_id(&listed[0].id),
         Some(("reviewer", "fable-decline-1")),
         "the listed id says which reviewing role to answer"
+    );
+}
+
+fn fixture_runtime_sessions(
+    operational: &BTreeMap<
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    >,
+    materialized: &BTreeMap<String, mj_client::daemon::RuntimeMaterializedSession>,
+) -> mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView> {
+    let mut views = mj_core::snapshot_map::SnapshotMap::new();
+    for id in operational.keys().chain(materialized.keys()) {
+        let mut view =
+            mj_client::daemon::RuntimeSessionView::from_managed(id.clone(), Default::default());
+        view.operational = operational.get(id).cloned();
+        view.materialized = materialized.get(id).cloned().map(Into::into);
+        views.insert(id.clone(), view);
+    }
+    views
+}
+
+fn publish_fixture(
+    publisher: &mut publication::ViewerPublication,
+    controller: &Controller,
+    runtime: &mj_client::runtime_feed::RuntimeProjection,
+) -> ViewerSnapshot {
+    let mut native_agents = BTreeMap::new();
+    let mut move_recoveries = BTreeMap::new();
+    publisher.observe_runtime(runtime, &mut native_agents, &mut move_recoveries);
+    publisher.snapshot(
+        controller,
+        &runtime.metadata.workspaces,
+        &Default::default(),
+        &PhoneSessionViews {
+            native_agents: &native_agents,
+            conversations: &Default::default(),
+            sessions: &runtime.sessions,
+            project_sources: &Default::default(),
+            operations: &Default::default(),
+            move_recoveries: &move_recoveries,
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &Default::default(),
+        },
+        runtime.revision,
+    )
+}
+
+#[test]
+fn child_worker_turn_and_attention_publish_together_and_update_the_parent() {
+    use mj_core::attention::SessionAttention;
+    let mut controller = controller_with_profiles(&["codex"]);
+    for id in ["parent", "child"] {
+        let mut record = phone_session(id, 0);
+        record.state = SessionState::Running;
+        controller.state.sessions.insert(id.into(), record);
+    }
+    controller.state.subagents.insert(
+        "child".into(),
+        mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            child_session_id: "child".into(),
+            parent_session_id: "parent".into(),
+            task_name: "piece".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: String::new(),
+            request_key: "request".into(),
+            created_at: "now".into(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: false,
+        }
+        .into(),
+    );
+    let mut runtime = mj_client::runtime_feed::RuntimeProjection {
+        records: controller.state.sessions.clone(),
+        subagents: controller.state.subagents.clone(),
+        ..Default::default()
+    };
+    let mut live = mj_core::relay::RelaySnapshot::new("child".into()).operational_state();
+    let mut publisher = publication::ViewerPublication::default();
+    for (revision, working) in [(1, false), (2, true), (3, false)] {
+        live.harness_turn = working.then_some(mj_core::relay::HarnessTurn { started_at_ms: 10 });
+        live.latest_ordinal = revision;
+        let mut view =
+            mj_client::daemon::RuntimeSessionView::from_managed("child".into(), Default::default());
+        view.operational = Some(live.clone().into());
+        view.attention = if working {
+            SessionAttention::Working
+        } else {
+            SessionAttention::Important
+        };
+        runtime
+            .metadata
+            .session_attention
+            .insert("child".into(), view.attention);
+        runtime.sessions.insert("child".into(), view.clone());
+        runtime.revision = revision;
+        let snapshot = publish_fixture(&mut publisher, &controller, &runtime);
+        let child = &snapshot.sessions.0["child"];
+        assert_eq!(child.latest_event_ordinal, revision);
+        assert_eq!(child.attention, view.attention);
+        assert_eq!(
+            snapshot.sessions.0["parent"].capabilities.interrupt_all,
+            working
+        );
+    }
+}
+
+#[test]
+fn metadata_only_workspace_and_storage_changes_refresh_existing_rows() {
+    use mj_core::targets::storage::{LOCAL_STORAGE_HOST, TargetStorageView};
+    let mut controller = controller_with_profiles(&["codex"]);
+    for id in ["one", "two"] {
+        let mut record = phone_session(id, 0);
+        record.state = SessionState::Running;
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/worker").join(id),
+        }));
+        controller.state.sessions.insert(id.into(), record);
+    }
+    let mut runtime = mj_client::runtime_feed::RuntimeProjection {
+        records: controller.state.sessions.clone(),
+        ..Default::default()
+    };
+    let workspace = |id: &str| WorkspaceRecord {
+        id: id.into(),
+        name: id.into(),
+        created_at: "now".into(),
+        last_opened_at: "now".into(),
+        session_count: 0,
+    };
+    let mut publisher = publication::ViewerPublication::default();
+    runtime.metadata.workspaces.push(workspace("first"));
+    let before = publish_fixture(&mut publisher, &controller, &runtime);
+    assert!(
+        before
+            .sessions
+            .0
+            .values()
+            .all(|row| !row.capabilities.change_workspace && row.storage_problem.is_none())
+    );
+
+    runtime.revision += 1;
+    runtime.metadata.workspaces.push(workspace("second"));
+    let added = publish_fixture(&mut publisher, &controller, &runtime);
+    assert!(
+        added
+            .sessions
+            .0
+            .values()
+            .all(|row| row.capabilities.change_workspace && row.storage_problem.is_none())
+    );
+
+    runtime.revision += 1;
+    runtime.metadata.storage = vec![TargetStorageView {
+        host: LOCAL_STORAGE_HOST.into(),
+        home: None,
+        filesystems: Vec::new(),
+        sampled_at_epoch_seconds: None,
+        unattributed_no_space: Some("fixture exhausted storage".into()),
+    }]
+    .into();
+    let full = publish_fixture(&mut publisher, &controller, &runtime);
+    assert!(full.sessions.0.values().all(|row| {
+        row.capabilities.change_workspace
+            && row
+                .storage_problem
+                .as_deref()
+                .is_some_and(|issue| issue.contains("fixture exhausted storage"))
+    }));
+
+    crate::server::take_viewer_row_visits();
+    let mut refreshed_storage = runtime.metadata.storage[0].clone();
+    refreshed_storage.sampled_at_epoch_seconds = Some(30);
+    runtime.metadata.storage = vec![refreshed_storage].into();
+    runtime.revision += 1;
+    let refreshed = publish_fixture(&mut publisher, &controller, &runtime);
+    assert_eq!(crate::server::take_viewer_row_visits(), 0);
+    assert_eq!(full.sessions, refreshed.sessions);
+
+    runtime.metadata.storage = vec![
+        runtime.metadata.storage[0].clone(),
+        TargetStorageView {
+            host: "other-host".into(),
+            home: None,
+            filesystems: Vec::new(),
+            sampled_at_epoch_seconds: Some(30),
+            unattributed_no_space: Some("other host is full".into()),
+        },
+    ]
+    .into();
+    runtime.revision += 1;
+    let unrelated = publish_fixture(&mut publisher, &controller, &runtime);
+    assert_eq!(crate::server::take_viewer_row_visits(), 0);
+    assert_eq!(full.sessions, unrelated.sessions);
+
+    runtime.revision += 1;
+    runtime.metadata.storage = Default::default();
+    let freed = publish_fixture(&mut publisher, &controller, &runtime);
+    assert!(
+        freed
+            .sessions
+            .0
+            .values()
+            .all(|row| row.storage_problem.is_none())
+    );
+    assert!(
+        full.sessions
+            .0
+            .values()
+            .all(|row| row.storage_problem.is_some())
     );
 }

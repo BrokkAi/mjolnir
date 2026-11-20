@@ -20,18 +20,15 @@ pub(super) fn request_phone_action_cancellation(
 }
 
 pub(super) fn track_started_phone_session(
-    state: &mut State,
     active_actions: &mut std::collections::BTreeSet<String>,
     action_sessions: &mut std::collections::BTreeMap<u64, String>,
     action_id: u64,
-    session: SessionRecord,
+    session_id: &str,
 ) -> std::result::Result<(), String> {
-    let session_id = session.id.clone();
-    if !active_actions.insert(session_id.clone()) {
+    if !active_actions.insert(session_id.to_owned()) {
         return Err("another operation is already running for the new session".into());
     }
-    action_sessions.insert(action_id, session_id.clone());
-    state.sessions.insert(session_id, session);
+    action_sessions.insert(action_id, session_id.to_owned());
     Ok(())
 }
 
@@ -263,7 +260,7 @@ pub(super) async fn apply_phone_action(
             started
                 .send(PhoneActionStarted {
                     action_id,
-                    session: registered.session,
+                    session_id: registered_session_id.clone(),
                     review_notice,
                     capacity_warning,
                     published,

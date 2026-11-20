@@ -46,13 +46,14 @@ use mj_controller::controller::{
     SessionLaunchOptions, SessionResumeOptions,
 };
 use mj_controller::session_manager::{
-    ManagedSessionView, RemoteSessionPublisher, RemoteSessionRequest, SessionManagerChannels,
-    SessionManagerControl, ViewError, new_command_id, spawn_remote_session_manager,
+    ManagedSessionView, SessionManagerControl, ViewError, new_command_id,
 };
 #[cfg(test)]
 use mj_controller::session_manager::{
     RelaySessionTarget, RemoteSessionRequests, SessionManagerShutdown,
 };
+#[cfg(test)]
+use mj_controller::session_manager::{RemoteSessionRequest, spawn_remote_session_manager};
 use mj_core::workspace::WorkspaceRecord;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;

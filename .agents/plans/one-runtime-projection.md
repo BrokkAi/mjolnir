@@ -26,7 +26,12 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20 18:06Z) Verified that a terminal Move starts a fresh preparation if a feed update removes its selected account, whether the old preparation is pending or complete.
 - [x] (2026-11-20) Implement Milestone 2: one capacity sampler, and Refresh reaches the daemon (#1596).
 - [x] (2026-11-20) Verify Milestone 2 in `feeds-m2` with an isolated mbx config.
-- [ ] Milestone 3: web rows built only from the runtime capture.
+- [x] (2026-11-20) Milestone 3: built viewer rows from the runtime capture and verified a real parent/child session pair on the browser stream in `feeds-m3`.
+- [x] (2026-11-20 18:37Z) Milestone 3: revalidated after merging `origin/master`. The phone golden, owner and viewer regressions, runtime feed tests, API wait and turn tests, Clippy, and a live browser Interrupt All action passed.
+- [x] (2026-11-20 18:50Z) Milestone 3: verified the review fixes for persisted titles, launch preferences, and storage invalidation. The browser published all three restored values in `feeds-m3`, and the named daemon and workers stopped.
+- [x] (2026-11-20 19:06Z) Milestone 3: verified that a stopped worker keeps its last committed title, that a rejected projection page rolls its title back, and that full prompt bodies stay within the browser capture.
+- [x] (2026-11-20 19:20Z) Milestone 3: a headless daemon restarted with malformed stored queue data. It logged and skipped the affected queue for startup while leaving the SQLite row available for recovery.
+- [x] (2026-11-20 19:30Z) Milestone 3: verified that a saved non-UTF-8 project path remains available in the browser capture without breaking terminal control frames.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
 
@@ -53,6 +58,17 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: before Milestone 2, both capacity samplers used `Controller::deployment_capacity_targets`. Its host list comes from configured targets, and its session-dependent paths and EC2 instance probes use active records. The daemon already supplies those records. The existing daemon refresh triggered sampling of the old target definitions.
   Evidence: `mj-controller/src/controller/backend.rs`, `mj-daemon/src/daemon/views.rs`, and the pre-change `CapacityFeed::request_refresh` at acd73e9d9.
+
+
+- Observation: the phone's mirrored session manager supplied both raw views and a request bridge. Removing its view stream also removes the registrations that made bridge handles usable. The phone now sends commands to the daemon's existing manager. The web action and background-task admission scopes still hold until the operation returns.
+  Evidence: `mj-session-runtime/src/session_manager/remote.rs` and `mj-daemon/src/server_runtime/run.rs`. A live browser stream in `feeds-m3` saw the parent's Interrupt All offer go from false to true and back to false after a child started and completed its assignment. The isolated daemon and workers were stopped.
+
+- Observation: retired relay actors still need to leave queue and activity behind for the web viewer. Bootstrap loads the last durable facts, and the runtime owner keeps those facts when a relay actor retires. Family-scoped terminal feeds continue to omit the retired actor's view.
+  Evidence: `mj-daemon/src/daemon/owner.rs`, `mj-client/src/runtime_feed.rs`, and the existing regression for retiring a relay actor.
+
+
+- Observation: the former viewer relay consumer persisted harness and provisional titles from worker views. The relay actor now saves each title in the same transaction as its projection page, including the last page read during checkpoint or suspend. It backfills titles from older projections when it attaches to an already-current worker. The captured controller state also includes the saved Oracle choice and the recent directories used by the browser launch wizard.
+  Evidence: `mj-daemon/src/daemon/snapshot.rs`, `mj-store/src/database/sessions.rs`, and `mj-daemon/src/daemon/feed.rs`.
 
 
 ## Decision Log
@@ -104,12 +120,25 @@ This plan does not add a new public API. A later plan will publish this projecti
   Date/Author: 2026-11-20, Milestone 2 implementation.
 
 
+- Decision: rebuild rows by dependency. Compare captured per-session entries and invalidate their parents when child entries change. Invalidate descendants for changes to an ancestor record or relationship they use for checkout and project identity. Rebuild every row when config or workspace count changes. A storage refresh invalidates only rows whose warning changes, so sampling timestamps and a full filesystem on an unused host do not rebuild any rows.
+  Rationale: a synthetic store of 1,200 records (200 active views, 1,000 stopped sessions, two profiles and one configured target) took 12.78 ms median and 13.19 ms p95 to rebuild all rows, versus 0.20 ms median and 0.22 ms p95 to publish one changed active view. This was 30 warm dev-profile samples on hel timed around row publication, excluding capture and HTTP serialization. Keep dependency-based selection because worker revisions can arrive many times a second and the existing test covers 100,000 retained sessions.
+  Date/Author: 2026-11-20, Milestone 3 implementation.
+
+- Decision: workspaces, capacity and storage are capture inputs. Only the runtime revision watch wakes the viewer for them. Retain the separate quota watch as a wake trigger leading to a fresh capture, keeping quota surfacing out of scope.
+  Rationale: the daemon already publishes revisions from workspace and capacity changes, including storage-only publications. Session storage problems and host capacity rows now use the same storage snapshot.
+  Date/Author: 2026-11-20, Milestone 3 implementation.
+
+
 ## Outcomes & Retrospective
 
 
 Milestone 1 is implemented and validated in its detached worktree. Both pickers showed unchecked profiles and targets, then hid the same missing entries. The options API reported the target verdicts. A configuration edit restored the unchecked choice in both pickers. The running check accepted demand from both surfaces and repeated once. Without the Docker command, both pickers hid the target immediately and the API returned HTTP 400 on explicit create. The host has no installed Docker command, so the stopped-service case used a command fixture with the actual Docker preflight and daemon. Both isolated daemons were stopped.
 
 Milestone 2 has been validated in its worktree. The terminal renders host capacity from runtime metadata. Pressing Refresh in `feeds-m2` after changing the isolated mbx `cache_dir` added `/dev/shm` to the browser snapshot in 0.31 seconds and to the terminal Disks dropdown in 0.37 seconds. The already-open browser Targets page showed the pending refresh and then displayed the new filesystem over its feed. The browser snapshot and `mj hosts --json` agreed on the sample timestamp, CPU, used memory and available bytes. The test instance's daemon was stopped.
+
+Milestone 3 moved the viewer's worker and session facts into the runtime capture. The test cases cover workspace and storage changes without a session record change, and a child update that publishes operational state and attention together. The full queues and forms stay in the in-process capture, and terminal clients continue reading them from the transcript tail. A browser stream in `feeds-m3` showed the parent change from no Interrupt All offer to offering it after a child started. The browser action was accepted and the existing stream withdrew the offer when the child stopped. The named daemon was stopped and its workers were reaped.
+
+Milestone 3 review follow-ups cover the retained allocation of browser prompt bodies in terminal replay history (Milestone 5), the idle verdict for a parked child whose relay actor has retired (Milestone 4), comparing storage warnings only for sessions on affected hosts, and refreshing the displayed title in the same transaction as a checkpoint repair that requires no further relay events.
 
 Follow-ups: publish the unified projection as a versioned `/api/v1` stream including profile availability and "transcript advanced to sequence N" notices (a separate plan, the prerequisite for a desktop client); give project-source resolution one cache in the runtime owner; give quota surfacing one cache; revisit the browser Move picker’s implicit destination when all compatible destinations have a missing verdict. The existing profile-only Move can omit a destination and relies on execution preflight to check the implicit one.
 
@@ -123,7 +152,7 @@ The daemon's "runtime owner" (`mj-daemon/src/daemon/owner.rs`, `RuntimeStateOwne
 
 The terminal feed works like this. `RuntimeHistory` in `mj-daemon/src/daemon/feed.rs` keeps up to 4,096 captured projections (or 16 MiB of encoded change estimates) with its own sequence number. A terminal holds a `RuntimeCursor` (daemon incarnation, sequence, which sub-agent families it has opened, and a durable alert position) and long-polls the control socket; the daemon answers with a `RuntimeDelta` (keyed replacements and deletions) from the cursor's base, or a fresh snapshot if the base is gone. The client keeps a `RuntimeReplica`. The control socket speaks length-prefixed JSON; its version is `PROTOCOL_VERSION` in `mj-client/src/daemon.rs` (111 at the start of this plan), and ordinary requests require an exact match. `mj-daemon/src/pollers/remote.rs` is the terminal's adapter that applies these deltas and feeds the dashboard and embedded chat (`mj-chat`).
 
-The web feed works like this. The phone publication loop in `mj-daemon/src/server_runtime/run.rs` calls the capture, then joins it with its own inputs (the `PhoneSessionViews` struct: native agents, conversations, queued prompts, user shells, pending questions, prompt image support, operational flags, materialized activity, project sources, operations, move recoveries, capacity, launch failures, reviews), builds a `ViewerSnapshot` (`mj-daemon/src/server_runtime/snapshot.rs`, `mj-server/src/server/viewer_types.rs`) and sends it on a watch channel. `mj-server/src/server/viewer_feed.rs` keeps its own history of the last 128 snapshots it served, with its own incarnation, and serves `GET /api/snapshot` and `GET /api/events?format=changes` (handlers in `mj-server/src/server/handlers.rs`). `mj-server/src/server/viewer_wire.rs` encodes rows, an intern table for repeated values, and "detail changed" notices. Many HTTP handlers, including the stable `/api/v1` ones under `mj-server/src/server/api/`, also read the latest `ViewerSnapshot` to validate requests.
+Before Milestone 3, the web feed worked like this. The phone publication loop in `mj-daemon/src/server_runtime/run.rs` calls the capture, then joins it with its own inputs (the `PhoneSessionViews` struct: native agents, conversations, queued prompts, user shells, pending questions, prompt image support, operational flags, materialized activity, project sources, operations, move recoveries, capacity, launch failures, reviews), builds a `ViewerSnapshot` (`mj-daemon/src/server_runtime/snapshot.rs`, `mj-server/src/server/viewer_types.rs`) and sends it on a watch channel. `mj-server/src/server/viewer_feed.rs` keeps its own history of the last 128 snapshots it served, with its own incarnation, and serves `GET /api/snapshot` and `GET /api/events?format=changes` (handlers in `mj-server/src/server/handlers.rs`). `mj-server/src/server/viewer_wire.rs` encodes rows, an intern table for repeated values, and "detail changed" notices. Many HTTP handlers, including the stable `/api/v1` ones under `mj-server/src/server/api/`, also read the latest `ViewerSnapshot` to validate requests.
 
 The facts computed more than once, and where, are these. Target and profile availability: the terminal asks the daemon to run `mj_setup::setup::check_availability` (`mj-setup/src/setup/availability.rs`) through `DaemonAction::CheckAvailability` (handled in `mj-daemon/src/daemon/machine.rs`), then applies its own predicates in `mj-tui/src/availability.rs` (`profile_missing`, `target_offered`, `target_missing`); the web snapshot uses `InstalledEngines::runtime_missing` (a PATH check) and host capacity in `snapshot.rs`; `/api/v1/options` (`mj-server/src/server/api/options.rs`) adds `LocalEngineChecks`, a separate cached probe of local engines, through `target_availability`. Host capacity: the terminal starts its own sampler (`spawn_dashboard_capacity_poller`, called from `mj-cli/src/dashboard.rs`) while the web viewer reads the daemon's `CapacityFeed` (`mj-daemon/src/pollers/capacity.rs`, `mj-daemon/src/daemon/capacity.rs`); the terminal's Refresh re-samples locally (`mj-cli/src/dashboard/surface.rs`, `request_capacity_refresh`). Session verdicts: the web viewer's `session_capabilities` in `snapshot.rs`, the terminal's action gates in `mj-tui/src/actions.rs`, `transition_kind` in `mj-tui/src/dashboard_standby.rs`, working and unfinished child counts in `mj-tui/src/dashboard_sessions.rs`, and in `viewer.js` the functions `isTransitioningSession`, `isDashboardSession`, `resumeMoveRecovery` and the working-child count, plus `viewer_wire::is_summary` in Rust.
 
@@ -226,3 +255,5 @@ No new crates or external libraries. The shared types live where the current one
 
 
 Milestone 2 update, 2026-11-20. The plan now records the shared target coverage, why the refresh request must rebuild targets, how in-flight probes answer a refresh, and the named-instance outcome.
+
+Milestone 3 update, 2026-11-20. The viewer reads the captured runtime state. The plan records the measured row selection cost, the remaining quota wake, and the named-instance browser result.

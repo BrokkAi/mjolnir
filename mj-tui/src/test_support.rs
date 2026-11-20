@@ -39,6 +39,7 @@ impl DashboardState {
                 .map(|target| RuntimeHostCapacity {
                     reading: HostCapacityRow::new(&target, &Default::default(), &[]),
                     refreshing: false,
+                    disk_total_bytes: None,
                 })
                 .collect(),
         );

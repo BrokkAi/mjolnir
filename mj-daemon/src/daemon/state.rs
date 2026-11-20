@@ -871,8 +871,8 @@ impl RuntimeState {
         mj_controller::controller::QuickBundleCreation,
         mj_controller::controller::QuickBundleFailure,
     > {
-        let _mutation = self.config_mutation.lock().await;
-        mj_core::runtime::spawn_blocking(move || {
+        let mut mutation = self.config_mutation.lock().await;
+        let created = mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::create_quick_bundle(&source)
         })
         .await
@@ -880,7 +880,11 @@ impl RuntimeState {
             mj_controller::controller::QuickBundleFailure::Persistence(anyhow!(
                 "bundle creation task panicked: {error}"
             ))
-        })?
+        })??;
+        self.configure_inactivity(&mut mutation, created.config.advanced.auto_afk_minutes);
+        self.owner().install_config(created.config.clone());
+        self.publish_revision();
+        Ok(created)
     }
 
     /// Persist exactly the picker-selected repository set under the same
@@ -893,8 +897,8 @@ impl RuntimeState {
         mj_controller::controller::QuickBundleCreation,
         mj_controller::controller::QuickBundleFailure,
     > {
-        let _mutation = self.config_mutation.lock().await;
-        mj_core::runtime::spawn_blocking(move || {
+        let mut mutation = self.config_mutation.lock().await;
+        let created = mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::persist_project_sources(&sources, discovered)
         })
         .await
@@ -902,7 +906,11 @@ impl RuntimeState {
             mj_controller::controller::QuickBundleFailure::Persistence(anyhow!(
                 "bundle creation task panicked: {error}"
             ))
-        })?
+        })??;
+        self.configure_inactivity(&mut mutation, created.config.advanced.auto_afk_minutes);
+        self.owner().install_config(created.config.clone());
+        self.publish_revision();
+        Ok(created)
     }
 
     /// Remove a saved project under the daemon's config-mutation coordinator,

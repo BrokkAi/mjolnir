@@ -772,7 +772,7 @@ pub fn queued_prompt_projection(
     queued_prompt_entries(&session.queued_prompts)
 }
 
-pub(super) fn queued_prompt_entries(
+pub(crate) fn queued_prompt_entries(
     prompts: &[mj_core::state::MaterializedQueuedPrompt],
 ) -> Vec<mj_core::relay::QueuedPrompt> {
     prompts

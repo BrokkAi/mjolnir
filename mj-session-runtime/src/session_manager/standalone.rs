@@ -79,7 +79,25 @@ impl StandaloneSession {
             (connection.materialized, connection.window) =
                 load_projection(&target.session_id).await?;
         }
+        let loaded_ordinal = connection.materialized.applied_event_ordinal;
         connection.sync_in_place().await?;
+        if connection.materialized.applied_event_ordinal == loaded_ordinal {
+            // An already-current projection can predate title publication.
+            // Backfill against the exact materialized frontier on attachment.
+            let session = connection.materialized.session_id.clone();
+            let digest = connection.materialized.applied_event_digest.clone();
+            let title = connection.window.resolved_title(&connection.materialized);
+            mj_core::runtime::spawn_blocking(move || {
+                crate::database::set_session_acp_title_at_projection(
+                    session,
+                    loaded_ordinal,
+                    digest,
+                    title,
+                )
+            })
+            .await
+            .context("backfill relay title task failed")??;
+        }
         if let Some((legacy_pending, pinned_operations)) =
             connection.client.command_retention_status().await?
             && (legacy_pending || !pinned_operations.is_empty())
@@ -960,6 +978,7 @@ impl StandaloneSession {
                             }
                         }
                         window.trim(&mut projection, crate::database::PROJECTION_TAIL_ITEMS);
+                        committed.set_resolved_title(window.resolved_title(&projection).as_deref())?;
                         Ok((projection, window, credential_sync_signal))
                     })
                 },
